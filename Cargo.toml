@@ -4,6 +4,9 @@ members = [
     "crates/classmesh-core",
     "crates/classmesh-protocol",
     "crates/classmesh-network",
+    "crates/classmesh-video",
+    "crates/classmesh-capture-win",
+    "crates/classmesh-codec-win",
     "crates/classmesh-windows-runtime",
 ]
 
