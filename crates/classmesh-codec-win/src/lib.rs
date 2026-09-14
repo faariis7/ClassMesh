@@ -59,6 +59,28 @@ pub struct EncodeSample {
     pub produced_output: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BenchmarkCapabilities {
+    pub gpu_native_input: bool,
+    pub low_latency_accepted: bool,
+    pub reset_ok: bool,
+    pub dynamic_bitrate_ok: bool,
+    pub keyframe_request_ok: bool,
+}
+
+impl BenchmarkCapabilities {
+    #[must_use]
+    pub const fn fully_supported() -> Self {
+        Self {
+            gpu_native_input: true,
+            low_latency_accepted: true,
+            reset_ok: true,
+            dynamic_bitrate_ok: true,
+            keyframe_request_ok: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncoderCapabilityCacheKey {
     pub adapter_identity: String,
@@ -88,11 +110,7 @@ pub fn summarize_benchmark(
     codec: Codec,
     samples: &[EncodeSample],
     elapsed_seconds: f32,
-    gpu_native_input: bool,
-    low_latency_accepted: bool,
-    reset_ok: bool,
-    dynamic_bitrate_ok: bool,
-    keyframe_request_ok: bool,
+    capabilities: BenchmarkCapabilities,
 ) -> Result<EncoderBenchmarkResult, BenchmarkError> {
     if samples.is_empty() || elapsed_seconds <= 0.0 {
         return Err(BenchmarkError::EmptySamples);
@@ -119,14 +137,14 @@ pub fn summarize_benchmark(
         backend: candidate.name.clone(),
         codec,
         advertised_hardware: candidate.advertised_hardware,
-        gpu_native_input,
-        low_latency_accepted,
+        gpu_native_input: capabilities.gpu_native_input,
+        low_latency_accepted: capabilities.low_latency_accepted,
         sustained_fps,
         p50_encode_ms: p50,
         p95_encode_ms: p95,
-        reset_ok,
-        dynamic_bitrate_ok,
-        keyframe_request_ok,
+        reset_ok: capabilities.reset_ok,
+        dynamic_bitrate_ok: capabilities.dynamic_bitrate_ok,
+        keyframe_request_ok: capabilities.keyframe_request_ok,
     };
     let class = probe.classify();
 
@@ -193,11 +211,7 @@ mod tests {
             Codec::H264,
             &samples,
             2.0,
-            true,
-            true,
-            true,
-            true,
-            true,
+            BenchmarkCapabilities::fully_supported(),
         )
         .expect("benchmark should summarize");
         assert_eq!(result.class, EncoderClass::Presentation1080p30);
@@ -217,11 +231,7 @@ mod tests {
             Codec::H264,
             &samples,
             2.0,
-            true,
-            true,
-            true,
-            true,
-            true,
+            BenchmarkCapabilities::fully_supported(),
         )
         .expect("benchmark should summarize");
         assert_eq!(result.class, EncoderClass::Compatibility);
@@ -239,11 +249,7 @@ mod tests {
                 Codec::H264,
                 &samples,
                 1.0,
-                true,
-                true,
-                true,
-                true,
-                true,
+                BenchmarkCapabilities::fully_supported(),
             ),
             Err(BenchmarkError::InvalidSample)
         );
