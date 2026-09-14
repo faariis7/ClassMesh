@@ -187,10 +187,7 @@ fn wide_null(value: &std::ffi::OsStr) -> Vec<u16> {
 fn last_error(stage: &'static str) -> LaunchError {
     // SAFETY: GetLastError has no preconditions and is read immediately after the failing API.
     let win32_error = unsafe { GetLastError() };
-    LaunchError {
-        stage,
-        win32_error,
-    }
+    LaunchError { stage, win32_error }
 }
 
 struct HandleGuard(HANDLE);
@@ -217,7 +214,9 @@ mod tests {
         let command = quoted_command_line(path, 17, &[OsString::from("pipe name")]);
         let decoded = OsString::from_wide(&command[..command.len() - 1]);
         let text = decoded.to_string_lossy();
-        assert!(text.starts_with(r#""C:\Program Files\ClassMesh\classmesh-worker.exe" --session 17"#));
+        assert!(
+            text.starts_with(r#""C:\Program Files\ClassMesh\classmesh-worker.exe" --session 17"#)
+        );
         assert!(text.ends_with(r#""pipe name""#));
     }
 }
