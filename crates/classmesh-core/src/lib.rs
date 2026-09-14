@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+pub mod adaptation;
+pub mod queue;
+pub mod recovery;
+
 /// High-level media workloads supported by ClassMesh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamKind {
@@ -34,6 +38,7 @@ pub enum MediaTransport {
     UdpMulticast,
     UdpUnicast,
     QuicDatagram,
+    WebRtc,
     ReliableFallback,
 }
 
@@ -44,6 +49,7 @@ pub struct NetworkMetrics {
     pub jitter_ms: f32,
     pub decode_fps: f32,
     pub queue_delay_ms: f32,
+    pub estimated_mbps: f32,
     pub multicast_viable: bool,
     pub wireless: bool,
 }
@@ -56,6 +62,7 @@ impl NetworkMetrics {
             && self.jitter_ms >= 0.0
             && self.decode_fps >= 0.0
             && self.queue_delay_ms >= 0.0
+            && self.estimated_mbps >= 0.0
     }
 }
 
@@ -71,6 +78,7 @@ mod tests {
             jitter_ms: 1.0,
             decode_fps: 30.0,
             queue_delay_ms: 0.0,
+            estimated_mbps: 100.0,
             multicast_viable: true,
             wireless: false,
         };
