@@ -11,7 +11,8 @@ use windows_sys::Win32::Foundation::{
     GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::{
-    InitializeSecurityDescriptor, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorDacl,
+    InitializeSecurityDescriptor, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
+    SetSecurityDescriptorDacl,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
@@ -110,7 +111,8 @@ impl NamedPipeServer {
         };
 
         let open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE;
-        let pipe_mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
+        let pipe_mode =
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
         // SAFETY: the UTF-16 name is NUL-terminated, security attributes live through the call, and
         // no output pointers are used.
         let handle = unsafe {
@@ -244,7 +246,9 @@ impl NamedPipeClient {
     pub fn connect(name: &str, timeout: Duration) -> Result<Self, PipeError> {
         let full_name = normalize_pipe_name(name);
         let wide_name = wide_null(OsStr::new(&full_name));
-        let deadline = Instant::now().checked_add(timeout).unwrap_or_else(Instant::now);
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(Instant::now);
 
         loop {
             // SAFETY: path is valid NUL-terminated UTF-16; remaining optional pointers are NULL.
