@@ -1,0 +1,12 @@
+[package]
+name = "classmesh-network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+classmesh-protocol = { path = "../classmesh-protocol" }
+
+[lints]
+workspace = true
