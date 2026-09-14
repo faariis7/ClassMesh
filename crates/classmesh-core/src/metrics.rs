@@ -86,10 +86,14 @@ impl MediaCounters {
         self.rendered_frames = self.rendered_frames.saturating_add(delta.rendered_frames);
         self.dropped_frames = self.dropped_frames.saturating_add(delta.dropped_frames);
         self.dropped_packets = self.dropped_packets.saturating_add(delta.dropped_packets);
-        self.reordered_packets = self.reordered_packets.saturating_add(delta.reordered_packets);
+        self.reordered_packets = self
+            .reordered_packets
+            .saturating_add(delta.reordered_packets);
         self.keyframes = self.keyframes.saturating_add(delta.keyframes);
         self.nack_requests = self.nack_requests.saturating_add(delta.nack_requests);
-        self.capture_recoveries = self.capture_recoveries.saturating_add(delta.capture_recoveries);
+        self.capture_recoveries = self
+            .capture_recoveries
+            .saturating_add(delta.capture_recoveries);
         self.codec_recoveries = self.codec_recoveries.saturating_add(delta.codec_recoveries);
     }
 }

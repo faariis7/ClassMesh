@@ -57,8 +57,14 @@ impl ReceiverWindow {
     /// Panics when `max_inflight_frames` is zero or NACK delay is not below the stale deadline.
     #[must_use]
     pub fn new(policy: ReceiverPolicy) -> Self {
-        assert!(policy.max_inflight_frames > 0, "receiver must allow at least one frame");
-        assert!(policy.nack_after_us < policy.drop_after_us, "NACK deadline must precede drop deadline");
+        assert!(
+            policy.max_inflight_frames > 0,
+            "receiver must allow at least one frame"
+        );
+        assert!(
+            policy.nack_after_us < policy.drop_after_us,
+            "NACK deadline must precede drop deadline"
+        );
         Self {
             policy,
             inflight: BTreeMap::new(),
@@ -67,7 +73,11 @@ impl ReceiverWindow {
         }
     }
 
-    pub fn push(&mut self, now_us: u64, packet: &MediaPacket) -> Result<Vec<ReceiverEvent>, AssembleError> {
+    pub fn push(
+        &mut self,
+        now_us: u64,
+        packet: &MediaPacket,
+    ) -> Result<Vec<ReceiverEvent>, AssembleError> {
         let mut events = self.expire(now_us);
         let frame_id = packet.header.frame_id;
 
@@ -235,7 +245,10 @@ mod tests {
         let expired = window.tick(100_000);
         assert!(expired.iter().any(|event| matches!(
             event,
-            ReceiverEvent::NeedKeyframe { after_frame_id: 1, .. }
+            ReceiverEvent::NeedKeyframe {
+                after_frame_id: 1,
+                ..
+            }
         )));
         assert_eq!(window.dropped_frames(), 1);
     }

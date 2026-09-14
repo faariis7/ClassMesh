@@ -160,7 +160,8 @@ impl IpcFrameDecoder {
             }
             let header_bytes: Vec<u8> = self.buffer.iter().take(IPC_HEADER_LEN).copied().collect();
             let header = IpcHeader::decode(&header_bytes)?;
-            let payload_len = usize::try_from(header.payload_len).map_err(|_| IpcFrameError::PayloadTooLarge)?;
+            let payload_len =
+                usize::try_from(header.payload_len).map_err(|_| IpcFrameError::PayloadTooLarge)?;
             let frame_len = IPC_HEADER_LEN.saturating_add(payload_len);
             if self.buffer.len() < frame_len {
                 break;
@@ -199,8 +200,15 @@ mod tests {
     fn decoder_handles_fragmented_pipe_reads() {
         let bytes = frame(&[1, 2, 3, 4]).encode().expect("frame should encode");
         let mut decoder = IpcFrameDecoder::default();
-        assert!(decoder.push_bytes(&bytes[..5]).expect("partial input valid").is_empty());
-        let decoded = decoder.push_bytes(&bytes[5..]).expect("remaining input valid");
+        assert!(
+            decoder
+                .push_bytes(&bytes[..5])
+                .expect("partial input valid")
+                .is_empty()
+        );
+        let decoded = decoder
+            .push_bytes(&bytes[5..])
+            .expect("remaining input valid");
         assert_eq!(decoded, vec![frame(&[1, 2, 3, 4])]);
     }
 

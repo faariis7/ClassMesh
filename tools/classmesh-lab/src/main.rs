@@ -55,7 +55,11 @@ fn main() {
                 "receiver requests NACK for frame {frame_id}, missing={missing_packet_indices:?}"
             ),
             ReceiverEvent::FrameReady(frame) => {
-                println!("frame {} completed ({} bytes)", frame.frame_id, frame.data.len())
+                println!(
+                    "frame {} completed ({} bytes)",
+                    frame.frame_id,
+                    frame.data.len()
+                )
             }
             ReceiverEvent::NeedKeyframe { after_frame_id, .. } => {
                 println!("receiver requests keyframe after stale frame {after_frame_id}")

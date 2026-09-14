@@ -113,9 +113,7 @@ impl AdaptationPolicy {
             return MediaTransport::ReliableFallback;
         }
 
-        if kind == StreamKind::TeacherPresentation
-            && !metrics.wireless
-            && metrics.multicast_viable
+        if kind == StreamKind::TeacherPresentation && !metrics.wireless && metrics.multicast_viable
         {
             return MediaTransport::UdpMulticast;
         }
@@ -306,20 +304,16 @@ mod tests {
 
     #[test]
     fn wired_presentation_prefers_multicast_when_probe_succeeds() {
-        let decision = AdaptationPolicy::default().decide(
-            StreamKind::TeacherPresentation,
-            healthy(false, true),
-        );
+        let decision = AdaptationPolicy::default()
+            .decide(StreamKind::TeacherPresentation, healthy(false, true));
         assert_eq!(decision.transport, MediaTransport::UdpMulticast);
         assert_eq!(decision.tier, QualityTier::High);
     }
 
     #[test]
     fn wireless_presentation_avoids_ip_multicast() {
-        let decision = AdaptationPolicy::default().decide(
-            StreamKind::TeacherPresentation,
-            healthy(true, true),
-        );
+        let decision = AdaptationPolicy::default()
+            .decide(StreamKind::TeacherPresentation, healthy(true, true));
         assert_eq!(decision.transport, MediaTransport::QuicDatagram);
     }
 
@@ -340,7 +334,10 @@ mod tests {
             AdaptationPolicy::default(),
             HysteresisConfig::default(),
         );
-        assert_eq!(controller.observe(healthy(false, true)).tier, QualityTier::High);
+        assert_eq!(
+            controller.observe(healthy(false, true)).tier,
+            QualityTier::High
+        );
         let mut bad = healthy(false, true);
         bad.packet_loss = 0.12;
         assert_eq!(controller.observe(bad).tier, QualityTier::High);
@@ -361,9 +358,18 @@ mod tests {
         let mut bad = healthy(false, false);
         bad.packet_loss = 0.12;
         assert_eq!(controller.observe(bad).tier, QualityTier::Emergency);
-        assert_eq!(controller.observe(healthy(false, false)).tier, QualityTier::Emergency);
-        assert_eq!(controller.observe(healthy(false, false)).tier, QualityTier::Emergency);
-        assert_eq!(controller.observe(healthy(false, false)).tier, QualityTier::High);
+        assert_eq!(
+            controller.observe(healthy(false, false)).tier,
+            QualityTier::Emergency
+        );
+        assert_eq!(
+            controller.observe(healthy(false, false)).tier,
+            QualityTier::Emergency
+        );
+        assert_eq!(
+            controller.observe(healthy(false, false)).tier,
+            QualityTier::High
+        );
     }
 
     #[test]

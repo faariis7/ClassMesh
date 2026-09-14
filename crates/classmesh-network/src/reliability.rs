@@ -93,7 +93,10 @@ impl RetransmitCache {
     /// Panics if `max_packets` is zero.
     #[must_use]
     pub fn new(max_packets: usize, max_age_us: u64) -> Self {
-        assert!(max_packets > 0, "retransmit cache must hold at least one packet");
+        assert!(
+            max_packets > 0,
+            "retransmit cache must hold at least one packet"
+        );
         Self {
             entries: VecDeque::with_capacity(max_packets),
             max_packets,
@@ -175,7 +178,10 @@ mod tests {
         assert_eq!(tracker.observe(10), SequenceObservation::First);
         assert_eq!(tracker.observe(12), SequenceObservation::Gap { missing: 1 });
         assert_eq!(tracker.missing_sequences(), vec![11]);
-        assert_eq!(tracker.observe(11), SequenceObservation::ReorderedOrDuplicate);
+        assert_eq!(
+            tracker.observe(11),
+            SequenceObservation::ReorderedOrDuplicate
+        );
         assert!(tracker.missing_sequences().is_empty());
     }
 

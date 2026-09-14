@@ -37,9 +37,13 @@ mod tests {
 
     #[test]
     fn compatibility_requires_same_major_version() {
-        assert!(ProtocolVersion { major: 1, minor: 0 }
-            .is_compatible_with(ProtocolVersion { major: 1, minor: 8 }));
-        assert!(!ProtocolVersion { major: 1, minor: 0 }
-            .is_compatible_with(ProtocolVersion { major: 2, minor: 0 }));
+        assert!(
+            ProtocolVersion { major: 1, minor: 0 }
+                .is_compatible_with(ProtocolVersion { major: 1, minor: 8 })
+        );
+        assert!(
+            !ProtocolVersion { major: 1, minor: 0 }
+                .is_compatible_with(ProtocolVersion { major: 2, minor: 0 })
+        );
     }
 }

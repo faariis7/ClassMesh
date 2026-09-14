@@ -152,8 +152,12 @@ mod tests {
         let original = frame(1);
         let pointer = Arc::as_ptr(&original.data);
         distributor.publish(original);
-        let a = distributor.pop_latest(SinkId(1)).expect("sink 1 gets frame");
-        let b = distributor.pop_latest(SinkId(2)).expect("sink 2 gets frame");
+        let a = distributor
+            .pop_latest(SinkId(1))
+            .expect("sink 1 gets frame");
+        let b = distributor
+            .pop_latest(SinkId(2))
+            .expect("sink 2 gets frame");
         assert_eq!(Arc::as_ptr(&a.data), pointer);
         assert_eq!(Arc::as_ptr(&b.data), pointer);
     }
@@ -171,7 +175,9 @@ mod tests {
         distributor.publish(frame(3));
         let _ = distributor.pop_latest(SinkId(1));
 
-        let latest_slow = distributor.pop_latest(SinkId(2)).expect("slow sink has latest");
+        let latest_slow = distributor
+            .pop_latest(SinkId(2))
+            .expect("slow sink has latest");
         assert_eq!(latest_slow.meta.frame_id, 3);
         assert!(distributor.stats(SinkId(2)).expect("stats").dropped >= 2);
         assert_eq!(distributor.stats(SinkId(1)).expect("stats").dropped, 0);

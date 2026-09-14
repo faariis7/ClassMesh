@@ -4,9 +4,7 @@ mod windows_service_app {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use classmesh_windows_runtime::{
-        SessionEvent, SessionId, SessionSupervisor, SupervisorAction,
-    };
+    use classmesh_windows_runtime::{SessionEvent, SessionId, SessionSupervisor, SupervisorAction};
     use windows_service::service::{
         ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
         ServiceType, SessionChangeParam, SessionChangeReason,

@@ -108,7 +108,10 @@ pub fn summarize_benchmark(
     latencies.sort_by(f32::total_cmp);
     let p50 = percentile(&latencies, 50);
     let p95 = percentile(&latencies, 95);
-    let output_frames = samples.iter().filter(|sample| sample.produced_output).count();
+    let output_frames = samples
+        .iter()
+        .filter(|sample| sample.produced_output)
+        .count();
     let dropped_or_missing = samples.len().saturating_sub(output_frames);
     let sustained_fps = output_frames as f32 / elapsed_seconds;
 

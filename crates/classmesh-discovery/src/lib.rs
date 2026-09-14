@@ -286,10 +286,19 @@ mod tests {
     fn registry_detects_reboot_and_expiry() {
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 7));
         let mut registry = DiscoveryRegistry::new(5_000_000);
-        assert_eq!(registry.observe(0, ip, announcement(1)), DiscoveryEvent::Added(DeviceId([7; 16])));
-        assert_eq!(registry.observe(1_000, ip, announcement(2)), DiscoveryEvent::Rebooted(DeviceId([7; 16])));
+        assert_eq!(
+            registry.observe(0, ip, announcement(1)),
+            DiscoveryEvent::Added(DeviceId([7; 16]))
+        );
+        assert_eq!(
+            registry.observe(1_000, ip, announcement(2)),
+            DiscoveryEvent::Rebooted(DeviceId([7; 16]))
+        );
         assert!(registry.expire(5_000_000).is_empty());
-        assert_eq!(registry.expire(5_002_000), vec![DiscoveryEvent::Expired(DeviceId([7; 16]))]);
+        assert_eq!(
+            registry.expire(5_002_000),
+            vec![DiscoveryEvent::Expired(DeviceId([7; 16]))]
+        );
     }
 
     #[test]

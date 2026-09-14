@@ -38,13 +38,17 @@ impl From<MediaHeaderError> for PacketizeError {
     }
 }
 
-pub fn packetize_frame(frame: &[u8], meta: PacketizeMeta) -> Result<Vec<MediaPacket>, PacketizeError> {
+pub fn packetize_frame(
+    frame: &[u8],
+    meta: PacketizeMeta,
+) -> Result<Vec<MediaPacket>, PacketizeError> {
     if frame.is_empty() {
         return Err(PacketizeError::EmptyFrame);
     }
 
     let packet_count = frame.len().div_ceil(MAX_PACKET_PAYLOAD);
-    let packet_count_u16 = u16::try_from(packet_count).map_err(|_| PacketizeError::TooManyPackets)?;
+    let packet_count_u16 =
+        u16::try_from(packet_count).map_err(|_| PacketizeError::TooManyPackets)?;
     let mut packets = Vec::with_capacity(packet_count);
 
     for (index, chunk) in frame.chunks(MAX_PACKET_PAYLOAD).enumerate() {
@@ -246,8 +250,12 @@ mod tests {
         let frame = vec![1_u8; MAX_PACKET_PAYLOAD * 3];
         let packets = packetize_frame(&frame, meta()).expect("frame should packetize");
         let mut assembler = FrameAssembler::from_first(&packets[0]);
-        assembler.push(&packets[0]).expect("first packet should insert");
-        assembler.push(&packets[2]).expect("third packet should insert");
+        assembler
+            .push(&packets[0])
+            .expect("first packet should insert");
+        assembler
+            .push(&packets[2])
+            .expect("third packet should insert");
         assert_eq!(assembler.missing_packet_indices(), vec![1]);
         assert!(!assembler.is_complete());
     }

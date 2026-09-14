@@ -83,14 +83,10 @@ impl PresenceTracker {
             ControlState::Recovering => PresenceState::ControlRecovering,
             ControlState::Authenticated => match self.last_heartbeat_us {
                 None => PresenceState::Connecting,
-                Some(last)
-                    if now_us.saturating_sub(last) >= self.policy.offline_after_us =>
-                {
+                Some(last) if now_us.saturating_sub(last) >= self.policy.offline_after_us => {
                     PresenceState::Offline
                 }
-                Some(last)
-                    if now_us.saturating_sub(last) >= self.policy.suspect_after_us =>
-                {
+                Some(last) if now_us.saturating_sub(last) >= self.policy.suspect_after_us => {
                     PresenceState::ControlRecovering
                 }
                 Some(_) => PresenceState::Online,
@@ -129,7 +125,10 @@ mod tests {
         });
         tracker.heartbeat(100);
         assert_eq!(tracker.health(104).presence, PresenceState::Online);
-        assert_eq!(tracker.health(106).presence, PresenceState::ControlRecovering);
+        assert_eq!(
+            tracker.health(106).presence,
+            PresenceState::ControlRecovering
+        );
         assert_eq!(tracker.health(110).presence, PresenceState::Offline);
     }
 

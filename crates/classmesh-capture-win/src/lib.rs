@@ -83,7 +83,10 @@ pub trait CaptureBackend {
     type Frame;
 
     fn display(&self) -> &DisplayDescriptor;
-    fn acquire(&mut self, timeout_ms: u32) -> Result<(CapturedFrameMeta, Self::Frame), CaptureFailure>;
+    fn acquire(
+        &mut self,
+        timeout_ms: u32,
+    ) -> Result<(CapturedFrameMeta, Self::Frame), CaptureFailure>;
 }
 
 pub trait CaptureFactory<B: CaptureBackend> {
@@ -197,7 +200,9 @@ where
     fn begin_recovery(&mut self, error: CaptureFailure) -> CaptureStep<B::Frame> {
         self.backend = None;
         self.pending_failure = Some(error);
-        let reason = error.recovery_reason().unwrap_or(RecoveryReason::AccessLost);
+        let reason = error
+            .recovery_reason()
+            .unwrap_or(RecoveryReason::AccessLost);
         let delay_ms = self.recovery.begin(reason);
         self.try_recreate(error, delay_ms)
     }
@@ -219,7 +224,11 @@ where
         self.try_recreate(error, delay_ms)
     }
 
-    fn try_recreate(&mut self, original_error: CaptureFailure, delay_ms: u64) -> CaptureStep<B::Frame> {
+    fn try_recreate(
+        &mut self,
+        original_error: CaptureFailure,
+        delay_ms: u64,
+    ) -> CaptureStep<B::Frame> {
         match self.factory.create(self.target) {
             Ok(backend) => {
                 self.backend = Some(backend);

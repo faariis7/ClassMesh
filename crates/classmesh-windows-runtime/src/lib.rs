@@ -196,9 +196,15 @@ mod tests {
             supervisor.on_event(SessionEvent::Logon(SessionId(1))),
             SupervisorAction::LaunchWorker(SessionId(1))
         );
-        assert_eq!(supervisor.worker_state(), WorkerState::Starting(SessionId(1)));
+        assert_eq!(
+            supervisor.worker_state(),
+            WorkerState::Starting(SessionId(1))
+        );
         supervisor.mark_worker_running(SessionId(1));
-        assert_eq!(supervisor.worker_state(), WorkerState::Running(SessionId(1)));
+        assert_eq!(
+            supervisor.worker_state(),
+            WorkerState::Running(SessionId(1))
+        );
     }
 
     #[test]
@@ -210,7 +216,10 @@ mod tests {
             supervisor.on_event(SessionEvent::Lock(SessionId(3))),
             SupervisorAction::SuspendMedia(SessionId(3))
         );
-        assert_eq!(supervisor.worker_state(), WorkerState::Suspended(SessionId(3)));
+        assert_eq!(
+            supervisor.worker_state(),
+            WorkerState::Suspended(SessionId(3))
+        );
         assert_eq!(
             supervisor.on_event(SessionEvent::Unlock(SessionId(3))),
             SupervisorAction::ResumeMedia(SessionId(3))
@@ -241,6 +250,9 @@ mod tests {
             supervisor.worker_crashed(SessionId(7)),
             SupervisorAction::LaunchWorker(SessionId(7))
         );
-        assert_eq!(supervisor.worker_state(), WorkerState::Starting(SessionId(7)));
+        assert_eq!(
+            supervisor.worker_state(),
+            WorkerState::Starting(SessionId(7))
+        );
     }
 }

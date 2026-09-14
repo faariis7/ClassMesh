@@ -60,7 +60,10 @@ impl WorkerWatchdog {
     }
 
     pub fn stopped_intentionally(&mut self, session: SessionId) {
-        if self.process.is_some_and(|process| process.session == session) {
+        if self
+            .process
+            .is_some_and(|process| process.session == session)
+        {
             self.process = None;
             self.consecutive_failures = 0;
         }

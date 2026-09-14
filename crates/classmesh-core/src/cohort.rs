@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use crate::adaptation::{QualityTier, StreamDecision};
 use crate::MediaTransport;
+use crate::adaptation::{QualityTier, StreamDecision};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReceiverId(pub u64);
@@ -93,7 +93,7 @@ impl CohortRouter {
 
 #[cfg(test)]
 mod tests {
-    use crate::adaptation::{StreamProfile, StreamDecision};
+    use crate::adaptation::{StreamDecision, StreamProfile};
 
     use super::*;
 
@@ -131,7 +131,10 @@ mod tests {
             ReceiverId(3),
             decision(MediaTransport::ReliableFallback, QualityTier::Emergency),
         );
-        assert_eq!(router.members(high_multicast), vec![ReceiverId(1), ReceiverId(2)]);
+        assert_eq!(
+            router.members(high_multicast),
+            vec![ReceiverId(1), ReceiverId(2)]
+        );
         assert_eq!(
             router.route(ReceiverId(3)),
             Some(CohortKey {

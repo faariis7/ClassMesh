@@ -2,7 +2,9 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
-use classmesh_protocol::media::{MEDIA_HEADER_LEN, MAX_PACKET_PAYLOAD, MediaHeaderError, MediaPacketHeader};
+use classmesh_protocol::media::{
+    MAX_PACKET_PAYLOAD, MEDIA_HEADER_LEN, MediaHeaderError, MediaPacketHeader,
+};
 
 use crate::MediaPacket;
 
@@ -183,7 +185,11 @@ mod tests {
 
     #[test]
     fn classroom_multicast_range_is_detected() {
-        assert!(is_ipv4_multicast(IpAddr::V4(Ipv4Addr::new(239, 10, 20, 30))));
-        assert!(!is_ipv4_multicast(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20))));
+        assert!(is_ipv4_multicast(IpAddr::V4(Ipv4Addr::new(
+            239, 10, 20, 30
+        ))));
+        assert!(!is_ipv4_multicast(IpAddr::V4(Ipv4Addr::new(
+            192, 168, 1, 20
+        ))));
     }
 }
