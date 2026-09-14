@@ -3,6 +3,8 @@ resolver = "3"
 members = [
     "crates/classmesh-core",
     "crates/classmesh-protocol",
+    "crates/classmesh-network",
+    "crates/classmesh-windows-runtime",
 ]
 
 [workspace.package]
