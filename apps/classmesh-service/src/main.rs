@@ -1,9 +1,11 @@
 #[cfg(windows)]
 mod windows_service_app {
     use std::ffi::OsString;
+    use std::path::PathBuf;
     use std::sync::mpsc;
     use std::time::Duration;
 
+    use classmesh_win32::{SessionProcess, launch_worker_in_session};
     use classmesh_windows_runtime::{SessionEvent, SessionId, SessionSupervisor, SupervisorAction};
     use windows_service::service::{
         ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
@@ -23,6 +25,94 @@ mod windows_service_app {
     enum RuntimeEvent {
         Stop,
         Session(SessionEvent),
+    }
+
+    #[derive(Debug)]
+    struct WorkerManager {
+        executable: Option<PathBuf>,
+        process: Option<SessionProcess>,
+    }
+
+    impl WorkerManager {
+        fn new() -> Self {
+            let executable = std::env::current_exe().ok().map(|service| {
+                service
+                    .parent()
+                    .map_or_else(|| PathBuf::from("classmesh-worker.exe"), |dir| dir.join("classmesh-worker.exe"))
+            });
+            Self {
+                executable,
+                process: None,
+            }
+        }
+
+        fn launch(&mut self, session: SessionId) -> bool {
+            let Some(executable) = self.executable.as_deref() else {
+                eprintln!("cannot resolve classmesh-worker.exe next to the service binary");
+                return false;
+            };
+
+            match launch_worker_in_session(session.0, executable, &[]) {
+                Ok(process) => {
+                    eprintln!(
+                        "ClassMesh Worker {} launched in Windows session {}",
+                        process.process_id(),
+                        process.session_id()
+                    );
+                    self.process = Some(process);
+                    true
+                }
+                Err(error) => {
+                    eprintln!("failed to launch Worker for session {}: {error}", session.0);
+                    false
+                }
+            }
+        }
+
+        fn stop(&mut self, session: SessionId) {
+            let Some(process) = self.process.as_mut() else {
+                return;
+            };
+            if process.session_id() != session.0 {
+                return;
+            }
+            if let Err(error) = process.terminate(0) {
+                eprintln!(
+                    "failed to terminate Worker {} for session {}: {error}",
+                    process.process_id(),
+                    session.0
+                );
+            }
+            self.process = None;
+        }
+
+        fn stop_any(&mut self) {
+            let session = self.process.as_ref().map(|process| SessionId(process.session_id()));
+            if let Some(session) = session {
+                self.stop(session);
+            }
+        }
+
+        fn poll_exit(&mut self) -> Option<SessionId> {
+            let process = self.process.as_ref()?;
+            match process.is_running() {
+                Ok(true) => None,
+                Ok(false) => {
+                    let session = SessionId(process.session_id());
+                    eprintln!(
+                        "ClassMesh Worker {} exited from session {}",
+                        process.process_id(),
+                        session.0
+                    );
+                    self.process = None;
+                    Some(session)
+                }
+                Err(error) => {
+                    eprintln!("Worker liveness probe failed: {error}");
+                    None
+                }
+            }
+        }
     }
 
     pub fn run() -> windows_service::Result<()> {
@@ -61,19 +151,25 @@ mod windows_service_app {
         set_running(&status_handle)?;
 
         let mut supervisor = SessionSupervisor::default();
+        let mut workers = WorkerManager::new();
         loop {
             match event_rx.recv_timeout(Duration::from_secs(2)) {
                 Ok(RuntimeEvent::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Ok(RuntimeEvent::Session(event)) => {
                     let action = supervisor.on_event(event);
-                    handle_supervisor_action(action);
+                    handle_supervisor_action(action, &mut supervisor, &mut workers);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // Future work: worker health/restart watchdog and control heartbeat live here.
+                    if let Some(session) = workers.poll_exit() {
+                        supervisor.mark_worker_stopped(session);
+                        let action = supervisor.worker_crashed(session);
+                        handle_supervisor_action(action, &mut supervisor, &mut workers);
+                    }
                 }
             }
         }
 
+        workers.stop_any();
         set_stopped(&status_handle)
     }
 
@@ -107,9 +203,7 @@ mod windows_service_app {
         let session = SessionId(change.notification.session_id);
         match change.reason {
             SessionChangeReason::ConsoleConnect => Some(SessionEvent::ConsoleConnect(session)),
-            SessionChangeReason::ConsoleDisconnect => {
-                Some(SessionEvent::ConsoleDisconnect(session))
-            }
+            SessionChangeReason::ConsoleDisconnect => Some(SessionEvent::ConsoleDisconnect(session)),
             SessionChangeReason::RemoteConnect => Some(SessionEvent::RemoteConnect(session)),
             SessionChangeReason::RemoteDisconnect => Some(SessionEvent::RemoteDisconnect(session)),
             SessionChangeReason::SessionLogon => Some(SessionEvent::Logon(session)),
@@ -122,18 +216,24 @@ mod windows_service_app {
         }
     }
 
-    fn handle_supervisor_action(action: SupervisorAction) {
+    fn handle_supervisor_action(
+        action: SupervisorAction,
+        supervisor: &mut SessionSupervisor,
+        workers: &mut WorkerManager,
+    ) {
         match action {
             SupervisorAction::None => {}
             SupervisorAction::LaunchWorker(session) => {
-                // The Win32 token/process launcher is intentionally the next isolated component.
-                // Do not call CreateProcess from Session 0 as a substitute.
-                eprintln!("worker launch requested for Windows session {}", session.0);
+                if workers.launch(session) {
+                    supervisor.mark_worker_running(session);
+                }
             }
             SupervisorAction::StopWorker(session) => {
-                eprintln!("worker stop requested for Windows session {}", session.0);
+                workers.stop(session);
+                supervisor.mark_worker_stopped(session);
             }
             SupervisorAction::SuspendMedia(session) => {
+                // Media suspension will move to authenticated IPC instead of killing the Worker.
                 eprintln!("media suspend requested for Windows session {}", session.0);
             }
             SupervisorAction::ResumeMedia(session) => {
@@ -143,10 +243,10 @@ mod windows_service_app {
                 old_session,
                 new_session,
             } => {
-                eprintln!(
-                    "worker replacement requested: session {} -> {}",
-                    old_session.0, new_session.0
-                );
+                workers.stop(old_session);
+                if workers.launch(new_session) {
+                    supervisor.mark_worker_running(new_session);
+                }
             }
         }
     }
