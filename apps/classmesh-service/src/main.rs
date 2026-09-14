@@ -36,9 +36,10 @@ mod windows_service_app {
     impl WorkerManager {
         fn new() -> Self {
             let executable = std::env::current_exe().ok().map(|service| {
-                service
-                    .parent()
-                    .map_or_else(|| PathBuf::from("classmesh-worker.exe"), |dir| dir.join("classmesh-worker.exe"))
+                service.parent().map_or_else(
+                    || PathBuf::from("classmesh-worker.exe"),
+                    |dir| dir.join("classmesh-worker.exe"),
+                )
             });
             Self {
                 executable,
@@ -87,7 +88,10 @@ mod windows_service_app {
         }
 
         fn stop_any(&mut self) {
-            let session = self.process.as_ref().map(|process| SessionId(process.session_id()));
+            let session = self
+                .process
+                .as_ref()
+                .map(|process| SessionId(process.session_id()));
             if let Some(session) = session {
                 self.stop(session);
             }
@@ -203,7 +207,9 @@ mod windows_service_app {
         let session = SessionId(change.notification.session_id);
         match change.reason {
             SessionChangeReason::ConsoleConnect => Some(SessionEvent::ConsoleConnect(session)),
-            SessionChangeReason::ConsoleDisconnect => Some(SessionEvent::ConsoleDisconnect(session)),
+            SessionChangeReason::ConsoleDisconnect => {
+                Some(SessionEvent::ConsoleDisconnect(session))
+            }
             SessionChangeReason::RemoteConnect => Some(SessionEvent::RemoteConnect(session)),
             SessionChangeReason::RemoteDisconnect => Some(SessionEvent::RemoteDisconnect(session)),
             SessionChangeReason::SessionLogon => Some(SessionEvent::Logon(session)),
