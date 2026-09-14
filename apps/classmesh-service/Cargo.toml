@@ -1,0 +1,16 @@
+[package]
+name = "classmesh-service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+classmesh-windows-runtime = { path = "../../crates/classmesh-windows-runtime" }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8.1"
+
+[lints]
+workspace = true
