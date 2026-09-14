@@ -1,0 +1,13 @@
+[package]
+name = "classmesh-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[target.'cfg(windows)'.dependencies]
+classmesh-win32 = { path = "../../crates/classmesh-win32" }
+
+[lints]
+workspace = true
