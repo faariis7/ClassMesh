@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod reliability;
 pub mod udp;
 
 use classmesh_protocol::media::{
