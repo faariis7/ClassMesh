@@ -133,22 +133,19 @@ mod windows_service_app {
         }
 
         fn poll(&mut self) -> WorkerManagerEvent {
-            let exited = self.process.as_ref().and_then(|process| {
-                match process.is_running() {
+            let exited = self
+                .process
+                .as_ref()
+                .and_then(|process| match process.is_running() {
                     Ok(true) => None,
-                    Ok(false) => Some((
-                        SessionId(process.session_id()),
-                        process.process_id(),
-                        false,
-                    )),
+                    Ok(false) => Some((SessionId(process.session_id()), process.process_id())),
                     Err(error) => {
                         eprintln!("Worker liveness probe failed: {error}");
                         None
                     }
-                }
-            });
+                });
 
-            if let Some((session, process_id, _)) = exited {
+            if let Some((session, process_id)) = exited {
                 eprintln!(
                     "ClassMesh Worker {process_id} exited from session {}",
                     session.0
