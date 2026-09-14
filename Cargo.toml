@@ -10,7 +10,9 @@ members = [
     "crates/classmesh-security",
     "crates/classmesh-discovery",
     "crates/classmesh-windows-runtime",
+    "crates/classmesh-win32",
     "apps/classmesh-service",
+    "apps/classmesh-worker",
     "tools/classmesh-lab",
 ]
 

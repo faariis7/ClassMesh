@@ -69,6 +69,11 @@ impl WorkerWatchdog {
         }
     }
 
+    pub fn launch_failed(&mut self, session: SessionId) -> WorkerRestartDecision {
+        self.process = None;
+        self.next_failure_decision(session)
+    }
+
     pub fn exited_unexpectedly(
         &mut self,
         now_us: u64,
@@ -86,6 +91,15 @@ impl WorkerWatchdog {
         if now_us.saturating_sub(process.launched_at_us) >= self.policy.reset_after_healthy_us {
             self.consecutive_failures = 0;
         }
+        self.next_failure_decision(session)
+    }
+
+    #[must_use]
+    pub const fn consecutive_failures(&self) -> u8 {
+        self.consecutive_failures
+    }
+
+    fn next_failure_decision(&mut self, session: SessionId) -> WorkerRestartDecision {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
 
         if self.consecutive_failures > self.policy.max_consecutive_failures {
@@ -99,11 +113,6 @@ impl WorkerWatchdog {
             .saturating_mul(1_u64 << exponent)
             .min(self.policy.max_backoff_us);
         WorkerRestartDecision::RelaunchAfter { session, delay_us }
-    }
-
-    #[must_use]
-    pub const fn consecutive_failures(&self) -> u8 {
-        self.consecutive_failures
     }
 }
 
@@ -154,6 +163,35 @@ mod tests {
         });
         assert_eq!(
             watchdog.exited_unexpectedly(5, session, 12),
+            WorkerRestartDecision::GiveUp { session }
+        );
+    }
+
+    #[test]
+    fn launch_failures_use_same_bounded_backoff() {
+        let mut watchdog = WorkerWatchdog::new(WorkerRestartPolicy {
+            base_backoff_us: 100,
+            max_backoff_us: 500,
+            reset_after_healthy_us: 10_000,
+            max_consecutive_failures: 2,
+        });
+        let session = SessionId(8);
+        assert_eq!(
+            watchdog.launch_failed(session),
+            WorkerRestartDecision::RelaunchAfter {
+                session,
+                delay_us: 100
+            }
+        );
+        assert_eq!(
+            watchdog.launch_failed(session),
+            WorkerRestartDecision::RelaunchAfter {
+                session,
+                delay_us: 200
+            }
+        );
+        assert_eq!(
+            watchdog.launch_failed(session),
             WorkerRestartDecision::GiveUp { session }
         );
     }
