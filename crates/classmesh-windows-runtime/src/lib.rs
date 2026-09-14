@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ipc;
+pub mod worker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionId(pub u32);
