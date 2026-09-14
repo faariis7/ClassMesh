@@ -166,9 +166,7 @@ impl FrameAssembler {
             .iter()
             .enumerate()
             .filter(|(_, packet)| packet.is_none())
-            .map(|(index, _)| {
-                u16::try_from(index).expect("packet count is represented by u16")
-            })
+            .map(|(index, _)| u16::try_from(index).expect("packet count is represented by u16"))
             .collect()
     }
 
