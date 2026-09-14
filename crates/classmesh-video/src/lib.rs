@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod distributor;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
     Bgra8,
