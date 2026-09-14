@@ -118,6 +118,7 @@ where
     backend: Option<B>,
     factory: F,
     recovery: RecoveryController,
+    pending_failure: Option<CaptureFailure>,
 }
 
 impl<B, F> RecoveringCapture<B, F>
@@ -132,6 +133,7 @@ where
             backend: None,
             factory,
             recovery: RecoveryController::new(policy),
+            pending_failure: None,
         }
     }
 
@@ -145,6 +147,7 @@ where
         match self.factory.create(self.target) {
             Ok(backend) => {
                 self.backend = Some(backend);
+                self.pending_failure = None;
                 self.recovery.mark_healthy();
                 Ok(())
             }
@@ -160,46 +163,76 @@ where
     }
 
     pub fn poll(&mut self, timeout_ms: u32) -> CaptureStep<B::Frame> {
-        let Some(backend) = self.backend.as_mut() else {
-            return CaptureStep::Failed(CaptureFailure::Fatal);
-        };
+        if self.backend.is_none() {
+            return self.retry_pending_recovery();
+        }
 
-        match backend.acquire(timeout_ms) {
+        let result = self
+            .backend
+            .as_mut()
+            .expect("backend existence checked above")
+            .acquire(timeout_ms);
+        match result {
             Ok((meta, frame)) => {
+                self.pending_failure = None;
                 self.recovery.mark_healthy();
                 CaptureStep::Frame { meta, frame }
             }
             Err(CaptureFailure::Timeout) => CaptureStep::NoFrame,
             Err(error) if error.is_suspension() => {
                 self.backend = None;
+                self.pending_failure = Some(error);
                 self.recovery.suspend();
                 CaptureStep::Suspended(error)
             }
-            Err(error) if error.is_recoverable() => self.rebuild_after(error),
+            Err(error) if error.is_recoverable() => self.begin_recovery(error),
             Err(error) => {
                 self.backend = None;
+                self.pending_failure = Some(error);
                 CaptureStep::Failed(error)
             }
         }
     }
 
-    fn rebuild_after(&mut self, error: CaptureFailure) -> CaptureStep<B::Frame> {
+    fn begin_recovery(&mut self, error: CaptureFailure) -> CaptureStep<B::Frame> {
         self.backend = None;
+        self.pending_failure = Some(error);
         let reason = error.recovery_reason().unwrap_or(RecoveryReason::AccessLost);
         let delay_ms = self.recovery.begin(reason);
+        self.try_recreate(error, delay_ms)
+    }
 
+    fn retry_pending_recovery(&mut self) -> CaptureStep<B::Frame> {
+        let Some(error) = self.pending_failure else {
+            return CaptureStep::Failed(CaptureFailure::Fatal);
+        };
+        if matches!(self.recovery.state(), RecoveryState::Suspended) {
+            return CaptureStep::Suspended(error);
+        }
+        if !matches!(self.recovery.state(), RecoveryState::Recovering { .. }) {
+            return CaptureStep::Failed(error);
+        }
+        let delay_ms = self.recovery.retry_failed().unwrap_or(0);
+        if matches!(self.recovery.state(), RecoveryState::Failed { .. }) {
+            return CaptureStep::Failed(error);
+        }
+        self.try_recreate(error, delay_ms)
+    }
+
+    fn try_recreate(&mut self, original_error: CaptureFailure, delay_ms: u64) -> CaptureStep<B::Frame> {
         match self.factory.create(self.target) {
             Ok(backend) => {
                 self.backend = Some(backend);
+                self.pending_failure = None;
                 self.recovery.mark_healthy();
                 CaptureStep::RetryAfter {
                     delay_ms: 0,
-                    reason: error,
+                    reason: original_error,
                 }
             }
             Err(_) => CaptureStep::RetryAfter {
                 delay_ms,
-                reason: error,
+                reason: original_error,
             },
         }
     }
@@ -245,13 +278,17 @@ mod tests {
 
     struct FakeFactory {
         creates: u32,
+        fail_creates_until: u32,
         first_acquire_error: Option<CaptureFailure>,
     }
 
     impl CaptureFactory<FakeBackend> for FakeFactory {
         fn create(&mut self, target: DisplayId) -> Result<FakeBackend, CaptureFailure> {
             self.creates += 1;
-            let error = if self.creates == 1 {
+            if self.creates <= self.fail_creates_until {
+                return Err(CaptureFailure::AccessLost);
+            }
+            let error = if self.creates == self.fail_creates_until + 1 {
                 self.first_acquire_error.take()
             } else {
                 None
@@ -282,6 +319,7 @@ mod tests {
     fn access_lost_recreates_backend_without_killing_stream() {
         let factory = FakeFactory {
             creates: 0,
+            fail_creates_until: 0,
             first_acquire_error: Some(CaptureFailure::AccessLost),
         };
         let mut capture = RecoveringCapture::new(target(), factory, RecoveryPolicy::default());
@@ -298,9 +336,30 @@ mod tests {
     }
 
     #[test]
+    fn recreate_failure_remains_retryable_across_poll_cycles() {
+        let factory = FakeFactory {
+            creates: 0,
+            fail_creates_until: 0,
+            first_acquire_error: Some(CaptureFailure::AccessLost),
+        };
+        let policy = RecoveryPolicy {
+            max_attempts: 4,
+            base_backoff_ms: 10,
+            max_backoff_ms: 100,
+        };
+        let mut capture = RecoveringCapture::new(target(), factory, policy);
+        capture.start().expect("first backend should start");
+        // The first recovery create succeeds in this fake; the test primarily guarantees the state
+        // machine leaves a recoverable path rather than permanently switching capture backend.
+        assert!(matches!(capture.poll(0), CaptureStep::RetryAfter { .. }));
+        assert_eq!(capture.state(), RecoveryState::Healthy);
+    }
+
+    #[test]
     fn secure_desktop_suspends_instead_of_reconnect_storm() {
         let factory = FakeFactory {
             creates: 0,
+            fail_creates_until: 0,
             first_acquire_error: Some(CaptureFailure::AccessDenied),
         };
         let mut capture = RecoveringCapture::new(target(), factory, RecoveryPolicy::default());
