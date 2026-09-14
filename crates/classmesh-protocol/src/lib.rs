@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod media;
+
 pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 1 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -17,6 +19,7 @@ impl ProtocolVersion {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
+    ServiceSessionWorker,
     DxgiCapture,
     WindowsGraphicsCapture,
     H264HardwareEncode,
@@ -24,6 +27,8 @@ pub enum Capability {
     UdpMulticast,
     UdpUnicast,
     QuicDatagram,
+    WebRtc,
+    LocalSfu,
 }
 
 #[cfg(test)]
