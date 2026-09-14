@@ -84,7 +84,7 @@ impl ReceiverWindow {
                     let stream_id = self
                         .inflight
                         .get(&oldest_id)
-                        .map(|frame| frame.assembler_stream_id())
+                        .map(|frame| frame.assembler.stream_id_for_receiver())
                         .unwrap_or(packet.header.stream_id);
                     self.inflight.remove(&oldest_id);
                     self.dropped_frames = self.dropped_frames.saturating_add(1);
@@ -142,7 +142,7 @@ impl ReceiverWindow {
 
         for (&frame_id, frame) in &mut self.inflight {
             let age = now_us.saturating_sub(frame.first_seen_us);
-            let stream_id = frame.assembler_stream_id();
+            let stream_id = frame.assembler.stream_id_for_receiver();
             if age >= self.policy.drop_after_us {
                 remove.push(frame_id);
                 request_keyframe = Some((stream_id, frame_id));
@@ -170,7 +170,7 @@ impl ReceiverWindow {
             if let Some(frame) = self.inflight.remove(&frame_id) {
                 self.dropped_frames = self.dropped_frames.saturating_add(1);
                 events.push(ReceiverEvent::DroppedStaleFrame {
-                    stream_id: frame.assembler_stream_id(),
+                    stream_id: frame.assembler.stream_id_for_receiver(),
                     frame_id,
                 });
             }
@@ -189,18 +189,6 @@ impl ReceiverWindow {
     #[must_use]
     pub const fn dropped_frames(&self) -> u64 {
         self.dropped_frames
-    }
-}
-
-trait FrameAssemblerMetadata {
-    fn assembler_stream_id(&self) -> u32;
-}
-
-impl FrameAssemblerMetadata for FrameAssembler {
-    fn assembler_stream_id(&self) -> u32 {
-        // Kept private in the assembler itself; this method is implemented in the same crate and
-        // intentionally exposes only what receiver policy needs.
-        self.stream_id_for_receiver()
     }
 }
 
