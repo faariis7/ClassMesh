@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/classmesh-core",
+    "crates/classmesh-protocol",
+]
+
+[workspace.package]
+edition = "2024"
+license = "UNLICENSED"
+rust-version = "1.85"
+version = "0.0.1"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
