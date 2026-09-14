@@ -3,6 +3,7 @@
 pub mod adaptation;
 pub mod cohort;
 pub mod metrics;
+pub mod presence;
 pub mod queue;
 pub mod recovery;
 
