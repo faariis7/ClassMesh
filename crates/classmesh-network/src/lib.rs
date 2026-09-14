@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod udp;
+
 use classmesh_protocol::media::{
     MAX_PACKET_PAYLOAD, MediaFlags, MediaHeaderError, MediaPacketHeader,
 };
