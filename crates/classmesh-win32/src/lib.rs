@@ -8,9 +8,7 @@ mod session;
 mod session_process;
 
 #[cfg(windows)]
-pub use named_pipe::{
-    NamedPipeClient, NamedPipeServer, PipeError, PipePeer, worker_pipe_name,
-};
+pub use named_pipe::{NamedPipeClient, NamedPipeServer, PipeError, PipePeer, worker_pipe_name};
 #[cfg(windows)]
 pub use session::current_session_id;
 #[cfg(windows)]
