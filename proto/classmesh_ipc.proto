@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package classmesh.ipc.v1;
+
+message WorkerHello {
+  uint32 protocol_major = 1;
+  uint32 protocol_minor = 2;
+  uint32 windows_session_id = 3;
+  uint32 process_id = 4;
+  bytes worker_nonce = 5;
+}
+
+message ServiceHello {
+  uint32 protocol_major = 1;
+  uint32 protocol_minor = 2;
+  bytes service_nonce = 3;
+  bytes challenge = 4;
+}
+
+message WorkerChallengeResponse {
+  bytes response = 1;
+}
+
+message CaptureTarget {
+  uint32 adapter_luid_low = 1;
+  sint32 adapter_luid_high = 2;
+  uint32 output_index = 3;
+}
+
+message StartMonitoring {
+  CaptureTarget target = 1;
+  uint32 max_width = 2;
+  uint32 fps = 3;
+}
+
+message StartPresentationReceiver {
+  uint64 stream_id = 1;
+}
+
+message StartInteractiveStream {
+  CaptureTarget target = 1;
+  uint32 max_width = 2;
+  uint32 max_height = 3;
+  uint32 fps = 4;
+  uint32 bitrate_kbps = 5;
+}
+
+message StopMedia {
+  uint64 stream_id = 1;
+}
+
+enum WorkerLifecycleState {
+  WORKER_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  STARTING = 1;
+  READY = 2;
+  SUSPENDED = 3;
+  RECOVERING = 4;
+  STOPPING = 5;
+}
+
+message WorkerStatus {
+  WorkerLifecycleState state = 1;
+  string capture_backend = 2;
+  string encoder_backend = 3;
+  string diagnostic = 4;
+}
+
+message CaptureRecoveryEvent {
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    ACCESS_LOST = 1;
+    ACCESS_DENIED = 2;
+    DEVICE_REMOVED = 3;
+    DEVICE_RESET = 4;
+    DISPLAY_CHANGED = 5;
+    MONITOR_REMOVED = 6;
+    SESSION_CHANGED = 7;
+    PROTECTED_CONTENT = 8;
+  }
+  Reason reason = 1;
+  uint32 attempt = 2;
+  uint64 timestamp_us = 3;
+}
+
+message EncoderCapability {
+  string backend = 1;
+  bool advertised_hardware = 2;
+  bool gpu_native_input = 3;
+  bool low_latency_accepted = 4;
+  float sustained_fps = 5;
+  float p50_encode_ms = 6;
+  float p95_encode_ms = 7;
+  bool presentation_1080p30 = 8;
+}
