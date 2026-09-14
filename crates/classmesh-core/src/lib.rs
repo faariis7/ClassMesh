@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod adaptation;
+pub mod metrics;
 pub mod queue;
 pub mod recovery;
 
