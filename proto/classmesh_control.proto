@@ -1,0 +1,177 @@
+syntax = "proto3";
+
+package classmesh.control.v1;
+
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+enum Capability {
+  CAPABILITY_UNSPECIFIED = 0;
+  SERVICE_SESSION_WORKER = 1;
+  DXGI_CAPTURE = 2;
+  WINDOWS_GRAPHICS_CAPTURE = 3;
+  H264_HARDWARE_ENCODE = 4;
+  H264_HARDWARE_DECODE = 5;
+  UDP_MULTICAST = 6;
+  UDP_UNICAST = 7;
+  QUIC_DATAGRAM = 8;
+  WEBRTC = 9;
+  LOCAL_SFU = 10;
+}
+
+message Hello {
+  ProtocolVersion version = 1;
+  bytes device_id = 2;
+  string hostname = 3;
+  repeated Capability capabilities = 4;
+  string app_version = 5;
+}
+
+message Heartbeat {
+  uint64 monotonic_time_us = 1;
+  uint64 control_session_id = 2;
+  MediaHealth media = 3;
+}
+
+enum MediaHealth {
+  MEDIA_HEALTH_UNSPECIFIED = 0;
+  IDLE = 1;
+  STARTING = 2;
+  STREAMING = 3;
+  DEGRADED = 4;
+  RECOVERING = 5;
+  SUSPENDED = 6;
+  FAILED = 7;
+}
+
+enum StreamKind {
+  STREAM_KIND_UNSPECIFIED = 0;
+  MONITORING = 1;
+  INTERACTIVE = 2;
+  TEACHER_PRESENTATION = 3;
+}
+
+enum VideoCodec {
+  VIDEO_CODEC_UNSPECIFIED = 0;
+  H264 = 1;
+  HEVC = 2;
+  AV1 = 3;
+}
+
+enum MediaTransport {
+  MEDIA_TRANSPORT_UNSPECIFIED = 0;
+  UDP_MULTICAST = 1;
+  UDP_UNICAST = 2;
+  QUIC_DATAGRAM = 3;
+  WEBRTC = 4;
+  RELIABLE_FALLBACK = 5;
+}
+
+message VideoProfile {
+  uint32 width = 1;
+  uint32 height = 2;
+  uint32 fps = 3;
+  uint32 bitrate_kbps = 4;
+  VideoCodec codec = 5;
+}
+
+message StreamOffer {
+  uint64 stream_id = 1;
+  StreamKind kind = 2;
+  MediaTransport transport = 3;
+  VideoProfile profile = 4;
+  bytes transport_parameters = 5;
+}
+
+message StreamAnswer {
+  uint64 stream_id = 1;
+  bool accepted = 2;
+  string rejection_reason = 3;
+  repeated MediaTransport supported_transports = 4;
+}
+
+message ReceiverFeedback {
+  uint64 stream_id = 1;
+  float rtt_ms = 2;
+  float packet_loss = 3;
+  float jitter_ms = 4;
+  float decode_fps = 5;
+  float decode_latency_ms = 6;
+  float render_latency_ms = 7;
+  float queue_delay_ms = 8;
+  uint64 dropped_frames = 9;
+  uint64 reordered_packets = 10;
+  uint64 received_bitrate_bps = 11;
+}
+
+message Nack {
+  uint64 stream_id = 1;
+  uint64 frame_id = 2;
+  repeated uint32 missing_packet_indices = 3;
+  uint64 recovery_deadline_us = 4;
+}
+
+message KeyframeRequest {
+  uint64 stream_id = 1;
+  uint64 last_decodable_frame_id = 2;
+}
+
+message StreamReconfigure {
+  uint64 stream_id = 1;
+  VideoProfile profile = 2;
+  MediaTransport transport = 3;
+  bytes transport_parameters = 4;
+}
+
+message MouseMove {
+  sint32 x = 1;
+  sint32 y = 2;
+  bool absolute = 3;
+}
+
+message MouseButton {
+  uint32 button = 1;
+  bool down = 2;
+}
+
+message MouseWheel {
+  sint32 delta = 1;
+  bool horizontal = 2;
+}
+
+message KeyEvent {
+  uint32 virtual_key = 1;
+  uint32 scan_code = 2;
+  bool down = 3;
+  bool extended = 4;
+}
+
+message ReleaseAllInput {}
+
+message InputEvent {
+  uint64 sequence = 1;
+  uint64 timestamp_us = 2;
+  oneof event {
+    MouseMove mouse_move = 10;
+    MouseButton mouse_button = 11;
+    MouseWheel mouse_wheel = 12;
+    KeyEvent key = 13;
+    ReleaseAllInput release_all = 14;
+  }
+}
+
+message SessionWorkerStatus {
+  uint32 windows_session_id = 1;
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    STOPPED = 1;
+    STARTING = 2;
+    RUNNING = 3;
+    SUSPENDED = 4;
+    RECOVERING = 5;
+  }
+  State state = 2;
+  string diagnostic = 3;
+}
