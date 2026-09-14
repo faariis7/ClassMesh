@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::mem::{size_of, zeroed};
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
@@ -206,6 +206,8 @@ impl Drop for HandleGuard {
 
 #[cfg(test)]
 mod tests {
+    use std::os::windows::ffi::OsStringExt;
+
     use super::*;
 
     #[test]
