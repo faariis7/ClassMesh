@@ -1,0 +1,15 @@
+[package]
+name = "classmesh-lab"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+classmesh-core = { path = "../../crates/classmesh-core" }
+classmesh-network = { path = "../../crates/classmesh-network" }
+classmesh-protocol = { path = "../../crates/classmesh-protocol" }
+
+[lints]
+workspace = true
