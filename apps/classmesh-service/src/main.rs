@@ -3,9 +3,12 @@ mod windows_service_app {
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use classmesh_win32::{SessionProcess, launch_worker_in_session};
+    use classmesh_windows_runtime::worker::{
+        WorkerProcess, WorkerRestartDecision, WorkerRestartPolicy, WorkerWatchdog,
+    };
     use classmesh_windows_runtime::{SessionEvent, SessionId, SessionSupervisor, SupervisorAction};
     use windows_service::service::{
         ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
@@ -27,10 +30,21 @@ mod windows_service_app {
         Session(SessionEvent),
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum WorkerManagerEvent {
+        Running(SessionId),
+        RestartScheduled(SessionId),
+        GiveUp(SessionId),
+        None,
+    }
+
     #[derive(Debug)]
     struct WorkerManager {
         executable: Option<PathBuf>,
         process: Option<SessionProcess>,
+        watchdog: WorkerWatchdog,
+        pending_restart: Option<(SessionId, Instant)>,
+        clock: Instant,
     }
 
     impl WorkerManager {
@@ -44,13 +58,18 @@ mod windows_service_app {
             Self {
                 executable,
                 process: None,
+                watchdog: WorkerWatchdog::new(WorkerRestartPolicy::default()),
+                pending_restart: None,
+                clock: Instant::now(),
             }
         }
 
-        fn launch(&mut self, session: SessionId) -> bool {
+        fn launch(&mut self, session: SessionId) -> WorkerManagerEvent {
+            let now_us = self.now_us();
             let Some(executable) = self.executable.as_deref() else {
                 eprintln!("cannot resolve classmesh-worker.exe next to the service binary");
-                return false;
+                let decision = self.watchdog.launch_failed(session);
+                return self.apply_restart_decision(decision);
             };
 
             match launch_worker_in_session(session.0, executable, &[]) {
@@ -60,17 +79,32 @@ mod windows_service_app {
                         process.process_id(),
                         process.session_id()
                     );
+                    self.watchdog.launched(WorkerProcess {
+                        session,
+                        process_id: process.process_id(),
+                        launched_at_us: now_us,
+                    });
                     self.process = Some(process);
-                    true
+                    self.pending_restart = None;
+                    WorkerManagerEvent::Running(session)
                 }
                 Err(error) => {
                     eprintln!("failed to launch Worker for session {}: {error}", session.0);
-                    false
+                    let decision = self.watchdog.launch_failed(session);
+                    self.apply_restart_decision(decision)
                 }
             }
         }
 
         fn stop(&mut self, session: SessionId) {
+            if self
+                .pending_restart
+                .is_some_and(|(pending, _)| pending == session)
+            {
+                self.pending_restart = None;
+            }
+            self.watchdog.stopped_intentionally(session);
+
             let Some(process) = self.process.as_mut() else {
                 return;
             };
@@ -88,6 +122,7 @@ mod windows_service_app {
         }
 
         fn stop_any(&mut self) {
+            self.pending_restart = None;
             let session = self
                 .process
                 .as_ref()
@@ -97,25 +132,76 @@ mod windows_service_app {
             }
         }
 
-        fn poll_exit(&mut self) -> Option<SessionId> {
-            let process = self.process.as_ref()?;
-            match process.is_running() {
-                Ok(true) => None,
-                Ok(false) => {
-                    let session = SessionId(process.session_id());
-                    eprintln!(
-                        "ClassMesh Worker {} exited from session {}",
+        fn poll(&mut self) -> WorkerManagerEvent {
+            let exited = self.process.as_ref().and_then(|process| {
+                match process.is_running() {
+                    Ok(true) => None,
+                    Ok(false) => Some((
+                        SessionId(process.session_id()),
                         process.process_id(),
+                        false,
+                    )),
+                    Err(error) => {
+                        eprintln!("Worker liveness probe failed: {error}");
+                        None
+                    }
+                }
+            });
+
+            if let Some((session, process_id, _)) = exited {
+                eprintln!(
+                    "ClassMesh Worker {process_id} exited from session {}",
+                    session.0
+                );
+                self.process = None;
+                let decision =
+                    self.watchdog
+                        .exited_unexpectedly(self.now_us(), session, process_id);
+                return self.apply_restart_decision(decision);
+            }
+
+            if let Some((session, due)) = self.pending_restart
+                && Instant::now() >= due
+            {
+                self.pending_restart = None;
+                return self.launch(session);
+            }
+
+            WorkerManagerEvent::None
+        }
+
+        fn apply_restart_decision(
+            &mut self,
+            decision: WorkerRestartDecision,
+        ) -> WorkerManagerEvent {
+            match decision {
+                WorkerRestartDecision::RelaunchAfter { session, delay_us } => {
+                    let delay = Duration::from_micros(delay_us);
+                    let due = Instant::now()
+                        .checked_add(delay)
+                        .unwrap_or_else(Instant::now);
+                    self.pending_restart = Some((session, due));
+                    eprintln!(
+                        "Worker restart scheduled for session {} in {} ms",
+                        session.0,
+                        delay.as_millis()
+                    );
+                    WorkerManagerEvent::RestartScheduled(session)
+                }
+                WorkerRestartDecision::GiveUp { session } => {
+                    self.pending_restart = None;
+                    eprintln!(
+                        "Worker restart limit reached for session {}; media remains unavailable while service/control stays alive",
                         session.0
                     );
-                    self.process = None;
-                    Some(session)
+                    WorkerManagerEvent::GiveUp(session)
                 }
-                Err(error) => {
-                    eprintln!("Worker liveness probe failed: {error}");
-                    None
-                }
+                WorkerRestartDecision::Ignore => WorkerManagerEvent::None,
             }
+        }
+
+        fn now_us(&self) -> u64 {
+            u64::try_from(self.clock.elapsed().as_micros()).unwrap_or(u64::MAX)
         }
     }
 
@@ -157,18 +243,15 @@ mod windows_service_app {
         let mut supervisor = SessionSupervisor::default();
         let mut workers = WorkerManager::new();
         loop {
-            match event_rx.recv_timeout(Duration::from_secs(2)) {
+            match event_rx.recv_timeout(Duration::from_millis(250)) {
                 Ok(RuntimeEvent::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Ok(RuntimeEvent::Session(event)) => {
                     let action = supervisor.on_event(event);
                     handle_supervisor_action(action, &mut supervisor, &mut workers);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if let Some(session) = workers.poll_exit() {
-                        supervisor.mark_worker_stopped(session);
-                        let action = supervisor.worker_crashed(session);
-                        handle_supervisor_action(action, &mut supervisor, &mut workers);
-                    }
+                    let event = workers.poll();
+                    handle_worker_event(event, &mut supervisor);
                 }
             }
         }
@@ -230,9 +313,8 @@ mod windows_service_app {
         match action {
             SupervisorAction::None => {}
             SupervisorAction::LaunchWorker(session) => {
-                if workers.launch(session) {
-                    supervisor.mark_worker_running(session);
-                }
+                let event = workers.launch(session);
+                handle_worker_event(event, supervisor);
             }
             SupervisorAction::StopWorker(session) => {
                 workers.stop(session);
@@ -250,10 +332,20 @@ mod windows_service_app {
                 new_session,
             } => {
                 workers.stop(old_session);
-                if workers.launch(new_session) {
-                    supervisor.mark_worker_running(new_session);
-                }
+                let event = workers.launch(new_session);
+                handle_worker_event(event, supervisor);
             }
+        }
+    }
+
+    fn handle_worker_event(event: WorkerManagerEvent, supervisor: &mut SessionSupervisor) {
+        match event {
+            WorkerManagerEvent::Running(session) => supervisor.mark_worker_running(session),
+            WorkerManagerEvent::RestartScheduled(session) => {
+                let _ = supervisor.worker_crashed(session);
+            }
+            WorkerManagerEvent::GiveUp(session) => supervisor.mark_worker_stopped(session),
+            WorkerManagerEvent::None => {}
         }
     }
 }
