@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod receiver;
 pub mod reliability;
 pub mod udp;
 
