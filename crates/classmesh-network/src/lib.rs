@@ -118,6 +118,11 @@ impl FrameAssembler {
         }
     }
 
+    #[must_use]
+    pub(crate) const fn stream_id_for_receiver(&self) -> u32 {
+        self.stream_id
+    }
+
     pub fn push(&mut self, packet: &MediaPacket) -> Result<(), AssembleError> {
         if packet.header.frame_id != self.frame_id {
             return Err(AssembleError::WrongFrame);
