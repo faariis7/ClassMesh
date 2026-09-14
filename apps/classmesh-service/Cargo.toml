@@ -10,6 +10,7 @@ publish = false
 classmesh-windows-runtime = { path = "../../crates/classmesh-windows-runtime" }
 
 [target.'cfg(windows)'.dependencies]
+classmesh-win32 = { path = "../../crates/classmesh-win32" }
 windows-service = "0.8.1"
 
 [lints]
