@@ -8,6 +8,7 @@ members = [
     "crates/classmesh-capture-win",
     "crates/classmesh-codec-win",
     "crates/classmesh-security",
+    "crates/classmesh-discovery",
     "crates/classmesh-windows-runtime",
     "tools/classmesh-lab",
 ]
