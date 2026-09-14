@@ -9,8 +9,9 @@ permissions:
   contents: read
 
 jobs:
-  rust:
-    runs-on: windows-latest
+  portable:
+    name: Portable Rust
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,6 +23,27 @@ jobs:
 
       - name: Rustfmt
         run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Synthetic media lab
+        run: cargo run -p classmesh-lab
+
+  windows:
+    name: Windows Build
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
