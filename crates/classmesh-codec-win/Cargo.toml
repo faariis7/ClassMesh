@@ -1,0 +1,12 @@
+[package]
+name = "classmesh-codec-win"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+classmesh-video = { path = "../classmesh-video" }
+
+[lints]
+workspace = true
