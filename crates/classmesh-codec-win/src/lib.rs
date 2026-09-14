@@ -224,7 +224,7 @@ mod tests {
                 encode_ms: 50.0,
                 produced_output: true,
             };
-            20
+            30
         ];
         let result = summarize_benchmark(
             &candidate(),
