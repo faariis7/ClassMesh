@@ -1,0 +1,16 @@
+/target/
+**/*.rs.bk
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+artifacts/
+bench-output/
