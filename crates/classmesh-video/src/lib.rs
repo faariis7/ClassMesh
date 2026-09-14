@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod distributor;
+pub mod rendition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
