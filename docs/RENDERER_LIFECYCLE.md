@@ -30,16 +30,28 @@ On restore the first non-zero `WM_SIZE` resizes the swap chain and presentation 
 
 DXGI errors corresponding to device removed, reset, hung, or driver-internal failure are classified separately from ordinary presentation errors.
 
-Because the Media Foundation decoder and flip presenter intentionally share a D3D11 device, a real device-loss event is a **media GPU pipeline** failure. Recreating only the swap chain is insufficient. The Worker recovery path must recreate:
+Because the Media Foundation decoder and flip presenter intentionally share a D3D11 device, a real device-loss event is a **media GPU pipeline** failure. Recreating only the swap chain is insufficient. The diagnostic Worker now rebuilds:
 
 1. the D3D11 video device;
 2. the Media Foundation DXGI device manager / hardware decoder binding;
 3. the decoder;
-4. the flip-model presenter;
+4. the flip-model presenter on the existing student HWND;
 5. keyframe-gated decode state.
+
+The existing Win32 presentation window is preserved across recovery. The recovered decoder waits for a valid keyframe before accepting inter frames, and the receiver exports a `gpu_recoveries` diagnostic counter.
+
+Device loss is detected from decoder submission/output, D3D11 presentation, or swap-chain resize. Ordinary presentation errors remain isolated from decoder/control health.
 
 Control/device heartbeat remains independent and should stay online while the media pipeline recovers.
 
 ## Current diagnostic boundary
 
-The standalone `classmesh-media-receiver --render` now exercises resize/minimize/restore behavior. Full D3D11 device-loss reconstruction is the next hardening step and should be validated by an explicit fault/restart path before integration into the normal long-lived Worker session.
+The standalone `classmesh-media-receiver --render` now exercises:
+
+- resize/minimize/restore;
+- DXGI device-loss classification;
+- recreation of the D3D11 + Media Foundation decoder/presenter stack;
+- preservation of the existing student presentation HWND;
+- keyframe-gated resume after recovery.
+
+The remaining gate is **physical GPU fault qualification**. Hosted CI proves the code builds and tests, but does not prove a real Intel/NVIDIA/AMD driver reset recovers correctly. Before normal long-lived Worker integration, ClassMesh should exercise an explicit fault-injection or real device-reset test and confirm that video resumes without dropping the authenticated control session.
