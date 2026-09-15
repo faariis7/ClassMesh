@@ -299,10 +299,7 @@ fn prepare_server_ack(data: &[u8], stats: &mut ServerStats) -> Option<Vec<u8>> {
     Some(build_packet(ACK_MAGIC, sequence, sent_us, HEADER_LEN))
 }
 
-fn record_server_ack_result<E: std::fmt::Display>(
-    result: Result<(), E>,
-    stats: &mut ServerStats,
-) {
+fn record_server_ack_result<E: std::fmt::Display>(result: Result<(), E>, stats: &mut ServerStats) {
     match result {
         Ok(()) => stats.acknowledgements = stats.acknowledgements.saturating_add(1),
         Err(error) => {
