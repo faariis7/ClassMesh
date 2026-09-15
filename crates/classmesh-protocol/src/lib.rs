@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod feedback;
 pub mod media;
 
 pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 1 };
