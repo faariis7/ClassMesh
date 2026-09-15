@@ -408,9 +408,6 @@ mod tests {
     #[test]
     fn empty_access_unit_error_is_stable() {
         let error = classmesh_decoder_error("empty H.264 access unit");
-        assert_eq!(
-            error.code(),
-            windows::core::HRESULT(0x8000_4005_u32 as i32)
-        );
+        assert_eq!(error.code(), windows::core::HRESULT(0x8000_4005_u32 as i32));
     }
 }
