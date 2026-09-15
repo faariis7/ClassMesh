@@ -10,6 +10,7 @@ publish = false
 classmesh-core = { path = "../../crates/classmesh-core" }
 classmesh-network = { path = "../../crates/classmesh-network" }
 classmesh-protocol = { path = "../../crates/classmesh-protocol" }
+classmesh-video = { path = "../../crates/classmesh-video" }
 
 [lints]
 workspace = true
