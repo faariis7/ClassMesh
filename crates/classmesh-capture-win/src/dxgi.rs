@@ -8,8 +8,7 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_MODE_ROTATION_IDENTITY, DXGI_MODE_ROTATION_ROTATE90, DXGI_MODE_ROTATION_ROTATE180,
-    DXGI_MODE_ROTATION_ROTATE270,
+    DXGI_MODE_ROTATION_ROTATE90, DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE270,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET,
@@ -241,7 +240,6 @@ fn find_output(
 }
 
 fn create_device(adapter: &IDXGIAdapter1) -> Result<ID3D11Device, CaptureFailure> {
-    let base_adapter = adapter.cast().map_err(|_| CaptureFailure::Unsupported)?;
     let feature_levels = [D3D_FEATURE_LEVEL_11_0];
     let mut device = None;
 
@@ -249,7 +247,7 @@ fn create_device(adapter: &IDXGIAdapter1) -> Result<ID3D11Device, CaptureFailure
     // storage or are omitted. The feature-level slice remains valid for the call.
     unsafe {
         D3D11CreateDevice(
-            &base_adapter,
+            adapter,
             D3D_DRIVER_TYPE_UNKNOWN,
             HMODULE::default(),
             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
@@ -288,8 +286,6 @@ fn descriptor_from_dxgi(
         180
     } else if desc.Rotation == DXGI_MODE_ROTATION_ROTATE270 {
         270
-    } else if desc.Rotation == DXGI_MODE_ROTATION_IDENTITY {
-        0
     } else {
         0
     };
