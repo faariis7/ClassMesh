@@ -6,18 +6,18 @@ use std::ptr::{null_mut, read};
 
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFDXGIDeviceManager, IMFMediaType, IMFSample, IMFTransform,
-    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MFCreateDXGIDeviceManager,
-    MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample, MFMediaType_Video,
-    MFSTARTUP_FULL, MFShutdown, MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
-    MFT_ENUM_FLAG_SORTANDFILTER, MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_FLUSH,
-    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
-    MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_MESSAGE_SET_D3D_MANAGER, MFT_REGISTER_TYPE_INFO, MFT_TRANSFORM_CLSID_Attribute, MFTEnumEx,
-    MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MF_LOW_LATENCY,
+    IMFActivate, IMFDXGIDeviceManager, IMFMediaType, IMFSample, IMFTransform, MF_LOW_LATENCY,
     MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE,
     MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO,
-    MF_MT_SUBTYPE,
+    MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
+    MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample,
+    MFMediaType_Video, MFSTARTUP_FULL, MFShutdown, MFStartup, MFT_CATEGORY_VIDEO_ENCODER,
+    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_FRIENDLY_NAME_Attribute,
+    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_REGISTER_TYPE_INFO,
+    MFT_TRANSFORM_CLSID_Attribute, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive,
 };
 use windows::Win32::System::Com::{
     COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -387,7 +387,10 @@ fn create_nv12_input_type(config: MfH264EncoderConfig) -> windows::core::Result<
     unsafe {
         media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
         media_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
-        media_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_u32_pair(config.width, config.height))?;
+        media_type.SetUINT64(
+            &MF_MT_FRAME_SIZE,
+            pack_u32_pair(config.width, config.height),
+        )?;
         media_type.SetUINT64(
             &MF_MT_FRAME_RATE,
             pack_u32_pair(config.fps_numerator, config.fps_denominator),
@@ -406,7 +409,10 @@ fn create_h264_output_type(config: MfH264EncoderConfig) -> windows::core::Result
     unsafe {
         media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
         media_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
-        media_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_u32_pair(config.width, config.height))?;
+        media_type.SetUINT64(
+            &MF_MT_FRAME_SIZE,
+            pack_u32_pair(config.width, config.height),
+        )?;
         media_type.SetUINT64(
             &MF_MT_FRAME_RATE,
             pack_u32_pair(config.fps_numerator, config.fps_denominator),
