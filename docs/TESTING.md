@@ -45,6 +45,8 @@ Teacher + student Windows machines:
 - induced UDP loss/reordering/jitter;
 - input responsiveness while video is degraded.
 
+For the current Phase 4 qualification sequence, use `docs/PHASE4_TWO_PC_QUALIFICATION.md` and the helper script `scripts/phase4-two-pc.ps1`. Record physical results in `docs/PHASE4_TWO_PC_RESULTS.md`; hosted CI must not be used to claim the physical acceptance criteria passed.
+
 ### Classroom scale tests
 
 At 2/5/10/20/30 clients where equipment allows:
