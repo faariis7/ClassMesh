@@ -97,9 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pipeline = Some(created);
                 }
 
-                let active = pipeline
-                    .as_mut()
-                    .expect("pipeline was initialized above");
+                let active = pipeline.as_mut().expect("pipeline was initialized above");
                 if pending_keyframe_request {
                     match active.request_keyframe() {
                         Ok(()) => {
