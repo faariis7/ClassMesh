@@ -87,7 +87,10 @@ mod windows_service_app {
             let mut pipe = match NamedPipeServer::create(&pipe_name) {
                 Ok(pipe) => pipe,
                 Err(error) => {
-                    eprintln!("failed to create Worker IPC pipe for session {}: {error}", session.0);
+                    eprintln!(
+                        "failed to create Worker IPC pipe for session {}: {error}",
+                        session.0
+                    );
                     let decision = self.watchdog.launch_failed(session);
                     return self.apply_restart_decision(decision);
                 }
@@ -307,7 +310,9 @@ mod windows_service_app {
                 session_id,
             } if process_id == expected_process_id && session_id == expected_session.0 => {}
             message => {
-                return Err(format!("unexpected Worker hello identity/message: {message:?}"));
+                return Err(format!(
+                    "unexpected Worker hello identity/message: {message:?}"
+                ));
             }
         }
 
