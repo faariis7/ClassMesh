@@ -3,8 +3,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use classmesh_capture_win::{CaptureStep, DxgiCaptureBackend, DxgiCaptureFactory, RecoveringCapture};
-    use classmesh_core::recovery::RecoveryPolicy;
+    use classmesh_capture_win::CaptureStep;
     use classmesh_win32::NamedPipeClient;
     use classmesh_windows_runtime::ipc::{IpcFrame, IpcMessage};
 
