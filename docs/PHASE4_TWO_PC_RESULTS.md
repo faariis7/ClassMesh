@@ -73,8 +73,32 @@ Duration: 120 s minimum.
 - Proxy peak queue depth:
 - Queue returned to zero/bounded: pending
 - Observed latency behavior:
-- End-to-end latency instrumentation status: pending
-- `<100 ms` target demonstrated: **NOT YET MEASURED**
+
+## Glass-to-glass latency measurement
+
+Source: `tools/phase4-latency-source.html` displayed fullscreen on Teacher and carried through the normal ClassMesh capture/encode/network/decode/render path.
+
+Measurement method: common-camera frame containing both physical displays; latency sample = Teacher elapsed-ms value minus Student rendered elapsed-ms value.
+
+- Camera/device:
+- Camera frame rate:
+- Number of readable samples (minimum 20):
+- Warm-up before sampling:
+- Glass-to-glass min ms:
+- Glass-to-glass p50 ms:
+- Glass-to-glass p95 ms:
+- Glass-to-glass max ms:
+- Estimated measurement uncertainty:
+- Healthy wired-LAN p95 `<100 ms`: **NOT YET MEASURED**
+- Notes:
+
+Optional raw samples:
+
+| Sample | Teacher ms | Student ms | Difference ms |
+|---:|---:|---:|---:|
+| 1 | pending | pending | pending |
+| 2 | pending | pending | pending |
+| 3 | pending | pending | pending |
 
 ## Deterministic impairment matrix
 
@@ -106,6 +130,9 @@ Profile: 3% loss, 20 ms jitter, 3% reorder, 20 ms reorder delay, seed 42.
 - Full 1800 s completed: pending
 - Continuous live presentation: pending
 - No steadily increasing display delay: pending
+- Visual latency near start — p50/p95/max ms:
+- Visual latency near midpoint — p50/p95/max ms:
+- Visual latency near end — p50/p95/max ms:
 - Proxy queue bounded: pending
 - Receiver queues/recovery bounded: pending
 - Sender in-flight/pool bounded: pending
@@ -117,7 +144,7 @@ Profile: 3% loss, 20 ms jitter, 3% reorder, 20 ms reorder delay, seed 42.
 ## Phase 4 exit checklist
 
 - [ ] 1080p30 teacher motion renders on the second Windows PC.
-- [ ] Healthy wired-LAN latency target is measured and `<100 ms`, or missing instrumentation is explicitly tracked as a blocking task.
+- [ ] Healthy wired-LAN glass-to-glass p95 is measured below 100 ms using the documented common-camera method or a more accurate equivalent.
 - [ ] No steadily increasing latency during the 30-minute run.
 - [ ] 1%, 3%, and 5% impairment runs degrade/recover without losing the device/control session.
 - [ ] UDP and QUIC Datagram results are recorded.
