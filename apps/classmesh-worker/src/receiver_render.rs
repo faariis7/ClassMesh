@@ -44,11 +44,7 @@ impl PresentationWindow {
     /// # Errors
     /// Returns a Win32 or DXGI/D3D11 error if the window or GPU presentation target cannot be
     /// created.
-    pub fn new(
-        device: &ID3D11Device,
-        width: u32,
-        height: u32,
-    ) -> windows::core::Result<Self> {
+    pub fn new(device: &ID3D11Device, width: u32, height: u32) -> windows::core::Result<Self> {
         let module = unsafe { GetModuleHandleW(None)? };
         let cursor = unsafe { LoadCursorW(None, IDC_ARROW)? };
         let window_class = WNDCLASSW {
