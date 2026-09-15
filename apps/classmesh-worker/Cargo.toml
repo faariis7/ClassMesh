@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+classmesh-network = { path = "../../crates/classmesh-network" }
 classmesh-windows-runtime = { path = "../../crates/classmesh-windows-runtime" }
 
 [target.'cfg(windows)'.dependencies]
@@ -22,6 +23,10 @@ windows = { version = "0.61.3", features = [
 [[bin]]
 name = "classmesh-media-probe"
 path = "src/bin/media_probe.rs"
+
+[[bin]]
+name = "classmesh-media-receiver"
+path = "src/bin/media_receiver.rs"
 
 [lints]
 workspace = true
