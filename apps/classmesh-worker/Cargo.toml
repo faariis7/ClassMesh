@@ -10,6 +10,8 @@ publish = false
 classmesh-windows-runtime = { path = "../../crates/classmesh-windows-runtime" }
 
 [target.'cfg(windows)'.dependencies]
+classmesh-capture-win = { path = "../../crates/classmesh-capture-win" }
+classmesh-core = { path = "../../crates/classmesh-core" }
 classmesh-win32 = { path = "../../crates/classmesh-win32" }
 
 [lints]
