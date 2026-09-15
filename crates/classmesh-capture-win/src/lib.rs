@@ -1,6 +1,11 @@
-#![forbid(unsafe_code)]
+#![cfg_attr(not(windows), forbid(unsafe_code))]
 
 use classmesh_core::recovery::{RecoveryController, RecoveryPolicy, RecoveryReason, RecoveryState};
+
+#[cfg(windows)]
+mod dxgi;
+#[cfg(windows)]
+pub use dxgi::{DxgiCaptureBackend, DxgiCaptureFactory, DxgiFrame, enumerate_displays};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DisplayId {
