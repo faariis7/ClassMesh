@@ -8,6 +8,7 @@ pub mod gpu;
 pub mod mf;
 #[cfg(windows)]
 pub mod mf_async;
+pub mod selection;
 pub mod surface_pool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
