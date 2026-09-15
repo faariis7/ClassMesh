@@ -1,11 +1,12 @@
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use std::time::Duration;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
+    use classmesh_capture_win::{CaptureStep, DxgiCaptureBackend, DxgiCaptureFactory, RecoveringCapture};
+    use classmesh_core::recovery::RecoveryPolicy;
     use classmesh_win32::NamedPipeClient;
-    use classmesh_windows_runtime::ipc::{
-        IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage,
-    };
+    use classmesh_windows_runtime::ipc::{IpcFrame, IpcMessage};
 
     let args: Vec<String> = std::env::args().collect();
     let expected_session = parse_session(&args)?;
@@ -45,37 +46,196 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let mut decoder = IpcFrameDecoder::default();
-    let mut buffer = [0_u8; 4096];
-    loop {
-        let read = pipe.read(&mut buffer)?;
-        if read == 0 {
-            return Err("ClassMesh Service IPC pipe closed".into());
-        }
+    let (event_tx, event_rx) = mpsc::channel();
+    let _ipc_thread = spawn_ipc_reader(pipe, event_tx);
 
-        let frames = decoder
-            .push_bytes(&buffer[..read])
-            .map_err(ipc_frame_error)?;
-        for frame in frames {
-            match frame.message().map_err(ipc_message_error)? {
-                IpcMessage::Control(IpcControlCommand::SuspendMedia) => {
-                    eprintln!("ClassMesh Worker media suspended by Service");
+    let mut capture = Some(start_capture()?);
+    let mut capture_due = Instant::now();
+    let mut captured_frames = 0_u64;
+
+    loop {
+        let wait = if capture.is_some() {
+            capture_due
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(50))
+        } else {
+            Duration::from_millis(250)
+        };
+
+        match event_rx.recv_timeout(wait) {
+            Ok(WorkerEvent::Control(command)) => match command {
+                classmesh_windows_runtime::ipc::IpcControlCommand::SuspendMedia => {
+                    capture = None;
+                    eprintln!("ClassMesh Worker DXGI capture suspended by Service");
+                    continue;
                 }
-                IpcMessage::Control(IpcControlCommand::ResumeMedia) => {
-                    eprintln!("ClassMesh Worker media resumed by Service");
+                classmesh_windows_runtime::ipc::IpcControlCommand::ResumeMedia => {
+                    capture = Some(start_capture()?);
+                    capture_due = Instant::now();
+                    eprintln!("ClassMesh Worker DXGI capture resumed by Service");
+                    continue;
                 }
-                IpcMessage::Control(IpcControlCommand::Shutdown) => {
+                classmesh_windows_runtime::ipc::IpcControlCommand::Shutdown => {
                     eprintln!("ClassMesh Worker shutdown requested by Service");
                     return Ok(());
                 }
-                unexpected => {
-                    return Err(
-                        format!("unexpected IPC message after handshake: {unexpected:?}").into(),
+            },
+            Ok(WorkerEvent::IpcFailure(error)) => return Err(error.into()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("ClassMesh Worker IPC reader stopped unexpectedly".into());
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+
+        let Some(active_capture) = capture.as_mut() else {
+            continue;
+        };
+        if Instant::now() < capture_due {
+            continue;
+        }
+
+        match active_capture.poll(16) {
+            CaptureStep::Frame { meta, frame } => {
+                captured_frames = captured_frames.saturating_add(1);
+                if captured_frames == 1 || captured_frames.is_multiple_of(300) {
+                    eprintln!(
+                        "DXGI frame {}: {}x{}, accumulated={}, pointer_visible={}",
+                        meta.frame_id,
+                        meta.width,
+                        meta.height,
+                        meta.accumulated_frames,
+                        meta.pointer_visible
                     );
                 }
+                // The next milestone hands this GPU-native texture directly to the encoder. For now
+                // dropping the frame releases the Desktop Duplication frame without CPU readback.
+                drop(frame);
+                capture_due = Instant::now();
+            }
+            CaptureStep::NoFrame => {
+                capture_due = Instant::now();
+            }
+            CaptureStep::RetryAfter { delay_ms, reason } => {
+                eprintln!("DXGI capture recovery scheduled after {reason:?} in {delay_ms} ms");
+                capture_due = Instant::now()
+                    .checked_add(Duration::from_millis(delay_ms))
+                    .unwrap_or_else(Instant::now);
+            }
+            CaptureStep::Suspended(reason) => {
+                eprintln!("DXGI capture suspended by backend: {reason:?}");
+                capture = None;
+            }
+            CaptureStep::Failed(reason) => {
+                return Err(capture_error(reason).into());
             }
         }
     }
+}
+
+#[cfg(windows)]
+type WorkerCapture = classmesh_capture_win::RecoveringCapture<
+    classmesh_capture_win::DxgiCaptureBackend,
+    classmesh_capture_win::DxgiCaptureFactory,
+>;
+
+#[cfg(windows)]
+#[derive(Debug)]
+enum WorkerEvent {
+    Control(classmesh_windows_runtime::ipc::IpcControlCommand),
+    IpcFailure(String),
+}
+
+#[cfg(windows)]
+fn start_capture() -> Result<WorkerCapture, Box<dyn std::error::Error>> {
+    use classmesh_capture_win::{RecoveringCapture, enumerate_displays};
+    use classmesh_core::recovery::RecoveryPolicy;
+
+    let displays = enumerate_displays().map_err(capture_error)?;
+    let display = displays
+        .iter()
+        .find(|display| display.primary)
+        .or_else(|| displays.first())
+        .ok_or("no attached desktop display is available for DXGI capture")?;
+
+    eprintln!(
+        "ClassMesh Worker selecting display {} ({}x{}, adapter={:08x}:{:08x}, output={})",
+        display.name,
+        display.width,
+        display.height,
+        display.id.adapter_luid_high,
+        display.id.adapter_luid_low,
+        display.id.output_index
+    );
+
+    let mut capture = RecoveringCapture::new(
+        display.id,
+        classmesh_capture_win::DxgiCaptureFactory,
+        RecoveryPolicy::default(),
+    );
+    capture.start().map_err(capture_error)?;
+    Ok(capture)
+}
+
+#[cfg(windows)]
+fn spawn_ipc_reader(
+    pipe: classmesh_win32::NamedPipeClient,
+    event_tx: std::sync::mpsc::Sender<WorkerEvent>,
+) -> std::thread::JoinHandle<()> {
+    use classmesh_windows_runtime::ipc::{IpcFrameDecoder, IpcMessage};
+
+    std::thread::spawn(move || {
+        let mut decoder = IpcFrameDecoder::default();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = match pipe.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = event_tx.send(WorkerEvent::IpcFailure(
+                        "ClassMesh Service IPC pipe closed".to_owned(),
+                    ));
+                    return;
+                }
+                Ok(read) => read,
+                Err(error) => {
+                    let _ = event_tx.send(WorkerEvent::IpcFailure(format!(
+                        "ClassMesh Service IPC read failed: {error}"
+                    )));
+                    return;
+                }
+            };
+
+            let frames = match decoder.push_bytes(&buffer[..read]) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    let _ = event_tx.send(WorkerEvent::IpcFailure(format!(
+                        "ClassMesh Service IPC frame error: {error:?}"
+                    )));
+                    return;
+                }
+            };
+
+            for frame in frames {
+                match frame.message() {
+                    Ok(IpcMessage::Control(command)) => {
+                        if event_tx.send(WorkerEvent::Control(command)).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(unexpected) => {
+                        let _ = event_tx.send(WorkerEvent::IpcFailure(format!(
+                            "unexpected IPC message after handshake: {unexpected:?}"
+                        )));
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = event_tx.send(WorkerEvent::IpcFailure(format!(
+                            "invalid IPC message after handshake: {error:?}"
+                        )));
+                        return;
+                    }
+                }
+            }
+        }
+    })
 }
 
 #[cfg(windows)]
@@ -98,6 +258,11 @@ fn read_one_frame(
             return Ok(frames.remove(0));
         }
     }
+}
+
+#[cfg(windows)]
+fn capture_error(error: classmesh_capture_win::CaptureFailure) -> std::io::Error {
+    std::io::Error::other(format!("DXGI capture error: {error:?}"))
 }
 
 #[cfg(windows)]
