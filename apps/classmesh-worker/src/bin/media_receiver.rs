@@ -361,6 +361,7 @@ impl DecodeProbe {
     }
 }
 
+#[cfg(windows)]
 impl DecodeBatch {
     fn add(&mut self, other: Self) {
         self.decoded = self.decoded.saturating_add(other.decoded);
