@@ -68,6 +68,27 @@ jobs:
       - name: Build transport benchmark
         run: cargo build -p classmesh-lab --bin classmesh-transport-benchmark --release
 
+      - name: Stage Phase 4 qualification bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path phase4-bundle -Force | Out-Null
+          Copy-Item target/release/classmesh-media-probe.exe phase4-bundle/
+          Copy-Item target/release/classmesh-media-receiver.exe phase4-bundle/
+          Copy-Item target/release/classmesh-media-recovery-probe.exe phase4-bundle/
+          Copy-Item target/release/classmesh-network-impairment-proxy.exe phase4-bundle/
+          Copy-Item target/release/classmesh-transport-benchmark.exe phase4-bundle/
+          Copy-Item scripts/phase4-two-pc.ps1 phase4-bundle/
+          Copy-Item tools/phase4-latency-source.html phase4-bundle/
+          Copy-Item docs/PHASE4_TWO_PC_QUALIFICATION.md phase4-bundle/
+          Copy-Item docs/PHASE4_TWO_PC_RESULTS.md phase4-bundle/
+
+      - name: Upload Phase 4 qualification bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-phase4-qualification-windows-x64
+          path: phase4-bundle/
+          if-no-files-found: error
+
       - name: Upload media probe
         uses: actions/upload-artifact@v4
         with:
