@@ -267,10 +267,7 @@ impl DecodeProbe {
         .into())
     }
 
-    fn submit(
-        &mut self,
-        frame: &AssembledFrame,
-    ) -> Result<DecodeStep, Box<dyn std::error::Error>> {
+    fn submit(&mut self, frame: &AssembledFrame) -> Result<DecodeStep, Box<dyn std::error::Error>> {
         if self.waiting_for_keyframe && !frame.keyframe {
             return Ok(DecodeStep::WaitingForKeyframe);
         }
@@ -308,10 +305,7 @@ impl DecodeProbe {
         Err("--decode is supported only by the Windows media receiver".into())
     }
 
-    fn submit(
-        &mut self,
-        _frame: &AssembledFrame,
-    ) -> Result<DecodeStep, Box<dyn std::error::Error>> {
+    fn submit(&mut self, _frame: &AssembledFrame) -> Result<DecodeStep, Box<dyn std::error::Error>> {
         Err("hardware decode is unavailable on this platform".into())
     }
 
