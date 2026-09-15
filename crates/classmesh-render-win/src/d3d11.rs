@@ -523,7 +523,8 @@ mod tests {
             let error = windows::core::Error::from_hresult(windows::core::HRESULT(code));
             assert_eq!(classify_dxgi_error(&error), DxgiFailureClass::DeviceLost);
         }
-        let other = windows::core::Error::from_hresult(windows::core::HRESULT(0x8000_4005_u32 as i32));
+        let other =
+            windows::core::Error::from_hresult(windows::core::HRESULT(0x8000_4005_u32 as i32));
         assert_eq!(classify_dxgi_error(&other), DxgiFailureClass::Other);
     }
 }
