@@ -60,7 +60,11 @@ impl BoundedScheduler {
     }
 
     fn pop_due(&mut self, now_us: u64) -> Option<ScheduledDatagram> {
-        if self.queued.first().is_some_and(|packet| packet.due_us <= now_us) {
+        if self
+            .queued
+            .first()
+            .is_some_and(|packet| packet.due_us <= now_us)
+        {
             Some(self.queued.remove(0))
         } else {
             None
@@ -85,16 +89,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let listen = parse_socket_arg(&args, "--listen", Some(DEFAULT_LISTEN))?
         .expect("default listen address exists");
-    let destination = parse_socket_arg(&args, "--to", None)?
-        .ok_or("--to <receiver-ip:port> is required")?;
+    let destination =
+        parse_socket_arg(&args, "--to", None)?.ok_or("--to <receiver-ip:port> is required")?;
     let seconds = parse_u64_arg(&args, "--seconds", DEFAULT_SECONDS, 1, 86_400)?;
-    let queue_capacity = parse_usize_arg(
-        &args,
-        "--queue-capacity",
-        DEFAULT_QUEUE_CAPACITY,
-        1,
-        65_536,
-    )?;
+    let queue_capacity =
+        parse_usize_arg(&args, "--queue-capacity", DEFAULT_QUEUE_CAPACITY, 1, 65_536)?;
     let loss_basis_points = parse_u16_arg(&args, "--loss-bp", 0, 0, 10_000)?;
     let reorder_basis_points = parse_u16_arg(&args, "--reorder-bp", 0, 0, 10_000)?;
     let jitter_ms = parse_u64_arg(&args, "--jitter-ms", 0, 0, 60_000)?;
@@ -127,7 +126,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         seed,
         seconds
     );
-    eprintln!("Only valid ClassMesh media datagrams are forwarded; feedback should bypass this proxy.");
+    eprintln!(
+        "Only valid ClassMesh media datagrams are forwarded; feedback should bypass this proxy."
+    );
 
     let started = Instant::now();
     let deadline = started
@@ -158,7 +159,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(error) => return Err(format!("impairment proxy receive failed: {error}").into()),
+                    Err(error) => {
+                        return Err(format!("impairment proxy receive failed: {error}").into());
+                    }
                 }
             }
         }
@@ -326,12 +329,11 @@ mod tests {
 
     #[test]
     fn basis_point_arguments_are_bounded() {
-        let args = vec![
-            "proxy".to_owned(),
-            "--loss-bp".to_owned(),
-            "500".to_owned(),
-        ];
-        assert_eq!(parse_u16_arg(&args, "--loss-bp", 0, 0, 10_000).unwrap(), 500);
+        let args = vec!["proxy".to_owned(), "--loss-bp".to_owned(), "500".to_owned()];
+        assert_eq!(
+            parse_u16_arg(&args, "--loss-bp", 0, 0, 10_000).unwrap(),
+            500
+        );
 
         let invalid = vec![
             "proxy".to_owned(),
