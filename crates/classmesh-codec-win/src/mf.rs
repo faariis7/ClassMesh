@@ -1,3 +1,5 @@
+#![allow(unsafe_code)]
+
 use std::ffi::c_void;
 use std::fmt;
 use std::ptr::{null_mut, read};
@@ -199,9 +201,7 @@ pub fn create_dxgi_texture_sample(
 ) -> windows::core::Result<IMFSample> {
     // SAFETY: `texture` is a live D3D11 texture. The returned media buffer retains the COM surface
     // reference, so the caller does not need to keep a separate texture clone for sample lifetime.
-    let buffer = unsafe {
-        MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, 0, false)?
-    };
+    let buffer = unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, 0, false)? };
     // SAFETY: Media Foundation is expected to be started by an MfPlatform guard.
     let sample = unsafe { MFCreateSample()? };
     // SAFETY: both COM objects are live and owned for the duration of these calls.
@@ -272,14 +272,26 @@ mod tests {
 
     #[test]
     fn encoder_vendor_is_inferred_without_platform_calls() {
-        assert_eq!(vendor_from_name("Intel H.264 Encoder MFT"), EncoderVendor::Intel);
-        assert_eq!(vendor_from_name("NVIDIA NVENC H264"), EncoderVendor::Nvidia);
-        assert_eq!(vendor_from_name("AMD Video Encoder"), EncoderVendor::Amd);
+        assert_eq!(
+            vendor_from_name("Intel H.264 Encoder MFT"),
+            EncoderVendor::Intel
+        );
+        assert_eq!(
+            vendor_from_name("NVIDIA NVENC H264"),
+            EncoderVendor::Nvidia
+        );
+        assert_eq!(
+            vendor_from_name("AMD Video Encoder"),
+            EncoderVendor::Amd
+        );
         assert_eq!(
             vendor_from_name("Microsoft H264 Video Encoder MFT"),
             EncoderVendor::Microsoft
         );
-        assert_eq!(vendor_from_name("Vendor X Encoder"), EncoderVendor::Other);
+        assert_eq!(
+            vendor_from_name("Vendor X Encoder"),
+            EncoderVendor::Other
+        );
     }
 
     #[test]
