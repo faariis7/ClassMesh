@@ -69,7 +69,9 @@ pub fn select_encoder(
     candidates
         .iter()
         .enumerate()
-        .filter_map(|(index, entry)| score(entry, policy).map(|(score, reason)| (index, score, reason)))
+        .filter_map(|(index, entry)| {
+            score(entry, policy).map(|(score, reason)| (index, score, reason))
+        })
         .max_by_key(|(index, score, _)| (*score, std::cmp::Reverse(*index)))
         .map(|(index, _, reason)| EncoderSelection { index, reason })
 }
