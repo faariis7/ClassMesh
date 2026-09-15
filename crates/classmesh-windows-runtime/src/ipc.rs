@@ -3,6 +3,12 @@ use std::collections::VecDeque;
 pub const IPC_MAGIC: u32 = 0x434D_4950; // "CMIP"
 pub const IPC_HEADER_LEN: usize = 12;
 pub const MAX_IPC_MESSAGE: usize = 1_048_576;
+pub const IPC_VERSION_MAJOR: u8 = 0;
+pub const IPC_VERSION_MINOR: u8 = 1;
+
+const MESSAGE_WORKER_HELLO: u16 = 1;
+const MESSAGE_SERVICE_READY: u16 = 2;
+const MESSAGE_CONTROL: u16 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpcRole {
@@ -77,6 +83,46 @@ pub enum IpcFrameError {
     LengthMismatch,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpcControlCommand {
+    SuspendMedia,
+    ResumeMedia,
+    Shutdown,
+}
+
+impl IpcControlCommand {
+    const fn as_byte(self) -> u8 {
+        match self {
+            Self::SuspendMedia => 1,
+            Self::ResumeMedia => 2,
+            Self::Shutdown => 3,
+        }
+    }
+
+    const fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::SuspendMedia),
+            2 => Some(Self::ResumeMedia),
+            3 => Some(Self::Shutdown),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpcMessage {
+    WorkerHello { process_id: u32, session_id: u32 },
+    ServiceReady,
+    Control(IpcControlCommand),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpcMessageError {
+    UnsupportedVersion,
+    UnknownMessageType,
+    InvalidPayload,
+}
+
 impl IpcHeader {
     pub fn encode(self) -> Result<[u8; IPC_HEADER_LEN], IpcFrameError> {
         if usize::try_from(self.payload_len).unwrap_or(usize::MAX) > MAX_IPC_MESSAGE {
@@ -128,6 +174,82 @@ impl IpcFrame {
         output.extend_from_slice(&header);
         output.extend_from_slice(&self.payload);
         Ok(output)
+    }
+
+    #[must_use]
+    pub fn worker_hello(process_id: u32, session_id: u32) -> Self {
+        let mut payload = Vec::with_capacity(8);
+        payload.extend_from_slice(&process_id.to_be_bytes());
+        payload.extend_from_slice(&session_id.to_be_bytes());
+        Self::new(MESSAGE_WORKER_HELLO, payload)
+    }
+
+    #[must_use]
+    pub fn service_ready() -> Self {
+        Self::new(MESSAGE_SERVICE_READY, Vec::new())
+    }
+
+    #[must_use]
+    pub fn control(command: IpcControlCommand) -> Self {
+        Self::new(MESSAGE_CONTROL, vec![command.as_byte()])
+    }
+
+    pub fn message(&self) -> Result<IpcMessage, IpcMessageError> {
+        if self.header.version_major != IPC_VERSION_MAJOR {
+            return Err(IpcMessageError::UnsupportedVersion);
+        }
+
+        match self.header.message_type {
+            MESSAGE_WORKER_HELLO => {
+                if self.payload.len() != 8 {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let process_id = u32::from_be_bytes([
+                    self.payload[0],
+                    self.payload[1],
+                    self.payload[2],
+                    self.payload[3],
+                ]);
+                let session_id = u32::from_be_bytes([
+                    self.payload[4],
+                    self.payload[5],
+                    self.payload[6],
+                    self.payload[7],
+                ]);
+                Ok(IpcMessage::WorkerHello {
+                    process_id,
+                    session_id,
+                })
+            }
+            MESSAGE_SERVICE_READY => {
+                if self.payload.is_empty() {
+                    Ok(IpcMessage::ServiceReady)
+                } else {
+                    Err(IpcMessageError::InvalidPayload)
+                }
+            }
+            MESSAGE_CONTROL => {
+                let [raw] = self.payload.as_slice() else {
+                    return Err(IpcMessageError::InvalidPayload);
+                };
+                let command = IpcControlCommand::from_byte(*raw)
+                    .ok_or(IpcMessageError::InvalidPayload)?;
+                Ok(IpcMessage::Control(command))
+            }
+            _ => Err(IpcMessageError::UnknownMessageType),
+        }
+    }
+
+    fn new(message_type: u16, payload: Vec<u8>) -> Self {
+        Self {
+            header: IpcHeader {
+                version_major: IPC_VERSION_MAJOR,
+                version_minor: IPC_VERSION_MINOR,
+                message_type,
+                payload_len: u32::try_from(payload.len()).expect("IPC payload length is bounded"),
+            },
+            payload,
+        }
     }
 }
 
@@ -187,9 +309,9 @@ mod tests {
     fn frame(payload: &[u8]) -> IpcFrame {
         IpcFrame {
             header: IpcHeader {
-                version_major: 0,
-                version_minor: 1,
-                message_type: 10,
+                version_major: IPC_VERSION_MAJOR,
+                version_minor: IPC_VERSION_MINOR,
+                message_type: 99,
                 payload_len: u32::try_from(payload.len()).expect("small test payload"),
             },
             payload: payload.to_vec(),
@@ -219,5 +341,31 @@ mod tests {
         assert_eq!(handshake.state(), HandshakeState::AwaitingChallengeResponse);
         handshake.on_event(HandshakeEvent::ChallengeResponseInvalid);
         assert_eq!(handshake.state(), HandshakeState::Rejected);
+    }
+
+    #[test]
+    fn typed_control_message_round_trips() {
+        let frame = IpcFrame::control(IpcControlCommand::SuspendMedia);
+        let encoded = frame.encode().expect("control frame should encode");
+        let mut decoder = IpcFrameDecoder::default();
+        let frames = decoder
+            .push_bytes(&encoded)
+            .expect("control frame should decode");
+        assert_eq!(
+            frames[0].message().expect("typed message should decode"),
+            IpcMessage::Control(IpcControlCommand::SuspendMedia)
+        );
+    }
+
+    #[test]
+    fn worker_hello_carries_process_and_session_identity() {
+        let hello = IpcFrame::worker_hello(42, 7);
+        assert_eq!(
+            hello.message().expect("hello should decode"),
+            IpcMessage::WorkerHello {
+                process_id: 42,
+                session_id: 7
+            }
+        );
     }
 }
