@@ -4,6 +4,8 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::mem::ManuallyDrop;
 use std::ptr;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use classmesh_video::distributor::SharedEncodedFrame;
 use classmesh_video::{Codec, EncodedFrameMeta};
@@ -12,10 +14,10 @@ use windows::Win32::Media::MediaFoundation::{
     IMFMediaEvent, IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFTransform,
     METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
     MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
-    MF_EVENT_FLAG_NO_WAIT, MF_EVENT_FLAG_NONE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
-    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO,
-    MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC_UNLOCK, MFCreateMediaType, MFCreateMemoryBuffer,
-    MFCreateSample, MFMediaType_Video, MFSampleExtension_CleanPoint, MFT_MESSAGE_COMMAND_DRAIN,
+    MF_EVENT_FLAG_NO_WAIT, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
+    MF_TRANSFORM_ASYNC_UNLOCK, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+    MFMediaType_Video, MFSampleExtension_CleanPoint, MFT_MESSAGE_COMMAND_DRAIN,
     MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
@@ -27,6 +29,32 @@ use windows::core::Interface;
 use crate::mf::{
     MfDxgiDeviceManager, MfEncoderActivation, MfH264EncoderConfig, create_dxgi_texture_sample,
 };
+
+const MAX_EVENTS_PER_POLL: usize = 128;
+const ERROR_TIMEOUT_HRESULT: i32 = 0x8007_05B4_u32 as i32;
+
+/// Bounded wait policy for asynchronous Media Foundation hardware transforms.
+///
+/// Hardware/driver bugs must not be able to park the ClassMesh media worker forever while waiting
+/// for `METransformNeedInput` or `METransformDrainComplete`. The encoder polls the async event queue
+/// with `MF_EVENT_FLAG_NO_WAIT`, sleeps briefly when no event is available, and fails with
+/// `HRESULT_FROM_WIN32(ERROR_TIMEOUT)` once the corresponding deadline expires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MfAsyncWaitConfig {
+    pub input_timeout: Duration,
+    pub drain_timeout: Duration,
+    pub poll_interval: Duration,
+}
+
+impl Default for MfAsyncWaitConfig {
+    fn default() -> Self {
+        Self {
+            input_timeout: Duration::from_secs(2),
+            drain_timeout: Duration::from_secs(5),
+            poll_interval: Duration::from_millis(1),
+        }
+    }
+}
 
 #[derive(Debug)]
 struct PendingInput {
@@ -121,6 +149,7 @@ pub struct MfAsyncH264Encoder {
     events: IMFMediaEventGenerator,
     _device_manager: MfDxgiDeviceManager,
     config: MfH264EncoderConfig,
+    wait: MfAsyncWaitConfig,
     provides_output_samples: bool,
     output_size: u32,
     needs_input: bool,
@@ -133,6 +162,7 @@ impl fmt::Debug for MfAsyncH264Encoder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MfAsyncH264Encoder")
             .field("config", &self.config)
+            .field("wait", &self.wait)
             .field("needs_input", &self.needs_input)
             .field("drained", &self.drained)
             .field("pending", &self.pending.len())
@@ -141,7 +171,7 @@ impl fmt::Debug for MfAsyncH264Encoder {
 }
 
 impl MfAsyncH264Encoder {
-    /// Activates an H.264 hardware MFT and starts its asynchronous streaming state machine.
+    /// Activates an H.264 hardware MFT with the default bounded wait policy.
     ///
     /// # Errors
     /// Returns an error when the transform cannot expose the asynchronous event interface or rejects
@@ -151,7 +181,21 @@ impl MfAsyncH264Encoder {
         device: &ID3D11Device,
         config: MfH264EncoderConfig,
     ) -> windows::core::Result<Self> {
+        Self::new_with_wait_config(activation, device, config, MfAsyncWaitConfig::default())
+    }
+
+    /// Activates an H.264 hardware MFT with an explicit watchdog policy.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid wait policy or when Media Foundation rejects initialization.
+    pub fn new_with_wait_config(
+        activation: &MfEncoderActivation,
+        device: &ID3D11Device,
+        config: MfH264EncoderConfig,
+        wait: MfAsyncWaitConfig,
+    ) -> windows::core::Result<Self> {
         validate_config(config)?;
+        validate_wait_config(wait)?;
         let transform = activation.activate_transform()?;
         let attributes = unsafe { transform.GetAttributes()? };
         unsafe {
@@ -186,6 +230,7 @@ impl MfAsyncH264Encoder {
             events,
             _device_manager: device_manager,
             config,
+            wait,
             provides_output_samples,
             output_size,
             needs_input: false,
@@ -200,11 +245,16 @@ impl MfAsyncH264Encoder {
         self.pending.len()
     }
 
-    /// Waits until the async MFT requests one input, submits the owned NV12 surface, and then drains
-    /// any output events that are already ready.
+    #[must_use]
+    pub const fn wait_config(&self) -> MfAsyncWaitConfig {
+        self.wait
+    }
+
+    /// Waits up to the configured input deadline for `METransformNeedInput`, submits the owned NV12
+    /// surface, and then drains output events that are already ready.
     ///
-    /// The method is intentionally blocking only while waiting for `METransformNeedInput`; it is
-    /// designed to run on ClassMesh's dedicated media worker, never on the UI thread.
+    /// The wait is implemented with non-blocking Media Foundation event polling so a missing async
+    /// event cannot park the media worker forever.
     pub fn encode_surface(
         &mut self,
         frame_id: u64,
@@ -248,7 +298,8 @@ impl MfAsyncH264Encoder {
         Ok(outputs)
     }
 
-    /// Non-blockingly consumes queued encoder events and returns all completed access units.
+    /// Non-blockingly consumes a bounded batch of queued encoder events and returns completed access
+    /// units. A transform that continuously emits events therefore cannot monopolize the worker.
     ///
     /// # Errors
     /// Returns an asynchronous MFT event/status or output-processing error.
@@ -258,11 +309,13 @@ impl MfAsyncH264Encoder {
         Ok(outputs)
     }
 
-    /// Ends the stream, waits for `METransformDrainComplete`, and returns all tail output plus every
-    /// input surface that is safe to recycle.
+    /// Ends the stream, waits up to the configured drain deadline for
+    /// `METransformDrainComplete`, and returns all tail output plus every input surface that is safe
+    /// to recycle.
     ///
     /// # Errors
-    /// Returns an asynchronous event or drain/output error.
+    /// Returns an asynchronous event/drain error or a timeout if the hardware transform stops
+    /// making progress.
     pub fn finish(&mut self) -> windows::core::Result<MfDrainResult> {
         let mut outputs = Vec::new();
         self.drained = false;
@@ -273,9 +326,17 @@ impl MfAsyncH264Encoder {
                 .ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0)?;
         }
 
+        let deadline = Instant::now() + self.wait.drain_timeout;
         while !self.drained {
-            let event = unsafe { self.events.GetEvent(MF_EVENT_FLAG_NONE)? };
-            self.handle_event(&event, &mut outputs)?;
+            self.drain_ready(&mut outputs)?;
+            if self.drained {
+                break;
+            }
+            wait_for_next_poll(
+                deadline,
+                self.wait.poll_interval,
+                "Media Foundation drain timed out",
+            )?;
         }
         unsafe {
             self.transform
@@ -326,21 +387,30 @@ impl MfAsyncH264Encoder {
     }
 
     fn wait_for_input(&mut self, outputs: &mut Vec<MfEncodedOutput>) -> windows::core::Result<()> {
+        let deadline = Instant::now() + self.wait.input_timeout;
         while !self.needs_input {
-            let event = unsafe { self.events.GetEvent(MF_EVENT_FLAG_NONE)? };
-            self.handle_event(&event, outputs)?;
+            self.drain_ready(outputs)?;
+            if self.needs_input {
+                break;
+            }
+            wait_for_next_poll(
+                deadline,
+                self.wait.poll_interval,
+                "Media Foundation encoder input timed out",
+            )?;
         }
         Ok(())
     }
 
     fn drain_ready(&mut self, outputs: &mut Vec<MfEncodedOutput>) -> windows::core::Result<()> {
-        loop {
+        for _ in 0..MAX_EVENTS_PER_POLL {
             match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
                 Ok(event) => self.handle_event(&event, outputs)?,
                 Err(error) if error.code() == MF_E_NO_EVENTS_AVAILABLE => return Ok(()),
                 Err(error) => return Err(error),
             }
         }
+        Ok(())
     }
 
     fn handle_event(
@@ -532,12 +602,50 @@ fn validate_config(config: MfH264EncoderConfig) -> windows::core::Result<()> {
     Ok(())
 }
 
+fn validate_wait_config(config: MfAsyncWaitConfig) -> windows::core::Result<()> {
+    if config.input_timeout.is_zero()
+        || config.drain_timeout.is_zero()
+        || config.poll_interval.is_zero()
+    {
+        return Err(invalid_argument(
+            "Media Foundation async wait durations must be non-zero",
+        ));
+    }
+    Ok(())
+}
+
+fn wait_for_next_poll(
+    deadline: Instant,
+    poll_interval: Duration,
+    timeout_message: &'static str,
+) -> windows::core::Result<()> {
+    let now = Instant::now();
+    if now >= deadline {
+        return Err(timeout_error(timeout_message));
+    }
+    let remaining = deadline.duration_since(now);
+    let sleep_for = if poll_interval < remaining {
+        poll_interval
+    } else {
+        remaining
+    };
+    thread::sleep(sleep_for);
+    if Instant::now() >= deadline {
+        return Err(timeout_error(timeout_message));
+    }
+    Ok(())
+}
+
 const fn pack_u32_pair(high: u32, low: u32) -> u64 {
     ((high as u64) << 32) | low as u64
 }
 
 fn invalid_argument(message: &'static str) -> windows::core::Error {
     windows::core::Error::new(windows::core::HRESULT(0x8007_0057_u32 as i32), message)
+}
+
+fn timeout_error(message: &'static str) -> windows::core::Error {
+    windows::core::Error::new(windows::core::HRESULT(ERROR_TIMEOUT_HRESULT), message)
 }
 
 #[cfg(test)]
@@ -562,5 +670,31 @@ mod tests {
         let error = MfSubmitError::accepted(invalid_argument("synthetic async failure"));
         assert!(error.input_was_accepted());
         assert!(error.rejected_surface.is_none());
+    }
+
+    #[test]
+    fn default_wait_policy_is_bounded_and_polling() {
+        let wait = MfAsyncWaitConfig::default();
+        assert_eq!(wait.input_timeout, Duration::from_secs(2));
+        assert_eq!(wait.drain_timeout, Duration::from_secs(5));
+        assert_eq!(wait.poll_interval, Duration::from_millis(1));
+        assert!(validate_wait_config(wait).is_ok());
+    }
+
+    #[test]
+    fn zero_wait_duration_is_rejected() {
+        let wait = MfAsyncWaitConfig {
+            input_timeout: Duration::ZERO,
+            ..MfAsyncWaitConfig::default()
+        };
+        assert!(validate_wait_config(wait).is_err());
+    }
+
+    #[test]
+    fn timeout_error_uses_win32_timeout_hresult() {
+        assert_eq!(
+            timeout_error("test timeout").code(),
+            windows::core::HRESULT(ERROR_TIMEOUT_HRESULT)
+        );
     }
 }
