@@ -195,7 +195,10 @@ mod tests {
     #[test]
     fn extracts_client_size_from_wm_size_lparam() {
         let packed = (720usize << 16) | 1280usize;
-        assert_eq!(client_size_from_lparam(LPARAM(packed as isize)), (1280, 720));
+        assert_eq!(
+            client_size_from_lparam(LPARAM(packed as isize)),
+            (1280, 720)
+        );
     }
 
     #[test]
