@@ -96,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match active_capture.poll(16) {
             CaptureStep::Frame { meta, frame } => {
                 captured_frames = captured_frames.saturating_add(1);
-                if captured_frames == 1 || captured_frames.is_multiple_of(300) {
+                if captured_frames == 1 || captured_frames % 300 == 0 {
                     eprintln!(
                         "DXGI frame {}: {}x{}, accumulated={}, pointer_visible={}",
                         meta.frame_id,
