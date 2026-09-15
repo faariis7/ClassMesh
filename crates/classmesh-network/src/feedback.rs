@@ -88,7 +88,10 @@ pub struct UdpFeedbackSender {
 }
 
 impl UdpFeedbackSender {
-    pub fn bind(local: SocketAddr, destination: SocketAddr) -> Result<Self, FeedbackTransportError> {
+    pub fn bind(
+        local: SocketAddr,
+        destination: SocketAddr,
+    ) -> Result<Self, FeedbackTransportError> {
         let socket = UdpSocket::bind(local)?;
         Ok(Self {
             socket,
