@@ -16,20 +16,58 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL,
-    DXGI_SAMPLE_DESC,
+    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_UNKNOWN,
+    DXGI_RATIONAL, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_MWA_NO_ALT_ENTER, DXGI_PRESENT, DXGI_SCALING_STRETCH,
-    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
-    IDXGIFactory2, IDXGISwapChain1,
+    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIFactory2, IDXGISwapChain1,
 };
 use windows::core::Interface;
+
+const DXGI_ERROR_DEVICE_REMOVED_HR: i32 = 0x887A_0005_u32 as i32;
+const DXGI_ERROR_DEVICE_HUNG_HR: i32 = 0x887A_0006_u32 as i32;
+const DXGI_ERROR_DEVICE_RESET_HR: i32 = 0x887A_0007_u32 as i32;
+const DXGI_ERROR_DRIVER_INTERNAL_ERROR_HR: i32 = 0x887A_0020_u32 as i32;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PresentMetrics {
     pub presented_frames: u64,
     pub processor_rebuilds: u64,
+    pub swap_chain_resizes: u64,
+    pub suspend_events: u64,
+    pub skipped_while_suspended: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentOutcome {
+    Presented,
+    SkippedSuspended,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeOutcome {
+    Unchanged,
+    Suspended,
+    Resized,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DxgiFailureClass {
+    DeviceLost,
+    Other,
+}
+
+#[must_use]
+pub fn classify_dxgi_error(error: &windows::core::Error) -> DxgiFailureClass {
+    match error.code().0 {
+        DXGI_ERROR_DEVICE_REMOVED_HR
+        | DXGI_ERROR_DEVICE_HUNG_HR
+        | DXGI_ERROR_DEVICE_RESET_HR
+        | DXGI_ERROR_DRIVER_INTERNAL_ERROR_HR => DxgiFailureClass::DeviceLost,
+        _ => DxgiFailureClass::Other,
+    }
 }
 
 struct VideoPipeline {
@@ -62,6 +100,7 @@ pub struct FlipPresenter {
     swap_chain: IDXGISwapChain1,
     output_width: u32,
     output_height: u32,
+    suspended: bool,
     pipeline: Option<VideoPipeline>,
     metrics: PresentMetrics,
 }
@@ -72,6 +111,7 @@ impl fmt::Debug for FlipPresenter {
             .debug_struct("FlipPresenter")
             .field("output_width", &self.output_width)
             .field("output_height", &self.output_height)
+            .field("suspended", &self.suspended)
             .field("pipeline", &self.pipeline)
             .field("metrics", &self.metrics)
             .finish_non_exhaustive()
@@ -129,6 +169,7 @@ impl FlipPresenter {
             swap_chain,
             output_width,
             output_height,
+            suspended: false,
             pipeline: None,
             metrics: PresentMetrics::default(),
         })
@@ -144,6 +185,62 @@ impl FlipPresenter {
         (self.output_width, self.output_height)
     }
 
+    #[must_use]
+    pub const fn is_suspended(&self) -> bool {
+        self.suspended
+    }
+
+    /// Updates the flip-model buffers to the current client size.
+    ///
+    /// A zero width or height means the HWND is minimized. In that state ClassMesh deliberately
+    /// suspends presentation without calling `ResizeBuffers(0, 0)` and without treating the media
+    /// stream as failed. Restoring the window resizes the swap chain and rebuilds the video
+    /// processor lazily on the next decoded frame.
+    ///
+    /// # Errors
+    /// Returns the underlying DXGI error if `ResizeBuffers` fails. Device-removed/reset failures
+    /// can be identified with [`classify_dxgi_error`].
+    pub fn resize_output(
+        &mut self,
+        output_width: u32,
+        output_height: u32,
+    ) -> windows::core::Result<ResizeOutcome> {
+        if output_width == 0 || output_height == 0 {
+            if !self.suspended {
+                self.metrics.suspend_events = self.metrics.suspend_events.saturating_add(1);
+            }
+            self.suspended = true;
+            return Ok(ResizeOutcome::Suspended);
+        }
+
+        if !self.suspended
+            && output_width == self.output_width
+            && output_height == self.output_height
+        {
+            return Ok(ResizeOutcome::Unchanged);
+        }
+
+        // The presenter does not cache a backbuffer view between frames. Dropping the video
+        // processor here ensures no pipeline-owned object can indirectly retain swap-chain-size
+        // assumptions across ResizeBuffers.
+        self.pipeline = None;
+        unsafe {
+            self.context.Flush();
+            self.swap_chain.ResizeBuffers(
+                2,
+                output_width,
+                output_height,
+                DXGI_FORMAT_UNKNOWN,
+                DXGI_SWAP_CHAIN_FLAG(0),
+            )?;
+        }
+        self.output_width = output_width;
+        self.output_height = output_height;
+        self.suspended = false;
+        self.metrics.swap_chain_resizes = self.metrics.swap_chain_resizes.saturating_add(1);
+        Ok(ResizeOutcome::Resized)
+    }
+
     /// Presents one decoder-owned NV12 D3D11 texture.
     ///
     /// `subresource_index` is the Media Foundation `IMFDXGIBuffer` subresource index. The presenter
@@ -156,7 +253,13 @@ impl FlipPresenter {
         &mut self,
         texture: &ID3D11Texture2D,
         subresource_index: u32,
-    ) -> windows::core::Result<()> {
+    ) -> windows::core::Result<PresentOutcome> {
+        if self.suspended {
+            self.metrics.skipped_while_suspended =
+                self.metrics.skipped_while_suspended.saturating_add(1);
+            return Ok(PresentOutcome::SkippedSuspended);
+        }
+
         let source_desc = texture_desc(texture);
         if source_desc.Width == 0
             || source_desc.Height == 0
@@ -251,7 +354,7 @@ impl FlipPresenter {
 
         unsafe { self.swap_chain.Present(1, DXGI_PRESENT(0)) }.ok()?;
         self.metrics.presented_frames = self.metrics.presented_frames.saturating_add(1);
-        Ok(())
+        Ok(PresentOutcome::Presented)
     }
 
     fn ensure_pipeline(
@@ -407,5 +510,21 @@ mod tests {
         assert_eq!(rect.bottom, 720);
         assert!(rect.left > 0);
         assert!(rect.right < 1280);
+    }
+
+    #[test]
+    fn classifies_device_loss_hresult_values() {
+        for code in [
+            DXGI_ERROR_DEVICE_REMOVED_HR,
+            DXGI_ERROR_DEVICE_HUNG_HR,
+            DXGI_ERROR_DEVICE_RESET_HR,
+            DXGI_ERROR_DRIVER_INTERNAL_ERROR_HR,
+        ] {
+            let error = windows::core::Error::from_hresult(windows::core::HRESULT(code));
+            assert_eq!(classify_dxgi_error(&error), DxgiFailureClass::DeviceLost);
+        }
+        let other =
+            windows::core::Error::from_hresult(windows::core::HRESULT(0x8000_4005_u32 as i32));
+        assert_eq!(classify_dxgi_error(&other), DxgiFailureClass::Other);
     }
 }
