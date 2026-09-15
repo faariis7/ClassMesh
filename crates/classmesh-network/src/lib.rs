@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod feedback;
+pub mod impairment;
 pub mod receiver;
 pub mod reliability;
 pub mod transport;
