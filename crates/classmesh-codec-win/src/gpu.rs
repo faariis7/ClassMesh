@@ -6,14 +6,13 @@ use std::ptr;
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
-    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
-    D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-    ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor,
-    ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
+    D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device,
+    ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
+    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
     ID3D11VideoProcessorOutputView,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
@@ -55,7 +54,9 @@ impl GpuNv12Config {
             || self.target_width % 2 != 0
             || self.target_height % 2 != 0
         {
-            return Err(invalid_argument("invalid GPU NV12 conversion configuration"));
+            return Err(invalid_argument(
+                "invalid GPU NV12 conversion configuration",
+            ));
         }
         Ok(())
     }
@@ -151,17 +152,8 @@ impl GpuBgraToNv12Converter {
                 true,
                 Some(&source_rect),
             );
-            video_context.VideoProcessorSetStreamDestRect(
-                &processor,
-                0,
-                true,
-                Some(&target_rect),
-            );
-            video_context.VideoProcessorSetOutputTargetRect(
-                &processor,
-                true,
-                Some(&target_rect),
-            );
+            video_context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&target_rect));
+            video_context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&target_rect));
         }
 
         Ok(Self {
@@ -189,7 +181,11 @@ impl GpuBgraToNv12Converter {
     /// # Errors
     /// Returns the D3D11 allocation error.
     pub fn create_output_texture(&self) -> windows::core::Result<ID3D11Texture2D> {
-        create_nv12_target(&self.device, self.config.target_width, self.config.target_height)
+        create_nv12_target(
+            &self.device,
+            self.config.target_width,
+            self.config.target_height,
+        )
     }
 
     /// Converts one Desktop Duplication frame into a caller-owned NV12 texture entirely on the GPU.
@@ -374,10 +370,7 @@ fn create_texture(
     texture.ok_or_else(|| invalid_argument("D3D11 returned no texture"))
 }
 
-fn validate_source(
-    texture: &ID3D11Texture2D,
-    config: GpuNv12Config,
-) -> windows::core::Result<()> {
+fn validate_source(texture: &ID3D11Texture2D, config: GpuNv12Config) -> windows::core::Result<()> {
     let mut desc = D3D11_TEXTURE2D_DESC::default();
     unsafe { texture.GetDesc(&mut desc) };
     if desc.Width != config.source_width
@@ -411,10 +404,7 @@ fn validate_destination(
 }
 
 fn invalid_argument(message: &'static str) -> windows::core::Error {
-    windows::core::Error::new(
-        windows::core::HRESULT(0x8007_0057_u32 as i32),
-        message,
-    )
+    windows::core::Error::new(windows::core::HRESULT(0x8007_0057_u32 as i32), message)
 }
 
 #[cfg(test)]
