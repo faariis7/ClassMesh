@@ -3,6 +3,8 @@
 use classmesh_video::{Codec, EncoderClass, EncoderProbeResult};
 
 #[cfg(windows)]
+pub mod d3d11;
+#[cfg(windows)]
 pub mod gpu;
 #[cfg(windows)]
 pub mod mf;
