@@ -56,8 +56,8 @@ impl FeedbackMessage {
             } => (KIND_REQUEST_KEYFRAME, *stream_id, *after_frame_id, &[]),
         };
 
-        let count = u16::try_from(missing.len())
-            .map_err(|_| FeedbackCodecError::TooManyMissingPackets)?;
+        let count =
+            u16::try_from(missing.len()).map_err(|_| FeedbackCodecError::TooManyMissingPackets)?;
         let payload_len = missing.len().saturating_mul(2);
         let mut encoded = vec![0_u8; FEEDBACK_HEADER_LEN.saturating_add(payload_len)];
         encoded[0..4].copy_from_slice(&FEEDBACK_MAGIC.to_be_bytes());
@@ -163,7 +163,9 @@ impl fmt::Display for FeedbackCodecError {
             ),
             Self::UnknownKind(value) => write!(formatter, "unknown feedback message kind {value}"),
             Self::EmptyNack => formatter.write_str("NACK must contain at least one packet index"),
-            Self::TooManyMissingPackets => formatter.write_str("NACK packet-index list is too large"),
+            Self::TooManyMissingPackets => {
+                formatter.write_str("NACK packet-index list is too large")
+            }
             Self::LengthMismatch => formatter.write_str("feedback datagram length is inconsistent"),
         }
     }
