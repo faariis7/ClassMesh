@@ -64,7 +64,7 @@ impl CaptureFactory<DxgiCaptureBackend> for DxgiCaptureFactory {
 
 pub struct DxgiCaptureBackend {
     descriptor: DisplayDescriptor,
-    _device: ID3D11Device,
+    device: ID3D11Device,
     duplication: IDXGIOutputDuplication,
     next_frame_id: u64,
     clock: Instant,
@@ -89,11 +89,20 @@ impl DxgiCaptureBackend {
 
         Ok(Self {
             descriptor,
-            _device: device,
+            device,
             duplication,
             next_frame_id: 1,
             clock: Instant::now(),
         })
+    }
+
+    /// Returns the D3D11 device that owns the duplication resources.
+    ///
+    /// Downstream GPU processing and hardware encoding must use this same adapter/device lineage to
+    /// keep desktop frames GPU-native and avoid cross-adapter copies or CPU readback.
+    #[must_use]
+    pub const fn device(&self) -> &ID3D11Device {
+        &self.device
     }
 }
 
