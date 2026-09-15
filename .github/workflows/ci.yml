@@ -35,7 +35,7 @@ jobs:
         run: cargo test --workspace
 
       - name: Synthetic media lab
-        run: cargo run -p classmesh-lab
+        run: cargo run -p classmesh-lab --bin classmesh-lab
 
   windows:
     name: Windows Build
