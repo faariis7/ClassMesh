@@ -7,16 +7,16 @@ use std::ptr::{self, null_mut, read};
 
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFDXGIBuffer, IMFMediaType, IMFSample, IMFTransform, MF_LOW_LATENCY,
-    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFT_CATEGORY_VIDEO_DECODER,
-    MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_ENUM_FLAG_SYNCMFT, MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_FLUSH,
-    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
-    MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MFT_REGISTER_TYPE_INFO, MFT_TRANSFORM_CLSID_Attribute, MFTEnumEx, MFVideoFormat_H264,
-    MFVideoFormat_NV12, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
+    IMFActivate, IMFDXGIBuffer, IMFMediaType, IMFSample, IMFTransform,
+    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_MAJOR_TYPE,
+    MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+    MFMediaType_Video, MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
+    MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_FRIENDLY_NAME_Attribute,
+    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFT_TRANSFORM_CLSID_Attribute,
+    MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::core::Interface;
@@ -191,9 +191,7 @@ impl MfH264Decoder {
         let attributes = unsafe { transform.GetAttributes()? };
         let d3d11_aware = unsafe { attributes.GetUINT32(&MF_SA_D3D11_AWARE) }.unwrap_or(0) != 0;
         if !d3d11_aware {
-            return Err(classmesh_decoder_error(
-                "H.264 decoder is not D3D11-aware",
-            ));
+            return Err(classmesh_decoder_error("H.264 decoder is not D3D11-aware"));
         }
         let _ = unsafe { attributes.SetUINT32(&MF_LOW_LATENCY, 1) };
 
@@ -410,6 +408,9 @@ mod tests {
     #[test]
     fn empty_access_unit_error_is_stable() {
         let error = classmesh_decoder_error("empty H.264 access unit");
-        assert_eq!(error.code(), windows::core::HRESULT(0x8000_4005_u32 as i32));
+        assert_eq!(
+            error.code(),
+            windows::core::HRESULT(0x8000_4005_u32 as i32)
+        );
     }
 }
