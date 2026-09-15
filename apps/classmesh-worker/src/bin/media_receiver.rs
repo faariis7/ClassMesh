@@ -409,8 +409,7 @@ impl DecodeProbe {
             self.recover_after_frames = None;
             eprintln!(
                 "triggering scheduled live-stream GPU media recovery at decoder frame {} (keyframe={})",
-                self.decoder_eligible_frames,
-                frame.keyframe
+                self.decoder_eligible_frames, frame.keyframe
             );
             self.rebuild_gpu_pipeline("scheduled live-stream recovery test")?;
             self.forced_recoveries = self.forced_recoveries.saturating_add(1);
@@ -497,7 +496,8 @@ impl DecodeProbe {
 
         if let Err(error) = self.decoder.flush() {
             if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
-                if let Err(recovery_error) = self.rebuild_gpu_pipeline("decoder flush device loss") {
+                if let Err(recovery_error) = self.rebuild_gpu_pipeline("decoder flush device loss")
+                {
                     eprintln!("GPU pipeline rebuild failed during loss recovery: {recovery_error}");
                 }
             } else {
