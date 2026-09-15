@@ -6,15 +6,14 @@ use std::ptr;
 
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC,
-    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
-    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
-    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device,
-    ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D, ID3D11VideoContext,
-    ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
-    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
+    D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
+    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
+    D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView,
+    ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor,
+    ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL,
@@ -93,7 +92,9 @@ impl FlipPresenter {
         output_height: u32,
     ) -> windows::core::Result<Self> {
         if output_width == 0 || output_height == 0 {
-            return Err(invalid_argument("presentation window dimensions must be non-zero"));
+            return Err(invalid_argument(
+                "presentation window dimensions must be non-zero",
+            ));
         }
 
         let context = unsafe { device.GetImmediateContext()? };
@@ -116,9 +117,8 @@ impl FlipPresenter {
             AlphaMode: DXGI_ALPHA_MODE_IGNORE,
             Flags: 0,
         };
-        let swap_chain = unsafe {
-            factory.CreateSwapChainForHwnd(device, hwnd, &descriptor, None, None)?
-        };
+        let swap_chain =
+            unsafe { factory.CreateSwapChainForHwnd(device, hwnd, &descriptor, None, None)? };
         unsafe { factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER)? };
 
         Ok(Self {
@@ -182,7 +182,8 @@ impl FlipPresenter {
             subresource_index,
             source_desc.MipLevels,
         )?;
-        let output_view = create_output_view(&self.video_device, &pipeline.enumerator, &backbuffer)?;
+        let output_view =
+            create_output_view(&self.video_device, &pipeline.enumerator, &backbuffer)?;
 
         let source_rect = RECT {
             left: 0,
@@ -253,7 +254,11 @@ impl FlipPresenter {
         Ok(())
     }
 
-    fn ensure_pipeline(&mut self, source_width: u32, source_height: u32) -> windows::core::Result<()> {
+    fn ensure_pipeline(
+        &mut self,
+        source_width: u32,
+        source_height: u32,
+    ) -> windows::core::Result<()> {
         if self.pipeline.as_ref().is_some_and(|pipeline| {
             pipeline.source_width == source_width && pipeline.source_height == source_height
         }) {
@@ -335,12 +340,7 @@ fn create_input_view(
     };
     let mut view = None;
     unsafe {
-        video_device.CreateVideoProcessorInputView(
-            texture,
-            enumerator,
-            &desc,
-            Some(&mut view),
-        )?;
+        video_device.CreateVideoProcessorInputView(texture, enumerator, &desc, Some(&mut view))?;
     }
     view.ok_or_else(|| invalid_argument("D3D11 returned no decoder video input view"))
 }
@@ -358,12 +358,7 @@ fn create_output_view(
     };
     let mut view = None;
     unsafe {
-        video_device.CreateVideoProcessorOutputView(
-            texture,
-            enumerator,
-            &desc,
-            Some(&mut view),
-        )?;
+        video_device.CreateVideoProcessorOutputView(texture, enumerator, &desc, Some(&mut view))?;
     }
     view.ok_or_else(|| invalid_argument("D3D11 returned no swap-chain video output view"))
 }
