@@ -16,10 +16,11 @@ use windows::Win32::Media::MediaFoundation::{
     MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO,
     MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC_UNLOCK, MFCreateMediaType, MFCreateMemoryBuffer,
     MFCreateSample, MFMediaType_Video, MFSampleExtension_CleanPoint, MFT_MESSAGE_COMMAND_DRAIN,
-    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
-    MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
+    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFVideoFormat_H264, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive,
 };
 use windows::core::Interface;
 
@@ -303,7 +304,8 @@ impl MfAsyncH264Encoder {
     /// all pending surfaces remains with this encoder.
     pub fn abort_and_reclaim(&mut self) -> windows::core::Result<Vec<ID3D11Texture2D>> {
         unsafe {
-            self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0)?;
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0)?;
             let _ = self
                 .transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
@@ -458,10 +460,7 @@ fn create_nv12_input_type(config: MfH264EncoderConfig) -> windows::core::Result<
             pack_u32_pair(config.fps_numerator, config.fps_denominator),
         )?;
         media_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack_u32_pair(1, 1))?;
-        media_type.SetUINT32(
-            &MF_MT_INTERLACE_MODE,
-            MFVideoInterlace_Progressive.0 as u32,
-        )?;
+        media_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
     }
     Ok(media_type)
 }
@@ -480,10 +479,7 @@ fn create_h264_output_type(config: MfH264EncoderConfig) -> windows::core::Result
             pack_u32_pair(config.fps_numerator, config.fps_denominator),
         )?;
         media_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack_u32_pair(1, 1))?;
-        media_type.SetUINT32(
-            &MF_MT_INTERLACE_MODE,
-            MFVideoInterlace_Progressive.0 as u32,
-        )?;
+        media_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
         media_type.SetUINT32(&MF_MT_AVG_BITRATE, config.bitrate_bps)?;
     }
     Ok(media_type)
