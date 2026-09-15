@@ -210,6 +210,7 @@ fn handle_events<W: Write>(
     Ok(())
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DecodeStep {
     Decoded(usize),
