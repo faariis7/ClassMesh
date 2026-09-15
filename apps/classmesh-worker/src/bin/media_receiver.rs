@@ -23,6 +23,14 @@ struct ReceiverCounters {
     decode_waiting_frames: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct RecoveryTelemetry {
+    recoveries: u64,
+    forced_recoveries: u64,
+    last: Duration,
+    longest: Duration,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let listen = parse_socket_arg(&args, "--listen", "0.0.0.0:57000")?;
@@ -30,6 +38,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_path = parse_optional_arg(&args, "--output")?;
     let render_enabled = has_flag(&args, "--render");
     let decode_enabled = has_flag(&args, "--decode") || render_enabled;
+    let recover_after_frames =
+        parse_optional_u64_arg(&args, "--recover-after-frames", 1, u64::MAX)?;
+    if recover_after_frames.is_some() && !decode_enabled {
+        return Err("--recover-after-frames requires --decode or --render".into());
+    }
 
     let mut output = match output_path.as_deref() {
         Some(path) => {
@@ -39,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => None,
     };
     let mut decoder = if decode_enabled {
-        Some(DecodeProbe::new(render_enabled)?)
+        Some(DecodeProbe::new(render_enabled, recover_after_frames)?)
     } else {
         None
     };
@@ -53,6 +66,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if render_enabled {
         eprintln!("D3D11 flip-model presentation window is enabled");
+    }
+    if let Some(frame_count) = recover_after_frames {
+        eprintln!(
+            "scheduled live-stream GPU media recovery after {frame_count} decoder-eligible frames"
+        );
     }
 
     let started = Instant::now();
@@ -98,9 +116,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if Instant::now() >= next_report {
             let stats = receiver.stats();
-            let gpu_recoveries = decoder.as_ref().map_or(0, DecodeProbe::gpu_recoveries);
+            let recovery = decoder
+                .as_ref()
+                .map_or_else(RecoveryTelemetry::default, DecodeProbe::recovery_telemetry);
             eprintln!(
-                "receiver stats: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={}",
+                "receiver stats: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={} forced_gpu_recoveries={} last_gpu_recovery_ms={:.2} longest_gpu_recovery_ms={:.2}",
                 stats.datagrams_received,
                 counters.frames,
                 counters.bytes,
@@ -115,7 +135,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 counters.present_errors,
                 counters.decode_errors,
                 counters.decode_waiting_frames,
-                gpu_recoveries
+                recovery.recoveries,
+                recovery.forced_recoveries,
+                recovery.last.as_secs_f64() * 1_000.0,
+                recovery.longest.as_secs_f64() * 1_000.0
             );
             next_report = Instant::now()
                 .checked_add(Duration::from_secs(1))
@@ -137,9 +160,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let stats = receiver.stats();
-    let gpu_recoveries = decoder.as_ref().map_or(0, DecodeProbe::gpu_recoveries);
+    let recovery = decoder
+        .as_ref()
+        .map_or_else(RecoveryTelemetry::default, DecodeProbe::recovery_telemetry);
     eprintln!(
-        "ClassMesh media receiver complete: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={} elapsed={:.2}s",
+        "ClassMesh media receiver complete: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={} forced_gpu_recoveries={} last_gpu_recovery_ms={:.2} longest_gpu_recovery_ms={:.2} elapsed={:.2}s",
         stats.datagrams_received,
         counters.frames,
         counters.bytes,
@@ -154,7 +179,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         counters.present_errors,
         counters.decode_errors,
         counters.decode_waiting_frames,
-        gpu_recoveries,
+        recovery.recoveries,
+        recovery.forced_recoveries,
+        recovery.last.as_secs_f64() * 1_000.0,
+        recovery.longest.as_secs_f64() * 1_000.0,
         started.elapsed().as_secs_f32()
     );
     Ok(())
@@ -258,11 +286,19 @@ struct DecodeProbe {
     render_enabled: bool,
     waiting_for_keyframe: bool,
     gpu_recoveries: u64,
+    forced_recoveries: u64,
+    recover_after_frames: Option<u64>,
+    decoder_eligible_frames: u64,
+    last_recovery: Duration,
+    longest_recovery: Duration,
 }
 
 #[cfg(windows)]
 impl DecodeProbe {
-    fn new(render_enabled: bool) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(
+        render_enabled: bool,
+        recover_after_frames: Option<u64>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         use classmesh_codec_win::mf::MfPlatform;
         use classmesh_worker::receiver_render::PresentationWindow;
 
@@ -282,6 +318,11 @@ impl DecodeProbe {
             render_enabled,
             waiting_for_keyframe: true,
             gpu_recoveries: 0,
+            forced_recoveries: 0,
+            recover_after_frames,
+            decoder_eligible_frames: 0,
+            last_recovery: Duration::ZERO,
+            longest_recovery: Duration::ZERO,
         })
     }
 
@@ -323,10 +364,11 @@ impl DecodeProbe {
         .into())
     }
 
-    fn rebuild_gpu_pipeline(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn rebuild_gpu_pipeline(&mut self, reason: &str) -> Result<(), Box<dyn std::error::Error>> {
         use classmesh_worker::receiver_render::PresentationWindow;
 
-        eprintln!("rebuilding student D3D11 decoder/presenter pipeline after device loss");
+        let started = Instant::now();
+        eprintln!("rebuilding student D3D11 decoder/presenter pipeline: reason={reason}");
         let (new_device, new_decoder) = Self::create_decoder_device()?;
 
         if self.render_enabled {
@@ -341,9 +383,13 @@ impl DecodeProbe {
         self.device = new_device;
         self.waiting_for_keyframe = true;
         self.gpu_recoveries = self.gpu_recoveries.saturating_add(1);
+        let elapsed = started.elapsed();
+        self.last_recovery = elapsed;
+        self.longest_recovery = self.longest_recovery.max(elapsed);
         eprintln!(
-            "student GPU media pipeline rebuilt; waiting for keyframe (recovery #{})",
-            self.gpu_recoveries
+            "student GPU media pipeline rebuilt; waiting for keyframe (recovery #{}, elapsed_ms={:.2})",
+            self.gpu_recoveries,
+            elapsed.as_secs_f64() * 1_000.0
         );
         Ok(())
     }
@@ -353,6 +399,23 @@ impl DecodeProbe {
 
         if self.waiting_for_keyframe && !frame.keyframe {
             return Ok(DecodeStep::WaitingForKeyframe);
+        }
+
+        self.decoder_eligible_frames = self.decoder_eligible_frames.saturating_add(1);
+        if self
+            .recover_after_frames
+            .is_some_and(|threshold| self.decoder_eligible_frames >= threshold)
+        {
+            self.recover_after_frames = None;
+            eprintln!(
+                "triggering scheduled live-stream GPU media recovery at decoder frame {} (keyframe={})",
+                self.decoder_eligible_frames, frame.keyframe
+            );
+            self.rebuild_gpu_pipeline("scheduled live-stream recovery test")?;
+            self.forced_recoveries = self.forced_recoveries.saturating_add(1);
+            if !frame.keyframe {
+                return Ok(DecodeStep::WaitingForKeyframe);
+            }
         }
 
         let mut batch = self.drain_decoded()?;
@@ -369,7 +432,7 @@ impl DecodeProbe {
         {
             Ok(()) => {}
             Err(error) if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost => {
-                self.rebuild_gpu_pipeline()?;
+                self.rebuild_gpu_pipeline("decoder input device loss")?;
                 if !frame.keyframe {
                     return Ok(DecodeStep::Decoded(batch));
                 }
@@ -390,7 +453,7 @@ impl DecodeProbe {
         let frames = match self.decoder.poll_decoded() {
             Ok(frames) => frames,
             Err(error) if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost => {
-                self.rebuild_gpu_pipeline()?;
+                self.rebuild_gpu_pipeline("decoder output device loss")?;
                 return Ok(DecodeBatch::default());
             }
             Err(error) => return Err(error.into()),
@@ -423,7 +486,7 @@ impl DecodeProbe {
 
         if device_lost {
             drop(frames);
-            self.rebuild_gpu_pipeline()?;
+            self.rebuild_gpu_pipeline("presentation device loss")?;
         }
         Ok(batch)
     }
@@ -433,7 +496,8 @@ impl DecodeProbe {
 
         if let Err(error) = self.decoder.flush() {
             if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
-                if let Err(recovery_error) = self.rebuild_gpu_pipeline() {
+                if let Err(recovery_error) = self.rebuild_gpu_pipeline("decoder flush device loss")
+                {
                     eprintln!("GPU pipeline rebuild failed during loss recovery: {recovery_error}");
                 }
             } else {
@@ -455,7 +519,7 @@ impl DecodeProbe {
 
         if open
             && device_lost
-            && let Err(error) = self.rebuild_gpu_pipeline()
+            && let Err(error) = self.rebuild_gpu_pipeline("presentation window device loss")
         {
             eprintln!("GPU pipeline rebuild failed after window resize device loss: {error}");
         }
@@ -468,8 +532,13 @@ impl DecodeProbe {
         Ok(decoded)
     }
 
-    const fn gpu_recoveries(&self) -> u64 {
-        self.gpu_recoveries
+    const fn recovery_telemetry(&self) -> RecoveryTelemetry {
+        RecoveryTelemetry {
+            recoveries: self.gpu_recoveries,
+            forced_recoveries: self.forced_recoveries,
+            last: self.last_recovery,
+            longest: self.longest_recovery,
+        }
     }
 }
 
@@ -487,7 +556,10 @@ struct DecodeProbe;
 
 #[cfg(not(windows))]
 impl DecodeProbe {
-    fn new(_render_enabled: bool) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(
+        _render_enabled: bool,
+        _recover_after_frames: Option<u64>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         Err("--decode/--render are supported only by the Windows media receiver".into())
     }
 
@@ -508,8 +580,13 @@ impl DecodeProbe {
         Ok(DecodeBatch::default())
     }
 
-    const fn gpu_recoveries(&self) -> u64 {
-        0
+    const fn recovery_telemetry(&self) -> RecoveryTelemetry {
+        RecoveryTelemetry {
+            recoveries: 0,
+            forced_recoveries: 0,
+            last: Duration::ZERO,
+            longest: Duration::ZERO,
+        }
     }
 }
 
@@ -539,6 +616,22 @@ fn parse_u64_arg(
     Ok(value)
 }
 
+fn parse_optional_u64_arg(
+    args: &[String],
+    name: &str,
+    min: u64,
+    max: u64,
+) -> Result<Option<u64>, Box<dyn std::error::Error>> {
+    let Some(raw) = parse_optional_arg(args, name)? else {
+        return Ok(None);
+    };
+    let value = raw.parse::<u64>()?;
+    if value < min || value > max {
+        return Err(format!("{name} must be between {min} and {max}").into());
+    }
+    Ok(Some(value))
+}
+
 fn parse_optional_arg(
     args: &[String],
     name: &str,
@@ -558,4 +651,38 @@ fn has_flag(args: &[String], name: &str) -> bool {
 
 fn elapsed_us(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optional_u64_parser_accepts_absent_and_valid_values() {
+        let absent = vec!["receiver".to_owned()];
+        assert_eq!(
+            parse_optional_u64_arg(&absent, "--recover-after-frames", 1, 100).unwrap(),
+            None
+        );
+
+        let present = vec![
+            "receiver".to_owned(),
+            "--recover-after-frames".to_owned(),
+            "90".to_owned(),
+        ];
+        assert_eq!(
+            parse_optional_u64_arg(&present, "--recover-after-frames", 1, 100).unwrap(),
+            Some(90)
+        );
+    }
+
+    #[test]
+    fn optional_u64_parser_rejects_out_of_range_value() {
+        let args = vec![
+            "receiver".to_owned(),
+            "--recover-after-frames".to_owned(),
+            "0".to_owned(),
+        ];
+        assert!(parse_optional_u64_arg(&args, "--recover-after-frames", 1, 100).is_err());
+    }
 }
