@@ -6,14 +6,14 @@ This file distinguishes **implemented code**, **hosted-CI validation**, **real-h
 
 ## Current baseline
 
-Main now includes the merged live presentation-media work through PR #14 (`65e0db1633792fe620a2cf20832a293b11abce00`). PR #14 passed both hosted CI jobs before merge:
+`main` now includes Phase 4 implementation work through PR #29 (`553fca31d4adcb8723e64711dfec2e9e36cdcdb8`). The current hosted CI baseline covers:
 
-- **Portable Rust / Ubuntu** — rustfmt, Clippy with warnings denied, full workspace tests, and `classmesh-lab` pass.
-- **Windows Build** — full workspace Clippy and tests pass on `windows-latest`.
+- **Portable Rust / Ubuntu** — rustfmt, Clippy with warnings denied, full workspace tests, and `classmesh-lab`.
+- **Windows Build** — workspace Clippy/tests plus release builds for the media probe, media receiver, media recovery probe, deterministic network impairment proxy, and UDP/QUIC Datagram transport benchmark.
 
-Hosted Windows runners prove that the Win32/D3D11/Media Foundation code compiles and its deterministic tests pass. They do **not** prove that Desktop Duplication, D3D11 Video Processor, or a hardware encoder works correctly on a real interactive GPU/driver combination.
+Hosted Windows runners prove that the Win32/D3D11/Media Foundation code compiles and deterministic tests pass. They do **not** prove that Desktop Duplication, hardware H.264 encode/decode, D3D11 presentation, or two-machine latency behaves correctly on real interactive GPU/driver combinations.
 
-PR #15 adds a release-mode Windows `classmesh-media-probe.exe` workflow artifact and the real-hardware runbook so that the next validation gate can be executed without first wiring presentation encoding into the normal classroom Worker lifecycle.
+The immediate gate is now physical two-PC Phase 4 qualification using `docs/PHASE4_TWO_PC_QUALIFICATION.md` and `scripts/phase4-two-pc.ps1`.
 
 ## Implemented in the repository
 
@@ -25,7 +25,7 @@ PR #15 adds a release-mode Windows `classmesh-media-probe.exe` workflow artifact
 - Baseline network adaptation policy with separate monitoring/presentation profiles.
 - Stateful quality/transport hysteresis to prevent protocol and bitrate flapping.
 - Receiver cohort grouping so one weak client does not force a class-wide downgrade.
-- Rolling capture/encode/queue/decode/render latency metrics and media counters.
+- Rolling capture/encode/queue/decode/render latency metric primitives and media counters.
 
 ### Media protocol/network primitives
 
@@ -47,8 +47,6 @@ PR #15 adds a release-mode Windows `classmesh-media-probe.exe` workflow artifact
 
 ### Windows Service / interactive Worker boundary
 
-Merged PRs #6 and #7 implement the first real Windows runtime boundary:
-
 - Service launches a Worker into the selected interactive Windows session with `WTSQueryUserToken` + `CreateProcessAsUserW`.
 - Worker validates its Windows session identity.
 - Fast-user-switch replaces the active Worker instead of moving capture into Session 0.
@@ -63,43 +61,66 @@ Production hardening still includes a per-user SID pipe DACL, production environ
 
 ### Real DXGI Desktop Duplication capture
 
-Merged PRs #8 and #9 implement real GPU-native capture:
-
 - DXGI adapter/output enumeration.
 - Stable display identity using adapter LUID + output index.
 - D3D11 device creation on the selected adapter.
 - `IDXGIOutputDuplication` creation and `AcquireNextFrame`.
 - GPU-native `ID3D11Texture2D` frame ownership without CPU readback.
 - RAII `ReleaseFrame` behavior.
-- explicit mapping for timeout, access-lost, device-reset and device-removed failures.
-- replace/recreate recovery rather than permanent sticky fallback.
-- the capture loop runs inside the interactive Worker and responds to Service suspend/resume/shutdown control.
+- Explicit mapping for timeout, access-lost, device-reset and device-removed failures.
+- Replace/recreate recovery rather than permanent sticky fallback.
+- Capture loop runs inside the interactive Worker and responds to Service suspend/resume/shutdown control.
 
-Real runtime validation is still required for Intel/NVIDIA/AMD drivers, rotation, multi-monitor, HDR, secure desktop, lock/unlock, sleep/resume and display-topology changes.
+Real runtime validation is still required across representative Intel/NVIDIA/AMD drivers, rotation, multi-monitor, HDR, secure desktop, lock/unlock, sleep/resume and display-topology changes.
 
-### GPU processing and Media Foundation H.264
-
-Merged PRs #10–#14 establish the first complete code path from live DXGI frame to encoded H.264 bytes:
+### GPU processing and hardware H.264 encode
 
 - COM + Media Foundation RAII platform lifetime.
-- hardware H.264 MFT enumeration and activation.
-- shared D3D11 device through `IMFDXGIDeviceManager`.
+- Hardware H.264 MFT enumeration and activation.
+- Shared D3D11 device through `IMFDXGIDeviceManager`.
 - NV12 input / H.264 output media type configuration.
 - GPU texture wrapping through `MFCreateDXGISurfaceBuffer`.
-- D3D11 Video Processor BGRA → NV12 conversion/scaling with no CPU `Bitmap`, staging readback, or System.Drawing hot path.
-- caller-owned NV12 output textures.
-- bounded preallocated NV12 `SurfacePool`.
-- asynchronous MFT input/output flow driven by `METransformNeedInput` / `METransformHaveOutput`.
-- pending-surface ownership retained until encoded output or explicit flush/drain proves a surface is safe to recycle.
-- encoded access units paired back to ClassMesh frame id/timestamp metadata.
-- clean-point + Annex-B IDR keyframe detection.
+- D3D11 Video Processor BGRA → NV12 conversion/scaling without a CPU bitmap hot path.
+- Caller-owned NV12 output textures.
+- Bounded preallocated NV12 `SurfacePool`.
+- Asynchronous MFT input/output flow driven by Media Foundation events.
+- Pending-surface ownership retained until encoded output or explicit flush/drain proves reuse is safe.
+- Encoded access units paired to ClassMesh frame id/timestamp metadata.
+- Clean-point + Annex-B IDR keyframe detection.
 - `SharedEncodedFrame` output suitable for one-allocation fan-out.
-- live `PresentationPipeline` that polls/recycles completed outputs, paces capture to 30 fps and drops stale work instead of growing latency.
-- actual capture texture geometry is used for source sizing, and output is capped at 1920×1080 without upscaling while preserving aspect ratio and even NV12 dimensions.
-- Desktop Duplication frames are released immediately after GPU conversion, before waiting on encoder input.
-- standalone `classmesh-media-probe` exercises the full path without enabling it in the normal production Worker yet.
+- Live `PresentationPipeline` paced to 30 fps with stale-work drops instead of latency growth.
+- Output capped at 1920×1080 without upscaling while preserving aspect ratio and even NV12 dimensions.
+- Desktop Duplication frames released immediately after GPU conversion.
+- Standalone `classmesh-media-probe.exe` exercises capture → process → hardware encode → UDP packetization.
 
-**Important:** the complete code path is implemented and CI-clean, but real GPU/driver execution is the next gate. Until `classmesh-media-probe` succeeds on interactive Windows hardware, do not describe 1080p30 hardware presentation as validated.
+### Hardware H.264 decode and D3D11 presentation
+
+The Phase 4 receiver path is implemented and CI-clean:
+
+- `classmesh-media-receiver.exe` receives/reassembles ClassMesh UDP media frames.
+- Media Foundation/D3D11 hardware H.264 decoding is available with `--decode` / `--render`.
+- `--render` enables the D3D11 flip-model presentation window.
+- Receiver feedback reports missing/stale media recovery signals to the Teacher sender.
+- Receiver telemetry includes decoded GPU frames, presented frames, decode/present errors, stale drops, NACK/keyframe requests, and recovery timing.
+- `--recover-after-frames` deliberately rebuilds GPU media resources for recovery qualification.
+- The Teacher media probe consumes receiver feedback, retransmits cached packets when useful, and coalesces/rate-limits keyframe requests.
+
+**Important:** this is implemented code, not yet a claim that real two-PC 1080p30 hardware presentation has passed the Phase 4 exit criteria.
+
+### Phase 4 impairment and transport qualification tooling
+
+- Deterministic media loss/jitter/reorder engine with reproducible seeds.
+- Bounded one-way media impairment proxy with queue/drop/reorder statistics.
+- Baseline, 1%, 3%, 5%, and 30-minute impairment procedures.
+- Synthetic `classmesh-transport-benchmark` with equivalent UDP and QUIC Datagram modes.
+- Configurable packets-per-second and application payload size.
+- Application acknowledgement RTT without requiring synchronized PC clocks.
+- Bounded latency sample window with lifetime min/avg/max and recent p50/p95/p99.
+- QUIC path statistics including RTT, congestion window, loss, congestion events and MTU.
+- Explicit copied DER trust for the benchmark self-signed certificate; this is not production enrollment identity.
+- Windows CI publishes the transport benchmark executable.
+- `scripts/phase4-two-pc.ps1` standardizes the physical commands and captures logs.
+- `docs/PHASE4_TWO_PC_RESULTS.md` is the persistent physical-result record and remains pending until real hardware is tested.
 
 ### Security/discovery/tooling
 
@@ -107,68 +128,73 @@ Merged PRs #10–#14 establish the first complete code path from live DXGI frame
 - Service/Worker IPC Protobuf schema.
 - Enrollment/authorization/replay-window policy primitives.
 - LAN discovery protocol and expiry/rate-limit primitives.
-- `classmesh-lab` synthetic packet-loss/adaptation utility.
 - Portable + Windows GitHub Actions validation.
-- architecture, roadmap, security, protocol and runtime validation documents.
-- media-probe hardware validation runbook.
+- Architecture, roadmap, security, protocol and runtime validation documents.
 
 ## Not implemented or not validated yet
 
-### Immediate hardware validation gate
+### Immediate Phase 4 physical validation gate
 
-Run `classmesh-media-probe` on a signed-in teacher Windows desktop while continuous motion is visible. The first gate is a 15-second run; after that succeeds, run a five-minute soak. See `docs/MEDIA_PROBE.md`.
+Run the two-PC sequence in `docs/PHASE4_TWO_PC_QUALIFICATION.md` on two signed-in Windows machines.
 
-Required observations:
+Required observations before Issue #3 can close:
 
-- hardware encoder selected successfully;
-- encoded frame count continues advancing;
-- no CPU bitmap/readback path appears;
-- bounded NV12 pool remains bounded;
-- pool drops stay low/zero under a healthy local GPU;
-- no hang, disconnect, or growing latency queue.
+- Teacher hardware capture/encode stays live under continuous motion.
+- Student hardware decode + D3D11 render stays live at the target 1080p30 workload.
+- Healthy wired-LAN end-to-end latency is measured; the Phase 4 engineering target is `<100 ms`.
+- No steadily growing display delay during a 30-minute run.
+- 1%, 3%, and 5% deterministic loss/jitter/reorder degrade and recover the video path without dropping the device/control session.
+- UDP and QUIC Datagram synthetic benchmark results are recorded before selecting the unicast default.
 
-Repeat later on representative Intel Quick Sync, NVIDIA and AMD devices.
+If current telemetry cannot substantiate the end-to-end latency target, that missing instrumentation remains a Phase 4 blocker; do not infer a pass from visual smoothness alone.
 
 ### Encoder/runtime hardening
 
-Still required before the presentation pipeline is production-enabled:
+Still required before the presentation pipeline is production-enabled broadly:
 
-- bounded timeout/watchdog around asynchronous Media Foundation event waits so a broken driver cannot hang the Worker indefinitely;
-- measured `ICodecAPI` low-latency/rate-control/GOP/keyframe controls rather than assuming vendor behavior;
-- first-run encoder benchmark and capability cache wired to real adapter/driver/CLSID data;
-- deliberate multi-GPU encoder selection instead of assuming the first enumerated hardware MFT is optimal;
-- recovery/rebuild after encoder/device loss;
-- long-running resource/leak/driver soak tests.
+- Bounded timeout/watchdog around asynchronous Media Foundation event waits so a broken driver cannot hang the Worker indefinitely.
+- Measured `ICodecAPI` low-latency/rate-control/GOP/keyframe controls rather than assuming vendor behavior.
+- First-run encoder benchmark and capability cache wired to real adapter/driver/CLSID data.
+- Deliberate multi-GPU encoder selection instead of assuming the first enumerated hardware MFT is optimal.
+- Recovery/rebuild after encoder/device loss across representative drivers.
+- Long-running resource/leak/driver soak tests.
 
-### Receiver decode/render
+### End-to-end observability gaps
 
-Missing:
+The receiver/sender expose useful counters, but Phase 4 still needs hardware evidence for the complete latency budget:
 
-- Media Foundation/D3D11 hardware H.264 decoder;
-- GPU presentation/swap-chain rendering;
-- real jitter timing using receive clocks;
-- end-to-end glass-to-glass latency instrumentation.
+- capture timing;
+- GPU process timing;
+- encode timing;
+- sender queue age;
+- network RTT/loss/jitter;
+- receiver reassembly/jitter delay;
+- decode timing;
+- render/presentation timing;
+- an end-to-end value that can demonstrate the `<100 ms` target without synchronized-PC ambiguity.
 
 ### Classroom fan-out runtime
 
-Protocol primitives exist, but the live encoded output is not yet connected to production network fan-out. Still required:
+The first two-machine UDP media path exists, but production classroom fan-out is intentionally later. Still required:
 
-- live `SharedEncodedFrame` → packetizer → UDP unicast path for the first two-machine stream;
-- live multicast sender for teacher presentation;
-- per-client fallback selection (multicast → UDP unicast → later fallback options);
-- NACK/keyframe recovery connected to the real encoder;
-- receiver quality telemetry feeding adaptation policy;
+- production integration of shared encoded output into the normal Teacher/Worker lifecycle;
+- multicast sender and authenticated group-media protection;
+- per-client fallback selection;
+- receiver telemetry wired into the production adaptation/controller path;
 - classroom-scale 2/5/10/20+ device tests on wired LAN and Wi-Fi.
 
-### Control/security transport
+### Control/security transport — Phase 5
 
 Still missing or incomplete:
 
 - QUIC/TLS control runtime;
 - persistent enrollment and certificate/key storage;
 - transport-connected authorization engine;
+- heartbeat/capability/session negotiation over the real control transport;
 - encrypted multicast media session keys, replay protection and rotation;
 - production per-user SID ACL on the local Named Pipe.
+
+The QUIC Datagram benchmark from Phase 4 does not replace this Phase 5 identity/control-plane work.
 
 ### Installer/update/product surface
 
@@ -181,12 +207,11 @@ Still required:
 
 ## Next implementation sequence
 
-1. Build/publish PR #15 media-probe artifact.
-2. Run the 15-second and five-minute live Windows GPU/H.264 probe.
-3. Fix any adapter/driver/MFT compatibility issue revealed by the probe before hiding it behind fallback logic.
-4. Add bounded Media Foundation wait timeouts, measured codec controls and encoder capability selection.
-5. Implement hardware H.264 decode + GPU render on a second Windows machine.
-6. Prove one-to-one 1080p30 motion streaming over UDP with end-to-end latency metrics.
-7. Connect shared encoded output to multicast plus per-client unicast fallback.
-8. Run wired/Wi-Fi classroom scale and loss/jitter/reorder tests.
-9. Only after the media engine is proven, expand product UI and installer/update polish.
+1. Merge the Phase 4 two-PC qualification runner/runbook after CI is green.
+2. Run healthy UDP and QUIC Datagram synthetic benchmarks on two Windows PCs and record the results.
+3. Run the live hardware encode → UDP → hardware decode/render baseline.
+4. Run deterministic 1%, 3%, and 5% loss/jitter/reorder recovery tests.
+5. Run the 30-minute 3% impairment soak and record queue/resource/latency behavior.
+6. If the `<100 ms` gate cannot be measured directly, implement the missing end-to-end latency instrumentation and repeat the baseline.
+7. Update `docs/PHASE4_TWO_PC_RESULTS.md`, choose the measured Phase 4 unicast default, and close Issue #3 only when every acceptance item is evidenced.
+8. Begin Phase 5: reliable QUIC/TLS control plane, device/teacher identity, enrollment, authorization, heartbeat and capability/session negotiation.
