@@ -203,11 +203,9 @@ async fn run_udp_server(listen: SocketAddr, seconds: u64) -> AnyResult<()> {
     while Instant::now() < deadline {
         match timeout(Duration::from_millis(100), socket.recv_from(&mut buffer)).await {
             Ok(Ok((len, peer))) => {
-                process_server_datagram(
-                    &buffer[..len],
-                    &mut stats,
-                    |ack| async { socket.send_to(&ack, peer).await.map(|_| ()) },
-                )
+                process_server_datagram(&buffer[..len], &mut stats, |ack| async {
+                    socket.send_to(&ack, peer).await.map(|_| ())
+                })
                 .await;
             }
             Ok(Err(error)) => return Err(format!("UDP receive failed: {error}").into()),
@@ -289,11 +287,8 @@ async fn run_quic_server(listen: SocketAddr, seconds: u64, cert_path: &str) -> A
     Ok(())
 }
 
-async fn process_server_datagram<F, Fut, E>(
-    data: &[u8],
-    stats: &mut ServerStats,
-    send_ack: F,
-) where
+async fn process_server_datagram<F, Fut, E>(data: &[u8], stats: &mut ServerStats, send_ack: F)
+where
     F: FnOnce(Vec<u8>) -> Fut,
     Fut: std::future::Future<Output = Result<(), E>>,
     E: std::fmt::Display,
@@ -486,7 +481,11 @@ async fn drain_udp_acks(
     Ok(())
 }
 
-async fn drain_quic_acks(connection: &quinn::Connection, started: Instant, stats: &mut ClientStats) {
+async fn drain_quic_acks(
+    connection: &quinn::Connection,
+    started: Instant,
+    stats: &mut ClientStats,
+) {
     let deadline = Instant::now() + ACK_DRAIN_GRACE;
     while Instant::now() < deadline {
         match timeout(Duration::from_millis(25), connection.read_datagram()).await {
@@ -606,13 +605,7 @@ fn parse_string_arg(args: &[String], name: &str, default: &str) -> AnyResult<Str
     Ok(parse_optional_arg(args, name)?.unwrap_or_else(|| default.to_owned()))
 }
 
-fn parse_u64_arg(
-    args: &[String],
-    name: &str,
-    default: u64,
-    min: u64,
-    max: u64,
-) -> AnyResult<u64> {
+fn parse_u64_arg(args: &[String], name: &str, default: u64, min: u64, max: u64) -> AnyResult<u64> {
     let Some(raw) = parse_optional_arg(args, name)? else {
         return Ok(default);
     };
