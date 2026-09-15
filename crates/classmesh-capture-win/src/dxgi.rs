@@ -223,8 +223,8 @@ fn find_output(
             && adapter_desc.AdapterLuid.HighPart == target.adapter_luid_high;
         if luid_matches {
             // SAFETY: DXGI validates the output index.
-            let output = unsafe { adapter.EnumOutputs(target.output_index) }
-                .map_err(map_windows_error)?;
+            let output =
+                unsafe { adapter.EnumOutputs(target.output_index) }.map_err(map_windows_error)?;
             // SAFETY: output is live.
             let output_desc = unsafe { output.GetDesc() }.map_err(map_windows_error)?;
             let descriptor = descriptor_from_dxgi(
@@ -241,9 +241,7 @@ fn find_output(
 }
 
 fn create_device(adapter: &IDXGIAdapter1) -> Result<ID3D11Device, CaptureFailure> {
-    let base_adapter = adapter
-        .cast()
-        .map_err(|_| CaptureFailure::Unsupported)?;
+    let base_adapter = adapter.cast().map_err(|_| CaptureFailure::Unsupported)?;
     let feature_levels = [D3D_FEATURE_LEVEL_11_0];
     let mut device = None;
 
@@ -311,7 +309,10 @@ fn descriptor_from_dxgi(
 }
 
 fn utf16_name(value: &[u16]) -> String {
-    let end = value.iter().position(|unit| *unit == 0).unwrap_or(value.len());
+    let end = value
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(value.len());
     String::from_utf16_lossy(&value[..end])
 }
 
