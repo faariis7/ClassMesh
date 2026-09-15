@@ -1,6 +1,7 @@
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 
 #[cfg(windows)]
-pub mod presentation;
+mod d3d11;
+
 #[cfg(windows)]
-pub mod receiver_render;
+pub use d3d11::{FlipPresenter, PresentMetrics};

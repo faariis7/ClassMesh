@@ -14,10 +14,15 @@ classmesh-windows-runtime = { path = "../../crates/classmesh-windows-runtime" }
 classmesh-capture-win = { path = "../../crates/classmesh-capture-win" }
 classmesh-codec-win = { path = "../../crates/classmesh-codec-win" }
 classmesh-core = { path = "../../crates/classmesh-core" }
+classmesh-render-win = { path = "../../crates/classmesh-render-win" }
 classmesh-video = { path = "../../crates/classmesh-video" }
 classmesh-win32 = { path = "../../crates/classmesh-win32" }
 windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
     "Win32_Graphics_Direct3D11",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [[bin]]

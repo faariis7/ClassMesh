@@ -17,6 +17,8 @@ struct ReceiverCounters {
     keyframe_requests: u64,
     stale_drops: u64,
     decoded_gpu_frames: u64,
+    presented_frames: u64,
+    present_errors: u64,
     decode_errors: u64,
     decode_waiting_frames: u64,
 }
@@ -26,7 +28,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen = parse_socket_arg(&args, "--listen", "0.0.0.0:57000")?;
     let seconds = parse_u64_arg(&args, "--seconds", 30, 1, 86_400)?;
     let output_path = parse_optional_arg(&args, "--output")?;
-    let decode_enabled = has_flag(&args, "--decode");
+    let render_enabled = has_flag(&args, "--render");
+    let decode_enabled = has_flag(&args, "--decode") || render_enabled;
 
     let mut output = match output_path.as_deref() {
         Some(path) => {
@@ -36,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => None,
     };
     let mut decoder = if decode_enabled {
-        Some(DecodeProbe::new()?)
+        Some(DecodeProbe::new(render_enabled)?)
     } else {
         None
     };
@@ -47,6 +50,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("ClassMesh media receiver listening on {bound} for {seconds} seconds");
     if decoder.is_some() {
         eprintln!("hardware H.264 decode probe is enabled; waiting for the first keyframe");
+    }
+    if render_enabled {
+        eprintln!("D3D11 flip-model presentation window is enabled");
     }
 
     let started = Instant::now();
@@ -83,10 +89,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut counters,
         )?;
 
+        if let Some(active) = decoder.as_mut()
+            && !active.pump_window()
+        {
+            eprintln!("student presentation window closed; stopping media receiver");
+            break;
+        }
+
         if Instant::now() >= next_report {
             let stats = receiver.stats();
             eprintln!(
-                "receiver stats: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} stale_drops={} decoded_gpu_frames={} decode_errors={} decode_waiting_frames={}",
+                "receiver stats: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={}",
                 stats.datagrams_received,
                 counters.frames,
                 counters.bytes,
@@ -97,6 +110,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 counters.keyframe_requests,
                 counters.stale_drops,
                 counters.decoded_gpu_frames,
+                counters.presented_frames,
+                counters.present_errors,
                 counters.decode_errors,
                 counters.decode_waiting_frames
             );
@@ -111,11 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(active) = decoder.as_mut() {
         match active.finish() {
-            Ok(decoded) => {
-                counters.decoded_gpu_frames = counters
-                    .decoded_gpu_frames
-                    .saturating_add(u64::try_from(decoded).unwrap_or(u64::MAX));
-            }
+            Ok(batch) => apply_decode_batch(&mut counters, batch),
             Err(error) => {
                 counters.decode_errors = counters.decode_errors.saturating_add(1);
                 eprintln!("hardware decoder shutdown reported: {error}");
@@ -125,7 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let stats = receiver.stats();
     eprintln!(
-        "ClassMesh media receiver complete: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} stale_drops={} decoded_gpu_frames={} decode_errors={} decode_waiting_frames={} elapsed={:.2}s",
+        "ClassMesh media receiver complete: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} elapsed={:.2}s",
         stats.datagrams_received,
         counters.frames,
         counters.bytes,
@@ -136,6 +147,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         counters.keyframe_requests,
         counters.stale_drops,
         counters.decoded_gpu_frames,
+        counters.presented_frames,
+        counters.present_errors,
         counters.decode_errors,
         counters.decode_waiting_frames,
         started.elapsed().as_secs_f32()
@@ -164,11 +177,7 @@ fn handle_events<W: Write>(
                 }
                 if let Some(active) = decoder.as_deref_mut() {
                     match active.submit(frame) {
-                        Ok(DecodeStep::Decoded(count)) => {
-                            counters.decoded_gpu_frames = counters
-                                .decoded_gpu_frames
-                                .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
-                        }
+                        Ok(DecodeStep::Decoded(batch)) => apply_decode_batch(counters, batch),
                         Ok(DecodeStep::WaitingForKeyframe) => {
                             counters.decode_waiting_frames =
                                 counters.decode_waiting_frames.saturating_add(1);
@@ -210,16 +219,36 @@ fn handle_events<W: Write>(
     Ok(())
 }
 
+fn apply_decode_batch(counters: &mut ReceiverCounters, batch: DecodeBatch) {
+    counters.decoded_gpu_frames = counters
+        .decoded_gpu_frames
+        .saturating_add(u64::try_from(batch.decoded).unwrap_or(u64::MAX));
+    counters.presented_frames = counters
+        .presented_frames
+        .saturating_add(u64::try_from(batch.presented).unwrap_or(u64::MAX));
+    counters.present_errors = counters
+        .present_errors
+        .saturating_add(u64::try_from(batch.present_errors).unwrap_or(u64::MAX));
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DecodeBatch {
+    decoded: usize,
+    presented: usize,
+    present_errors: usize,
+}
+
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DecodeStep {
-    Decoded(usize),
+    Decoded(DecodeBatch),
     WaitingForKeyframe,
 }
 
 #[cfg(windows)]
 struct DecodeProbe {
     decoder: classmesh_codec_win::mf_decoder::MfH264Decoder,
+    presentation: Option<classmesh_worker::receiver_render::PresentationWindow>,
     _device: windows::Win32::Graphics::Direct3D11::ID3D11Device,
     _platform: classmesh_codec_win::mf::MfPlatform,
     waiting_for_keyframe: bool,
@@ -227,10 +256,11 @@ struct DecodeProbe {
 
 #[cfg(windows)]
 impl DecodeProbe {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(render_enabled: bool) -> Result<Self, Box<dyn std::error::Error>> {
         use classmesh_codec_win::d3d11::create_default_video_device;
         use classmesh_codec_win::mf::MfPlatform;
         use classmesh_codec_win::mf_decoder::{MfH264Decoder, enumerate_h264_decoders};
+        use classmesh_worker::receiver_render::PresentationWindow;
 
         let platform = MfPlatform::startup()?;
         let device = create_default_video_device()?;
@@ -248,8 +278,14 @@ impl DecodeProbe {
                         candidate.name(),
                         candidate.clsid()
                     );
+                    let presentation = if render_enabled {
+                        Some(PresentationWindow::new(&device, 1280, 720)?)
+                    } else {
+                        None
+                    };
                     return Ok(Self {
                         decoder,
+                        presentation,
                         _device: device,
                         _platform: platform,
                         waiting_for_keyframe: true,
@@ -276,11 +312,33 @@ impl DecodeProbe {
             self.waiting_for_keyframe = false;
         }
 
-        let mut decoded = self.decoder.poll_decoded()?.len();
+        let mut batch = self.drain_decoded()?;
         self.decoder
             .submit_access_unit(&frame.data, frame.timestamp_us)?;
-        decoded = decoded.saturating_add(self.decoder.poll_decoded()?.len());
-        Ok(DecodeStep::Decoded(decoded))
+        batch.add(self.drain_decoded()?);
+        Ok(DecodeStep::Decoded(batch))
+    }
+
+    fn drain_decoded(&mut self) -> Result<DecodeBatch, Box<dyn std::error::Error>> {
+        let frames = self.decoder.poll_decoded()?;
+        let mut batch = DecodeBatch {
+            decoded: frames.len(),
+            ..DecodeBatch::default()
+        };
+        for frame in &frames {
+            if let Some(presentation) = self.presentation.as_mut() {
+                match presentation.present(frame) {
+                    Ok(()) => batch.presented = batch.presented.saturating_add(1),
+                    Err(error) => {
+                        batch.present_errors = batch.present_errors.saturating_add(1);
+                        eprintln!(
+                            "D3D11 presentation failed while decode remains healthy: {error}"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(batch)
     }
 
     fn recover_after_loss(&mut self) {
@@ -290,10 +348,25 @@ impl DecodeProbe {
         self.waiting_for_keyframe = true;
     }
 
-    fn finish(&mut self) -> Result<usize, Box<dyn std::error::Error>> {
-        let decoded = self.decoder.poll_decoded()?.len();
+    fn pump_window(&mut self) -> bool {
+        self.presentation
+            .as_mut()
+            .is_none_or(classmesh_worker::receiver_render::PresentationWindow::pump_messages)
+    }
+
+    fn finish(&mut self) -> Result<DecodeBatch, Box<dyn std::error::Error>> {
+        let decoded = self.drain_decoded()?;
         self.decoder.end_streaming()?;
         Ok(decoded)
+    }
+}
+
+#[cfg(windows)]
+impl DecodeBatch {
+    fn add(&mut self, other: Self) {
+        self.decoded = self.decoded.saturating_add(other.decoded);
+        self.presented = self.presented.saturating_add(other.presented);
+        self.present_errors = self.present_errors.saturating_add(other.present_errors);
     }
 }
 
@@ -302,8 +375,8 @@ struct DecodeProbe;
 
 #[cfg(not(windows))]
 impl DecodeProbe {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        Err("--decode is supported only by the Windows media receiver".into())
+    fn new(_render_enabled: bool) -> Result<Self, Box<dyn std::error::Error>> {
+        Err("--decode/--render are supported only by the Windows media receiver".into())
     }
 
     fn submit(
@@ -315,8 +388,12 @@ impl DecodeProbe {
 
     fn recover_after_loss(&mut self) {}
 
-    fn finish(&mut self) -> Result<usize, Box<dyn std::error::Error>> {
-        Ok(0)
+    fn pump_window(&mut self) -> bool {
+        true
+    }
+
+    fn finish(&mut self) -> Result<DecodeBatch, Box<dyn std::error::Error>> {
+        Ok(DecodeBatch::default())
     }
 }
 
