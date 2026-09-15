@@ -331,7 +331,9 @@ impl DecodeProbe {
                     Ok(()) => batch.presented = batch.presented.saturating_add(1),
                     Err(error) => {
                         batch.present_errors = batch.present_errors.saturating_add(1);
-                        eprintln!("D3D11 presentation failed while decode remains healthy: {error}");
+                        eprintln!(
+                            "D3D11 presentation failed while decode remains healthy: {error}"
+                        );
                     }
                 }
             }
