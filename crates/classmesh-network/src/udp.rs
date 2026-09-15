@@ -24,8 +24,12 @@ impl fmt::Display for DatagramError {
         match self {
             Self::Io(error) => write!(formatter, "UDP media I/O error: {error}"),
             Self::Header(error) => write!(formatter, "invalid media packet header: {error:?}"),
-            Self::PayloadLengthMismatch => formatter.write_str("media packet payload length mismatch"),
-            Self::DatagramTooLarge => formatter.write_str("media UDP datagram exceeds ClassMesh MTU"),
+            Self::PayloadLengthMismatch => {
+                formatter.write_str("media packet payload length mismatch")
+            }
+            Self::DatagramTooLarge => {
+                formatter.write_str("media UDP datagram exceeds ClassMesh MTU")
+            }
         }
     }
 }
