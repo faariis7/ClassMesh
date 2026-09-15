@@ -203,7 +203,7 @@ async fn run_udp_server(listen: SocketAddr, seconds: u64) -> AnyResult<()> {
     while Instant::now() < deadline {
         match timeout(Duration::from_millis(100), socket.recv_from(&mut buffer)).await {
             Ok(Ok((len, peer))) => {
-                process_server_datagram(&buffer[..len], &mut stats, |ack| async {
+                process_server_datagram(&buffer[..len], &mut stats, |ack| async move {
                     socket.send_to(&ack, peer).await.map(|_| ())
                 })
                 .await;
