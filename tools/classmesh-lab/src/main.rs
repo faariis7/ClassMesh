@@ -92,11 +92,8 @@ fn udp_loopback() {
     let destination = receiver
         .local_addr()
         .expect("UDP loopback receiver must have a local address");
-    let mut sender = UdpFrameSender::bind(
-        loopback,
-        UdpSenderConfig::presentation(77, destination),
-    )
-    .expect("UDP loopback sender must bind");
+    let mut sender = UdpFrameSender::bind(loopback, UdpSenderConfig::presentation(77, destination))
+        .expect("UDP loopback sender must bind");
 
     let encoded = SharedEncodedFrame::new(
         EncodedFrameMeta {
