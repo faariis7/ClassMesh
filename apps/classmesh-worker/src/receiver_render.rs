@@ -1,7 +1,7 @@
 #![allow(unsafe_code)]
 
 use classmesh_codec_win::mf_decoder::DecodedGpuFrame;
-use classmesh_render_win::{FlipPresenter, PresentMetrics, PresentOutcome, ResizeOutcome};
+use classmesh_render_win::{FlipPresenter, PresentMetrics, ResizeOutcome};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -88,11 +88,15 @@ impl PresentationWindow {
 
     /// Presents one Media Foundation GPU frame and keeps it entirely on the D3D11 path.
     ///
+    /// While minimized the underlying presenter intentionally skips GPU presentation and returns
+    /// success so window lifecycle does not become media/decode failure. The presenter's own
+    /// metrics keep the skipped-frame count separate from successful swap-chain presents.
+    ///
     /// # Errors
     /// Returns an error when Media Foundation cannot expose the decoder surface as an
     /// `ID3D11Texture2D`, when the subresource index cannot be queried, or when D3D11/DXGI fails to
     /// present the frame.
-    pub fn present(&mut self, frame: &DecodedGpuFrame) -> windows::core::Result<PresentOutcome> {
+    pub fn present(&mut self, frame: &DecodedGpuFrame) -> windows::core::Result<()> {
         let mut texture: Option<ID3D11Texture2D> = None;
         unsafe {
             frame
@@ -106,7 +110,8 @@ impl PresentationWindow {
             )
         })?;
         let subresource_index = unsafe { frame.dxgi_buffer().GetSubresourceIndex()? };
-        self.presenter.present_nv12(&texture, subresource_index)
+        let _ = self.presenter.present_nv12(&texture, subresource_index)?;
+        Ok(())
     }
 
     /// Drains pending Win32 messages without blocking media receive/decode.
