@@ -332,7 +332,11 @@ impl MfAsyncH264Encoder {
             if self.drained {
                 break;
             }
-            wait_for_next_poll(deadline, self.wait.poll_interval, "Media Foundation drain timed out")?;
+            wait_for_next_poll(
+                deadline,
+                self.wait.poll_interval,
+                "Media Foundation drain timed out",
+            )?;
         }
         unsafe {
             self.transform
