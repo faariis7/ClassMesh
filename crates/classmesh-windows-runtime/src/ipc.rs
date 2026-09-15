@@ -232,8 +232,8 @@ impl IpcFrame {
                 let [raw] = self.payload.as_slice() else {
                     return Err(IpcMessageError::InvalidPayload);
                 };
-                let command = IpcControlCommand::from_byte(*raw)
-                    .ok_or(IpcMessageError::InvalidPayload)?;
+                let command =
+                    IpcControlCommand::from_byte(*raw).ok_or(IpcMessageError::InvalidPayload)?;
                 Ok(IpcMessage::Control(command))
             }
             _ => Err(IpcMessageError::UnknownMessageType),
