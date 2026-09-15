@@ -26,9 +26,9 @@ impl KeyframeRequestCoordinator {
     /// The first request is granted immediately. Subsequent requests inside the configured interval
     /// are coalesced. A request exactly at the boundary is granted.
     pub fn request(&mut self, now_us: u64) -> bool {
-        let allowed = self.last_granted_us.is_none_or(|last| {
-            now_us.saturating_sub(last) >= self.min_interval_us
-        });
+        let allowed = self
+            .last_granted_us
+            .is_none_or(|last| now_us.saturating_sub(last) >= self.min_interval_us);
         if allowed {
             self.last_granted_us = Some(now_us);
             self.granted_requests = self.granted_requests.saturating_add(1);
