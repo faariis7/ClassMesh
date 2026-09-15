@@ -71,7 +71,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             CaptureStep::Suspended(reason) => {
-                return Err(format!("DXGI capture suspended during media probe: {reason:?}").into());
+                return Err(
+                    format!("DXGI capture suspended during media probe: {reason:?}").into(),
+                );
             }
             CaptureStep::Failed(reason) => {
                 return Err(format!("DXGI capture failed during media probe: {reason:?}").into());
@@ -178,8 +180,8 @@ fn write_frames<W: std::io::Write>(
 ) -> std::io::Result<()> {
     for frame in frames {
         *total_frames = total_frames.saturating_add(1);
-        *total_bytes = total_bytes
-            .saturating_add(u64::try_from(frame.data.len()).unwrap_or(u64::MAX));
+        *total_bytes =
+            total_bytes.saturating_add(u64::try_from(frame.data.len()).unwrap_or(u64::MAX));
         if let Some(writer) = output.as_deref_mut() {
             writer.write_all(&frame.data)?;
         }
@@ -207,9 +209,7 @@ fn parse_output_path(args: &[String]) -> Result<Option<String>, Box<dyn std::err
     let Some(index) = args.iter().position(|arg| arg == "--output") else {
         return Ok(None);
     };
-    let path = args
-        .get(index + 1)
-        .ok_or("--output requires a file path")?;
+    let path = args.get(index + 1).ok_or("--output requires a file path")?;
     Ok(Some(path.clone()))
 }
 
