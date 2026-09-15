@@ -24,7 +24,7 @@ const WINDOW_TITLE: windows::core::PCWSTR = w!("ClassMesh Student Presentation")
 /// are passed directly from Media Foundation to D3D11 without CPU readback.
 pub struct PresentationWindow {
     hwnd: HWND,
-    presenter: FlipPresenter,
+    presenter: Option<FlipPresenter>,
     closed: bool,
     client_size: (u32, u32),
     device_lost: bool,
@@ -87,7 +87,7 @@ impl PresentationWindow {
 
         Ok(Self {
             hwnd,
-            presenter,
+            presenter: Some(presenter),
             closed: false,
             client_size: (width, height),
             device_lost: false,
@@ -96,15 +96,23 @@ impl PresentationWindow {
 
     /// Rebinds the existing HWND to a freshly-created D3D11 device after device loss.
     ///
-    /// The Win32 window stays alive, so recovery does not flash a replacement window or require a
-    /// teacher reconnect. If the HWND is currently minimized, the new presenter is immediately put
-    /// back into suspended state after construction.
+    /// Flip-model swap chains must not overlap on the same HWND. ClassMesh therefore releases the
+    /// old presenter and its swap chain *before* constructing the replacement. The HWND itself
+    /// remains alive, so recovery does not flash a replacement window or require a teacher
+    /// reconnect. If replacement construction fails, the window remains alive with no presenter and
+    /// the device-loss signal stays asserted so the caller can retry recovery.
+    ///
+    /// If the HWND is currently minimized, the replacement is immediately put back into suspended
+    /// state after construction.
     ///
     /// # Errors
     /// Returns a D3D11/DXGI error if the new flip-model presenter cannot be constructed.
     pub fn recover_device(&mut self, device: &ID3D11Device) -> windows::core::Result<()> {
         let (client_width, client_height) = self.client_size;
-        let fallback_size = self.presenter.output_size();
+        let fallback_size = self
+            .presenter
+            .as_ref()
+            .map_or((1280, 720), FlipPresenter::output_size);
         let initial_width = if client_width == 0 {
             fallback_size.0
         } else {
@@ -115,11 +123,16 @@ impl PresentationWindow {
         } else {
             client_height
         };
+
+        self.device_lost = true;
+        let stale_presenter = self.presenter.take();
+        drop(stale_presenter);
+
         let mut replacement = FlipPresenter::new(self.hwnd, device, initial_width, initial_height)?;
         if client_width == 0 || client_height == 0 {
             let _ = replacement.resize_output(0, 0)?;
         }
-        self.presenter = replacement;
+        self.presenter = Some(replacement);
         self.device_lost = false;
         Ok(())
     }
@@ -132,8 +145,9 @@ impl PresentationWindow {
     ///
     /// # Errors
     /// Returns an error when Media Foundation cannot expose the decoder surface as an
-    /// `ID3D11Texture2D`, when the subresource index cannot be queried, or when D3D11/DXGI fails to
-    /// present the frame.
+    /// `ID3D11Texture2D`, when the subresource index cannot be queried, when recovery has left the
+    /// window temporarily without GPU presentation resources, or when D3D11/DXGI fails to present
+    /// the frame.
     pub fn present(&mut self, frame: &DecodedGpuFrame) -> windows::core::Result<()> {
         let mut texture: Option<ID3D11Texture2D> = None;
         unsafe {
@@ -148,7 +162,14 @@ impl PresentationWindow {
             )
         })?;
         let subresource_index = unsafe { frame.dxgi_buffer().GetSubresourceIndex()? };
-        match self.presenter.present_nv12(&texture, subresource_index) {
+        let Some(presenter) = self.presenter.as_mut() else {
+            self.device_lost = true;
+            return Err(windows::core::Error::new(
+                windows::core::HRESULT(0x8000_4005_u32 as i32),
+                "presentation GPU resources are unavailable during recovery",
+            ));
+        };
+        match presenter.present_nv12(&texture, subresource_index) {
             Ok(_) => Ok(()),
             Err(error) => {
                 if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
@@ -176,22 +197,28 @@ impl PresentationWindow {
             if message.message == WM_SIZE && message.hwnd == self.hwnd {
                 let (width, height) = client_size_from_lparam(message.lParam);
                 self.client_size = (width, height);
-                match self.presenter.resize_output(width, height) {
-                    Ok(ResizeOutcome::Resized) => {
-                        eprintln!("student presentation resized to {width}x{height}");
-                    }
-                    Ok(ResizeOutcome::Suspended) => {
-                        eprintln!("student presentation suspended while the window is minimized");
-                    }
-                    Ok(ResizeOutcome::Unchanged) => {}
-                    Err(error) => {
-                        if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
-                            self.device_lost = true;
+                if let Some(presenter) = self.presenter.as_mut() {
+                    match presenter.resize_output(width, height) {
+                        Ok(ResizeOutcome::Resized) => {
+                            eprintln!("student presentation resized to {width}x{height}");
                         }
-                        eprintln!(
-                            "student presentation swap-chain resize failed at {width}x{height}: {error}"
-                        );
+                        Ok(ResizeOutcome::Suspended) => {
+                            eprintln!(
+                                "student presentation suspended while the window is minimized"
+                            );
+                        }
+                        Ok(ResizeOutcome::Unchanged) => {}
+                        Err(error) => {
+                            if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
+                                self.device_lost = true;
+                            }
+                            eprintln!(
+                                "student presentation swap-chain resize failed at {width}x{height}: {error}"
+                            );
+                        }
                     }
+                } else {
+                    self.device_lost = true;
                 }
             }
             unsafe {
@@ -208,8 +235,10 @@ impl PresentationWindow {
     }
 
     #[must_use]
-    pub const fn metrics(&self) -> PresentMetrics {
-        self.presenter.metrics()
+    pub fn metrics(&self) -> PresentMetrics {
+        self.presenter
+            .as_ref()
+            .map_or_else(PresentMetrics::default, FlipPresenter::metrics)
     }
 }
 
