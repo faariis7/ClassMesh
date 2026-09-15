@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ClassMesh Phase 4 Latency Source</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #050505;
+      color: #fff;
+    }
+
+    body {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+
+    header, footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.75rem 1rem;
+      background: #111;
+      font-size: clamp(0.85rem, 1.4vw, 1.1rem);
+    }
+
+    main {
+      position: relative;
+      display: grid;
+      place-items: center;
+      isolation: isolate;
+    }
+
+    #checker {
+      position: absolute;
+      inset: 0;
+      z-index: -2;
+      background-image:
+        linear-gradient(45deg, #202020 25%, transparent 25%),
+        linear-gradient(-45deg, #202020 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #202020 75%),
+        linear-gradient(-45deg, transparent 75%, #202020 75%);
+      background-size: 96px 96px;
+      background-position: 0 0, 0 48px, 48px -48px, -48px 0;
+    }
+
+    #sweep {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 10vw;
+      min-width: 80px;
+      background: #fff;
+      opacity: 0.9;
+      z-index: -1;
+      will-change: transform;
+    }
+
+    .readout {
+      width: min(94vw, 1500px);
+      text-align: center;
+      padding: 2rem;
+      background: rgba(0, 0, 0, 0.76);
+      border: 3px solid #fff;
+    }
+
+    #milliseconds {
+      font-family: Consolas, "Cascadia Mono", monospace;
+      font-variant-numeric: tabular-nums;
+      font-size: clamp(5rem, 17vw, 15rem);
+      font-weight: 800;
+      line-height: 0.95;
+      letter-spacing: -0.06em;
+    }
+
+    .unit {
+      margin-top: 0.4rem;
+      font-size: clamp(1.3rem, 3vw, 2.8rem);
+      font-weight: 700;
+      letter-spacing: 0.12em;
+    }
+
+    .subreadout {
+      display: flex;
+      justify-content: center;
+      gap: clamp(1.2rem, 5vw, 5rem);
+      margin-top: 1.5rem;
+      font-family: Consolas, "Cascadia Mono", monospace;
+      font-size: clamp(1rem, 2.5vw, 2rem);
+    }
+
+    button {
+      appearance: none;
+      border: 1px solid #777;
+      border-radius: 0.35rem;
+      padding: 0.45rem 0.8rem;
+      background: #222;
+      color: #fff;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    button:hover { background: #333; }
+
+    .status-running { font-weight: 700; }
+  </style>
+</head>
+<body>
+  <header>
+    <div><strong>ClassMesh Phase 4</strong> · visual glass-to-glass latency source</div>
+    <div>
+      <button id="reset" type="button">Reset timer</button>
+      <button id="fullscreen" type="button">Fullscreen</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="checker" aria-hidden="true"></div>
+    <div id="sweep" aria-hidden="true"></div>
+    <section class="readout" aria-live="off">
+      <div id="milliseconds">00000000</div>
+      <div class="unit">SOURCE ELAPSED MILLISECONDS</div>
+      <div class="subreadout">
+        <span>FRAME <span id="frame">000000</span></span>
+        <span>REFRESH <span id="hz">--</span> Hz</span>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span class="status-running">RUNNING</span>
+    <span>Camera-frame latency = Teacher value − Student value</span>
+    <span>Use the same captured camera frame for both displays</span>
+  </footer>
+
+  <script>
+    (() => {
+      const milliseconds = document.getElementById('milliseconds');
+      const frameReadout = document.getElementById('frame');
+      const hzReadout = document.getElementById('hz');
+      const sweep = document.getElementById('sweep');
+      const checker = document.getElementById('checker');
+      const reset = document.getElementById('reset');
+      const fullscreen = document.getElementById('fullscreen');
+
+      let origin = performance.now();
+      let frame = 0;
+      let hzWindowStart = origin;
+      let hzFrames = 0;
+
+      function resetTimer() {
+        origin = performance.now();
+        frame = 0;
+        hzWindowStart = origin;
+        hzFrames = 0;
+      }
+
+      function render(now) {
+        const elapsed = Math.max(0, Math.round(now - origin));
+        frame += 1;
+        hzFrames += 1;
+
+        milliseconds.textContent = String(elapsed).padStart(8, '0');
+        frameReadout.textContent = String(frame).padStart(6, '0');
+
+        const width = window.innerWidth;
+        const sweepWidth = Math.max(80, width * 0.10);
+        const travel = width + sweepWidth;
+        const x = ((elapsed / 4) % travel) - sweepWidth;
+        sweep.style.transform = `translateX(${x}px)`;
+
+        const checkerOffset = Math.floor(elapsed / 12) % 96;
+        checker.style.backgroundPosition = `${checkerOffset}px 0, ${checkerOffset}px 48px, ${checkerOffset + 48}px -48px, ${checkerOffset - 48}px 0`;
+
+        const hzElapsed = now - hzWindowStart;
+        if (hzElapsed >= 1000) {
+          const hz = Math.round((hzFrames * 1000) / hzElapsed);
+          hzReadout.textContent = String(hz);
+          hzWindowStart = now;
+          hzFrames = 0;
+        }
+
+        requestAnimationFrame(render);
+      }
+
+      reset.addEventListener('click', resetTimer);
+      fullscreen.addEventListener('click', async () => {
+        if (!document.fullscreenElement) {
+          await document.documentElement.requestFullscreen();
+        } else {
+          await document.exitFullscreen();
+        }
+      });
+
+      requestAnimationFrame(render);
+    })();
+  </script>
+</body>
+</html>
