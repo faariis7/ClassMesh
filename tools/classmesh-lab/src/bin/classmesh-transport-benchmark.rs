@@ -203,10 +203,10 @@ async fn run_udp_server(listen: SocketAddr, seconds: u64) -> AnyResult<()> {
     while Instant::now() < deadline {
         match timeout(Duration::from_millis(100), socket.recv_from(&mut buffer)).await {
             Ok(Ok((len, peer))) => {
-                process_server_datagram(&buffer[..len], &mut stats, |ack| async move {
-                    socket.send_to(&ack, peer).await.map(|_| ())
-                })
-                .await;
+                if let Some(ack) = prepare_server_ack(&buffer[..len], &mut stats) {
+                    let result = socket.send_to(&ack, peer).await.map(|_| ());
+                    record_server_ack_result(result, &mut stats);
+                }
             }
             Ok(Err(error)) => return Err(format!("UDP receive failed: {error}").into()),
             Err(_) => {}
@@ -251,12 +251,12 @@ async fn run_quic_server(listen: SocketAddr, seconds: u64, cert_path: &str) -> A
     while Instant::now() < deadline {
         match timeout(Duration::from_millis(100), connection.read_datagram()).await {
             Ok(Ok(data)) => {
-                process_server_datagram(&data, &mut stats, |ack| async {
-                    connection
+                if let Some(ack) = prepare_server_ack(&data, &mut stats) {
+                    let result = connection
                         .send_datagram(Bytes::from(ack))
-                        .map_err(std::io::Error::other)
-                })
-                .await;
+                        .map_err(std::io::Error::other);
+                    record_server_ack_result(result, &mut stats);
+                }
             }
             Ok(Err(error)) => {
                 eprintln!("QUIC connection ended while receiving benchmark datagrams: {error}");
@@ -287,22 +287,23 @@ async fn run_quic_server(listen: SocketAddr, seconds: u64, cert_path: &str) -> A
     Ok(())
 }
 
-async fn process_server_datagram<F, Fut, E>(data: &[u8], stats: &mut ServerStats, send_ack: F)
-where
-    F: FnOnce(Vec<u8>) -> Fut,
-    Fut: std::future::Future<Output = Result<(), E>>,
-    E: std::fmt::Display,
-{
+fn prepare_server_ack(data: &[u8], stats: &mut ServerStats) -> Option<Vec<u8>> {
     stats.received = stats.received.saturating_add(1);
     stats.received_bytes = stats
         .received_bytes
         .saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
     let Some((sequence, sent_us)) = parse_packet(data, DATA_MAGIC) else {
         stats.invalid = stats.invalid.saturating_add(1);
-        return;
+        return None;
     };
-    let ack = build_packet(ACK_MAGIC, sequence, sent_us, HEADER_LEN);
-    match send_ack(ack).await {
+    Some(build_packet(ACK_MAGIC, sequence, sent_us, HEADER_LEN))
+}
+
+fn record_server_ack_result<E: std::fmt::Display>(
+    result: Result<(), E>,
+    stats: &mut ServerStats,
+) {
+    match result {
         Ok(()) => stats.acknowledgements = stats.acknowledgements.saturating_add(1),
         Err(error) => {
             stats.acknowledgement_errors = stats.acknowledgement_errors.saturating_add(1);
