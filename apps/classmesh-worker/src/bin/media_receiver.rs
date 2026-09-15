@@ -453,7 +453,8 @@ impl DecodeProbe {
             None => (true, false),
         };
 
-        if open && device_lost
+        if open
+            && device_lost
             && let Err(error) = self.rebuild_gpu_pipeline()
         {
             eprintln!("GPU pipeline rebuild failed after window resize device loss: {error}");
