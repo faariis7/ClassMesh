@@ -3,9 +3,15 @@ mod windows_service_app {
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::sync::mpsc;
+    use std::thread;
     use std::time::{Duration, Instant};
 
-    use classmesh_win32::{SessionProcess, launch_worker_in_session};
+    use classmesh_win32::{
+        NamedPipeServer, SessionProcess, launch_worker_in_session, worker_pipe_name,
+    };
+    use classmesh_windows_runtime::ipc::{
+        IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage,
+    };
     use classmesh_windows_runtime::worker::{
         WorkerProcess, WorkerRestartDecision, WorkerRestartPolicy, WorkerWatchdog,
     };
@@ -42,8 +48,10 @@ mod windows_service_app {
     struct WorkerManager {
         executable: Option<PathBuf>,
         process: Option<SessionProcess>,
+        pipe: Option<NamedPipeServer>,
         watchdog: WorkerWatchdog,
         pending_restart: Option<(SessionId, Instant)>,
+        generation: u64,
         clock: Instant,
     }
 
@@ -58,8 +66,10 @@ mod windows_service_app {
             Self {
                 executable,
                 process: None,
+                pipe: None,
                 watchdog: WorkerWatchdog::new(WorkerRestartPolicy::default()),
                 pending_restart: None,
+                generation: 0,
                 clock: Instant::now(),
             }
         }
@@ -72,18 +82,54 @@ mod windows_service_app {
                 return self.apply_restart_decision(decision);
             };
 
-            match launch_worker_in_session(session.0, executable, &[]) {
-                Ok(process) => {
+            let pipe_name = worker_pipe_name(std::process::id(), session.0, self.generation);
+            self.generation = self.generation.wrapping_add(1);
+            let mut pipe = match NamedPipeServer::create(&pipe_name) {
+                Ok(pipe) => pipe,
+                Err(error) => {
                     eprintln!(
-                        "ClassMesh Worker {} launched in Windows session {}",
-                        process.process_id(),
+                        "failed to create Worker IPC pipe for session {}: {error}",
+                        session.0
+                    );
+                    let decision = self.watchdog.launch_failed(session);
+                    return self.apply_restart_decision(decision);
+                }
+            };
+
+            let extra_args = [OsString::from("--pipe"), OsString::from(&pipe_name)];
+            match launch_worker_in_session(session.0, executable, &extra_args) {
+                Ok(mut process) => {
+                    let process_id = process.process_id();
+                    if let Err(error) = pipe.accept_expected(process_id, session.0) {
+                        eprintln!(
+                            "Worker IPC peer validation failed for pid {process_id}, session {}: {error}",
+                            session.0
+                        );
+                        let _ = process.terminate(1);
+                        let decision = self.watchdog.launch_failed(session);
+                        return self.apply_restart_decision(decision);
+                    }
+
+                    if let Err(error) = authenticate_worker(&pipe, process_id, session) {
+                        eprintln!(
+                            "Worker IPC handshake failed for pid {process_id}, session {}: {error}",
+                            session.0
+                        );
+                        let _ = process.terminate(1);
+                        let decision = self.watchdog.launch_failed(session);
+                        return self.apply_restart_decision(decision);
+                    }
+
+                    eprintln!(
+                        "ClassMesh Worker {process_id} launched and IPC-bound in Windows session {}",
                         process.session_id()
                     );
                     self.watchdog.launched(WorkerProcess {
                         session,
-                        process_id: process.process_id(),
+                        process_id,
                         launched_at_us: now_us,
                     });
+                    self.pipe = Some(pipe);
                     self.process = Some(process);
                     self.pending_restart = None;
                     WorkerManagerEvent::Running(session)
@@ -105,19 +151,43 @@ mod windows_service_app {
             }
             self.watchdog.stopped_intentionally(session);
 
-            let Some(process) = self.process.as_mut() else {
-                return;
-            };
-            if process.session_id() != session.0 {
+            if !self
+                .process
+                .as_ref()
+                .is_some_and(|process| process.session_id() == session.0)
+            {
                 return;
             }
-            if let Err(error) = process.terminate(0) {
-                eprintln!(
-                    "failed to terminate Worker {} for session {}: {error}",
-                    process.process_id(),
-                    session.0
-                );
+
+            if let Some(pipe) = self.pipe.as_ref()
+                && let Err(error) = send_control(pipe, IpcControlCommand::Shutdown)
+            {
+                eprintln!("failed to request graceful Worker shutdown: {error}");
             }
+
+            if let Some(process) = self.process.as_mut() {
+                for _ in 0..25 {
+                    match process.is_running() {
+                        Ok(false) => break,
+                        Ok(true) => thread::sleep(Duration::from_millis(10)),
+                        Err(error) => {
+                            eprintln!("Worker shutdown liveness probe failed: {error}");
+                            break;
+                        }
+                    }
+                }
+                if process.is_running().unwrap_or(true)
+                    && let Err(error) = process.terminate(0)
+                {
+                    eprintln!(
+                        "failed to terminate Worker {} for session {}: {error}",
+                        process.process_id(),
+                        session.0
+                    );
+                }
+            }
+
+            self.pipe = None;
             self.process = None;
         }
 
@@ -129,6 +199,28 @@ mod windows_service_app {
                 .map(|process| SessionId(process.session_id()));
             if let Some(session) = session {
                 self.stop(session);
+            }
+        }
+
+        fn send_control(&self, session: SessionId, command: IpcControlCommand) {
+            if !self
+                .process
+                .as_ref()
+                .is_some_and(|process| process.session_id() == session.0)
+            {
+                eprintln!(
+                    "ignoring IPC command for session {}; no matching Worker is running",
+                    session.0
+                );
+                return;
+            }
+
+            let Some(pipe) = self.pipe.as_ref() else {
+                eprintln!("Worker IPC pipe is unavailable for session {}", session.0);
+                return;
+            };
+            if let Err(error) = send_control(pipe, command) {
+                eprintln!("failed to send Worker IPC command: {error}");
             }
         }
 
@@ -150,6 +242,7 @@ mod windows_service_app {
                     "ClassMesh Worker {process_id} exited from session {}",
                     session.0
                 );
+                self.pipe = None;
                 self.process = None;
                 let decision =
                     self.watchdog
@@ -200,6 +293,61 @@ mod windows_service_app {
         fn now_us(&self) -> u64 {
             u64::try_from(self.clock.elapsed().as_micros()).unwrap_or(u64::MAX)
         }
+    }
+
+    fn authenticate_worker(
+        pipe: &NamedPipeServer,
+        expected_process_id: u32,
+        expected_session: SessionId,
+    ) -> Result<(), String> {
+        let hello = read_one_frame(pipe)?;
+        match hello
+            .message()
+            .map_err(|error| format!("invalid Worker hello: {error:?}"))?
+        {
+            IpcMessage::WorkerHello {
+                process_id,
+                session_id,
+            } if process_id == expected_process_id && session_id == expected_session.0 => {}
+            message => {
+                return Err(format!(
+                    "unexpected Worker hello identity/message: {message:?}"
+                ));
+            }
+        }
+
+        let ready = IpcFrame::service_ready()
+            .encode()
+            .map_err(|error| format!("failed to encode ServiceReady: {error:?}"))?;
+        pipe.write_all(&ready)
+            .map_err(|error| format!("failed to send ServiceReady: {error}"))
+    }
+
+    fn read_one_frame(pipe: &NamedPipeServer) -> Result<IpcFrame, String> {
+        let mut decoder = IpcFrameDecoder::default();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = pipe
+                .read(&mut buffer)
+                .map_err(|error| format!("Worker IPC read failed: {error}"))?;
+            if read == 0 {
+                return Err("Worker IPC pipe closed during handshake".to_owned());
+            }
+            let mut frames = decoder
+                .push_bytes(&buffer[..read])
+                .map_err(|error| format!("Worker IPC frame error: {error:?}"))?;
+            if !frames.is_empty() {
+                return Ok(frames.remove(0));
+            }
+        }
+    }
+
+    fn send_control(pipe: &NamedPipeServer, command: IpcControlCommand) -> Result<(), String> {
+        let bytes = IpcFrame::control(command)
+            .encode()
+            .map_err(|error| format!("failed to encode Worker control frame: {error:?}"))?;
+        pipe.write_all(&bytes)
+            .map_err(|error| format!("Worker IPC write failed: {error}"))
     }
 
     pub fn run() -> windows_service::Result<()> {
@@ -318,11 +466,10 @@ mod windows_service_app {
                 supervisor.mark_worker_stopped(session);
             }
             SupervisorAction::SuspendMedia(session) => {
-                // Media suspension will move to authenticated IPC instead of killing the Worker.
-                eprintln!("media suspend requested for Windows session {}", session.0);
+                workers.send_control(session, IpcControlCommand::SuspendMedia);
             }
             SupervisorAction::ResumeMedia(session) => {
-                eprintln!("media resume requested for Windows session {}", session.0);
+                workers.send_control(session, IpcControlCommand::ResumeMedia);
             }
             SupervisorAction::ReplaceWorker {
                 old_session,
