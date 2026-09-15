@@ -2,6 +2,7 @@
 
 pub mod adaptation;
 pub mod cohort;
+pub mod keyframe;
 pub mod metrics;
 pub mod presence;
 pub mod queue;
