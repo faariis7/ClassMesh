@@ -98,8 +98,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if Instant::now() >= next_report {
             let stats = receiver.stats();
+            let gpu_recoveries = decoder.as_ref().map_or(0, DecodeProbe::gpu_recoveries);
             eprintln!(
-                "receiver stats: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={}",
+                "receiver stats: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={}",
                 stats.datagrams_received,
                 counters.frames,
                 counters.bytes,
@@ -113,7 +114,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 counters.presented_frames,
                 counters.present_errors,
                 counters.decode_errors,
-                counters.decode_waiting_frames
+                counters.decode_waiting_frames,
+                gpu_recoveries
             );
             next_report = Instant::now()
                 .checked_add(Duration::from_secs(1))
@@ -135,8 +137,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let stats = receiver.stats();
+    let gpu_recoveries = decoder.as_ref().map_or(0, DecodeProbe::gpu_recoveries);
     eprintln!(
-        "ClassMesh media receiver complete: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} elapsed={:.2}s",
+        "ClassMesh media receiver complete: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={} elapsed={:.2}s",
         stats.datagrams_received,
         counters.frames,
         counters.bytes,
@@ -151,6 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         counters.present_errors,
         counters.decode_errors,
         counters.decode_waiting_frames,
+        gpu_recoveries,
         started.elapsed().as_secs_f32()
     );
     Ok(())
@@ -249,20 +253,48 @@ enum DecodeStep {
 struct DecodeProbe {
     decoder: classmesh_codec_win::mf_decoder::MfH264Decoder,
     presentation: Option<classmesh_worker::receiver_render::PresentationWindow>,
-    _device: windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    device: windows::Win32::Graphics::Direct3D11::ID3D11Device,
     _platform: classmesh_codec_win::mf::MfPlatform,
+    render_enabled: bool,
     waiting_for_keyframe: bool,
+    gpu_recoveries: u64,
 }
 
 #[cfg(windows)]
 impl DecodeProbe {
     fn new(render_enabled: bool) -> Result<Self, Box<dyn std::error::Error>> {
-        use classmesh_codec_win::d3d11::create_default_video_device;
         use classmesh_codec_win::mf::MfPlatform;
-        use classmesh_codec_win::mf_decoder::{MfH264Decoder, enumerate_h264_decoders};
         use classmesh_worker::receiver_render::PresentationWindow;
 
         let platform = MfPlatform::startup()?;
+        let (device, decoder) = Self::create_decoder_device()?;
+        let presentation = if render_enabled {
+            Some(PresentationWindow::new(&device, 1280, 720)?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            decoder,
+            presentation,
+            device,
+            _platform: platform,
+            render_enabled,
+            waiting_for_keyframe: true,
+            gpu_recoveries: 0,
+        })
+    }
+
+    fn create_decoder_device() -> Result<
+        (
+            windows::Win32::Graphics::Direct3D11::ID3D11Device,
+            classmesh_codec_win::mf_decoder::MfH264Decoder,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        use classmesh_codec_win::d3d11::create_default_video_device;
+        use classmesh_codec_win::mf_decoder::{MfH264Decoder, enumerate_h264_decoders};
+
         let device = create_default_video_device()?;
         let candidates = enumerate_h264_decoders()?;
         if candidates.is_empty() {
@@ -278,22 +310,9 @@ impl DecodeProbe {
                         candidate.name(),
                         candidate.clsid()
                     );
-                    let presentation = if render_enabled {
-                        Some(PresentationWindow::new(&device, 1280, 720)?)
-                    } else {
-                        None
-                    };
-                    return Ok(Self {
-                        decoder,
-                        presentation,
-                        _device: device,
-                        _platform: platform,
-                        waiting_for_keyframe: true,
-                    });
+                    return Ok((device, decoder));
                 }
-                Err(error) => {
-                    failures.push(format!("{}: {error}", candidate.name()));
-                }
+                Err(error) => failures.push(format!("{}: {error}", candidate.name())),
             }
         }
 
@@ -304,33 +323,96 @@ impl DecodeProbe {
         .into())
     }
 
+    fn rebuild_gpu_pipeline(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        use classmesh_worker::receiver_render::PresentationWindow;
+
+        eprintln!("rebuilding student D3D11 decoder/presenter pipeline after device loss");
+        let (new_device, new_decoder) = Self::create_decoder_device()?;
+
+        if self.render_enabled {
+            if let Some(presentation) = self.presentation.as_mut() {
+                presentation.recover_device(&new_device)?;
+            } else {
+                self.presentation = Some(PresentationWindow::new(&new_device, 1280, 720)?);
+            }
+        }
+
+        self.decoder = new_decoder;
+        self.device = new_device;
+        self.waiting_for_keyframe = true;
+        self.gpu_recoveries = self.gpu_recoveries.saturating_add(1);
+        eprintln!(
+            "student GPU media pipeline rebuilt; waiting for keyframe (recovery #{})",
+            self.gpu_recoveries
+        );
+        Ok(())
+    }
+
     fn submit(&mut self, frame: &AssembledFrame) -> Result<DecodeStep, Box<dyn std::error::Error>> {
+        use classmesh_render_win::{DxgiFailureClass, classify_dxgi_error};
+
         if self.waiting_for_keyframe && !frame.keyframe {
             return Ok(DecodeStep::WaitingForKeyframe);
         }
-        if frame.keyframe {
+
+        let mut batch = self.drain_decoded()?;
+        if self.waiting_for_keyframe {
+            if !frame.keyframe {
+                return Ok(DecodeStep::Decoded(batch));
+            }
             self.waiting_for_keyframe = false;
         }
 
-        let mut batch = self.drain_decoded()?;
-        self.decoder
-            .submit_access_unit(&frame.data, frame.timestamp_us)?;
+        match self
+            .decoder
+            .submit_access_unit(&frame.data, frame.timestamp_us)
+        {
+            Ok(()) => {}
+            Err(error) if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost => {
+                self.rebuild_gpu_pipeline()?;
+                if !frame.keyframe {
+                    return Ok(DecodeStep::Decoded(batch));
+                }
+                self.waiting_for_keyframe = false;
+                self.decoder
+                    .submit_access_unit(&frame.data, frame.timestamp_us)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+
         batch.add(self.drain_decoded()?);
         Ok(DecodeStep::Decoded(batch))
     }
 
     fn drain_decoded(&mut self) -> Result<DecodeBatch, Box<dyn std::error::Error>> {
-        let frames = self.decoder.poll_decoded()?;
+        use classmesh_render_win::{DxgiFailureClass, classify_dxgi_error};
+
+        let frames = match self.decoder.poll_decoded() {
+            Ok(frames) => frames,
+            Err(error) if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost => {
+                self.rebuild_gpu_pipeline()?;
+                return Ok(DecodeBatch::default());
+            }
+            Err(error) => return Err(error.into()),
+        };
         let mut batch = DecodeBatch {
             decoded: frames.len(),
             ..DecodeBatch::default()
         };
+        let mut device_lost = false;
         for frame in &frames {
             if let Some(presentation) = self.presentation.as_mut() {
                 match presentation.present(frame) {
                     Ok(()) => batch.presented = batch.presented.saturating_add(1),
                     Err(error) => {
                         batch.present_errors = batch.present_errors.saturating_add(1);
+                        if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
+                            device_lost = true;
+                            eprintln!(
+                                "D3D11 presentation reported device loss; rebuilding shared GPU media pipeline"
+                            );
+                            break;
+                        }
                         eprintln!(
                             "D3D11 presentation failed while decode remains healthy: {error}"
                         );
@@ -338,26 +420,55 @@ impl DecodeProbe {
                 }
             }
         }
+
+        if device_lost {
+            drop(frames);
+            self.rebuild_gpu_pipeline()?;
+        }
         Ok(batch)
     }
 
     fn recover_after_loss(&mut self) {
+        use classmesh_render_win::{DxgiFailureClass, classify_dxgi_error};
+
         if let Err(error) = self.decoder.flush() {
-            eprintln!("hardware decoder flush failed during loss recovery: {error}");
+            if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
+                if let Err(recovery_error) = self.rebuild_gpu_pipeline() {
+                    eprintln!("GPU pipeline rebuild failed during loss recovery: {recovery_error}");
+                }
+            } else {
+                eprintln!("hardware decoder flush failed during loss recovery: {error}");
+            }
         }
         self.waiting_for_keyframe = true;
     }
 
     fn pump_window(&mut self) -> bool {
-        self.presentation
-            .as_mut()
-            .is_none_or(classmesh_worker::receiver_render::PresentationWindow::pump_messages)
+        let (open, device_lost) = match self.presentation.as_mut() {
+            Some(presentation) => {
+                let open = presentation.pump_messages();
+                let device_lost = presentation.take_device_lost();
+                (open, device_lost)
+            }
+            None => (true, false),
+        };
+
+        if open && device_lost
+            && let Err(error) = self.rebuild_gpu_pipeline()
+        {
+            eprintln!("GPU pipeline rebuild failed after window resize device loss: {error}");
+        }
+        open
     }
 
     fn finish(&mut self) -> Result<DecodeBatch, Box<dyn std::error::Error>> {
         let decoded = self.drain_decoded()?;
         self.decoder.end_streaming()?;
         Ok(decoded)
+    }
+
+    const fn gpu_recoveries(&self) -> u64 {
+        self.gpu_recoveries
     }
 }
 
@@ -394,6 +505,10 @@ impl DecodeProbe {
 
     fn finish(&mut self) -> Result<DecodeBatch, Box<dyn std::error::Error>> {
         Ok(DecodeBatch::default())
+    }
+
+    const fn gpu_recoveries(&self) -> u64 {
+        0
     }
 }
 
