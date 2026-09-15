@@ -69,7 +69,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Ok(());
                 }
                 unexpected => {
-                    return Err(format!("unexpected IPC message after handshake: {unexpected:?}").into());
+                    return Err(
+                        format!("unexpected IPC message after handshake: {unexpected:?}").into(),
+                    );
                 }
             }
         }
@@ -99,16 +101,12 @@ fn read_one_frame(
 }
 
 #[cfg(windows)]
-fn ipc_frame_error(
-    error: classmesh_windows_runtime::ipc::IpcFrameError,
-) -> std::io::Error {
+fn ipc_frame_error(error: classmesh_windows_runtime::ipc::IpcFrameError) -> std::io::Error {
     std::io::Error::other(format!("IPC frame error: {error:?}"))
 }
 
 #[cfg(windows)]
-fn ipc_message_error(
-    error: classmesh_windows_runtime::ipc::IpcMessageError,
-) -> std::io::Error {
+fn ipc_message_error(error: classmesh_windows_runtime::ipc::IpcMessageError) -> std::io::Error {
     std::io::Error::other(format!("IPC message error: {error:?}"))
 }
 
@@ -130,9 +128,7 @@ fn parse_pipe_name(args: &[String]) -> Result<String, Box<dyn std::error::Error>
         .iter()
         .position(|arg| arg == "--pipe")
         .ok_or("missing required --pipe argument")?;
-    let value = args
-        .get(index + 1)
-        .ok_or("--pipe requires a pipe name")?;
+    let value = args.get(index + 1).ok_or("--pipe requires a pipe name")?;
     Ok(value.clone())
 }
 
