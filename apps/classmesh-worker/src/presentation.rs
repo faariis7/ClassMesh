@@ -3,9 +3,7 @@ use std::fmt;
 
 use classmesh_capture_win::{CapturedFrameMeta, DxgiFrame};
 use classmesh_codec_win::gpu::{GpuBgraToNv12Converter, GpuNv12Config};
-use classmesh_codec_win::mf::{
-    MfH264EncoderConfig, MfPlatform, enumerate_h264_hardware_encoders,
-};
+use classmesh_codec_win::mf::{MfH264EncoderConfig, MfPlatform, enumerate_h264_hardware_encoders};
 use classmesh_codec_win::mf_async::{MfAsyncH264Encoder, MfEncodedOutput, MfSubmitError};
 use classmesh_codec_win::surface_pool::SurfacePool;
 use classmesh_video::distributor::SharedEncodedFrame;
@@ -50,7 +48,9 @@ impl fmt::Display for PresentationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Windows(error) => write!(f, "Windows media error: {error}"),
-            Self::NoHardwareEncoder => write!(f, "no hardware H.264 Media Foundation encoder found"),
+            Self::NoHardwareEncoder => {
+                write!(f, "no hardware H.264 Media Foundation encoder found")
+            }
             Self::SurfacePoolInvariant => write!(f, "bounded NV12 surface pool invariant failed"),
         }
     }
@@ -103,12 +103,8 @@ impl PresentationPipeline {
         let mut source_desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { frame.texture().GetDesc(&mut source_desc) };
 
-        let (target_width, target_height) = bounded_even_size(
-            source_desc.Width,
-            source_desc.Height,
-            MAX_WIDTH,
-            MAX_HEIGHT,
-        );
+        let (target_width, target_height) =
+            bounded_even_size(source_desc.Width, source_desc.Height, MAX_WIDTH, MAX_HEIGHT);
         let profile = PresentationProfile {
             source_width: source_desc.Width,
             source_height: source_desc.Height,
@@ -245,10 +241,10 @@ impl PresentationPipeline {
     }
 
     fn is_due(&mut self, timestamp_us: u64) -> bool {
-        if let Some(next_due) = self.next_submit_timestamp_us
-            && timestamp_us < next_due
-        {
-            return false;
+        if let Some(next_due) = self.next_submit_timestamp_us {
+            if timestamp_us < next_due {
+                return false;
+            }
         }
         self.next_submit_timestamp_us = Some(timestamp_us.saturating_add(self.frame_interval_us));
         true
@@ -306,15 +302,11 @@ fn bounded_even_size(width: u32, height: u32, max_width: u32, max_height: u32) -
 
     let (scaled_width, scaled_height) = if width <= max_width && height <= max_height {
         (width, height)
-    } else if u64::from(max_width) * u64::from(height)
-        <= u64::from(max_height) * u64::from(width)
-    {
-        let scaled_height =
-            (u64::from(height) * u64::from(max_width) / u64::from(width)) as u32;
+    } else if u64::from(max_width) * u64::from(height) <= u64::from(max_height) * u64::from(width) {
+        let scaled_height = (u64::from(height) * u64::from(max_width) / u64::from(width)) as u32;
         (max_width, scaled_height)
     } else {
-        let scaled_width =
-            (u64::from(width) * u64::from(max_height) / u64::from(height)) as u32;
+        let scaled_width = (u64::from(width) * u64::from(max_height) / u64::from(height)) as u32;
         (scaled_width, max_height)
     };
 
