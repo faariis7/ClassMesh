@@ -95,10 +95,9 @@ impl PresentationWindow {
     pub fn present(&mut self, frame: &DecodedGpuFrame) -> windows::core::Result<()> {
         let mut texture: Option<ID3D11Texture2D> = None;
         unsafe {
-            frame.dxgi_buffer().GetResource(
-                &ID3D11Texture2D::IID,
-                &mut texture as *mut _ as *mut _,
-            )?;
+            frame
+                .dxgi_buffer()
+                .GetResource(&ID3D11Texture2D::IID, &mut texture as *mut _ as *mut _)?;
         }
         let texture = texture.ok_or_else(|| {
             windows::core::Error::new(
