@@ -50,7 +50,9 @@ pub enum ImpairmentConfigError {
 impl fmt::Display for ImpairmentConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::LossOutOfRange => formatter.write_str("loss percentage must be between 0% and 100%"),
+            Self::LossOutOfRange => {
+                formatter.write_str("loss percentage must be between 0% and 100%")
+            }
             Self::ReorderOutOfRange => {
                 formatter.write_str("reorder percentage must be between 0% and 100%")
             }
