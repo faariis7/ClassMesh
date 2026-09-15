@@ -58,6 +58,9 @@ jobs:
       - name: Build media diagnostics
         run: cargo build -p classmesh-worker --bin classmesh-media-probe --bin classmesh-media-receiver --bin classmesh-media-recovery-probe --release
 
+      - name: Build network impairment proxy
+        run: cargo build -p classmesh-lab --bin classmesh-network-impairment-proxy --release
+
       - name: Upload media probe
         uses: actions/upload-artifact@v4
         with:
@@ -77,4 +80,11 @@ jobs:
         with:
           name: classmesh-media-recovery-probe-windows-x64
           path: target/release/classmesh-media-recovery-probe.exe
+          if-no-files-found: error
+
+      - name: Upload network impairment proxy
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-network-impairment-proxy-windows-x64
+          path: target/release/classmesh-network-impairment-proxy.exe
           if-no-files-found: error
