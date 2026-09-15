@@ -2,3 +2,5 @@
 
 #[cfg(windows)]
 pub mod presentation;
+#[cfg(windows)]
+pub mod receiver_render;
