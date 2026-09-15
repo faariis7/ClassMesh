@@ -2,19 +2,11 @@ use classmesh_video::EncoderClass;
 
 use crate::{EncoderBenchmarkResult, EncoderCandidate};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EncoderSelectionPolicy {
     /// Production presentation should normally require a measured candidate. Hardware qualification
     /// tools may temporarily allow an unmeasured hardware MFT so it can be benchmarked.
     pub allow_unmeasured_hardware: bool,
-}
-
-impl Default for EncoderSelectionPolicy {
-    fn default() -> Self {
-        Self {
-            allow_unmeasured_hardware: false,
-        }
-    }
 }
 
 impl EncoderSelectionPolicy {
