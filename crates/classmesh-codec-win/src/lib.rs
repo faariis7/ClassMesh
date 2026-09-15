@@ -6,6 +6,7 @@ use classmesh_video::{Codec, EncoderClass, EncoderProbeResult};
 pub mod gpu;
 #[cfg(windows)]
 pub mod mf;
+pub mod surface_pool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncoderVendor {
