@@ -6,11 +6,11 @@ use std::ptr::{null_mut, read};
 
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFDXGIDeviceManager, IMFSample, IMFTransform, MF_TRANSFORM_ASYNC,
-    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_FRIENDLY_NAME_Attribute, MFT_REGISTER_TYPE_INFO, MFT_TRANSFORM_CLSID_Attribute,
+    IMFActivate, IMFDXGIDeviceManager, IMFSample, IMFTransform, MF_TRANSFORM_ASYNC, MF_VERSION,
     MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateSample, MFMediaType_Video,
-    MFSTARTUP_FULL, MFShutdown, MFStartup, MFVideoFormat_H264, MF_VERSION, MFTEnumEx,
+    MFSTARTUP_FULL, MFShutdown, MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
+    MFT_ENUM_FLAG_SORTANDFILTER, MFT_FRIENDLY_NAME_Attribute, MFT_REGISTER_TYPE_INFO,
+    MFT_TRANSFORM_CLSID_Attribute, MFTEnumEx, MFVideoFormat_H264,
 };
 use windows::Win32::System::Com::{
     COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -276,22 +276,13 @@ mod tests {
             vendor_from_name("Intel H.264 Encoder MFT"),
             EncoderVendor::Intel
         );
-        assert_eq!(
-            vendor_from_name("NVIDIA NVENC H264"),
-            EncoderVendor::Nvidia
-        );
-        assert_eq!(
-            vendor_from_name("AMD Video Encoder"),
-            EncoderVendor::Amd
-        );
+        assert_eq!(vendor_from_name("NVIDIA NVENC H264"), EncoderVendor::Nvidia);
+        assert_eq!(vendor_from_name("AMD Video Encoder"), EncoderVendor::Amd);
         assert_eq!(
             vendor_from_name("Microsoft H264 Video Encoder MFT"),
             EncoderVendor::Microsoft
         );
-        assert_eq!(
-            vendor_from_name("Vendor X Encoder"),
-            EncoderVendor::Other
-        );
+        assert_eq!(vendor_from_name("Vendor X Encoder"), EncoderVendor::Other);
     }
 
     #[test]
