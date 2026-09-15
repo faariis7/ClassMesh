@@ -78,7 +78,7 @@ pub fn apply_sender_feedback(
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
     use classmesh_video::distributor::SharedEncodedFrame;
     use classmesh_video::{Codec, EncodedFrameMeta};
@@ -126,7 +126,8 @@ mod tests {
 
     #[test]
     fn nack_retransmits_from_live_cache_and_keyframe_is_surfaced() {
-        let destination = loopback_any();
+        let sink = UdpSocket::bind(loopback_any()).expect("feedback test sink binds");
+        let destination = sink.local_addr().expect("feedback test sink address");
         let mut sender = UdpFrameSender::bind(
             loopback_any(),
             UdpSenderConfig::presentation(3, destination),
