@@ -11,7 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WM_DESTROY, WM_QUIT, WNDCLASSW,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
-use windows::core::w;
+use windows::core::{Interface, w};
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("ClassMeshMediaReceiverWindow");
 const WINDOW_TITLE: windows::core::PCWSTR = w!("ClassMesh Student Presentation");
@@ -93,7 +93,19 @@ impl PresentationWindow {
     /// `ID3D11Texture2D`, when the subresource index cannot be queried, or when D3D11/DXGI fails to
     /// present the frame.
     pub fn present(&mut self, frame: &DecodedGpuFrame) -> windows::core::Result<()> {
-        let texture: ID3D11Texture2D = unsafe { frame.dxgi_buffer().GetResource()? };
+        let mut texture: Option<ID3D11Texture2D> = None;
+        unsafe {
+            frame.dxgi_buffer().GetResource(
+                &ID3D11Texture2D::IID,
+                &mut texture as *mut _ as *mut _,
+            )?;
+        }
+        let texture = texture.ok_or_else(|| {
+            windows::core::Error::new(
+                windows::core::HRESULT(0x8000_4005_u32 as i32),
+                "Media Foundation returned a null D3D11 decode surface",
+            )
+        })?;
         let subresource_index = unsafe { frame.dxgi_buffer().GetSubresourceIndex()? };
         self.presenter.present_nv12(&texture, subresource_index)
     }
