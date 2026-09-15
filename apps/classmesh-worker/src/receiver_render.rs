@@ -1,7 +1,9 @@
 #![allow(unsafe_code)]
 
 use classmesh_codec_win::mf_decoder::DecodedGpuFrame;
-use classmesh_render_win::{FlipPresenter, PresentMetrics, ResizeOutcome};
+use classmesh_render_win::{
+    DxgiFailureClass, FlipPresenter, PresentMetrics, ResizeOutcome, classify_dxgi_error,
+};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -24,6 +26,8 @@ pub struct PresentationWindow {
     hwnd: HWND,
     presenter: FlipPresenter,
     closed: bool,
+    client_size: (u32, u32),
+    device_lost: bool,
 }
 
 impl std::fmt::Debug for PresentationWindow {
@@ -32,6 +36,8 @@ impl std::fmt::Debug for PresentationWindow {
             .debug_struct("PresentationWindow")
             .field("hwnd", &self.hwnd.0)
             .field("closed", &self.closed)
+            .field("client_size", &self.client_size)
+            .field("device_lost", &self.device_lost)
             .field("presenter", &self.presenter)
             .finish()
     }
@@ -83,7 +89,39 @@ impl PresentationWindow {
             hwnd,
             presenter,
             closed: false,
+            client_size: (width, height),
+            device_lost: false,
         })
+    }
+
+    /// Rebinds the existing HWND to a freshly-created D3D11 device after device loss.
+    ///
+    /// The Win32 window stays alive, so recovery does not flash a replacement window or require a
+    /// teacher reconnect. If the HWND is currently minimized, the new presenter is immediately put
+    /// back into suspended state after construction.
+    ///
+    /// # Errors
+    /// Returns a D3D11/DXGI error if the new flip-model presenter cannot be constructed.
+    pub fn recover_device(&mut self, device: &ID3D11Device) -> windows::core::Result<()> {
+        let (client_width, client_height) = self.client_size;
+        let fallback_size = self.presenter.output_size();
+        let initial_width = if client_width == 0 {
+            fallback_size.0
+        } else {
+            client_width
+        };
+        let initial_height = if client_height == 0 {
+            fallback_size.1
+        } else {
+            client_height
+        };
+        let mut replacement = FlipPresenter::new(self.hwnd, device, initial_width, initial_height)?;
+        if client_width == 0 || client_height == 0 {
+            let _ = replacement.resize_output(0, 0)?;
+        }
+        self.presenter = replacement;
+        self.device_lost = false;
+        Ok(())
     }
 
     /// Presents one Media Foundation GPU frame and keeps it entirely on the D3D11 path.
@@ -110,8 +148,15 @@ impl PresentationWindow {
             )
         })?;
         let subresource_index = unsafe { frame.dxgi_buffer().GetSubresourceIndex()? };
-        let _ = self.presenter.present_nv12(&texture, subresource_index)?;
-        Ok(())
+        match self.presenter.present_nv12(&texture, subresource_index) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
+                    self.device_lost = true;
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Drains pending Win32 messages without blocking media receive/decode.
@@ -130,6 +175,7 @@ impl PresentationWindow {
             }
             if message.message == WM_SIZE && message.hwnd == self.hwnd {
                 let (width, height) = client_size_from_lparam(message.lParam);
+                self.client_size = (width, height);
                 match self.presenter.resize_output(width, height) {
                     Ok(ResizeOutcome::Resized) => {
                         eprintln!("student presentation resized to {width}x{height}");
@@ -139,6 +185,9 @@ impl PresentationWindow {
                     }
                     Ok(ResizeOutcome::Unchanged) => {}
                     Err(error) => {
+                        if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
+                            self.device_lost = true;
+                        }
                         eprintln!(
                             "student presentation swap-chain resize failed at {width}x{height}: {error}"
                         );
@@ -151,6 +200,11 @@ impl PresentationWindow {
             }
         }
         !self.closed
+    }
+
+    /// Returns and clears the pending device-loss signal raised by present or resize.
+    pub fn take_device_lost(&mut self) -> bool {
+        std::mem::take(&mut self.device_lost)
     }
 
     #[must_use]
