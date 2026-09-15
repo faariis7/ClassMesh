@@ -3,8 +3,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use classmesh_protocol::PROTOCOL_VERSION;
-use classmesh_video::distributor::SharedEncodedFrame;
 use classmesh_video::Codec;
+use classmesh_video::distributor::SharedEncodedFrame;
 
 use crate::receiver::{ReceiverEvent, ReceiverPolicy, ReceiverWindow};
 use crate::reliability::{RetransmitCache, SequenceObservation, SequenceTracker};
@@ -129,7 +129,8 @@ impl UdpFrameSender {
         let payload_bytes = frame.data.len();
 
         for packet in &packets {
-            self.socket.send_packet_to(packet, self.config.destination)?;
+            self.socket
+                .send_packet_to(packet, self.config.destination)?;
             self.retransmit.insert(now_us, packet.clone());
         }
 
@@ -173,7 +174,8 @@ impl UdpFrameSender {
                     self.stats.retransmit_cache_misses.saturating_add(1);
                 continue;
             };
-            self.socket.send_packet_to(packet, self.config.destination)?;
+            self.socket
+                .send_packet_to(packet, self.config.destination)?;
             sent = sent.saturating_add(1);
             self.stats.retransmit_packets_sent =
                 self.stats.retransmit_packets_sent.saturating_add(1);
@@ -251,10 +253,12 @@ impl UdpFrameReceiver {
             SequenceObservation::First | SequenceObservation::InOrder => {}
         }
 
-        let events = self
-            .window
-            .push(now_us, &packet)
-            .map_err(|error| DatagramError::Io(io::Error::new(io::ErrorKind::InvalidData, format!("frame assembly failed: {error:?}"))))?;
+        let events = self.window.push(now_us, &packet).map_err(|error| {
+            DatagramError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("frame assembly failed: {error:?}"),
+            ))
+        })?;
         self.stats.frames_completed = self.stats.frames_completed.saturating_add(
             u64::try_from(
                 events
