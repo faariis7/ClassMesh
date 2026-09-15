@@ -8,6 +8,8 @@ pub mod gpu;
 pub mod mf;
 #[cfg(windows)]
 pub mod mf_async;
+#[cfg(windows)]
+pub mod mf_decoder;
 pub mod selection;
 pub mod surface_pool;
 
