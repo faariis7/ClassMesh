@@ -55,12 +55,19 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      - name: Build media probe
-        run: cargo build -p classmesh-worker --bin classmesh-media-probe --release
+      - name: Build media diagnostics
+        run: cargo build -p classmesh-worker --bin classmesh-media-probe --bin classmesh-media-receiver --release
 
       - name: Upload media probe
         uses: actions/upload-artifact@v4
         with:
           name: classmesh-media-probe-windows-x64
           path: target/release/classmesh-media-probe.exe
+          if-no-files-found: error
+
+      - name: Upload media receiver
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-media-receiver-windows-x64
+          path: target/release/classmesh-media-receiver.exe
           if-no-files-found: error

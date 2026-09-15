@@ -2,18 +2,34 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::fs::File;
     use std::io::{BufWriter, Write};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::{Duration, Instant};
 
     use classmesh_capture_win::CaptureStep;
+    use classmesh_network::transport::{UdpFrameSender, UdpSenderConfig};
     use classmesh_worker::presentation::PresentationPipeline;
 
     let args: Vec<String> = std::env::args().collect();
     let seconds = parse_seconds(&args)?;
     let output_path = parse_output_path(&args)?;
+    let udp_destination = parse_udp_destination(&args)?;
     let mut output = match output_path.as_deref() {
         Some(path) => {
             eprintln!("ClassMesh media probe writing raw H.264 access units to {path}");
             Some(BufWriter::new(File::create(path)?))
+        }
+        None => None,
+    };
+    let mut udp_sender = match udp_destination {
+        Some(destination) => {
+            let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+            let sender = UdpFrameSender::bind(local, UdpSenderConfig::presentation(1, destination))
+                .map_err(network_error)?;
+            eprintln!(
+                "ClassMesh media probe streaming encoded frames from {} to {destination}",
+                sender.local_addr().map_err(network_error)?
+            );
+            Some(sender)
         }
         None => None,
     };
@@ -53,9 +69,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .as_mut()
                     .expect("pipeline was initialized above")
                     .process_frame(meta, frame)?;
-                write_frames(
+                handle_encoded_frames(
                     &encoded,
                     output.as_mut(),
+                    udp_sender.as_mut(),
+                    elapsed_us(started),
                     &mut total_encoded_frames,
                     &mut total_encoded_bytes,
                 )?;
@@ -83,17 +101,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if Instant::now() >= next_report {
             if let Some(active) = pipeline.as_ref() {
                 let stats = active.stats();
-                eprintln!(
-                    "media stats: captured={} submitted={} encoded={} keyframes={} rate_drop={} pool_drop={} in_flight={} bytes={}",
-                    stats.captured_frames,
-                    stats.submitted_frames,
-                    stats.encoded_frames,
-                    stats.keyframes,
-                    stats.rate_dropped_frames,
-                    stats.pool_dropped_frames,
-                    stats.in_flight_surfaces,
-                    stats.encoded_bytes
-                );
+                if let Some(sender) = udp_sender.as_ref() {
+                    let network = sender.stats();
+                    eprintln!(
+                        "media stats: captured={} submitted={} encoded={} keyframes={} rate_drop={} pool_drop={} in_flight={} bytes={} udp_frames={} udp_packets={} udp_payload_bytes={}",
+                        stats.captured_frames,
+                        stats.submitted_frames,
+                        stats.encoded_frames,
+                        stats.keyframes,
+                        stats.rate_dropped_frames,
+                        stats.pool_dropped_frames,
+                        stats.in_flight_surfaces,
+                        stats.encoded_bytes,
+                        network.frames_sent,
+                        network.packets_sent,
+                        network.payload_bytes_sent
+                    );
+                } else {
+                    eprintln!(
+                        "media stats: captured={} submitted={} encoded={} keyframes={} rate_drop={} pool_drop={} in_flight={} bytes={}",
+                        stats.captured_frames,
+                        stats.submitted_frames,
+                        stats.encoded_frames,
+                        stats.keyframes,
+                        stats.rate_dropped_frames,
+                        stats.pool_dropped_frames,
+                        stats.in_flight_surfaces,
+                        stats.encoded_bytes
+                    );
+                }
             }
             next_report = Instant::now()
                 .checked_add(Duration::from_secs(1))
@@ -103,9 +139,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(active) = pipeline.as_mut() {
         let tail = active.finish()?;
-        write_frames(
+        handle_encoded_frames(
             &tail,
             output.as_mut(),
+            udp_sender.as_mut(),
+            elapsed_us(started),
             &mut total_encoded_frames,
             &mut total_encoded_bytes,
         )?;
@@ -125,6 +163,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(writer) = output.as_mut() {
         writer.flush()?;
+    }
+
+    if let Some(sender) = udp_sender.as_ref() {
+        let stats = sender.stats();
+        eprintln!(
+            "final UDP stats: frames={} packets={} payload_bytes={} retransmits={} cache_misses={}",
+            stats.frames_sent,
+            stats.packets_sent,
+            stats.payload_bytes_sent,
+            stats.retransmit_packets_sent,
+            stats.retransmit_cache_misses
+        );
     }
 
     eprintln!(
@@ -172,18 +222,23 @@ fn start_capture() -> Result<ProbeCapture, Box<dyn std::error::Error>> {
 }
 
 #[cfg(windows)]
-fn write_frames<W: std::io::Write>(
+fn handle_encoded_frames<W: std::io::Write>(
     frames: &[classmesh_video::distributor::SharedEncodedFrame],
     mut output: Option<&mut W>,
+    mut udp_sender: Option<&mut classmesh_network::transport::UdpFrameSender>,
+    now_us: u64,
     total_frames: &mut u64,
     total_bytes: &mut u64,
-) -> std::io::Result<()> {
+) -> Result<(), Box<dyn std::error::Error>> {
     for frame in frames {
         *total_frames = total_frames.saturating_add(1);
         *total_bytes =
             total_bytes.saturating_add(u64::try_from(frame.data.len()).unwrap_or(u64::MAX));
         if let Some(writer) = output.as_deref_mut() {
             writer.write_all(&frame.data)?;
+        }
+        if let Some(sender) = udp_sender.as_deref_mut() {
+            sender.send_frame(now_us, frame).map_err(network_error)?;
         }
     }
     Ok(())
@@ -214,8 +269,31 @@ fn parse_output_path(args: &[String]) -> Result<Option<String>, Box<dyn std::err
 }
 
 #[cfg(windows)]
+fn parse_udp_destination(
+    args: &[String],
+) -> Result<Option<std::net::SocketAddr>, Box<dyn std::error::Error>> {
+    let Some(index) = args.iter().position(|arg| arg == "--udp-to") else {
+        return Ok(None);
+    };
+    let address = args
+        .get(index + 1)
+        .ok_or("--udp-to requires an IP:port destination")?;
+    Ok(Some(address.parse()?))
+}
+
+#[cfg(windows)]
+fn elapsed_us(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+#[cfg(windows)]
 fn capture_error(error: classmesh_capture_win::CaptureFailure) -> std::io::Error {
     std::io::Error::other(format!("DXGI capture error: {error:?}"))
+}
+
+#[cfg(windows)]
+fn network_error(error: classmesh_network::transport::UdpSendError) -> std::io::Error {
+    std::io::Error::other(format!("UDP media send error: {error:?}"))
 }
 
 #[cfg(not(windows))]

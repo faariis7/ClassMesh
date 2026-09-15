@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
@@ -16,6 +17,30 @@ pub enum DatagramError {
     Header(MediaHeaderError),
     PayloadLengthMismatch,
     DatagramTooLarge,
+}
+
+impl fmt::Display for DatagramError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "UDP media I/O error: {error}"),
+            Self::Header(error) => write!(formatter, "invalid media packet header: {error:?}"),
+            Self::PayloadLengthMismatch => {
+                formatter.write_str("media packet payload length mismatch")
+            }
+            Self::DatagramTooLarge => {
+                formatter.write_str("media UDP datagram exceeds ClassMesh MTU")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DatagramError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Header(_) | Self::PayloadLengthMismatch | Self::DatagramTooLarge => None,
+        }
+    }
 }
 
 impl From<io::Error> for DatagramError {
@@ -181,6 +206,12 @@ mod tests {
             encode_datagram(&invalid),
             Err(DatagramError::PayloadLengthMismatch)
         ));
+    }
+
+    #[test]
+    fn datagram_error_is_usable_as_standard_error() {
+        let error = DatagramError::PayloadLengthMismatch;
+        assert!(error.to_string().contains("payload length"));
     }
 
     #[test]
