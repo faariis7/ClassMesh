@@ -2,6 +2,7 @@
 
 pub mod receiver;
 pub mod reliability;
+pub mod transport;
 pub mod udp;
 
 use classmesh_protocol::media::{
