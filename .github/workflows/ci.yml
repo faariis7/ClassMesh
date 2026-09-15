@@ -44,6 +44,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Validate Phase 4 PowerShell runner
+        shell: pwsh
+        run: .\scripts\phase4-two-pc.ps1 -Mode Help
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
