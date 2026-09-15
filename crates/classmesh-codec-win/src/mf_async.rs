@@ -10,13 +10,13 @@ use classmesh_video::{Codec, EncodedFrameMeta};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
     IMFMediaEvent, IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFTransform,
-    METransformDrainComplete, METransformHaveOutput, METransformNeedInput, MF_E_NO_EVENTS_AVAILABLE,
-    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NONE,
-    MF_EVENT_FLAG_NO_WAIT, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
-    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
-    MF_TRANSFORM_ASYNC_UNLOCK, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
-    MFMediaType_Video, MFSampleExtension_CleanPoint, MFT_MESSAGE_COMMAND_DRAIN,
-    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+    METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
+    MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
+    MF_EVENT_FLAG_NO_WAIT, MF_EVENT_FLAG_NONE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
+    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO,
+    MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC_UNLOCK, MFCreateMediaType, MFCreateMemoryBuffer,
+    MFCreateSample, MFMediaType_Video, MFSampleExtension_CleanPoint, MFT_MESSAGE_COMMAND_DRAIN,
+    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
     MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
     MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
     MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
@@ -24,7 +24,7 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::core::Interface;
 
 use crate::mf::{
-    create_dxgi_texture_sample, MfDxgiDeviceManager, MfEncoderActivation, MfH264EncoderConfig,
+    MfDxgiDeviceManager, MfEncoderActivation, MfH264EncoderConfig, create_dxgi_texture_sample,
 };
 
 #[derive(Debug)]
@@ -54,17 +54,48 @@ impl fmt::Debug for MfEncodedOutput {
     }
 }
 
-/// Error from submitting a surface. Ownership is returned so a bounded surface pool does not leak
-/// capacity when Media Foundation rejects input or reports an asynchronous failure first.
+/// Error from submitting a surface.
+///
+/// `rejected_surface` is `Some` only when Media Foundation did not accept the input, so the caller
+/// may safely return that texture to its bounded pool. Once `ProcessInput` succeeds, ownership stays
+/// inside the encoder until an encoded output, drain, or explicit abort proves the texture is no
+/// longer in use. In that case this field is `None` even if a later asynchronous event fails.
 pub struct MfSubmitError {
     pub error: windows::core::Error,
-    pub surface: ID3D11Texture2D,
+    pub rejected_surface: Option<ID3D11Texture2D>,
+}
+
+impl MfSubmitError {
+    fn rejected(error: windows::core::Error, surface: ID3D11Texture2D) -> Self {
+        Self {
+            error,
+            rejected_surface: Some(surface),
+        }
+    }
+
+    fn accepted(error: windows::core::Error) -> Self {
+        Self {
+            error,
+            rejected_surface: None,
+        }
+    }
+
+    /// Returns true when Media Foundation already accepted the submitted texture.
+    ///
+    /// When this is true the caller must not recycle its previous texture handle. Reclaim pending
+    /// surfaces through encoded output, [`MfAsyncH264Encoder::finish`], or
+    /// [`MfAsyncH264Encoder::abort_and_reclaim`].
+    #[must_use]
+    pub const fn input_was_accepted(&self) -> bool {
+        self.rejected_surface.is_none()
+    }
 }
 
 impl fmt::Debug for MfSubmitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MfSubmitError")
             .field("error", &self.error)
+            .field("input_was_accepted", &self.input_was_accepted())
             .finish_non_exhaustive()
     }
 }
@@ -181,7 +212,7 @@ impl MfAsyncH264Encoder {
     ) -> Result<Vec<MfEncodedOutput>, MfSubmitError> {
         let mut outputs = Vec::new();
         if let Err(error) = self.wait_for_input(&mut outputs) {
-            return Err(MfSubmitError { error, surface });
+            return Err(MfSubmitError::rejected(error, surface));
         }
 
         let sample_time_100ns = self.sample_time_100ns();
@@ -191,11 +222,11 @@ impl MfAsyncH264Encoder {
             self.config.frame_duration_100ns(),
         ) {
             Ok(sample) => sample,
-            Err(error) => return Err(MfSubmitError { error, surface }),
+            Err(error) => return Err(MfSubmitError::rejected(error, surface)),
         };
 
         if let Err(error) = unsafe { self.transform.ProcessInput(0, &sample, 0) } {
-            return Err(MfSubmitError { error, surface });
+            return Err(MfSubmitError::rejected(error, surface));
         }
 
         self.needs_input = false;
@@ -208,18 +239,10 @@ impl MfAsyncH264Encoder {
         self.next_sample_index = self.next_sample_index.saturating_add(1);
 
         if let Err(error) = self.drain_ready(&mut outputs) {
-            // The surface was accepted by the MFT, so ownership must remain with `pending`; returning
-            // a fake free surface here would permit overwrite while the encoder still owns it.
-            let placeholder = self
-                .pending
-                .back()
-                .expect("accepted surface must be pending")
-                .surface
-                .clone();
-            return Err(MfSubmitError {
-                error,
-                surface: placeholder,
-            });
+            // `ProcessInput` already succeeded. The submitted surface stays exclusively in
+            // `pending`; exposing even a cloned COM handle as recyclable would allow a caller to
+            // overwrite storage while the hardware encoder may still be reading it.
+            return Err(MfSubmitError::accepted(error));
         }
         Ok(outputs)
     }
@@ -245,7 +268,8 @@ impl MfAsyncH264Encoder {
         unsafe {
             self.transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0)?;
-            self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0)?;
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0)?;
         }
 
         while !self.drained {
@@ -257,11 +281,40 @@ impl MfAsyncH264Encoder {
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0)?;
         }
 
-        let reclaimed_surfaces = self.pending.drain(..).map(|pending| pending.surface).collect();
+        let reclaimed_surfaces = self
+            .pending
+            .drain(..)
+            .map(|pending| pending.surface)
+            .collect();
         Ok(MfDrainResult {
             outputs,
             reclaimed_surfaces,
         })
+    }
+
+    /// Flushes the transform and returns every accepted input surface still pending.
+    ///
+    /// This is the recovery path after an asynchronous encoder failure. Surfaces are reclaimed only
+    /// after the MFT accepts `MFT_MESSAGE_COMMAND_FLUSH`, which prevents a bounded pool from reusing
+    /// GPU memory while the transform may still hold a reference to it.
+    ///
+    /// # Errors
+    /// Returns the transform error if Media Foundation refuses the flush. In that case ownership of
+    /// all pending surfaces remains with this encoder.
+    pub fn abort_and_reclaim(&mut self) -> windows::core::Result<Vec<ID3D11Texture2D>> {
+        unsafe {
+            self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0)?;
+            let _ = self
+                .transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+        }
+        self.needs_input = false;
+        self.drained = false;
+        Ok(self
+            .pending
+            .drain(..)
+            .map(|pending| pending.surface)
+            .collect())
     }
 
     fn sample_time_100ns(&self) -> i64 {
@@ -270,10 +323,7 @@ impl MfAsyncH264Encoder {
         index.saturating_mul(duration)
     }
 
-    fn wait_for_input(
-        &mut self,
-        outputs: &mut Vec<MfEncodedOutput>,
-    ) -> windows::core::Result<()> {
+    fn wait_for_input(&mut self, outputs: &mut Vec<MfEncodedOutput>) -> windows::core::Result<()> {
         while !self.needs_input {
             let event = unsafe { self.events.GetEvent(MF_EVENT_FLAG_NONE)? };
             self.handle_event(&event, outputs)?;
@@ -281,10 +331,7 @@ impl MfAsyncH264Encoder {
         Ok(())
     }
 
-    fn drain_ready(
-        &mut self,
-        outputs: &mut Vec<MfEncodedOutput>,
-    ) -> windows::core::Result<()> {
+    fn drain_ready(&mut self, outputs: &mut Vec<MfEncodedOutput>) -> windows::core::Result<()> {
         loop {
             match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
                 Ok(event) => self.handle_event(&event, outputs)?,
@@ -377,10 +424,7 @@ impl MfAsyncH264Encoder {
         }))
     }
 
-    fn take_pending(
-        &mut self,
-        sample_time: Option<i64>,
-    ) -> windows::core::Result<PendingInput> {
+    fn take_pending(&mut self, sample_time: Option<i64>) -> windows::core::Result<PendingInput> {
         let matching = sample_time.and_then(|time| {
             self.pending
                 .iter()
@@ -405,13 +449,19 @@ fn create_nv12_input_type(config: MfH264EncoderConfig) -> windows::core::Result<
     unsafe {
         media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
         media_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
-        media_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_u32_pair(config.width, config.height))?;
+        media_type.SetUINT64(
+            &MF_MT_FRAME_SIZE,
+            pack_u32_pair(config.width, config.height),
+        )?;
         media_type.SetUINT64(
             &MF_MT_FRAME_RATE,
             pack_u32_pair(config.fps_numerator, config.fps_denominator),
         )?;
         media_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack_u32_pair(1, 1))?;
-        media_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+        media_type.SetUINT32(
+            &MF_MT_INTERLACE_MODE,
+            MFVideoInterlace_Progressive.0 as u32,
+        )?;
     }
     Ok(media_type)
 }
@@ -421,13 +471,19 @@ fn create_h264_output_type(config: MfH264EncoderConfig) -> windows::core::Result
     unsafe {
         media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
         media_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
-        media_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_u32_pair(config.width, config.height))?;
+        media_type.SetUINT64(
+            &MF_MT_FRAME_SIZE,
+            pack_u32_pair(config.width, config.height),
+        )?;
         media_type.SetUINT64(
             &MF_MT_FRAME_RATE,
             pack_u32_pair(config.fps_numerator, config.fps_denominator),
         )?;
         media_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack_u32_pair(1, 1))?;
-        media_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+        media_type.SetUINT32(
+            &MF_MT_INTERLACE_MODE,
+            MFVideoInterlace_Progressive.0 as u32,
+        )?;
         media_type.SetUINT32(&MF_MT_AVG_BITRATE, config.bitrate_bps)?;
     }
     Ok(media_type)
@@ -473,7 +529,9 @@ fn validate_config(config: MfH264EncoderConfig) -> windows::core::Result<()> {
         || config.fps_denominator == 0
         || config.bitrate_bps == 0
     {
-        return Err(invalid_argument("invalid async H.264 encoder configuration"));
+        return Err(invalid_argument(
+            "invalid async H.264 encoder configuration",
+        ));
     }
     Ok(())
 }
@@ -501,5 +559,12 @@ mod tests {
     fn packed_media_foundation_pairs_are_stable() {
         assert_eq!(pack_u32_pair(1920, 1080), 0x0000_0780_0000_0438);
         assert_eq!(pack_u32_pair(30, 1), 0x0000_001e_0000_0001);
+    }
+
+    #[test]
+    fn accepted_submit_error_never_exposes_a_recyclable_surface() {
+        let error = MfSubmitError::accepted(invalid_argument("synthetic async failure"));
+        assert!(error.input_was_accepted());
+        assert!(error.rejected_surface.is_none());
     }
 }
