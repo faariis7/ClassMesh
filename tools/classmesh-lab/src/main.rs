@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use classmesh_core::adaptation::AdaptationPolicy;
 use classmesh_core::{NetworkMetrics, StreamKind};
+use classmesh_network::impairment::{ImpairmentConfig, ImpairmentDecision, ImpairmentEngine};
 use classmesh_network::receiver::{ReceiverEvent, ReceiverPolicy, ReceiverWindow};
 use classmesh_network::transport::{UdpFrameReceiver, UdpFrameSender, UdpSenderConfig};
 use classmesh_network::{PacketizeMeta, packetize_frame};
@@ -14,6 +15,7 @@ fn main() {
     println!("ClassMesh lab — synthetic media transport check");
     synthetic_loss_recovery();
     udp_loopback();
+    deterministic_impairment();
     adaptation_examples();
 }
 
@@ -127,6 +129,39 @@ fn udp_loopback() {
         encoded.data.len(),
         report.packets,
         completed.data.len()
+    );
+}
+
+fn deterministic_impairment() {
+    let config = ImpairmentConfig {
+        loss_basis_points: 500,
+        reorder_basis_points: 1_000,
+        jitter_max_us: 3_000,
+        reorder_extra_delay_us: 8_000,
+        seed: 0xC1A5_5EED,
+    };
+    let mut engine = ImpairmentEngine::new(config).expect("impairment config is valid");
+    let mut delivered = 0_u64;
+    let mut latest_due = 0_u64;
+
+    for packet in 0..2_000_u64 {
+        match engine.plan(packet.saturating_mul(100)) {
+            ImpairmentDecision::Drop => {}
+            ImpairmentDecision::DeliverAt { due_us, .. } => {
+                delivered = delivered.saturating_add(1);
+                latest_due = latest_due.max(due_us);
+            }
+        }
+    }
+
+    assert_eq!(engine.packets_seen(), 2_000);
+    assert_eq!(delivered + engine.packets_dropped(), 2_000);
+    println!(
+        "deterministic impairment: delivered={} dropped={} reordered={} latest_due_us={}",
+        delivered,
+        engine.packets_dropped(),
+        engine.packets_reordered(),
+        latest_due
     );
 }
 
