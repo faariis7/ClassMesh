@@ -61,6 +61,9 @@ jobs:
       - name: Build network impairment proxy
         run: cargo build -p classmesh-lab --bin classmesh-network-impairment-proxy --release
 
+      - name: Build transport benchmark
+        run: cargo build -p classmesh-lab --bin classmesh-transport-benchmark --release
+
       - name: Upload media probe
         uses: actions/upload-artifact@v4
         with:
@@ -87,4 +90,11 @@ jobs:
         with:
           name: classmesh-network-impairment-proxy-windows-x64
           path: target/release/classmesh-network-impairment-proxy.exe
+          if-no-files-found: error
+
+      - name: Upload transport benchmark
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-transport-benchmark-windows-x64
+          path: target/release/classmesh-transport-benchmark.exe
           if-no-files-found: error
