@@ -23,11 +23,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut udp_sender = match udp_destination {
         Some(destination) => {
             let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-            let sender = UdpFrameSender::bind(
-                local,
-                UdpSenderConfig::presentation(1, destination),
-            )
-            .map_err(network_error)?;
+            let sender = UdpFrameSender::bind(local, UdpSenderConfig::presentation(1, destination))
+                .map_err(network_error)?;
             eprintln!(
                 "ClassMesh media probe streaming encoded frames from {} to {destination}",
                 sender.local_addr().map_err(network_error)?
