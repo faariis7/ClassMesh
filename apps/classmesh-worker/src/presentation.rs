@@ -33,6 +33,7 @@ pub struct PresentationStats {
     pub pool_dropped_frames: u64,
     pub encoded_frames: u64,
     pub keyframes: u64,
+    pub keyframe_requests: u64,
     pub encoded_bytes: u64,
     pub in_flight_surfaces: usize,
 }
@@ -176,6 +177,17 @@ impl PresentationPipeline {
         let mut stats = self.stats;
         stats.in_flight_surfaces = self.pool.in_flight();
         stats
+    }
+
+    /// Requests that the hardware H.264 encoder make the next submitted frame a keyframe.
+    ///
+    /// Callers are expected to coalesce and rate-limit receiver requests before invoking this
+    /// method. ClassMesh keeps that policy outside the hardware encoder so the same coordinator can
+    /// serve unicast, multicast, and future QUIC control-plane feedback.
+    pub fn request_keyframe(&mut self) -> Result<(), PresentationError> {
+        self.encoder.force_next_keyframe()?;
+        self.stats.keyframe_requests = self.stats.keyframe_requests.saturating_add(1);
+        Ok(())
     }
 
     /// Converts and submits one captured Desktop Duplication frame.

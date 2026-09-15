@@ -6,6 +6,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::time::{Duration, Instant};
 
     use classmesh_capture_win::CaptureStep;
+    use classmesh_core::keyframe::KeyframeRequestCoordinator;
+    use classmesh_network::feedback::UdpFeedbackReceiver;
     use classmesh_network::transport::{UdpFrameSender, UdpSenderConfig};
     use classmesh_worker::presentation::PresentationPipeline;
 
@@ -13,6 +15,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seconds = parse_seconds(&args)?;
     let output_path = parse_output_path(&args)?;
     let udp_destination = parse_udp_destination(&args)?;
+    let feedback_listen = parse_feedback_listen(&args)?;
+    if feedback_listen.is_some() && udp_destination.is_none() {
+        return Err("--feedback-listen requires --udp-to".into());
+    }
+
     let mut output = match output_path.as_deref() {
         Some(path) => {
             eprintln!("ClassMesh media probe writing raw H.264 access units to {path}");
@@ -33,6 +40,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => None,
     };
+    let feedback_receiver = match feedback_listen {
+        Some(listen) => {
+            let receiver = UdpFeedbackReceiver::bind(listen).map_err(feedback_error)?;
+            receiver.set_nonblocking(true).map_err(feedback_error)?;
+            eprintln!(
+                "Phase-4 diagnostic media feedback listening on {}",
+                receiver.local_addr().map_err(feedback_error)?
+            );
+            Some(receiver)
+        }
+        None => None,
+    };
 
     let mut capture = start_capture()?;
     let mut pipeline: Option<PresentationPipeline> = None;
@@ -43,10 +62,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut next_report = started;
     let mut total_encoded_frames = 0_u64;
     let mut total_encoded_bytes = 0_u64;
+    let mut feedback_stats = FeedbackStats::default();
+    let mut keyframe_coordinator = KeyframeRequestCoordinator::default();
+    let mut pending_keyframe_request = false;
 
     eprintln!("ClassMesh media probe running for {seconds} seconds");
 
     while Instant::now() < deadline {
+        if let (Some(receiver), Some(sender)) = (feedback_receiver.as_ref(), udp_sender.as_mut()) {
+            pending_keyframe_request |= drain_feedback(
+                receiver,
+                sender,
+                elapsed_us(started),
+                &mut keyframe_coordinator,
+                &mut feedback_stats,
+            )?;
+        }
+
         match capture.poll(16) {
             CaptureStep::Frame { meta, frame } => {
                 if pipeline.is_none() {
@@ -65,10 +97,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pipeline = Some(created);
                 }
 
-                let encoded = pipeline
-                    .as_mut()
-                    .expect("pipeline was initialized above")
-                    .process_frame(meta, frame)?;
+                let active = pipeline.as_mut().expect("pipeline was initialized above");
+                if pending_keyframe_request {
+                    match active.request_keyframe() {
+                        Ok(()) => {
+                            feedback_stats.keyframe_forces =
+                                feedback_stats.keyframe_forces.saturating_add(1);
+                            pending_keyframe_request = false;
+                            eprintln!("teacher encoder accepted coalesced keyframe request");
+                        }
+                        Err(error) => {
+                            feedback_stats.keyframe_force_errors =
+                                feedback_stats.keyframe_force_errors.saturating_add(1);
+                            eprintln!("teacher encoder rejected keyframe request: {error}");
+                            pending_keyframe_request = false;
+                        }
+                    }
+                }
+
+                let encoded = active.process_frame(meta, frame)?;
                 handle_encoded_frames(
                     &encoded,
                     output.as_mut(),
@@ -84,6 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "DXGI recovery after {reason:?}; rebuilding media pipeline (delay={delay_ms} ms)"
                 );
                 pipeline = None;
+                pending_keyframe_request = true;
                 if delay_ms > 0 {
                     std::thread::sleep(Duration::from_millis(delay_ms.min(250)));
                 }
@@ -104,26 +152,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(sender) = udp_sender.as_ref() {
                     let network = sender.stats();
                     eprintln!(
-                        "media stats: captured={} submitted={} encoded={} keyframes={} rate_drop={} pool_drop={} in_flight={} bytes={} udp_frames={} udp_packets={} udp_payload_bytes={}",
+                        "media stats: captured={} submitted={} encoded={} keyframes={} keyframe_requests={} rate_drop={} pool_drop={} in_flight={} bytes={} udp_frames={} udp_packets={} udp_payload_bytes={} retransmits={} feedback_rx={} feedback_errors={} keyframe_forces={} keyframe_force_errors={} keyframe_grants={} keyframe_suppressed={}",
                         stats.captured_frames,
                         stats.submitted_frames,
                         stats.encoded_frames,
                         stats.keyframes,
+                        stats.keyframe_requests,
                         stats.rate_dropped_frames,
                         stats.pool_dropped_frames,
                         stats.in_flight_surfaces,
                         stats.encoded_bytes,
                         network.frames_sent,
                         network.packets_sent,
-                        network.payload_bytes_sent
+                        network.payload_bytes_sent,
+                        network.retransmit_packets_sent,
+                        feedback_stats.received,
+                        feedback_stats.errors,
+                        feedback_stats.keyframe_forces,
+                        feedback_stats.keyframe_force_errors,
+                        keyframe_coordinator.granted_requests(),
+                        keyframe_coordinator.suppressed_requests()
                     );
                 } else {
                     eprintln!(
-                        "media stats: captured={} submitted={} encoded={} keyframes={} rate_drop={} pool_drop={} in_flight={} bytes={}",
+                        "media stats: captured={} submitted={} encoded={} keyframes={} keyframe_requests={} rate_drop={} pool_drop={} in_flight={} bytes={}",
                         stats.captured_frames,
                         stats.submitted_frames,
                         stats.encoded_frames,
                         stats.keyframes,
+                        stats.keyframe_requests,
                         stats.rate_dropped_frames,
                         stats.pool_dropped_frames,
                         stats.in_flight_surfaces,
@@ -149,11 +206,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         let stats = active.stats();
         eprintln!(
-            "final pipeline stats: captured={} submitted={} encoded={} keyframes={} rate_drop={} pool_drop={} in_flight={} bytes={}",
+            "final pipeline stats: captured={} submitted={} encoded={} keyframes={} keyframe_requests={} rate_drop={} pool_drop={} in_flight={} bytes={}",
             stats.captured_frames,
             stats.submitted_frames,
             stats.encoded_frames,
             stats.keyframes,
+            stats.keyframe_requests,
             stats.rate_dropped_frames,
             stats.pool_dropped_frames,
             stats.in_flight_surfaces,
@@ -178,10 +236,94 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eprintln!(
-        "ClassMesh media probe complete: encoded_frames={total_encoded_frames}, encoded_bytes={total_encoded_bytes}, elapsed={:.2}s",
+        "ClassMesh media probe complete: encoded_frames={total_encoded_frames}, encoded_bytes={total_encoded_bytes}, feedback_rx={}, feedback_errors={}, keyframe_forces={}, keyframe_force_errors={}, keyframe_grants={}, keyframe_suppressed={}, elapsed={:.2}s",
+        feedback_stats.received,
+        feedback_stats.errors,
+        feedback_stats.keyframe_forces,
+        feedback_stats.keyframe_force_errors,
+        keyframe_coordinator.granted_requests(),
+        keyframe_coordinator.suppressed_requests(),
         started.elapsed().as_secs_f32()
     );
     Ok(())
+}
+
+#[cfg(windows)]
+#[derive(Debug, Default)]
+struct FeedbackStats {
+    received: u64,
+    errors: u64,
+    keyframe_forces: u64,
+    keyframe_force_errors: u64,
+}
+
+#[cfg(windows)]
+fn drain_feedback(
+    receiver: &classmesh_network::feedback::UdpFeedbackReceiver,
+    sender: &mut classmesh_network::transport::UdpFrameSender,
+    now_us: u64,
+    coordinator: &mut classmesh_core::keyframe::KeyframeRequestCoordinator,
+    stats: &mut FeedbackStats,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    use classmesh_network::feedback::{
+        FeedbackTransportError, MediaFeedback, apply_sender_feedback,
+    };
+
+    const MAX_FEEDBACK_PER_TICK: usize = 32;
+    let mut force_keyframe = false;
+    for _ in 0..MAX_FEEDBACK_PER_TICK {
+        let (feedback, peer) = match receiver.receive_one() {
+            Ok(received) => received,
+            Err(FeedbackTransportError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(error) => {
+                stats.errors = stats.errors.saturating_add(1);
+                eprintln!("ignoring malformed/unreadable media feedback: {error}");
+                continue;
+            }
+        };
+
+        stats.received = stats.received.saturating_add(1);
+        if feedback.stream_id() != 1 {
+            stats.errors = stats.errors.saturating_add(1);
+            eprintln!(
+                "ignoring feedback for unexpected stream {} from {peer}",
+                feedback.stream_id()
+            );
+            continue;
+        }
+
+        let outcome = apply_sender_feedback(sender, now_us, &feedback).map_err(network_error)?;
+        if outcome.retransmitted_packets > 0 {
+            eprintln!(
+                "retransmitted {} live media packets after feedback from {peer}",
+                outcome.retransmitted_packets
+            );
+        }
+        if outcome.keyframe_requested {
+            let after_frame = match feedback {
+                MediaFeedback::RequestKeyframe { after_frame_id, .. } => after_frame_id,
+                MediaFeedback::Nack { .. } => 0,
+            };
+            if coordinator.request(now_us) {
+                force_keyframe = true;
+                eprintln!(
+                    "accepted receiver keyframe request from {peer} after frame {after_frame}"
+                );
+            } else {
+                eprintln!(
+                    "coalesced receiver keyframe request from {peer} after frame {after_frame}"
+                );
+            }
+        }
+    }
+    Ok(force_keyframe)
 }
 
 #[cfg(windows)]
@@ -272,12 +414,27 @@ fn parse_output_path(args: &[String]) -> Result<Option<String>, Box<dyn std::err
 fn parse_udp_destination(
     args: &[String],
 ) -> Result<Option<std::net::SocketAddr>, Box<dyn std::error::Error>> {
-    let Some(index) = args.iter().position(|arg| arg == "--udp-to") else {
+    parse_socket_option(args, "--udp-to")
+}
+
+#[cfg(windows)]
+fn parse_feedback_listen(
+    args: &[String],
+) -> Result<Option<std::net::SocketAddr>, Box<dyn std::error::Error>> {
+    parse_socket_option(args, "--feedback-listen")
+}
+
+#[cfg(windows)]
+fn parse_socket_option(
+    args: &[String],
+    name: &str,
+) -> Result<Option<std::net::SocketAddr>, Box<dyn std::error::Error>> {
+    let Some(index) = args.iter().position(|arg| arg == name) else {
         return Ok(None);
     };
     let address = args
         .get(index + 1)
-        .ok_or("--udp-to requires an IP:port destination")?;
+        .ok_or_else(|| format!("{name} requires an IP:port address"))?;
     Ok(Some(address.parse()?))
 }
 
@@ -294,6 +451,11 @@ fn capture_error(error: classmesh_capture_win::CaptureFailure) -> std::io::Error
 #[cfg(windows)]
 fn network_error(error: classmesh_network::transport::UdpSendError) -> std::io::Error {
     std::io::Error::other(format!("UDP media send error: {error:?}"))
+}
+
+#[cfg(windows)]
+fn feedback_error(error: classmesh_network::feedback::FeedbackTransportError) -> std::io::Error {
+    std::io::Error::other(format!("media feedback error: {error}"))
 }
 
 #[cfg(not(windows))]

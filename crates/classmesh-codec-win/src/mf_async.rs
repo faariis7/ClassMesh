@@ -11,19 +11,20 @@ use classmesh_video::distributor::SharedEncodedFrame;
 use classmesh_video::{Codec, EncodedFrameMeta};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
-    IMFMediaEvent, IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFTransform,
-    METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
-    MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
-    MF_EVENT_FLAG_NO_WAIT, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
-    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
-    MF_TRANSFORM_ASYNC_UNLOCK, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
-    MFMediaType_Video, MFSampleExtension_CleanPoint, MFT_MESSAGE_COMMAND_DRAIN,
-    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI, IMFMediaEvent, IMFMediaEventGenerator,
+    IMFMediaType, IMFSample, IMFTransform, METransformDrainComplete, METransformHaveOutput,
+    METransformNeedInput, MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_NEED_MORE_INPUT,
+    MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT, MF_LOW_LATENCY, MF_MT_AVG_BITRATE,
+    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
+    MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC_UNLOCK, MFCreateMediaType,
+    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSampleExtension_CleanPoint,
+    MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
     MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFVideoFormat_H264, MFVideoFormat_NV12,
     MFVideoInterlace_Progressive,
 };
+use windows::Win32::System::Variant::VARIANT;
 use windows::core::Interface;
 
 use crate::mf::{
@@ -248,6 +249,21 @@ impl MfAsyncH264Encoder {
     #[must_use]
     pub const fn wait_config(&self) -> MfAsyncWaitConfig {
         self.wait
+    }
+
+    /// Requests that the hardware encoder emit the next submitted frame as a keyframe.
+    ///
+    /// Media Foundation exposes this through `ICodecAPI` and
+    /// `CODECAPI_AVEncVideoForceKeyFrame`. The property applies to the next `ProcessInput` call and
+    /// resets automatically after that frame.
+    ///
+    /// # Errors
+    /// Returns an error if the active hardware MFT does not expose or accept the codec property.
+    pub fn force_next_keyframe(&self) -> windows::core::Result<()> {
+        let codec_api: ICodecAPI = self.transform.cast()?;
+        unsafe { codec_api.IsSupported(&CODECAPI_AVEncVideoForceKeyFrame)? };
+        let value = VARIANT::from(1_u32);
+        unsafe { codec_api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &value) }
     }
 
     /// Waits up to the configured input deadline for `METransformNeedInput`, submits the owned NV12

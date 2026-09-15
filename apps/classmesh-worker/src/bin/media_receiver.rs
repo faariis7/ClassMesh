@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use classmesh_network::AssembledFrame;
+use classmesh_network::feedback::{MediaFeedback, UdpFeedbackSender};
 use classmesh_network::receiver::{ReceiverEvent, ReceiverPolicy};
 use classmesh_network::transport::UdpFrameReceiver;
 use classmesh_network::udp::DatagramError;
@@ -21,6 +22,8 @@ struct ReceiverCounters {
     present_errors: u64,
     decode_errors: u64,
     decode_waiting_frames: u64,
+    feedback_sent: u64,
+    feedback_errors: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -36,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen = parse_socket_arg(&args, "--listen", "0.0.0.0:57000")?;
     let seconds = parse_u64_arg(&args, "--seconds", 30, 1, 86_400)?;
     let output_path = parse_optional_arg(&args, "--output")?;
+    let feedback_to = parse_optional_socket_arg(&args, "--feedback-to")?;
     let render_enabled = has_flag(&args, "--render");
     let decode_enabled = has_flag(&args, "--decode") || render_enabled;
     let recover_after_frames =
@@ -55,6 +59,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(DecodeProbe::new(render_enabled, recover_after_frames)?)
     } else {
         None
+    };
+    let feedback_sender = match feedback_to {
+        Some(destination) => {
+            let local: SocketAddr = "0.0.0.0:0".parse()?;
+            let sender = UdpFeedbackSender::bind(local, destination)?;
+            eprintln!(
+                "Phase-4 diagnostic feedback from {} to {destination}",
+                sender.local_addr()?
+            );
+            Some(sender)
+        }
+        None => None,
     };
 
     let mut receiver = UdpFrameReceiver::bind(listen, ReceiverPolicy::default())?;
@@ -88,6 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &batch.events,
                     output.as_mut(),
                     decoder.as_mut(),
+                    feedback_sender.as_ref(),
                     &mut counters,
                 )?;
             }
@@ -104,6 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &tick_events,
             output.as_mut(),
             decoder.as_mut(),
+            feedback_sender.as_ref(),
             &mut counters,
         )?;
 
@@ -120,7 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .as_ref()
                 .map_or_else(RecoveryTelemetry::default, DecodeProbe::recovery_telemetry);
             eprintln!(
-                "receiver stats: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={} forced_gpu_recoveries={} last_gpu_recovery_ms={:.2} longest_gpu_recovery_ms={:.2}",
+                "receiver stats: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} feedback_sent={} feedback_errors={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={} forced_gpu_recoveries={} last_gpu_recovery_ms={:.2} longest_gpu_recovery_ms={:.2}",
                 stats.datagrams_received,
                 counters.frames,
                 counters.bytes,
@@ -129,6 +147,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stats.reordered_or_duplicate,
                 counters.nack_requests,
                 counters.keyframe_requests,
+                counters.feedback_sent,
+                counters.feedback_errors,
                 counters.stale_drops,
                 counters.decoded_gpu_frames,
                 counters.presented_frames,
@@ -164,7 +184,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .map_or_else(RecoveryTelemetry::default, DecodeProbe::recovery_telemetry);
     eprintln!(
-        "ClassMesh media receiver complete: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={} forced_gpu_recoveries={} last_gpu_recovery_ms={:.2} longest_gpu_recovery_ms={:.2} elapsed={:.2}s",
+        "ClassMesh media receiver complete: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} feedback_sent={} feedback_errors={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={} forced_gpu_recoveries={} last_gpu_recovery_ms={:.2} longest_gpu_recovery_ms={:.2} elapsed={:.2}s",
         stats.datagrams_received,
         counters.frames,
         counters.bytes,
@@ -173,6 +193,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stats.reordered_or_duplicate,
         counters.nack_requests,
         counters.keyframe_requests,
+        counters.feedback_sent,
+        counters.feedback_errors,
         counters.stale_drops,
         counters.decoded_gpu_frames,
         counters.presented_frames,
@@ -192,6 +214,7 @@ fn handle_events<W: Write>(
     events: &[ReceiverEvent],
     mut output: Option<&mut W>,
     mut decoder: Option<&mut DecodeProbe>,
+    feedback_sender: Option<&UdpFeedbackSender>,
     counters: &mut ReceiverCounters,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for event in events {
@@ -226,18 +249,38 @@ fn handle_events<W: Write>(
                 }
             }
             ReceiverEvent::NeedNack {
+                stream_id,
                 frame_id,
                 missing_packet_indices,
-                ..
             } => {
                 counters.nack_requests = counters.nack_requests.saturating_add(1);
                 eprintln!(
                     "receiver requests NACK: frame={frame_id}, missing={missing_packet_indices:?}"
                 );
+                send_feedback(
+                    feedback_sender,
+                    &MediaFeedback::Nack {
+                        stream_id: *stream_id,
+                        frame_id: *frame_id,
+                        missing_packet_indices: missing_packet_indices.clone(),
+                    },
+                    counters,
+                );
             }
-            ReceiverEvent::NeedKeyframe { after_frame_id, .. } => {
+            ReceiverEvent::NeedKeyframe {
+                stream_id,
+                after_frame_id,
+            } => {
                 counters.keyframe_requests = counters.keyframe_requests.saturating_add(1);
                 eprintln!("receiver requests keyframe after frame={after_frame_id}");
+                send_feedback(
+                    feedback_sender,
+                    &MediaFeedback::RequestKeyframe {
+                        stream_id: *stream_id,
+                        after_frame_id: *after_frame_id,
+                    },
+                    counters,
+                );
                 if let Some(active) = decoder.as_deref_mut() {
                     active.recover_after_loss();
                 }
@@ -249,6 +292,23 @@ fn handle_events<W: Write>(
         }
     }
     Ok(())
+}
+
+fn send_feedback(
+    sender: Option<&UdpFeedbackSender>,
+    feedback: &MediaFeedback,
+    counters: &mut ReceiverCounters,
+) {
+    let Some(sender) = sender else {
+        return;
+    };
+    match sender.send(feedback) {
+        Ok(_) => counters.feedback_sent = counters.feedback_sent.saturating_add(1),
+        Err(error) => {
+            counters.feedback_errors = counters.feedback_errors.saturating_add(1);
+            eprintln!("media feedback send failed without stopping video: {error}");
+        }
+    }
 }
 
 fn apply_decode_batch(counters: &mut ReceiverCounters, batch: DecodeBatch) {
@@ -599,6 +659,15 @@ fn parse_socket_arg(
     Ok(value.parse()?)
 }
 
+fn parse_optional_socket_arg(
+    args: &[String],
+    name: &str,
+) -> Result<Option<SocketAddr>, Box<dyn std::error::Error>> {
+    parse_optional_arg(args, name)?
+        .map(|value| value.parse::<SocketAddr>().map_err(Into::into))
+        .transpose()
+}
+
 fn parse_u64_arg(
     args: &[String],
     name: &str,
@@ -684,5 +753,18 @@ mod tests {
             "0".to_owned(),
         ];
         assert!(parse_optional_u64_arg(&args, "--recover-after-frames", 1, 100).is_err());
+    }
+
+    #[test]
+    fn optional_socket_parser_accepts_feedback_destination() {
+        let args = vec![
+            "receiver".to_owned(),
+            "--feedback-to".to_owned(),
+            "127.0.0.1:57001".to_owned(),
+        ];
+        assert_eq!(
+            parse_optional_socket_arg(&args, "--feedback-to").unwrap(),
+            Some("127.0.0.1:57001".parse().unwrap())
+        );
     }
 }
