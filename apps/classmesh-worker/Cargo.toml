@@ -33,5 +33,9 @@ path = "src/bin/media_probe.rs"
 name = "classmesh-media-receiver"
 path = "src/bin/media_receiver.rs"
 
+[[bin]]
+name = "classmesh-media-recovery-probe"
+path = "src/bin/media_recovery_probe.rs"
+
 [lints]
 workspace = true
