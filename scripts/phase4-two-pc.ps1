@@ -110,10 +110,7 @@ switch ($Mode) {
         if ($Transport -eq "quic") {
             $arguments += @("--cert-out", $CertPath)
         }
-        Invoke-ClassMeshTool \
-            -Executable "classmesh-transport-benchmark.exe" \
-            -Arguments $arguments \
-            -LogPrefix "transport-$Transport-server"
+        Invoke-ClassMeshTool -Executable "classmesh-transport-benchmark.exe" -Arguments $arguments -LogPrefix "transport-$Transport-server"
     }
 
     "TransportClient" {
@@ -132,10 +129,7 @@ switch ($Mode) {
             }
             $arguments += @("--cert", $CertPath)
         }
-        Invoke-ClassMeshTool \
-            -Executable "classmesh-transport-benchmark.exe" \
-            -Arguments $arguments \
-            -LogPrefix "transport-$Transport-client"
+        Invoke-ClassMeshTool -Executable "classmesh-transport-benchmark.exe" -Arguments $arguments -LogPrefix "transport-$Transport-client"
     }
 
     "MediaReceiver" {
@@ -147,10 +141,7 @@ switch ($Mode) {
             "--render",
             "--feedback-to", $Peer
         )
-        Invoke-ClassMeshTool \
-            -Executable "classmesh-media-receiver.exe" \
-            -Arguments $arguments \
-            -LogPrefix "media-receiver"
+        Invoke-ClassMeshTool -Executable "classmesh-media-receiver.exe" -Arguments $arguments -LogPrefix "media-receiver"
     }
 
     "MediaProxy" {
@@ -166,10 +157,7 @@ switch ($Mode) {
             "--reorder-delay-ms", "$ReorderDelayMs",
             "--seed", "$Seed"
         )
-        Invoke-ClassMeshTool \
-            -Executable "classmesh-network-impairment-proxy.exe" \
-            -Arguments $arguments \
-            -LogPrefix "media-proxy-loss-$LossBp"
+        Invoke-ClassMeshTool -Executable "classmesh-network-impairment-proxy.exe" -Arguments $arguments -LogPrefix "media-proxy-loss-$LossBp"
     }
 
     "MediaSender" {
@@ -180,9 +168,6 @@ switch ($Mode) {
             "--udp-to", $effectivePeer,
             "--feedback-listen", $effectiveListen
         )
-        Invoke-ClassMeshTool \
-            -Executable "classmesh-media-probe.exe" \
-            -Arguments $arguments \
-            -LogPrefix "media-sender"
+        Invoke-ClassMeshTool -Executable "classmesh-media-probe.exe" -Arguments $arguments -LogPrefix "media-sender"
     }
 }
