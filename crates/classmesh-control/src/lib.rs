@@ -226,12 +226,8 @@ mod tests {
             app_version: "0.0.1".to_owned(),
         };
 
-        let negotiated = negotiate_hello(
-            ProtocolVersion { major: 1, minor: 5 },
-            &local,
-            &peer,
-        )
-        .expect("same major version should negotiate");
+        let negotiated = negotiate_hello(ProtocolVersion { major: 1, minor: 5 }, &local, &peer)
+            .expect("same major version should negotiate");
 
         assert_eq!(negotiated.version, ProtocolVersion { major: 1, minor: 2 });
         assert_eq!(
