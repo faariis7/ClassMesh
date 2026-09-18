@@ -89,7 +89,10 @@ pub fn server_config_with_certificate(
     certificate_chain: Vec<CertificateDer<'static>>,
     private_key: PrivateKeyDer<'static>,
 ) -> Result<ServerConfig, ControlTransportError> {
-    let mut tls = rustls::ServerConfig::builder()
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|error| ControlTransportError::Configuration(error.to_string()))?
         .with_no_client_auth()
         .with_single_cert(certificate_chain, private_key)
         .map_err(|error| ControlTransportError::Configuration(error.to_string()))?;
@@ -110,7 +113,10 @@ pub fn server_config_with_certificate(
 pub fn client_config_with_roots(
     roots: RootCertStore,
 ) -> Result<ClientConfig, ControlTransportError> {
-    let mut tls = rustls::ClientConfig::builder()
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|error| ControlTransportError::Configuration(error.to_string()))?
         .with_root_certificates(roots)
         .with_no_client_auth();
     tls.alpn_protocols = vec![CONTROL_ALPN.to_vec()];
