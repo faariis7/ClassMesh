@@ -118,7 +118,7 @@ mod tests {
                 control_wire::Heartbeat {
                     monotonic_time_us: 123_000,
                     control_session_id: 44,
-                    media: control_wire::MediaHealth::Streaming as i32,
+                    media: 3,
                 },
             )),
         };
