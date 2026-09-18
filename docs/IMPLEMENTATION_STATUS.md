@@ -136,6 +136,20 @@ The Phase 4 receiver path is implemented and CI-clean:
 - Stable identity is documented independently from credential fingerprints so key/certificate rotation will not change device identity.
 - Administrative QUIC 0-RTT is explicitly excluded from the initial Phase 5 security model.
 
+### Phase 5B QUIC/TLS control runtime
+
+In progress on `feat/phase5-quic-control-runtime`:
+
+- reliable QUIC bidirectional control channel using Quinn + rustls;
+- ALPN `classmesh-control/1` so control protocol negotiation is independent from media;
+- explicit 5s connect/I/O timeouts, 15s QUIC idle timeout and 4s transport keepalive;
+- 256 KiB maximum length-prefixed Protobuf control frame, rejected before oversized allocation;
+- 0-RTT explicitly disabled in both client and server TLS configuration;
+- bounded reconnect policy using the existing recovery/backoff primitive;
+- `Hello` / `HelloAck` exchange runs over the real control channel and returns an assigned control-session ID;
+- loopback integration test covers TLS/ALPN -> QUIC -> framing -> hello negotiation -> heartbeat;
+- Phase 5B is pre-enrollment server-authenticated TLS only. Client-certificate/mTLS enrollment is Phase 5C.
+
 ### Security/discovery/tooling
 
 - Control-plane Protobuf schema.
