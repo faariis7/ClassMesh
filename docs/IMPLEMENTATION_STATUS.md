@@ -6,14 +6,20 @@ This file distinguishes **implemented code**, **hosted-CI validation**, **real-h
 
 ## Current baseline
 
-`main` includes Phase 4 implementation and qualification tooling through PR #31 (`05ff9d647dfe548761b091017808356d2a32881c`). Phase 4 physical acceptance remains pending. Phase 5 is now tracked independently in Issue #32 so reliable control-plane work can proceed without falsely closing the Phase 4 hardware gate. The current hosted CI baseline covers:
+`main` includes Phase 4 implementation and qualification tooling through PR #31 plus the Phase 5A control-session foundation from PR #33 (merge `86e3a09b0e36ec38e29210dacd50b8c7f806e3e4`).
+
+Phase 4 physical acceptance remains pending. Issue #3 must remain open until two physical Windows PCs pass the documented qualification.
+
+Phase 5 is tracked in Issue #32. Phase 5B is being developed in PR #34 and is **not merged yet**; it must not be treated as the current production baseline until required CI is green and the PR is merged.
+
+The hosted CI baseline covers:
 
 - **Portable Rust / Ubuntu** — rustfmt, Clippy with warnings denied, full workspace tests, and `classmesh-lab`.
 - **Windows Build** — workspace Clippy/tests plus release builds for the media probe, media receiver, media recovery probe, deterministic network impairment proxy, and UDP/QUIC Datagram transport benchmark.
 
 Hosted Windows runners prove that the Win32/D3D11/Media Foundation code compiles and deterministic tests pass. They do **not** prove that Desktop Duplication, hardware H.264 encode/decode, D3D11 presentation, or two-machine latency behaves correctly on real interactive GPU/driver combinations.
 
-The immediate gate is now physical two-PC Phase 4 qualification using `docs/PHASE4_TWO_PC_QUALIFICATION.md` and `scripts/phase4-two-pc.ps1`.
+The immediate Phase 4 gate remains physical two-PC qualification using `docs/PHASE4_TWO_PC_QUALIFICATION.md` and `scripts/phase4-two-pc.ps1`.
 
 ## Implemented in the repository
 
@@ -124,26 +130,51 @@ The Phase 4 receiver path is implemented and CI-clean:
 
 ### Phase 5A control-session foundation
 
-- Control-plane Protobuf is now compiled into Rust types during the build using a vendored `protoc`, so CI validates the actual schema.
+Merged in PR #33:
+
+- Control-plane Protobuf is compiled into Rust types during the build using a vendored `protoc`.
 - Reliable `ControlEnvelope` carries session ID, sequence, protocol version, request ID and typed payload.
 - `Hello` / `HelloAck` schema supports explicit protocol negotiation, role, credential fingerprint and shared capabilities.
 - Protocol major mismatch is explicit; compatible peers select the lower minor version.
-- Shared capability intersection is implemented as a deterministic domain primitive.
-- Heartbeat tracking has bounded, testable Online / Suspect / Offline transitions.
+- Shared capability intersection is deterministic.
+- Heartbeat tracking has Online / Suspect / Offline transitions.
 - Duplicate/non-increasing heartbeat sequences and wrong control-session IDs are rejected.
-- Media health is tracked independently from control liveness, so media recovery does not imply device disconnect.
+- Media health is independent from control liveness.
 - Initial heartbeat defaults are 2s interval / 6s suspect / 10s offline.
-- Stable identity is documented independently from credential fingerprints so key/certificate rotation will not change device identity.
-- Administrative QUIC 0-RTT is explicitly excluded from the initial Phase 5 security model.
+- Stable identity is documented independently from credential fingerprints.
+- Administrative QUIC 0-RTT is excluded from the initial security model.
 
-### Security/discovery/tooling
+### AI-assisted engineering/design quality tooling
 
-- Control-plane Protobuf schema.
-- Service/Worker IPC Protobuf schema.
-- Enrollment/authorization/replay-window policy primitives.
-- LAN discovery protocol and expiry/rate-limit primitives.
-- Portable + Windows GitHub Actions validation.
-- Architecture, roadmap, security, protocol and runtime validation documents.
+Repository-level quality instructions are now defined under `.agents/skills/`:
+
+- `classmesh-engineering` — roadmap/security/evidence gates plus the engineering workflow.
+- `classmesh-design` — Windows desktop UI/UX, accessibility, DPI, runtime and live-grid constraints.
+- `frontend-design-review` — Microsoft-derived independent UI critique layer.
+
+`docs/AI_QUALITY_STACK.md` records the maintained external layers (Superpowers, UI/UX Pro Max and Codex Security), their source/update policy, and the rule that external skills are reviewed like third-party dependencies.
+
+These instructions improve agent consistency; they do not replace tests, security review, CI, runtime inspection or human product decisions.
+
+## In progress
+
+### Phase 5B reliable QUIC/TLS control runtime
+
+PR #34 is active and not yet merged.
+
+Its intended scope includes:
+
+- reliable bidirectional QUIC control streams using Quinn/rustls;
+- ALPN `classmesh-control/1`;
+- TLS 1.3 with application 0-RTT disabled;
+- bounded length-prefixed Protobuf framing;
+- message-size limits enforced before allocation;
+- connect/I/O/idle/keepalive timeouts;
+- bounded reconnect policy;
+- Hello/HelloAck and heartbeat over the real transport;
+- loopback integration coverage.
+
+Do not move this section to implemented-on-`main` until the PR passes required CI and merges.
 
 ## Not implemented or not validated yet
 
@@ -166,30 +197,16 @@ If current telemetry cannot substantiate the end-to-end latency target, that mis
 
 Still required before the presentation pipeline is production-enabled broadly:
 
-- Bounded timeout/watchdog around asynchronous Media Foundation event waits so a broken driver cannot hang the Worker indefinitely.
-- Measured `ICodecAPI` low-latency/rate-control/GOP/keyframe controls rather than assuming vendor behavior.
+- Bounded timeout/watchdog around asynchronous Media Foundation event waits.
+- Measured `ICodecAPI` low-latency/rate-control/GOP/keyframe controls.
 - First-run encoder benchmark and capability cache wired to real adapter/driver/CLSID data.
-- Deliberate multi-GPU encoder selection instead of assuming the first enumerated hardware MFT is optimal.
+- Deliberate multi-GPU encoder selection.
 - Recovery/rebuild after encoder/device loss across representative drivers.
 - Long-running resource/leak/driver soak tests.
 
-### End-to-end observability gaps
-
-The receiver/sender expose useful counters, but Phase 4 still needs hardware evidence for the complete latency budget:
-
-- capture timing;
-- GPU process timing;
-- encode timing;
-- sender queue age;
-- network RTT/loss/jitter;
-- receiver reassembly/jitter delay;
-- decode timing;
-- render/presentation timing;
-- an end-to-end value that can demonstrate the `<100 ms` target without synchronized-PC ambiguity.
-
 ### Classroom fan-out runtime
 
-The first two-machine UDP media path exists, but production classroom fan-out is intentionally later. Still required:
+Still required:
 
 - production integration of shared encoded output into the normal Teacher/Worker lifecycle;
 - multicast sender and authenticated group-media protection;
@@ -197,18 +214,18 @@ The first two-machine UDP media path exists, but production classroom fan-out is
 - receiver telemetry wired into the production adaptation/controller path;
 - classroom-scale 2/5/10/20+ device tests on wired LAN and Wi-Fi.
 
-### Control/security transport — Phase 5
+### Control/security transport — later Phase 5
 
 Still missing or incomplete:
 
-- QUIC/TLS control runtime;
-- persistent enrollment and certificate/key storage;
+- persistent enrollment and protected certificate/key storage;
+- post-enrollment mTLS identity;
+- revocation/key rotation;
 - transport-connected authorization engine;
-- heartbeat/capability/session negotiation over the real control transport;
+- replay/duplicate enforcement connected to privileged commands;
+- capability/session negotiation completed over authenticated transport;
 - encrypted multicast media session keys, replay protection and rotation;
 - production per-user SID ACL on the local Named Pipe.
-
-The QUIC Datagram benchmark from Phase 4 does not replace this Phase 5 identity/control-plane work.
 
 ### Installer/update/product surface
 
@@ -221,11 +238,8 @@ Still required:
 
 ## Next implementation sequence
 
-1. Merge the Phase 4 two-PC qualification runner/runbook after CI is green.
-2. Run healthy UDP and QUIC Datagram synthetic benchmarks on two Windows PCs and record the results.
-3. Run the live hardware encode → UDP → hardware decode/render baseline.
-4. Run deterministic 1%, 3%, and 5% loss/jitter/reorder recovery tests.
-5. Run the 30-minute 3% impairment soak and record queue/resource/latency behavior.
-6. If the `<100 ms` gate cannot be measured directly, implement the missing end-to-end latency instrumentation and repeat the baseline.
-7. Update `docs/PHASE4_TWO_PC_RESULTS.md`, choose the measured Phase 4 unicast default, and close Issue #3 only when every acceptance item is evidenced.
-8. Continue Phase 5 under Issue #32 while Phase 4 hardware is pending: first reliable QUIC/TLS control runtime with bounded framing/ALPN/reconnect, then persistent identity/enrollment/mTLS, then transport-connected authorization and session negotiation.
+1. Keep Issue #3 open and run Phase 4 physical qualification when two Windows PCs are available.
+2. Finish PR #34 Phase 5B; fix any CI failures, merge only when required Linux/Windows validation is green, then update Issue #32.
+3. Begin Phase 5C persistent identity/enrollment/mTLS with Windows-protected credential storage behind a testable abstraction.
+4. Add dependency/advisory/license and fuzzing gates when they become useful to the active phase rather than as unused tooling.
+5. Start product UI work under `classmesh-design` and runtime/visual verification once the Console/Agent surface becomes an active implementation track.
