@@ -87,7 +87,9 @@ pub fn encode_frame(envelope: &ControlEnvelope) -> Result<Vec<u8>, FrameError> {
     Ok(frame)
 }
 
-pub fn declared_payload_len(prefix: [u8; CONTROL_LENGTH_PREFIX_BYTES]) -> Result<usize, FrameError> {
+pub fn declared_payload_len(
+    prefix: [u8; CONTROL_LENGTH_PREFIX_BYTES],
+) -> Result<usize, FrameError> {
     let length = u32::from_be_bytes(prefix) as usize;
     validate_payload_len(length)?;
     Ok(length)
