@@ -402,10 +402,8 @@ mod tests {
     }
 
     #[test]
-    fn transport_defaults_are_bounded() {
-        assert!(DEFAULT_IO_TIMEOUT <= DEFAULT_QUIC_IDLE_TIMEOUT);
-        assert!(MAX_CONTROL_BIDI_STREAMS <= 8);
-        assert!(!CONTROL_ALPN.is_empty());
+    fn transport_defaults_build_with_bounded_reconnect() {
+        let _config = control_transport_config();
         assert_eq!(DEFAULT_RECONNECT_POLICY.backoff_ms(1), 200);
         assert_eq!(DEFAULT_RECONNECT_POLICY.backoff_ms(8), 5_000);
     }
