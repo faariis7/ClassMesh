@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use classmesh_core::recovery::RecoveryPolicy;
 use classmesh_protocol::control_wire::ControlEnvelope;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{
@@ -12,7 +13,7 @@ use quinn::{
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 use crate::framing::{
     CONTROL_LENGTH_PREFIX_BYTES, FrameError, declared_payload_len, encode_frame,
@@ -24,6 +25,11 @@ pub const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 pub const DEFAULT_QUIC_KEEPALIVE: Duration = Duration::from_secs(4);
 pub const MAX_CONTROL_BIDI_STREAMS: u32 = 4;
+pub const DEFAULT_RECONNECT_POLICY: RecoveryPolicy = RecoveryPolicy {
+    max_attempts: 8,
+    base_backoff_ms: 200,
+    max_backoff_ms: 5_000,
+};
 
 #[derive(Debug)]
 pub enum ControlTransportError {
@@ -134,6 +140,35 @@ pub async fn connect(
             operation: "QUIC connect",
         })?
         .map_err(|error| ControlTransportError::Transport(error.to_string()))
+}
+
+pub async fn connect_with_retries(
+    endpoint: &Endpoint,
+    remote: SocketAddr,
+    server_name: &str,
+    policy: RecoveryPolicy,
+) -> Result<Connection, ControlTransportError> {
+    if policy.max_attempts == 0 {
+        return Err(ControlTransportError::Configuration(
+            "reconnect policy must allow at least one attempt".to_owned(),
+        ));
+    }
+
+    let mut last_error = None;
+    for attempt in 1..=policy.max_attempts {
+        match connect(endpoint, remote, server_name).await {
+            Ok(connection) => return Ok(connection),
+            Err(error) => last_error = Some(error),
+        }
+
+        if attempt < policy.max_attempts {
+            sleep(Duration::from_millis(policy.backoff_ms(attempt))).await;
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        ControlTransportError::Configuration("reconnect policy produced no attempts".to_owned())
+    }))
 }
 
 pub async fn accept(endpoint: &Endpoint) -> Result<Connection, ControlTransportError> {
@@ -345,5 +380,7 @@ mod tests {
         assert!(DEFAULT_IO_TIMEOUT <= DEFAULT_QUIC_IDLE_TIMEOUT);
         assert!(MAX_CONTROL_BIDI_STREAMS <= 8);
         assert!(!CONTROL_ALPN.is_empty());
+        assert_eq!(DEFAULT_RECONNECT_POLICY.backoff_ms(1), 200);
+        assert_eq!(DEFAULT_RECONNECT_POLICY.backoff_ms(8), 5_000);
     }
 }
