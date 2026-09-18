@@ -2,18 +2,19 @@
 
 Last updated: 2026-09-18
 
-This is the active execution plan for ClassMesh. It is updated as implementation evidence changes so roadmap intent, code status, and physical validation are not confused.
+This is the active execution plan for ClassMesh. It is updated as implementation evidence changes so roadmap intent, code status, hosted-CI evidence, and physical validation are not confused.
 
 ## Current execution state
 
 | Track | State | Current gate |
 |---|---|---|
 | Phase 4 — one-to-one live video | **Implementation complete; physical qualification pending** | Issue #3 stays open until two physical Windows PCs pass the documented 1080p30, latency, impairment and soak criteria |
-| Phase 5A — control protocol foundation | **In progress** | Control envelope, generated Protobuf types, explicit version negotiation, capability intersection and heartbeat/liveness |
-| Phase 5B — QUIC/TLS runtime | Next | Reliable bounded control streams, TLS 1.3, ALPN, timeouts, reconnect and transport tests |
-| Phase 5C — identity + enrollment | Next | Persistent stable principal IDs, credential storage, approval flow, mTLS, revocation and key rotation |
+| Phase 5A — control protocol foundation | **Complete — PR #33 merged** | Generated Protobuf, version/capability negotiation and heartbeat/liveness are on `main` |
+| Phase 5B — QUIC/TLS runtime | **In progress — PR #34** | Reliable bounded control streams, TLS 1.3, ALPN, framing, timeouts/reconnect and transport tests; do not merge until CI is green |
+| Phase 5C — identity + enrollment | Next | Persistent stable principal IDs, protected credential storage, approval flow, mTLS, revocation and key rotation |
 | Phase 5D — authorization + session negotiation | Planned | Per-command authorization, replay controls, capability/session negotiation over the real transport |
-| Phase 5E — hardening | Planned | malformed input, reconnect storms, fuzzing, protocol compatibility and security tests |
+| Phase 5E — hardening | Planned | Malformed input, reconnect storms, fuzzing, protocol compatibility and security tests |
+| AI quality workflow | **Active** | Project skills + official plugins documented in `docs/AI_QUALITY_STACK.md` |
 
 Tracking issue: #32.
 
@@ -27,12 +28,35 @@ The following decision remains deliberately open until Phase 4 physical evidence
 
 Do not close Issue #3 or claim Phase 4 acceptance from hosted CI.
 
+## Engineering workflow
+
+For non-trivial repository work, follow:
+
+**Research → Plan → Test → Implement → Review → Security Scan → Runtime/Visual Verification → CI → Merge → Update living docs**
+
+Project-specific instructions live in:
+
+- `.agents/skills/classmesh-engineering/`
+- `.agents/skills/classmesh-design/`
+- `.agents/skills/frontend-design-review/`
+- `docs/AI_QUALITY_STACK.md`
+
+External general-purpose tooling should normally remain installed through its maintained upstream distribution instead of being copied into the repository.
+
+Current preferred layers:
+
+- Superpowers for planning/TDD/debugging/verification discipline;
+- UI/UX Pro Max as a maintained UI/UX knowledge layer;
+- Microsoft Frontend Design Review as an independent critique layer;
+- Codex Security for security-sensitive diffs and threat-model work;
+- ClassMesh skills for project-specific architecture, evidence, Windows UI and phase gates.
+
 ## Phase 5 transport/security baseline
 
 - QUIC is the reliable control transport.
 - TLS 1.3 protects the QUIC connection.
 - Enrolled peers will use mutual authentication.
-- ALPN will identify the ClassMesh control protocol independently of media transport.
+- ALPN identifies the ClassMesh control protocol independently of media transport.
 - Administrative application data will not use QUIC 0-RTT until ClassMesh has an explicit replay-safe profile. Initial production behavior is 1-RTT only.
 - Stable device/principal identity is independent from mutable hostname/IP and independent from the currently active credential, so certificates/keys can rotate without changing the device ID.
 - Authorization is checked for each privileged command, not only when the connection is established.
@@ -52,13 +76,15 @@ These are application-liveness defaults, not a replacement for QUIC idle timeout
 
 ## Dependency/research policy
 
-Before introducing or materially changing transport, cryptography, identity, codec, Windows API or update-chain dependencies:
+Before introducing or materially changing transport, cryptography, identity, codec, Windows API, update-chain, security-scanning or agent-tooling dependencies:
 
-1. check current upstream documentation and release state;
-2. prefer standards and maintained upstream crates over custom protocol/crypto;
+1. check current upstream documentation, release state, source and license;
+2. prefer standards and maintained upstream crates/tools over custom protocol/crypto;
 3. confirm project MSRV and Windows support;
 4. add deterministic tests before making the component production-critical;
-5. record any architecture decision that would be expensive to reverse.
+5. record architecture decisions that would be expensive to reverse;
+6. for external AI skills/plugins, review scripts/hooks/MCP servers, write permissions, credentials and network dependencies before upgrade;
+7. do not add overlapping skills that only increase context without adding a distinct quality gate.
 
 Current control-plane research baseline:
 
@@ -70,10 +96,12 @@ Current control-plane research baseline:
 
 ## Planned PR sequence
 
-1. **5A Control foundation** — generated control Protobuf, envelope/versioning, heartbeat/liveness and capability negotiation.
-2. **5B QUIC/TLS transport** — new control runtime using Quinn reliable streams with ALPN, bounded framing and reconnect behavior.
+1. **5A Control foundation — complete, PR #33.**
+2. **5B QUIC/TLS transport — active, PR #34.**
 3. **5C Identity store + enrollment** — stable IDs, local credential persistence, bootstrap approval, post-enrollment mTLS, rotation/revocation.
 4. **5D Authorization/session integration** — connect authenticated principal to command permissions and stream/session negotiation.
 5. **5E Hardening** — malformed messages, replay/duplicate cases, reconnect storms, fuzz targets and diagnostics.
 
-Each merged PR updates this file and docs/IMPLEMENTATION_STATUS.md.
+Quality-tooling changes should stay in small independent PRs so they do not block or obscure Phase implementation diffs.
+
+Each merged Phase PR updates this file and `docs/IMPLEMENTATION_STATUS.md`.
