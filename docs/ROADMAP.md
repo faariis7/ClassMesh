@@ -2,6 +2,10 @@
 
 This roadmap favors measured, recoverable primitives before UI breadth. It is deliberately Windows-first and treats Session 0 isolation, GPU lifecycle, transport backpressure and observability as architecture—not cleanup work.
 
+## Current execution note — 2026-09-18
+
+Phase 4 implementation/tooling is complete but its physical two-PC acceptance gate remains open in Issue #3. Phase 5 control-plane work is proceeding in parallel under Issue #32 because it does not require choosing the final UDP vs QUIC Datagram media default. The live execution order and current gates are maintained in `docs/WORK_PLAN.md`.
+
 ## Phase 0 — Architecture and repository foundation
 
 Deliverables:
