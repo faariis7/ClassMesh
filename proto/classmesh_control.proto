@@ -9,16 +9,23 @@ message ProtocolVersion {
 
 enum Capability {
   CAPABILITY_UNSPECIFIED = 0;
-  SERVICE_SESSION_WORKER = 1;
-  DXGI_CAPTURE = 2;
-  WINDOWS_GRAPHICS_CAPTURE = 3;
-  H264_HARDWARE_ENCODE = 4;
-  H264_HARDWARE_DECODE = 5;
-  UDP_MULTICAST = 6;
-  UDP_UNICAST = 7;
-  QUIC_DATAGRAM = 8;
-  WEBRTC = 9;
-  LOCAL_SFU = 10;
+  CAPABILITY_SERVICE_SESSION_WORKER = 1;
+  CAPABILITY_DXGI_CAPTURE = 2;
+  CAPABILITY_WINDOWS_GRAPHICS_CAPTURE = 3;
+  CAPABILITY_H264_HARDWARE_ENCODE = 4;
+  CAPABILITY_H264_HARDWARE_DECODE = 5;
+  CAPABILITY_UDP_MULTICAST = 6;
+  CAPABILITY_UDP_UNICAST = 7;
+  CAPABILITY_QUIC_DATAGRAM = 8;
+  CAPABILITY_WEBRTC = 9;
+  CAPABILITY_LOCAL_SFU = 10;
+}
+
+enum PrincipalRole {
+  PRINCIPAL_ROLE_UNSPECIFIED = 0;
+  PRINCIPAL_ROLE_TEACHER = 1;
+  PRINCIPAL_ROLE_STUDENT_DEVICE = 2;
+  PRINCIPAL_ROLE_ADMINISTRATOR = 3;
 }
 
 message Hello {
@@ -27,46 +34,77 @@ message Hello {
   string hostname = 3;
   repeated Capability capabilities = 4;
   string app_version = 5;
+  PrincipalRole role = 6;
+
+  // SHA-256 fingerprint of the presented enrollment credential. The stable
+  // device_id is deliberately independent from this value so credentials can
+  // rotate without changing device identity.
+  bytes credential_fingerprint_sha256 = 7;
+}
+
+enum ControlRejectReason {
+  CONTROL_REJECT_REASON_UNSPECIFIED = 0;
+  CONTROL_REJECT_REASON_INCOMPATIBLE_PROTOCOL = 1;
+  CONTROL_REJECT_REASON_UNAUTHORIZED = 2;
+  CONTROL_REJECT_REASON_REVOKED = 3;
+  CONTROL_REJECT_REASON_INVALID_IDENTITY = 4;
+}
+
+message HelloAck {
+  bool accepted = 1;
+  ProtocolVersion negotiated_version = 2;
+  uint64 control_session_id = 3;
+  repeated Capability negotiated_capabilities = 4;
+  ControlRejectReason reject_reason = 5;
+  string diagnostic = 6;
 }
 
 message Heartbeat {
+  // Sender-local monotonic time for diagnostics only. It must never be
+  // compared directly with the peer's monotonic clock.
   uint64 monotonic_time_us = 1;
   uint64 control_session_id = 2;
   MediaHealth media = 3;
 }
 
+message HeartbeatAck {
+  // Echoes the ControlEnvelope.sequence that carried the Heartbeat.
+  uint64 heartbeat_sequence = 1;
+  uint64 monotonic_time_us = 2;
+}
+
 enum MediaHealth {
   MEDIA_HEALTH_UNSPECIFIED = 0;
-  IDLE = 1;
-  STARTING = 2;
-  STREAMING = 3;
-  DEGRADED = 4;
-  RECOVERING = 5;
-  SUSPENDED = 6;
-  FAILED = 7;
+  MEDIA_HEALTH_IDLE = 1;
+  MEDIA_HEALTH_STARTING = 2;
+  MEDIA_HEALTH_STREAMING = 3;
+  MEDIA_HEALTH_DEGRADED = 4;
+  MEDIA_HEALTH_RECOVERING = 5;
+  MEDIA_HEALTH_SUSPENDED = 6;
+  MEDIA_HEALTH_FAILED = 7;
 }
 
 enum StreamKind {
   STREAM_KIND_UNSPECIFIED = 0;
-  MONITORING = 1;
-  INTERACTIVE = 2;
-  TEACHER_PRESENTATION = 3;
+  STREAM_KIND_MONITORING = 1;
+  STREAM_KIND_INTERACTIVE = 2;
+  STREAM_KIND_TEACHER_PRESENTATION = 3;
 }
 
 enum VideoCodec {
   VIDEO_CODEC_UNSPECIFIED = 0;
-  H264 = 1;
-  HEVC = 2;
-  AV1 = 3;
+  VIDEO_CODEC_H264 = 1;
+  VIDEO_CODEC_HEVC = 2;
+  VIDEO_CODEC_AV1 = 3;
 }
 
 enum MediaTransport {
   MEDIA_TRANSPORT_UNSPECIFIED = 0;
-  UDP_MULTICAST = 1;
-  UDP_UNICAST = 2;
-  QUIC_DATAGRAM = 3;
-  WEBRTC = 4;
-  RELIABLE_FALLBACK = 5;
+  MEDIA_TRANSPORT_UDP_MULTICAST = 1;
+  MEDIA_TRANSPORT_UDP_UNICAST = 2;
+  MEDIA_TRANSPORT_QUIC_DATAGRAM = 3;
+  MEDIA_TRANSPORT_WEBRTC = 4;
+  MEDIA_TRANSPORT_RELIABLE_FALLBACK = 5;
 }
 
 message VideoProfile {
@@ -174,4 +212,32 @@ message SessionWorkerStatus {
   }
   State state = 2;
   string diagnostic = 3;
+}
+
+// Every reliable control-plane message is carried inside this envelope.
+// sequence is monotonically increasing within a control session and supports
+// duplicate/replay suppression at the application layer. request_id is zero
+// for uncorrelated events and non-zero for request/response flows.
+message ControlEnvelope {
+  uint64 control_session_id = 1;
+  uint64 sequence = 2;
+  ProtocolVersion protocol_version = 3;
+  uint64 request_id = 4;
+
+  oneof payload {
+    Hello hello = 10;
+    HelloAck hello_ack = 11;
+    Heartbeat heartbeat = 12;
+    HeartbeatAck heartbeat_ack = 13;
+
+    StreamOffer stream_offer = 20;
+    StreamAnswer stream_answer = 21;
+    ReceiverFeedback receiver_feedback = 22;
+    Nack nack = 23;
+    KeyframeRequest keyframe_request = 24;
+    StreamReconfigure stream_reconfigure = 25;
+
+    InputEvent input_event = 30;
+    SessionWorkerStatus session_worker_status = 31;
+  }
 }

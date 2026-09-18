@@ -1,12 +1,12 @@
 # ClassMesh Implementation Status
 
-Last updated: 2026-09-15
+Last updated: 2026-09-18
 
 This file distinguishes **implemented code**, **hosted-CI validation**, **real-hardware validation still required**, and **future product work**. Architecture documents must not be read as claims that every planned feature is already production-ready.
 
 ## Current baseline
 
-`main` now includes Phase 4 implementation work through PR #29 (`553fca31d4adcb8723e64711dfec2e9e36cdcdb8`). The current hosted CI baseline covers:
+`main` includes Phase 4 implementation and qualification tooling through PR #31 (`05ff9d647dfe548761b091017808356d2a32881c`). Phase 4 physical acceptance remains pending. Phase 5 is now tracked independently in Issue #32 so reliable control-plane work can proceed without falsely closing the Phase 4 hardware gate. The current hosted CI baseline covers:
 
 - **Portable Rust / Ubuntu** — rustfmt, Clippy with warnings denied, full workspace tests, and `classmesh-lab`.
 - **Windows Build** — workspace Clippy/tests plus release builds for the media probe, media receiver, media recovery probe, deterministic network impairment proxy, and UDP/QUIC Datagram transport benchmark.
@@ -122,6 +122,20 @@ The Phase 4 receiver path is implemented and CI-clean:
 - `scripts/phase4-two-pc.ps1` standardizes the physical commands and captures logs.
 - `docs/PHASE4_TWO_PC_RESULTS.md` is the persistent physical-result record and remains pending until real hardware is tested.
 
+### Phase 5A control-session foundation
+
+- Control-plane Protobuf is now compiled into Rust types during the build using a vendored `protoc`, so CI validates the actual schema.
+- Reliable `ControlEnvelope` carries session ID, sequence, protocol version, request ID and typed payload.
+- `Hello` / `HelloAck` schema supports explicit protocol negotiation, role, credential fingerprint and shared capabilities.
+- Protocol major mismatch is explicit; compatible peers select the lower minor version.
+- Shared capability intersection is implemented as a deterministic domain primitive.
+- Heartbeat tracking has bounded, testable Online / Suspect / Offline transitions.
+- Duplicate/non-increasing heartbeat sequences and wrong control-session IDs are rejected.
+- Media health is tracked independently from control liveness, so media recovery does not imply device disconnect.
+- Initial heartbeat defaults are 2s interval / 6s suspect / 10s offline.
+- Stable identity is documented independently from credential fingerprints so key/certificate rotation will not change device identity.
+- Administrative QUIC 0-RTT is explicitly excluded from the initial Phase 5 security model.
+
 ### Security/discovery/tooling
 
 - Control-plane Protobuf schema.
@@ -214,4 +228,4 @@ Still required:
 5. Run the 30-minute 3% impairment soak and record queue/resource/latency behavior.
 6. If the `<100 ms` gate cannot be measured directly, implement the missing end-to-end latency instrumentation and repeat the baseline.
 7. Update `docs/PHASE4_TWO_PC_RESULTS.md`, choose the measured Phase 4 unicast default, and close Issue #3 only when every acceptance item is evidenced.
-8. Begin Phase 5: reliable QUIC/TLS control plane, device/teacher identity, enrollment, authorization, heartbeat and capability/session negotiation.
+8. Continue Phase 5 under Issue #32 while Phase 4 hardware is pending: first reliable QUIC/TLS control runtime with bounded framing/ALPN/reconnect, then persistent identity/enrollment/mTLS, then transport-connected authorization and session negotiation.

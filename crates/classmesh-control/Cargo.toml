@@ -1,16 +1,13 @@
 [package]
-name = "classmesh-protocol"
+name = "classmesh-control"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-prost = "0.14.4"
-
-[build-dependencies]
-prost-build = "0.14.4"
-protoc-bin-vendored = "3.2.0"
+classmesh-protocol = { path = "../classmesh-protocol" }
+classmesh-security = { path = "../classmesh-security" }
 
 [lints]
 workspace = true

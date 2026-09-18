@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/classmesh-core",
     "crates/classmesh-protocol",
+    "crates/classmesh-control",
     "crates/classmesh-network",
     "crates/classmesh-video",
     "crates/classmesh-capture-win",

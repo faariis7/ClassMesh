@@ -15,20 +15,22 @@ ClassMesh is an administrative classroom tool. Security is part of the transport
 
 Planned device identity:
 
-- generated private key stored locally;
+- a cryptographically random stable principal/device ID stored locally;
+- generated private key stored using platform-appropriate protected storage;
 - corresponding device certificate/credential;
-- stable device ID derived independently from mutable hostname/IP;
-- key material never sent in discovery packets.
+- stable device ID is independent from mutable hostname/IP **and** independent from the active credential/public-key fingerprint, so credential rotation does not rename the device;
+- private key material is never sent in discovery or application messages.
 
 Enrollment establishes which teacher/classroom authority can control an agent.
 
 ## Control plane
 
-- QUIC with TLS 1.3.
+- QUIC reliable streams with TLS 1.3.
 - Mutual authentication after enrollment.
-- Explicit protocol version and capability negotiation.
+- Explicit ALPN plus application protocol version and capability negotiation.
 - Authorization checked per command, not only at connection creation.
-- Replay-sensitive administrative commands carry session/request identifiers.
+- Replay-sensitive administrative commands carry control-session, sequence and request identifiers.
+- QUIC/TLS 0-RTT application data is disabled for the initial control plane. Administrative actions are processed only after the authenticated 1-RTT handshake completes.
 
 ## Teacher presentation multicast
 

@@ -8,7 +8,7 @@ ClassMesh never treats video delivery as the device connection itself.
 
 ### Control plane
 
-Planned transport: QUIC/TLS 1.3 with mutually authenticated enrolled identities.
+Transport: reliable QUIC streams protected by TLS 1.3, with mutually authenticated enrolled identities once enrollment is established.
 
 Carries:
 
@@ -22,6 +22,14 @@ Carries:
 - file transfer and future administrative messages.
 
 Messages are schema-driven with Protocol Buffers. See `proto/classmesh_control.proto`.
+
+### Reliable control envelope
+
+Phase 5 uses a `ControlEnvelope` around control messages. The envelope carries a control-session ID, a monotonically increasing application sequence, negotiated protocol version, optional request ID, and a typed Protobuf payload. The sequence/request fields are application semantics for duplicate/replay suppression and correlation; they do not replace QUIC/TLS integrity.
+
+A `Hello` / `HelloAck` exchange explicitly negotiates the protocol minor version and shared capabilities. A major-version mismatch is rejected rather than silently downgraded.
+
+Application heartbeat tracks device/control liveness independently from `MediaHealth`. The initial policy is a 2-second heartbeat interval, suspect after 6 seconds, and offline after 10 seconds. Peer monotonic timestamps are diagnostic only and are never directly compared across machines.
 
 ### Media plane
 
@@ -152,4 +160,8 @@ Until that work is complete, native UDP packetization is a transport prototype, 
 
 ## 10. Compatibility/versioning
 
-Protocol compatibility currently requires equal major versions. Minor versions can evolve through capability negotiation. Before 1.0, every public wire field needs documented backward/forward compatibility rules and malformed-input tests/fuzzing.
+Protocol compatibility requires equal major versions. Within one major version, the negotiated minor version is the lower of the two advertised minor versions, and features are enabled only through negotiated shared capabilities. Protobuf field numbers are append-only: existing field numbers are not repurposed, removed fields are reserved when the schema stabilizes, and unknown fields/unsupported capabilities must not imply authorization.
+
+The QUIC control ALPN is versioned independently from media transport. Initial production control data uses 1-RTT only; 0-RTT application data is disabled until ClassMesh defines a replay-safe application profile.
+
+Before 1.0, every public wire field needs documented backward/forward compatibility rules plus malformed-input tests/fuzzing.
