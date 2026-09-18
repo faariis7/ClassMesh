@@ -11,7 +11,7 @@ classmesh-protocol = { path = "../classmesh-protocol" }
 classmesh-security = { path = "../classmesh-security" }
 prost = "0.14.4"
 quinn = "0.11.12"
-rustls = "0.23"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
 
 [dev-dependencies]
