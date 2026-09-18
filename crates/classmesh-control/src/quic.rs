@@ -277,15 +277,21 @@ impl ControlChannel {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::net::{IpAddr, Ipv4Addr};
 
     use classmesh_protocol::control_wire::{
-        ControlEnvelope, Heartbeat, HeartbeatAck, ProtocolVersion, control_envelope,
+        ControlEnvelope, Heartbeat, HeartbeatAck, ProtocolVersion as WireProtocolVersion,
+        control_envelope,
     };
+    use classmesh_protocol::{Capability, ControlRole, ProtocolVersion};
+    use classmesh_security::PrincipalId;
     use rcgen::generate_simple_self_signed;
     use rustls::pki_types::PrivatePkcs8KeyDer;
 
     use super::*;
+    use crate::handshake::{ServerHelloConfig, client_hello, server_hello};
+    use crate::ControlHello;
 
     type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -293,7 +299,7 @@ mod tests {
         ControlEnvelope {
             control_session_id: 77,
             sequence: 1,
-            protocol_version: Some(ProtocolVersion { major: 0, minor: 1 }),
+            protocol_version: Some(WireProtocolVersion { major: 0, minor: 1 }),
             request_id: 0,
             payload: Some(control_envelope::Payload::Heartbeat(Heartbeat {
                 monotonic_time_us: 500,
@@ -307,7 +313,7 @@ mod tests {
         ControlEnvelope {
             control_session_id: 77,
             sequence: 1,
-            protocol_version: Some(ProtocolVersion { major: 0, minor: 1 }),
+            protocol_version: Some(WireProtocolVersion { major: 0, minor: 1 }),
             request_id: 0,
             payload: Some(control_envelope::Payload::HeartbeatAck(HeartbeatAck {
                 heartbeat_sequence: 1,
@@ -343,6 +349,18 @@ mod tests {
                 .await
                 .map_err(|error| error.to_string())?;
 
+            let established = server_hello(
+                &mut channel,
+                &ServerHelloConfig {
+                    local_version: ProtocolVersion { major: 0, minor: 1 },
+                    local_capabilities: [Capability::UdpUnicast].into_iter().collect(),
+                    control_session_id: 77,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            assert_eq!(established.control_session_id, 77);
+
             let received = channel.receive().await.map_err(|error| error.to_string())?;
             assert_eq!(received.control_session_id, 77);
             assert!(matches!(
@@ -360,6 +378,21 @@ mod tests {
 
         let connection = connect(&client, server_address, "classmesh.local").await?;
         let mut channel = ControlChannel::open(&connection, DEFAULT_IO_TIMEOUT).await?;
+        let hello = ControlHello {
+            principal_id: PrincipalId([7; 32]),
+            role: ControlRole::StudentDevice,
+            version: ProtocolVersion { major: 0, minor: 1 },
+            capabilities: BTreeSet::from([Capability::UdpUnicast, Capability::QuicDatagram]),
+            hostname: "student-07".to_owned(),
+            app_version: "0.0.1".to_owned(),
+        };
+        let established = client_hello(&mut channel, &hello).await?;
+        assert_eq!(established.control_session_id, 77);
+        assert_eq!(
+            established.negotiated.capabilities,
+            BTreeSet::from([Capability::UdpUnicast])
+        );
+
         channel.send(&heartbeat()).await?;
 
         let received = channel.receive().await?;
