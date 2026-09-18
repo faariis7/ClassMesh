@@ -112,10 +112,7 @@ mod tests {
         let envelope = control_wire::ControlEnvelope {
             control_session_id: 44,
             sequence: 7,
-            protocol_version: Some(control_wire::ProtocolVersion {
-                major: 0,
-                minor: 1,
-            }),
+            protocol_version: Some(control_wire::ProtocolVersion { major: 0, minor: 1 }),
             request_id: 0,
             payload: Some(control_wire::control_envelope::Payload::Heartbeat(
                 control_wire::Heartbeat {
