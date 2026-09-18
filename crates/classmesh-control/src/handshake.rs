@@ -33,16 +33,25 @@ impl Display for HandshakeError {
         match self {
             Self::Transport(error) => Display::fmt(error, formatter),
             Self::MissingProtocolVersion => write!(formatter, "hello is missing protocol version"),
-            Self::VersionOutOfRange => write!(formatter, "protocol version exceeds ClassMesh range"),
-            Self::InvalidPrincipalIdLength { length } => {
-                write!(formatter, "principal id must be 32 bytes; received {length}")
+            Self::VersionOutOfRange => {
+                write!(formatter, "protocol version exceeds ClassMesh range")
             }
-            Self::UnsupportedRole { value } => write!(formatter, "unsupported control role {value}"),
+            Self::InvalidPrincipalIdLength { length } => {
+                write!(
+                    formatter,
+                    "principal id must be 32 bytes; received {length}"
+                )
+            }
+            Self::UnsupportedRole { value } => {
+                write!(formatter, "unsupported control role {value}")
+            }
             Self::UnexpectedPayload => write!(formatter, "unexpected control handshake payload"),
             Self::Rejected { reason, diagnostic } => {
                 write!(formatter, "control hello rejected ({reason}): {diagnostic}")
             }
-            Self::InvalidSessionId => write!(formatter, "server returned invalid control session id"),
+            Self::InvalidSessionId => {
+                write!(formatter, "server returned invalid control session id")
+            }
             Self::Negotiation(error) => write!(formatter, "control negotiation failed: {error:?}"),
         }
     }
@@ -116,11 +125,8 @@ pub async fn server_hello(
     };
     let hello = hello_from_wire(hello_wire)?;
 
-    let negotiated = match negotiate_hello(
-        config.local_version,
-        &config.local_capabilities,
-        &hello,
-    ) {
+    let negotiated = match negotiate_hello(config.local_version, &config.local_capabilities, &hello)
+    {
         Ok(negotiated) => negotiated,
         Err(error) => {
             let ack = ControlEnvelope {
@@ -255,11 +261,12 @@ fn hello_from_wire(hello: Hello) -> Result<ControlHello, HandshakeError> {
 }
 
 fn principal_id_from_bytes(bytes: &[u8]) -> Result<PrincipalId, HandshakeError> {
-    let value: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| HandshakeError::InvalidPrincipalIdLength {
-            length: bytes.len(),
-        })?;
+    let value: [u8; 32] =
+        bytes
+            .try_into()
+            .map_err(|_| HandshakeError::InvalidPrincipalIdLength {
+                length: bytes.len(),
+            })?;
     Ok(PrincipalId(value))
 }
 
@@ -343,10 +350,7 @@ mod tests {
             principal_id: id(5),
             role: ControlRole::StudentDevice,
             version: ProtocolVersion { major: 0, minor: 1 },
-            capabilities: capabilities(&[
-                Capability::H264HardwareDecode,
-                Capability::UdpUnicast,
-            ]),
+            capabilities: capabilities(&[Capability::H264HardwareDecode, Capability::UdpUnicast]),
             hostname: "student-05".to_owned(),
             app_version: "0.0.1".to_owned(),
         };
