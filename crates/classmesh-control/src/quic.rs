@@ -372,7 +372,11 @@ mod tests {
                 .await
                 .map_err(|error| error.to_string())?;
             channel.finish().map_err(|error| error.to_string())?;
-            Ok::<(), String>(())
+
+            // Keep both the endpoint and connection alive in the task result until
+            // the client has consumed the final control frame. Dropping the final
+            // QUIC handles here can race the peer and surface as "connection lost".
+            Ok::<(Endpoint, Connection), String>((server, connection))
         });
 
         let connection = connect(&client, server_address, "classmesh.local").await?;
@@ -401,8 +405,11 @@ mod tests {
         ));
         channel.finish()?;
 
-        server_task.await.map_err(|error| error.to_string())??;
         connection.close(0_u32.into(), b"test complete");
+        let (server, server_connection) =
+            server_task.await.map_err(|error| error.to_string())??;
+        server_connection.close(0_u32.into(), b"test complete");
+        server.close(0_u32.into(), b"test complete");
         client.wait_idle().await;
         Ok(())
     }
