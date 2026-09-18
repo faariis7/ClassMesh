@@ -9,8 +9,8 @@ This is the active execution plan for ClassMesh. It is updated as implementation
 | Track | State | Current gate |
 |---|---|---|
 | Phase 4 — one-to-one live video | **Implementation complete; physical qualification pending** | Issue #3 stays open until two physical Windows PCs pass the documented 1080p30, latency, impairment and soak criteria |
-| Phase 5A — control protocol foundation | **In progress** | Control envelope, generated Protobuf types, explicit version negotiation, capability intersection and heartbeat/liveness |
-| Phase 5B — QUIC/TLS runtime | Next | Reliable bounded control streams, TLS 1.3, ALPN, timeouts, reconnect and transport tests |
+| Phase 5A — control protocol foundation | **Complete — PR #33** | Generated Protobuf, control envelope, version/capability negotiation, heartbeat/liveness |
+| Phase 5B — QUIC/TLS runtime | **In progress** | Reliable bounded control stream, TLS 1.3, ALPN, timeouts, reconnect policy and loopback integration tests |
 | Phase 5C — identity + enrollment | Next | Persistent stable principal IDs, credential storage, approval flow, mTLS, revocation and key rotation |
 | Phase 5D — authorization + session negotiation | Planned | Per-command authorization, replay controls, capability/session negotiation over the real transport |
 | Phase 5E — hardening | Planned | malformed input, reconnect storms, fuzzing, protocol compatibility and security tests |
@@ -70,8 +70,8 @@ Current control-plane research baseline:
 
 ## Planned PR sequence
 
-1. **5A Control foundation** — generated control Protobuf, envelope/versioning, heartbeat/liveness and capability negotiation.
-2. **5B QUIC/TLS transport** — new control runtime using Quinn reliable streams with ALPN, bounded framing and reconnect behavior.
+1. **5A Control foundation — complete in PR #33** — generated control Protobuf, envelope/versioning, heartbeat/liveness and capability negotiation.
+2. **5B QUIC/TLS transport — active** — Quinn reliable streams with ALPN, 256 KiB bounded framing, connect/I/O/idle timeouts, bounded reconnect and loopback handshake tests.
 3. **5C Identity store + enrollment** — stable IDs, local credential persistence, bootstrap approval, post-enrollment mTLS, rotation/revocation.
 4. **5D Authorization/session integration** — connect authenticated principal to command permissions and stream/session negotiation.
 5. **5E Hardening** — malformed messages, replay/duplicate cases, reconnect storms, fuzz targets and diagnostics.
