@@ -32,7 +32,7 @@ Initial platform direction:
 - **Video plane:** low-latency datagrams; multicast for suitable wired presentation; unicast/SFU candidates for Wi-Fi
 - **Windows UI:** separate native UI layer; final framework decision is deferred until engine gates are stable
 
-See [Architecture](docs/ARCHITECTURE.md), [Roadmap](docs/ROADMAP.md), [Protocol](docs/PROTOCOL.md), [Testing](docs/TESTING.md), [Security](docs/SECURITY.md), and the [current implementation status](docs/IMPLEMENTATION_STATUS.md).
+See [Architecture](docs/ARCHITECTURE.md), [Roadmap](docs/ROADMAP.md), [Living Work Plan](docs/WORK_PLAN.md), [Protocol](docs/PROTOCOL.md), [Testing](docs/TESTING.md), [Security](docs/SECURITY.md), and the [current implementation status](docs/IMPLEMENTATION_STATUS.md).
 
 ## Non-negotiable engineering rules
 
@@ -65,7 +65,8 @@ Before building the full classroom UI, ClassMesh must demonstrate:
 ClassMesh/
 ├─ crates/
 │  ├─ classmesh-core/             # queues, recovery, adaptation, metrics
-│  ├─ classmesh-protocol/         # versioning + native media header
+│  ├─ classmesh-protocol/         # versioning + generated control schema + native media header
+│  ├─ classmesh-control/          # control negotiation, heartbeat and liveness state
 │  ├─ classmesh-network/          # packetization, UDP, loss/NACK/reassembly
 │  ├─ classmesh-video/            # codec policy, pacing, keyframe coordination
 │  ├─ classmesh-capture-win/      # capture lifecycle/backend abstraction
