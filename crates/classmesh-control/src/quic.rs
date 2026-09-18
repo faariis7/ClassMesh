@@ -15,9 +15,7 @@ use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::time::{sleep, timeout};
 
-use crate::framing::{
-    CONTROL_LENGTH_PREFIX_BYTES, FrameError, declared_payload_len, encode_frame,
-};
+use crate::framing::{CONTROL_LENGTH_PREFIX_BYTES, FrameError, declared_payload_len, encode_frame};
 
 pub const CONTROL_ALPN: &[u8] = b"classmesh-control/1";
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -231,10 +229,7 @@ impl ControlChannel {
         })
     }
 
-    pub async fn send(
-        &mut self,
-        envelope: &ControlEnvelope,
-    ) -> Result<(), ControlTransportError> {
+    pub async fn send(&mut self, envelope: &ControlEnvelope) -> Result<(), ControlTransportError> {
         let frame = encode_frame(envelope)?;
         timeout(self.io_timeout, self.send.write_all(&frame))
             .await
@@ -290,8 +285,8 @@ mod tests {
     use rustls::pki_types::PrivatePkcs8KeyDer;
 
     use super::*;
-    use crate::handshake::{ServerHelloConfig, client_hello, server_hello};
     use crate::ControlHello;
+    use crate::handshake::{ServerHelloConfig, client_hello, server_hello};
 
     type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -342,9 +337,7 @@ mod tests {
         client.set_default_client_config(client_config_with_roots(roots)?);
 
         let server_task = tokio::spawn(async move {
-            let connection = accept(&server)
-                .await
-                .map_err(|error| error.to_string())?;
+            let connection = accept(&server).await.map_err(|error| error.to_string())?;
             let mut channel = ControlChannel::accept(&connection, DEFAULT_IO_TIMEOUT)
                 .await
                 .map_err(|error| error.to_string())?;
