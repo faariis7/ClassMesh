@@ -23,6 +23,23 @@ Carries:
 
 Messages are schema-driven with Protocol Buffers. See `proto/classmesh_control.proto`.
 
+### QUIC control transport runtime
+
+Phase 5B carries control envelopes on a long-lived reliable bidirectional QUIC stream.
+
+Current transport bounds:
+
+- ALPN: `classmesh-control/1`;
+- frame prefix: 4-byte unsigned big-endian payload length;
+- maximum encoded Protobuf payload: 256 KiB;
+- malformed zero-length/oversized frames are rejected before payload allocation;
+- connect and control I/O operations have explicit timeouts;
+- QUIC idle timeout and keepalive are bounded independently from application heartbeat;
+- reconnect attempts use bounded exponential backoff;
+- application 0-RTT remains disabled.
+
+The current server TLS helper is explicitly **pre-enrollment**: it authenticates the server certificate but does not yet require a client certificate. Phase 5C replaces this bootstrap mode with enrolled mutual authentication.
+
 ### Reliable control envelope
 
 Phase 5 uses a `ControlEnvelope` around control messages. The envelope carries a control-session ID, a monotonically increasing application sequence, negotiated protocol version, optional request ID, and a typed Protobuf payload. The sequence/request fields are application semantics for duplicate/replay suppression and correlation; they do not replace QUIC/TLS integrity.
