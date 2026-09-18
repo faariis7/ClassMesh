@@ -1,0 +1,13 @@
+[package]
+name = "classmesh-control"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+classmesh-protocol = { path = "../classmesh-protocol" }
+classmesh-security = { path = "../classmesh-security" }
+
+[lints]
+workspace = true
