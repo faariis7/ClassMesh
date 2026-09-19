@@ -199,7 +199,9 @@ pub async fn connect(
         .map_err(|error| ControlTransportError::Transport(error.to_string()))
 }
 
-fn validate_reconnect_policy(policy: RecoveryPolicy) -> Result<(), ControlTransportError> {
+pub(crate) fn validate_reconnect_policy(
+    policy: RecoveryPolicy,
+) -> Result<(), ControlTransportError> {
     if policy.max_attempts == 0 {
         return Err(ControlTransportError::Configuration(
             "reconnect policy must allow at least one attempt".to_owned(),
@@ -272,7 +274,7 @@ pub struct ControlChannel {
 }
 
 impl ControlChannel {
-    fn validate_io_timeout(io_timeout: Duration) -> Result<(), ControlTransportError> {
+    pub(crate) fn validate_io_timeout(io_timeout: Duration) -> Result<(), ControlTransportError> {
         if io_timeout.is_zero() {
             return Err(ControlTransportError::Configuration(
                 "control I/O timeout must be greater than zero".to_owned(),
