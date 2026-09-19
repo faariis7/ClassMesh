@@ -14,6 +14,7 @@ use quinn::{
 use rustls::RootCertStore;
 use rustls::client::ResolvesClientCert;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::ResolvesServerCert;
 use rustls::server::danger::ClientCertVerifier;
 use tokio::time::{sleep, timeout};
 
@@ -148,6 +149,30 @@ pub fn enrolled_server_config(
         .with_client_cert_verifier(client_cert_verifier)
         .with_single_cert(certificate_chain, private_key)
         .map_err(|error| ControlTransportError::Configuration(error.to_string()))?;
+    tls.alpn_protocols = vec![CONTROL_ALPN.to_vec()];
+    tls.max_early_data_size = 0;
+
+    let crypto = QuicServerConfig::try_from(tls)
+        .map_err(|error| ControlTransportError::Configuration(error.to_string()))?;
+    let mut config = ServerConfig::with_crypto(Arc::new(crypto));
+    config.transport_config(Arc::new(control_transport_config()));
+    Ok(config)
+}
+
+/// Creates an enrolled server configuration with resolver-backed server credentials.
+///
+/// This keeps protected-key implementations such as Windows CNG behind rustls'
+/// signing abstraction instead of requiring exportable PKCS#8/SEC1 private-key bytes.
+pub fn enrolled_server_config_with_resolver(
+    server_cert_resolver: Arc<dyn ResolvesServerCert>,
+    client_cert_verifier: Arc<dyn ClientCertVerifier>,
+) -> Result<ServerConfig, ControlTransportError> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|error| ControlTransportError::Configuration(error.to_string()))?
+        .with_client_cert_verifier(client_cert_verifier)
+        .with_cert_resolver(server_cert_resolver);
     tls.alpn_protocols = vec![CONTROL_ALPN.to_vec()];
     tls.max_early_data_size = 0;
 
@@ -633,12 +658,15 @@ mod tests {
                 .build()
                 .map_err(|error| error.to_string())?;
 
+        let provider = rustls::crypto::ring::default_provider();
+        let server_certified_key = CertifiedKey::from_der(
+            vec![server_certificate.clone()],
+            server_private_key.into(),
+            &provider,
+        )?;
+        let server_resolver = Arc::new(SingleCertAndKey::from(server_certified_key));
         let server = Endpoint::server(
-            enrolled_server_config(
-                vec![server_certificate.clone()],
-                server_private_key.into(),
-                verifier,
-            )?,
+            enrolled_server_config_with_resolver(server_resolver, verifier)?,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         )?;
         let server_address = server.local_addr()?;
