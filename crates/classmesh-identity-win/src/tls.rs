@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use p256::ecdsa::Signature;
 use rustls::client::ResolvesClientCert;
+use rustls::server::ResolvesServerCert;
 use rustls::pki_types::{CertificateDer, SubjectPublicKeyInfoDer, alg_id::ECDSA_P256};
 use rustls::sign::{CertifiedKey, Signer, SigningKey, SingleCertAndKey, public_key_to_spki};
 use rustls::{Error, SignatureAlgorithm, SignatureScheme};
@@ -108,14 +109,34 @@ impl Signer for CngRustlsSigner {
     }
 }
 
+fn cng_certified_key(
+    certificate_chain: Vec<CertificateDer<'static>>,
+    key: CngMachineKey,
+) -> Result<CertifiedKey, CngTlsError> {
+    let signing_key = Arc::new(CngRustlsSigningKey::new(key)?);
+    let certified_key = CertifiedKey::new(certificate_chain, signing_key);
+    certified_key.keys_match()?;
+    Ok(certified_key)
+}
+
 pub fn cng_client_cert_resolver(
     certificate_chain: Vec<CertificateDer<'static>>,
     key: CngMachineKey,
 ) -> Result<Arc<dyn ResolvesClientCert>, CngTlsError> {
-    let signing_key = Arc::new(CngRustlsSigningKey::new(key)?);
-    let certified_key = CertifiedKey::new(certificate_chain, signing_key);
-    certified_key.keys_match()?;
-    Ok(Arc::new(SingleCertAndKey::from(certified_key)))
+    Ok(Arc::new(SingleCertAndKey::from(cng_certified_key(
+        certificate_chain,
+        key,
+    )?)))
+}
+
+pub fn cng_server_cert_resolver(
+    certificate_chain: Vec<CertificateDer<'static>>,
+    key: CngMachineKey,
+) -> Result<Arc<dyn ResolvesServerCert>, CngTlsError> {
+    Ok(Arc::new(SingleCertAndKey::from(cng_certified_key(
+        certificate_chain,
+        key,
+    )?)))
 }
 
 #[cfg(test)]
@@ -202,6 +223,21 @@ mod tests {
                 .expect("CNG verification")
         );
         assert_eq!(verifier.export_policy().expect("export policy"), 0);
+    }
+
+    #[test]
+    fn server_resolver_requires_certificate_to_match_protected_key() {
+        let name = unique_key_name("server-match");
+        let other_name = unique_key_name("server-mismatch");
+        let _cleanup = TestKeyCleanup::new(name.clone());
+        let _other_cleanup = TestKeyCleanup::new(other_name.clone());
+        let key = CngMachineKey::create(name).expect("machine key");
+        let other = CngMachineKey::create(other_name).expect("other machine key");
+        let certificate = self_signed_certificate(key.clone());
+
+        cng_server_cert_resolver(vec![certificate.clone()], key)
+            .expect("matching server certificate and CNG key should resolve");
+        assert!(cng_server_cert_resolver(vec![certificate], other).is_err());
     }
 
     #[test]
