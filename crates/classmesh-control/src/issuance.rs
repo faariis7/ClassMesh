@@ -204,7 +204,13 @@ mod tests {
         );
         let oversized = vec![0; MAX_ENROLLMENT_CSR_BYTES + 1];
         assert!(matches!(
-            policy().validate(1_000_000, principal(7), &oversized, approval(&[1]), validity()),
+            policy().validate(
+                1_000_000,
+                principal(7),
+                &oversized,
+                approval(&[1]),
+                validity()
+            ),
             Err(CertificateIssuanceError::CsrTooLarge { .. })
         ));
     }
