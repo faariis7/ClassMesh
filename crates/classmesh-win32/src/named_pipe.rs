@@ -11,8 +11,9 @@ use windows_sys::Win32::Foundation::{
     GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::{
-    InitializeSecurityDescriptor, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
-    SetSecurityDescriptorDacl,
+    ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CreateWellKnownSid,
+    GetLengthSid, InitializeAcl, InitializeSecurityDescriptor, IsValidSid, SECURITY_ATTRIBUTES,
+    SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE, SetSecurityDescriptorDacl, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
@@ -55,10 +56,10 @@ pub struct PipePeer {
 
 /// Blocking local named-pipe endpoint used only for Service <-> Session Worker IPC.
 ///
-/// Pipe ACLs deliberately allow local callers to reach the endpoint because the Service and Worker
-/// run under different identities. Authorization is completed by binding the connected pipe to the
-/// exact Worker PID and Windows session returned by the Service's process launcher. Remote clients
-/// are rejected by the pipe mode itself.
+/// The pipe DACL grants access only to LocalSystem and the intended interactive user's SID.
+/// Authorization is then narrowed again by binding the connected pipe to the exact Worker PID and
+/// Windows session returned by the Service's process launcher. Remote clients are rejected by the
+/// pipe mode itself.
 #[derive(Debug)]
 pub struct NamedPipeServer {
     handle: HANDLE,
@@ -68,18 +69,90 @@ pub struct NamedPipeServer {
 unsafe impl Send for NamedPipeServer {}
 
 impl NamedPipeServer {
-    pub fn create(name: &str) -> Result<Self, PipeError> {
+    pub fn create_for_user(name: &str, user_sid: &[u8]) -> Result<Self, PipeError> {
         let full_name = normalize_pipe_name(name);
         let wide_name = wide_null(OsStr::new(&full_name));
 
-        // A NULL DACL lets the interactive Worker open the Service-created pipe regardless of the
-        // user's SID. This is NOT the authorization boundary: after connection we require the exact
-        // process id and session id of the Worker the Service launched. Remote clients are disabled.
-        // A future hardening step can replace this with a per-user SID DACL without changing the
-        // peer-binding model.
+        if user_sid.is_empty()
+            || unsafe { IsValidSid(user_sid.as_ptr().cast_mut().cast()) } == 0
+        {
+            return Err(PipeError {
+                stage: "NamedPipeUserSidValidation",
+                win32_error: 87, // ERROR_INVALID_PARAMETER
+            });
+        }
+
+        let mut system_sid = [0_u8; SECURITY_MAX_SID_SIZE as usize];
+        let mut system_sid_len =
+            u32::try_from(system_sid.len()).expect("SECURITY_MAX_SID_SIZE fits u32");
+        // SAFETY: system_sid is writable storage of the documented maximum SID size.
+        if unsafe {
+            CreateWellKnownSid(
+                WinLocalSystemSid,
+                null_mut(),
+                system_sid.as_mut_ptr().cast(),
+                &mut system_sid_len,
+            )
+        } == 0
+        {
+            return Err(last_error("CreateWellKnownSid(LocalSystem)"));
+        }
+
+        // SAFETY: both SIDs are valid for GetLengthSid; user SID was validated above and the
+        // LocalSystem SID was created successfully.
+        let user_sid_len = unsafe { GetLengthSid(user_sid.as_ptr().cast_mut().cast()) };
+        let system_sid_len =
+            unsafe { GetLengthSid(system_sid.as_mut_ptr().cast()) };
+        let ace_base = size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>();
+        let acl_bytes = size_of::<ACL>()
+            .saturating_add(ace_base)
+            .saturating_add(usize::try_from(user_sid_len).expect("user SID length fits usize"))
+            .saturating_add(ace_base)
+            .saturating_add(usize::try_from(system_sid_len).expect("system SID length fits usize"));
+        let word = size_of::<usize>();
+        let acl_words = acl_bytes.saturating_add(word - 1) / word;
+        let mut acl_storage = vec![0_usize; acl_words];
+        let acl = acl_storage.as_mut_ptr().cast::<ACL>();
+        let acl_len = u32::try_from(acl_words.saturating_mul(word)).map_err(|_| PipeError {
+            stage: "NamedPipeAclSize",
+            win32_error: 87,
+        })?;
+
+        // SAFETY: acl points to aligned writable storage of acl_len bytes.
+        if unsafe { InitializeAcl(acl, acl_len, ACL_REVISION) } == 0 {
+            return Err(last_error("InitializeAcl"));
+        }
+        let access_mask = GENERIC_READ | GENERIC_WRITE;
+        // SAFETY: acl is initialized and user_sid is a valid SID kept alive through pipe creation.
+        if unsafe {
+            AddAccessAllowedAceEx(
+                acl,
+                ACL_REVISION,
+                0,
+                access_mask,
+                user_sid.as_ptr().cast_mut().cast(),
+            )
+        } == 0
+        {
+            return Err(last_error("AddAccessAllowedAceEx(user)"));
+        }
+        // SAFETY: acl is initialized and system_sid remains valid through pipe creation.
+        if unsafe {
+            AddAccessAllowedAceEx(
+                acl,
+                ACL_REVISION,
+                0,
+                access_mask,
+                system_sid.as_mut_ptr().cast(),
+            )
+        } == 0
+        {
+            return Err(last_error("AddAccessAllowedAceEx(LocalSystem)"));
+        }
+
         // SAFETY: SECURITY_DESCRIPTOR is POD and then initialized by the Win32 API.
         let mut descriptor: SECURITY_DESCRIPTOR = unsafe { zeroed() };
-        // SAFETY: `descriptor` is valid writable storage for a security descriptor.
+        // SAFETY: descriptor is valid writable storage for a security descriptor.
         if unsafe {
             InitializeSecurityDescriptor(
                 &mut descriptor as *mut SECURITY_DESCRIPTOR as *mut _,
@@ -89,13 +162,12 @@ impl NamedPipeServer {
         {
             return Err(last_error("InitializeSecurityDescriptor"));
         }
-        // SAFETY: initialized descriptor is valid; a present NULL DACL grants access and is paired
-        // with strict local PID/session binding after connection.
+        // SAFETY: descriptor and ACL are initialized and live through CreateNamedPipeW.
         if unsafe {
             SetSecurityDescriptorDacl(
                 &mut descriptor as *mut SECURITY_DESCRIPTOR as *mut _,
                 1,
-                null_mut(),
+                acl,
                 0,
             )
         } == 0
@@ -113,8 +185,8 @@ impl NamedPipeServer {
         let open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE;
         let pipe_mode =
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
-        // SAFETY: the UTF-16 name is NUL-terminated, security attributes live through the call, and
-        // no output pointers are used.
+        // SAFETY: the UTF-16 name is NUL-terminated, security attributes and ACL live through the
+        // call, and no output pointers are used.
         let handle = unsafe {
             CreateNamedPipeW(
                 wide_name.as_ptr(),
