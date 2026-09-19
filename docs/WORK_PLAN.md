@@ -13,7 +13,7 @@ This is the active execution plan for ClassMesh. It is updated as implementation
 | Phase 5B — QUIC/TLS runtime | **Complete — PR #36 merged** | Current-baseline CI #232 passed on Synology Portable + Windows; merge `794fd45a5a20b6e4c623b7ecbbcfda5264e52ec0` |
 | Phase 5C1 — identity/rotation model | **Complete — PR #39 merged** | Stable PrincipalId, multi-credential lifecycle, enrollment binding and credential→principal mapping; CI #239 green, merge `aaf22a1f0caea908322620667d52f544fb59cb27` |
 | Phase 5C2 — Windows protected key backend | **Complete — PR #40 merged** | CI #243 passed on Synology Portable + Windows; merge `8608a1497a7e339eda2ba4447d08183d29de65bd` |
-| Phase 5C3 — enrollment + mTLS | **In progress — bootstrap trust merged in PR #43** | PR #41 merged the v0.2 CSR/receipt/status/result contract; PR #42 hardened terminal certificate results; PR #43 added explicit pinned bootstrap trust. PR #45 is the active certificate-issuance policy slice; cryptographic signing/provider integration and post-enrollment mTLS remain next |
+| Phase 5C3 — enrollment + mTLS | **In progress — issuance policy merged in PR #45** | PR #41–#43 established v0.2 enrollment, terminal result validation and pinned bootstrap trust; PR #45 merged bounded certificate-issuance policy. PR #46 verifies PKCS#10 proof-of-possession and PR #47 bounds credential rotation overlap while CI is pending; X.509 signing/provider integration and post-enrollment mTLS remain next |
 | Phase 5D — authorization + session negotiation | Planned | Per-command authorization, replay controls, capability/session negotiation over the real transport |
 | Phase 5E — hardening | Planned | Malformed input, reconnect storms, fuzzing, protocol compatibility and security tests |
 | AI quality workflow | **Active** | Project skills + official plugins documented in `docs/AI_QUALITY_STACK.md` |
@@ -103,7 +103,7 @@ Current control-plane research baseline:
 2. **5B QUIC/TLS transport — complete, PR #36 merged, CI #232.**
 3. **5C1 Stable identity + rotation model — complete, PR #39 merged, CI #239.**
 4. **5C2 Windows protected key backend — complete, PR #40 merged, CI #243.**
-5. **5C3 Enrollment + mTLS — active** — PR #41 landed the v0.2 enrollment wire contract; PR #42 validates bounded terminal certificate results; PR #43 landed explicit pinned bootstrap trust with CI #260 green. PR #45 adds the bounded authority-side issuance policy; cryptographic signing, mutual authentication and revocation/rotation integration follow.
+5. **5C3 Enrollment + mTLS — active** — PR #41 landed the v0.2 enrollment wire contract; PR #42 validates bounded terminal certificate results; PR #43 landed explicit pinned bootstrap trust with CI #260 green; PR #45 merged the bounded authority-side issuance policy with main CI #272 green. PR #46 is validating PKCS#10 proof-of-possession and PR #47 is enforcing bounded credential overlap; X.509 signing, mutual authentication and revocation/rotation transport integration follow.
 6. **5D Authorization/session integration** — connect authenticated principal to command permissions and stream/session negotiation.
 7. **5E Hardening** — malformed messages, replay/duplicate cases, reconnect storms, fuzz targets and diagnostics.
 
