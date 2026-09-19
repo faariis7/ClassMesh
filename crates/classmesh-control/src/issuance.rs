@@ -31,6 +31,7 @@ pub enum CertificateIssuanceError {
     NotBeforeTooFarInFuture,
     AlreadyExpired,
     LifetimeTooLong,
+    InvalidCsrSignature,
 }
 
 impl CertificateIssuancePolicy {
@@ -50,6 +51,9 @@ impl CertificateIssuancePolicy {
                 length: csr_der.len(),
                 maximum: MAX_ENROLLMENT_CSR_BYTES,
             });
+        }
+        if crate::csr::verify_pkcs10_csr(csr_der).is_err() {
+            return Err(CertificateIssuanceError::InvalidCsrSignature);
         }
         if approval.principal_id != principal_id {
             return Err(CertificateIssuanceError::PrincipalBindingMismatch);
@@ -85,10 +89,9 @@ impl CertificateIssuancePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enrollment::PRINCIPAL_ID_BYTES;
 
     fn principal(value: u8) -> PrincipalId {
-        PrincipalId([value; PRINCIPAL_ID_BYTES])
+        PrincipalId([value; 32])
     }
 
     fn policy() -> CertificateIssuancePolicy {
@@ -96,6 +99,16 @@ mod tests {
             maximum_lifetime_ms: 86_400_000,
             allowed_clock_skew_ms: 60_000,
         }
+    }
+
+    fn valid_csr() -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().expect("test key");
+        rcgen::CertificateParams::new(Vec::<String>::new())
+            .expect("params")
+            .serialize_request(&key)
+            .expect("CSR")
+            .der()
+            .to_vec()
     }
 
     fn approval(csr_der: &[u8]) -> EnrollmentApproval {
@@ -108,102 +121,95 @@ mod tests {
     fn validity() -> CertificateValidity {
         CertificateValidity {
             not_before_unix_ms: 1_000_000,
-            not_after_unix_ms: 1_000_000 + 3_600_000,
+            not_after_unix_ms: 4_600_000,
         }
     }
 
     #[test]
-    fn issuance_requires_exact_approved_principal_and_csr() {
+    fn issuance_requires_verified_exact_approved_principal_and_csr() {
+        let csr = valid_csr();
         policy()
-            .validate(
-                1_000_000,
-                principal(7),
-                &[0x30, 0x01, 0x00],
-                approval(&[0x30, 0x01, 0x00]),
-                validity(),
-            )
-            .expect("approved principal and CSR should pass issuance policy");
+            .validate(1_000_000, principal(7), &csr, approval(&csr), validity())
+            .expect("valid approved CSR");
 
         assert_eq!(
-            policy().validate(
-                1_000_000,
-                principal(9),
-                &[0x30, 0x01, 0x00],
-                approval(&[0x30, 0x01, 0x00]),
-                validity(),
-            ),
+            policy().validate(1_000_000, principal(9), &csr, approval(&csr), validity()),
             Err(CertificateIssuanceError::PrincipalBindingMismatch)
         );
+
+        let other = valid_csr();
         assert_eq!(
-            policy().validate(
-                1_000_000,
-                principal(7),
-                &[0x30, 0x01, 0x00],
-                approval(&[0x30, 0x01, 0x01]),
-                validity(),
-            ),
+            policy().validate(1_000_000, principal(7), &csr, approval(&other), validity()),
             Err(CertificateIssuanceError::CsrBindingMismatch)
         );
     }
 
     #[test]
-    fn issuance_rejects_unbounded_or_invalid_validity() {
-        let mut invalid = validity();
-        invalid.not_after_unix_ms = invalid.not_before_unix_ms;
+    fn issuance_rejects_invalid_csr_signature() {
+        let mut csr = valid_csr();
+        let last = csr.len() - 1;
+        csr[last] ^= 1;
         assert_eq!(
-            policy().validate(1_000_000, principal(7), &[1], approval(&[1]), invalid,),
-            Err(CertificateIssuanceError::InvalidValidityWindow)
-        );
-
-        let expired = CertificateValidity {
-            not_before_unix_ms: 900_000,
-            not_after_unix_ms: 999_999,
-        };
-        assert_eq!(
-            policy().validate(1_000_000, principal(7), &[1], approval(&[1]), expired,),
-            Err(CertificateIssuanceError::AlreadyExpired)
-        );
-
-        let too_long = CertificateValidity {
-            not_before_unix_ms: 1_000_000,
-            not_after_unix_ms: 1_000_000 + 86_400_001,
-        };
-        assert_eq!(
-            policy().validate(1_000_000, principal(7), &[1], approval(&[1]), too_long,),
-            Err(CertificateIssuanceError::LifetimeTooLong)
-        );
-
-        let future = CertificateValidity {
-            not_before_unix_ms: 1_060_001,
-            not_after_unix_ms: 1_060_002,
-        };
-        assert_eq!(
-            policy().validate(1_000_000, principal(7), &[1], approval(&[1]), future,),
-            Err(CertificateIssuanceError::NotBeforeTooFarInFuture)
+            policy().validate(1_000_000, principal(7), &csr, approval(&csr), validity()),
+            Err(CertificateIssuanceError::InvalidCsrSignature)
         );
     }
 
     #[test]
-    fn issuance_rejects_empty_or_oversized_csr() {
-        assert_eq!(
-            policy().validate(
-                1_000_000,
-                principal(7),
-                &[],
-                approval(&[0x30, 0x01, 0x00]),
-                validity(),
+    fn issuance_rejects_invalid_validity_windows() {
+        let csr = valid_csr();
+        let cases = [
+            (
+                CertificateValidity {
+                    not_before_unix_ms: 1_000_000,
+                    not_after_unix_ms: 1_000_000,
+                },
+                CertificateIssuanceError::InvalidValidityWindow,
             ),
+            (
+                CertificateValidity {
+                    not_before_unix_ms: 900_000,
+                    not_after_unix_ms: 999_999,
+                },
+                CertificateIssuanceError::AlreadyExpired,
+            ),
+            (
+                CertificateValidity {
+                    not_before_unix_ms: 1_000_000,
+                    not_after_unix_ms: 87_400_001,
+                },
+                CertificateIssuanceError::LifetimeTooLong,
+            ),
+            (
+                CertificateValidity {
+                    not_before_unix_ms: 1_060_001,
+                    not_after_unix_ms: 1_060_002,
+                },
+                CertificateIssuanceError::NotBeforeTooFarInFuture,
+            ),
+        ];
+        for (validity, expected) in cases {
+            assert_eq!(
+                policy().validate(1_000_000, principal(7), &csr, approval(&csr), validity),
+                Err(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn issuance_rejects_empty_or_oversized_csr_before_parsing() {
+        assert_eq!(
+            policy().validate(1_000_000, principal(7), &[], approval(&[1]), validity()),
             Err(CertificateIssuanceError::EmptyCsr)
         );
-
         let oversized = vec![0; MAX_ENROLLMENT_CSR_BYTES + 1];
         assert!(matches!(
             policy().validate(
                 1_000_000,
                 principal(7),
                 &oversized,
-                approval(&[0x30, 0x01, 0x00]),
-                validity(),
+                approval(&[1]),
+                validity()
             ),
             Err(CertificateIssuanceError::CsrTooLarge { .. })
         ));
