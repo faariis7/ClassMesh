@@ -12,7 +12,9 @@ use quinn::{
     TransportConfig,
 };
 use rustls::RootCertStore;
+use rustls::client::ResolvesClientCert;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::danger::ClientCertVerifier;
 use tokio::time::{sleep, timeout};
 
 use crate::framing::{CONTROL_LENGTH_PREFIX_BYTES, FrameError, declared_payload_len, encode_frame};
@@ -119,6 +121,57 @@ pub fn client_config_with_roots(
         .map_err(|error| ControlTransportError::Configuration(error.to_string()))?
         .with_root_certificates(roots)
         .with_no_client_auth();
+    tls.alpn_protocols = vec![CONTROL_ALPN.to_vec()];
+    tls.enable_early_data = false;
+
+    let crypto = QuicClientConfig::try_from(tls)
+        .map_err(|error| ControlTransportError::Configuration(error.to_string()))?;
+    let mut config = ClientConfig::new(Arc::new(crypto));
+    config.transport_config(Arc::new(control_transport_config()));
+    Ok(config)
+}
+
+/// Creates an enrolled server configuration that requires a verified client certificate.
+///
+/// The caller supplies the verifier so ClassMesh can enforce its own trust/revocation
+/// policy without weakening rustls certificate validation. Administrative 0-RTT remains
+/// disabled.
+pub fn enrolled_server_config(
+    certificate_chain: Vec<CertificateDer<'static>>,
+    private_key: PrivateKeyDer<'static>,
+    client_cert_verifier: Arc<dyn ClientCertVerifier>,
+) -> Result<ServerConfig, ControlTransportError> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|error| ControlTransportError::Configuration(error.to_string()))?
+        .with_client_cert_verifier(client_cert_verifier)
+        .with_single_cert(certificate_chain, private_key)
+        .map_err(|error| ControlTransportError::Configuration(error.to_string()))?;
+    tls.alpn_protocols = vec![CONTROL_ALPN.to_vec()];
+    tls.max_early_data_size = 0;
+
+    let crypto = QuicServerConfig::try_from(tls)
+        .map_err(|error| ControlTransportError::Configuration(error.to_string()))?;
+    let mut config = ServerConfig::with_crypto(Arc::new(crypto));
+    config.transport_config(Arc::new(control_transport_config()));
+    Ok(config)
+}
+
+/// Creates an enrolled client configuration with a resolver-backed client credential.
+///
+/// Using a resolver keeps protected-key implementations (for example Windows CNG) behind
+/// rustls' signing abstraction rather than requiring PKCS#8/SEC1 private-key export.
+pub fn enrolled_client_config(
+    roots: RootCertStore,
+    client_cert_resolver: Arc<dyn ResolvesClientCert>,
+) -> Result<ClientConfig, ControlTransportError> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|error| ControlTransportError::Configuration(error.to_string()))?
+        .with_root_certificates(roots)
+        .with_client_cert_resolver(client_cert_resolver);
     tls.alpn_protocols = vec![CONTROL_ALPN.to_vec()];
     tls.enable_early_data = false;
 
@@ -289,6 +342,8 @@ mod tests {
     use classmesh_security::PrincipalId;
     use rcgen::generate_simple_self_signed;
     use rustls::pki_types::PrivatePkcs8KeyDer;
+    use rustls::server::WebPkiClientVerifier;
+    use rustls::sign::{CertifiedKey, SingleCertAndKey};
 
     use super::*;
     use crate::ControlHello;
@@ -410,6 +465,64 @@ mod tests {
             server_task.await.map_err(|error| error.to_string())??;
         server_connection.close(0_u32.into(), b"test complete");
         server.close(0_u32.into(), b"test complete");
+        client.wait_idle().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enrolled_quic_accepts_verified_client_certificate() -> TestResult {
+        let server_identity = generate_simple_self_signed(vec!["classmesh.local".to_owned()])?;
+        let server_certificate = CertificateDer::from(server_identity.cert);
+        let server_private_key =
+            PrivatePkcs8KeyDer::from(server_identity.signing_key.serialize_der());
+
+        let client_identity = generate_simple_self_signed(vec!["student.classmesh".to_owned()])?;
+        let client_certificate = CertificateDer::from(client_identity.cert);
+        let client_private_key =
+            PrivatePkcs8KeyDer::from(client_identity.signing_key.serialize_der());
+
+        let mut client_roots = RootCertStore::empty();
+        client_roots.add(client_certificate.clone())?;
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier =
+            WebPkiClientVerifier::builder_with_provider(Arc::new(client_roots), provider)
+                .build()
+                .map_err(|error| error.to_string())?;
+
+        let server = Endpoint::server(
+            enrolled_server_config(
+                vec![server_certificate.clone()],
+                server_private_key.into(),
+                verifier,
+            )?,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        )?;
+        let server_address = server.local_addr()?;
+
+        let mut server_roots = RootCertStore::empty();
+        server_roots.add(server_certificate)?;
+
+        let provider = rustls::crypto::ring::default_provider();
+        let certified_key = CertifiedKey::from_der(
+            vec![client_certificate],
+            client_private_key.into(),
+            &provider,
+        )?;
+        let resolver = Arc::new(SingleCertAndKey::from(certified_key));
+
+        let mut client = Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
+        client.set_default_client_config(enrolled_client_config(server_roots, resolver)?);
+
+        let server_task = tokio::spawn(async move {
+            let connection = accept(&server).await.map_err(|error| error.to_string())?;
+            connection.close(0_u32.into(), b"mTLS test complete");
+            Ok::<Endpoint, String>(server)
+        });
+
+        let connection = connect(&client, server_address, "classmesh.local").await?;
+        connection.close(0_u32.into(), b"mTLS test complete");
+        let server = server_task.await.map_err(|error| error.to_string())??;
+        server.close(0_u32.into(), b"mTLS test complete");
         client.wait_idle().await;
         Ok(())
     }
