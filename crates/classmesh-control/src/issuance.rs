@@ -151,13 +151,7 @@ mod tests {
         let mut invalid = validity();
         invalid.not_after_unix_ms = invalid.not_before_unix_ms;
         assert_eq!(
-            policy().validate(
-                1_000_000,
-                principal(7),
-                &[1],
-                approval(&[1]),
-                invalid,
-            ),
+            policy().validate(1_000_000, principal(7), &[1], approval(&[1]), invalid,),
             Err(CertificateIssuanceError::InvalidValidityWindow)
         );
 
@@ -166,13 +160,7 @@ mod tests {
             not_after_unix_ms: 999_999,
         };
         assert_eq!(
-            policy().validate(
-                1_000_000,
-                principal(7),
-                &[1],
-                approval(&[1]),
-                expired,
-            ),
+            policy().validate(1_000_000, principal(7), &[1], approval(&[1]), expired,),
             Err(CertificateIssuanceError::AlreadyExpired)
         );
 
@@ -181,13 +169,7 @@ mod tests {
             not_after_unix_ms: 1_000_000 + 86_400_001,
         };
         assert_eq!(
-            policy().validate(
-                1_000_000,
-                principal(7),
-                &[1],
-                approval(&[1]),
-                too_long,
-            ),
+            policy().validate(1_000_000, principal(7), &[1], approval(&[1]), too_long,),
             Err(CertificateIssuanceError::LifetimeTooLong)
         );
 
@@ -196,13 +178,7 @@ mod tests {
             not_after_unix_ms: 1_060_002,
         };
         assert_eq!(
-            policy().validate(
-                1_000_000,
-                principal(7),
-                &[1],
-                approval(&[1]),
-                future,
-            ),
+            policy().validate(1_000_000, principal(7), &[1], approval(&[1]), future,),
             Err(CertificateIssuanceError::NotBeforeTooFarInFuture)
         );
     }
