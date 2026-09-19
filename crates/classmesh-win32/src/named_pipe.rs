@@ -11,8 +11,8 @@ use windows_sys::Win32::Foundation::{
     GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CreateWellKnownSid,
-    GetLengthSid, InitializeAcl, InitializeSecurityDescriptor, IsValidSid, SECURITY_ATTRIBUTES,
+    ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CreateWellKnownSid, GetLengthSid,
+    InitializeAcl, InitializeSecurityDescriptor, IsValidSid, SECURITY_ATTRIBUTES,
     SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE, SetSecurityDescriptorDacl, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
@@ -73,9 +73,7 @@ impl NamedPipeServer {
         let full_name = normalize_pipe_name(name);
         let wide_name = wide_null(OsStr::new(&full_name));
 
-        if user_sid.is_empty()
-            || unsafe { IsValidSid(user_sid.as_ptr().cast_mut().cast()) } == 0
-        {
+        if user_sid.is_empty() || unsafe { IsValidSid(user_sid.as_ptr().cast_mut().cast()) } == 0 {
             return Err(PipeError {
                 stage: "NamedPipeUserSidValidation",
                 win32_error: 87, // ERROR_INVALID_PARAMETER
@@ -101,8 +99,7 @@ impl NamedPipeServer {
         // SAFETY: both SIDs are valid for GetLengthSid; user SID was validated above and the
         // LocalSystem SID was created successfully.
         let user_sid_len = unsafe { GetLengthSid(user_sid.as_ptr().cast_mut().cast()) };
-        let system_sid_len =
-            unsafe { GetLengthSid(system_sid.as_mut_ptr().cast()) };
+        let system_sid_len = unsafe { GetLengthSid(system_sid.as_mut_ptr().cast()) };
         let ace_base = size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>();
         let acl_bytes = size_of::<ACL>()
             .saturating_add(ace_base)
