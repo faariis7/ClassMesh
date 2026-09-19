@@ -1,11 +1,13 @@
 use classmesh_protocol::ProtocolVersion;
-use classmesh_protocol::control_wire::ControlEnvelope;
+use classmesh_protocol::control_wire::{ControlEnvelope, control_envelope};
 use classmesh_security::{AuthorizationStore, Permission};
 
 use crate::peer_identity::AuthenticatedPeerIdentity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandAuthorizationError {
+    MissingPayload,
+    HandshakePayloadAfterEstablishment,
     MissingProtocolVersion,
     ProtocolVersionOutOfRange,
     WrongProtocolVersion {
@@ -71,6 +73,17 @@ impl AuthenticatedControlGuard {
         permission: Permission,
         now_unix_ms: u64,
     ) -> Result<(), CommandAuthorizationError> {
+        let payload = envelope
+            .payload
+            .as_ref()
+            .ok_or(CommandAuthorizationError::MissingPayload)?;
+        if matches!(
+            payload,
+            control_envelope::Payload::Hello(_) | control_envelope::Payload::HelloAck(_)
+        ) {
+            return Err(CommandAuthorizationError::HandshakePayloadAfterEstablishment);
+        }
+
         let wire_version = envelope
             .protocol_version
             .as_ref()
@@ -158,8 +171,52 @@ mod tests {
                 minor: u32::from(VERSION.minor),
             }),
             request_id: 0,
-            payload: None,
+            payload: Some(control_envelope::Payload::InputEvent(
+                classmesh_protocol::control_wire::InputEvent {
+                    sequence,
+                    timestamp_us: 0,
+                    event: Some(
+                        classmesh_protocol::control_wire::input_event::Event::ReleaseAll(
+                            classmesh_protocol::control_wire::ReleaseAllInput {},
+                        ),
+                    ),
+                },
+            )),
         }
+    }
+
+    #[test]
+    fn malformed_established_payload_does_not_consume_sequence() {
+        let authorization = store(BTreeSet::from([Permission::ControlInput]));
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+
+        let mut missing = envelope(77, 2);
+        missing.payload = None;
+        assert_eq!(
+            guard.authorize(&authorization, &missing, Permission::ControlInput, 150),
+            Err(CommandAuthorizationError::MissingPayload)
+        );
+        assert_eq!(guard.last_sequence(), 1);
+
+        let hello = classmesh_protocol::control_wire::Hello {
+            version: Some(classmesh_protocol::control_wire::ProtocolVersion {
+                major: u32::from(VERSION.major),
+                minor: u32::from(VERSION.minor),
+            }),
+            device_id: vec![7; 32],
+            hostname: "student".to_owned(),
+            capabilities: Vec::new(),
+            app_version: "0.0.1".to_owned(),
+            role: 2,
+            credential_fingerprint_sha256: Vec::new(),
+        };
+        let mut handshake = envelope(77, 2);
+        handshake.payload = Some(control_envelope::Payload::Hello(hello));
+        assert_eq!(
+            guard.authorize(&authorization, &handshake, Permission::ControlInput, 150,),
+            Err(CommandAuthorizationError::HandshakePayloadAfterEstablishment)
+        );
+        assert_eq!(guard.last_sequence(), 1);
     }
 
     #[test]
