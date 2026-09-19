@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod enrollment;
+pub mod enrollment_result;
 pub mod framing;
 pub mod handshake;
 pub mod quic;
