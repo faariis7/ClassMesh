@@ -12,7 +12,9 @@ use quinn::{
     TransportConfig,
 };
 use rustls::RootCertStore;
+use rustls::client::ResolvesClientCert;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::danger::ClientCertVerifier;
 use tokio::time::{sleep, timeout};
 
 use crate::framing::{CONTROL_LENGTH_PREFIX_BYTES, FrameError, declared_payload_len, encode_frame};
@@ -119,6 +121,57 @@ pub fn client_config_with_roots(
         .map_err(|error| ControlTransportError::Configuration(error.to_string()))?
         .with_root_certificates(roots)
         .with_no_client_auth();
+    tls.alpn_protocols = vec![CONTROL_ALPN.to_vec()];
+    tls.enable_early_data = false;
+
+    let crypto = QuicClientConfig::try_from(tls)
+        .map_err(|error| ControlTransportError::Configuration(error.to_string()))?;
+    let mut config = ClientConfig::new(Arc::new(crypto));
+    config.transport_config(Arc::new(control_transport_config()));
+    Ok(config)
+}
+
+/// Creates an enrolled server configuration that requires a verified client certificate.
+///
+/// The caller supplies the verifier so ClassMesh can enforce its own trust/revocation
+/// policy without weakening rustls certificate validation. Administrative 0-RTT remains
+/// disabled.
+pub fn enrolled_server_config(
+    certificate_chain: Vec<CertificateDer<'static>>,
+    private_key: PrivateKeyDer<'static>,
+    client_cert_verifier: Arc<dyn ClientCertVerifier>,
+) -> Result<ServerConfig, ControlTransportError> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|error| ControlTransportError::Configuration(error.to_string()))?
+        .with_client_cert_verifier(client_cert_verifier)
+        .with_single_cert(certificate_chain, private_key)
+        .map_err(|error| ControlTransportError::Configuration(error.to_string()))?;
+    tls.alpn_protocols = vec![CONTROL_ALPN.to_vec()];
+    tls.max_early_data_size = 0;
+
+    let crypto = QuicServerConfig::try_from(tls)
+        .map_err(|error| ControlTransportError::Configuration(error.to_string()))?;
+    let mut config = ServerConfig::with_crypto(Arc::new(crypto));
+    config.transport_config(Arc::new(control_transport_config()));
+    Ok(config)
+}
+
+/// Creates an enrolled client configuration with a resolver-backed client credential.
+///
+/// Using a resolver keeps protected-key implementations (for example Windows CNG) behind
+/// rustls' signing abstraction rather than requiring PKCS#8/SEC1 private-key export.
+pub fn enrolled_client_config(
+    roots: RootCertStore,
+    client_cert_resolver: Arc<dyn ResolvesClientCert>,
+) -> Result<ClientConfig, ControlTransportError> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|error| ControlTransportError::Configuration(error.to_string()))?
+        .with_root_certificates(roots)
+        .with_client_cert_resolver(client_cert_resolver);
     tls.alpn_protocols = vec![CONTROL_ALPN.to_vec()];
     tls.enable_early_data = false;
 
