@@ -469,6 +469,62 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enrolled_quic_accepts_verified_client_certificate() -> TestResult {
+        let server_identity = generate_simple_self_signed(vec!["classmesh.local".to_owned()])?;
+        let server_certificate = CertificateDer::from(server_identity.cert);
+        let server_private_key =
+            PrivatePkcs8KeyDer::from(server_identity.signing_key.serialize_der());
+
+        let client_identity = generate_simple_self_signed(vec!["student.classmesh".to_owned()])?;
+        let client_certificate = CertificateDer::from(client_identity.cert);
+        let client_private_key =
+            PrivatePkcs8KeyDer::from(client_identity.signing_key.serialize_der());
+
+        let mut client_roots = RootCertStore::empty();
+        client_roots.add(client_certificate.clone())?;
+        let verifier = WebPkiClientVerifier::builder(Arc::new(client_roots))
+            .build()
+            .map_err(|error| error.to_string())?;
+
+        let server = Endpoint::server(
+            enrolled_server_config(
+                vec![server_certificate.clone()],
+                server_private_key.into(),
+                verifier,
+            )?,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        )?;
+        let server_address = server.local_addr()?;
+
+        let mut server_roots = RootCertStore::empty();
+        server_roots.add(server_certificate)?;
+
+        let provider = rustls::crypto::ring::default_provider();
+        let certified_key = CertifiedKey::from_der(
+            vec![client_certificate],
+            client_private_key.into(),
+            &provider,
+        )?;
+        let resolver = Arc::new(SingleCertAndKey::from(certified_key));
+
+        let mut client = Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
+        client.set_default_client_config(enrolled_client_config(server_roots, resolver)?);
+
+        let server_task = tokio::spawn(async move {
+            let connection = accept(&server).await.map_err(|error| error.to_string())?;
+            connection.close(0_u32.into(), b"mTLS test complete");
+            Ok::<Endpoint, String>(server)
+        });
+
+        let connection = connect(&client, server_address, "classmesh.local").await?;
+        connection.close(0_u32.into(), b"mTLS test complete");
+        let server = server_task.await.map_err(|error| error.to_string())??;
+        server.close(0_u32.into(), b"mTLS test complete");
+        client.wait_idle().await;
+        Ok(())
+    }
+
     #[test]
     fn transport_defaults_build_with_bounded_reconnect() {
         let _config = control_transport_config();
