@@ -12,8 +12,8 @@ This is the active execution plan for ClassMesh. It is updated as implementation
 | Phase 5A — control protocol foundation | **Complete — PR #33 merged** | Generated Protobuf, version/capability negotiation and heartbeat/liveness are on `main` |
 | Phase 5B — QUIC/TLS runtime | **Complete — PR #36 merged** | Current-baseline CI #232 passed on Synology Portable + Windows; merge `794fd45a5a20b6e4c623b7ecbbcfda5264e52ec0` |
 | Phase 5C1 — identity/rotation model | **Complete — PR #39 merged** | Stable PrincipalId, multi-credential lifecycle, enrollment binding and credential→principal mapping; CI #239 green, merge `aaf22a1f0caea908322620667d52f544fb59cb27` |
-| Phase 5C2 — Windows protected key backend | **In progress — PR #40** | Machine-scope CNG ECDSA P-256, export policy 0, signing-only, real Windows CI on current main |
-| Phase 5C3 — enrollment + mTLS | Next | CSR/certificate issuance, explicit bootstrap trust, post-enrollment mutual TLS, revocation and rotation integration |
+| Phase 5C2 — Windows protected key backend | **Complete — PR #40 merged** | CI #243 passed on Synology Portable + Windows; merge `8608a1497a7e339eda2ba4447d08183d29de65bd` |
+| Phase 5C3 — enrollment + mTLS | **In progress — PR #41** | First slice: protocol v0.2 enrollment CSR/receipt/status/result contract; certificate issuance and mTLS wiring follow |
 | Phase 5D — authorization + session negotiation | Planned | Per-command authorization, replay controls, capability/session negotiation over the real transport |
 | Phase 5E — hardening | Planned | Malformed input, reconnect storms, fuzzing, protocol compatibility and security tests |
 | AI quality workflow | **Active** | Project skills + official plugins documented in `docs/AI_QUALITY_STACK.md` |
@@ -94,15 +94,16 @@ Current control-plane research baseline:
 - RFC 9001 — QUIC + TLS security and 0-RTT replay considerations;
 - RFC 8446 — TLS 1.3;
 - Quinn 0.11.x / rustls 0.23.x for Rust QUIC/TLS;
-- Prost 0.14.x for Protocol Buffers.
+- Prost 0.14.x for Protocol Buffers;
+- RFC 2986 — PKCS#10 certification requests for enrollment.
 
 ## Planned PR sequence
 
 1. **5A Control foundation — complete, PR #33.**
 2. **5B QUIC/TLS transport — complete, PR #36 merged, CI #232.**
 3. **5C1 Stable identity + rotation model — complete, PR #39 merged, CI #239.**
-4. **5C2 Windows protected key backend — active, PR #40.**
-5. **5C3 Enrollment + mTLS** — CSR/certificate issuance, explicit bootstrap trust, mutual authentication, revocation/rotation integration.
+4. **5C2 Windows protected key backend — complete, PR #40 merged, CI #243.**
+5. **5C3 Enrollment + mTLS — active, PR #41** — first land the v0.2 CSR/receipt/status/result contract, then certificate issuance, explicit bootstrap trust, mutual authentication and revocation/rotation integration.
 6. **5D Authorization/session integration** — connect authenticated principal to command permissions and stream/session negotiation.
 7. **5E Hardening** — malformed messages, replay/duplicate cases, reconnect storms, fuzz targets and diagnostics.
 

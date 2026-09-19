@@ -8,7 +8,7 @@ pub mod control_wire {
     include!(concat!(env!("OUT_DIR"), "/classmesh.control.v1.rs"));
 }
 
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 1 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 2 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProtocolVersion {
@@ -104,6 +104,50 @@ mod tests {
             ProtocolVersion { major: 2, minor: 7 }
                 .negotiate(ProtocolVersion { major: 3, minor: 0 }),
             None
+        );
+    }
+
+    #[test]
+    fn enrollment_request_round_trips_without_conflating_principal_and_credential() {
+        let principal_id = [7_u8; 32];
+        let nonce = [9_u8; 32];
+        let envelope = control_wire::ControlEnvelope {
+            control_session_id: 0,
+            sequence: 2,
+            protocol_version: Some(control_wire::ProtocolVersion { major: 0, minor: 2 }),
+            request_id: 42,
+            payload: Some(control_wire::control_envelope::Payload::EnrollmentRequest(
+                control_wire::EnrollmentRequest {
+                    principal_id: principal_id.to_vec(),
+                    role: 2,
+                    pkcs10_csr_der: vec![0x30, 0x01, 0x00],
+                    client_nonce: nonce.to_vec(),
+                    display_name: "student-07".to_owned(),
+                },
+            )),
+        };
+
+        let encoded = envelope.encode_to_vec();
+        let decoded = control_wire::ControlEnvelope::decode(encoded.as_slice())
+            .expect("enrollment request should decode");
+
+        let Some(control_wire::control_envelope::Payload::EnrollmentRequest(request)) =
+            decoded.payload
+        else {
+            panic!("expected enrollment request payload");
+        };
+
+        assert_eq!(request.principal_id, principal_id);
+        assert_eq!(request.client_nonce, nonce);
+        assert!(!request.pkcs10_csr_der.is_empty());
+    }
+
+    #[test]
+    fn protocol_version_marks_enrollment_as_minor_two() {
+        assert_eq!(PROTOCOL_VERSION, ProtocolVersion { major: 0, minor: 2 });
+        assert_eq!(
+            PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 1 }),
+            Some(ProtocolVersion { major: 0, minor: 1 })
         );
     }
 

@@ -73,6 +73,58 @@ message HeartbeatAck {
   uint64 monotonic_time_us = 2;
 }
 
+enum EnrollmentStatus {
+  ENROLLMENT_STATUS_UNSPECIFIED = 0;
+  ENROLLMENT_STATUS_PENDING_APPROVAL = 1;
+  ENROLLMENT_STATUS_APPROVED = 2;
+  ENROLLMENT_STATUS_REJECTED = 3;
+  ENROLLMENT_STATUS_REVOKED = 4;
+  ENROLLMENT_STATUS_EXPIRED = 5;
+}
+
+// Sent only over the explicitly trusted pre-enrollment control connection.
+// pkcs10_csr_der is an RFC 2986 PKCS#10 CSR signed by the local protected key.
+// client_nonce is a fresh 32-byte nonce used for deduplication/correlation; it
+// is not an authentication secret and does not replace server certificate trust.
+message EnrollmentRequest {
+  bytes principal_id = 1;
+  PrincipalRole role = 2;
+  bytes pkcs10_csr_der = 3;
+  bytes client_nonce = 4;
+  string display_name = 5;
+}
+
+// Returned immediately after the authority validates the request shape.
+// enrollment_id is an opaque authority-assigned identifier. csr_sha256 binds
+// later approval/status responses to the exact CSR the teacher approved.
+message EnrollmentReceipt {
+  bytes enrollment_id = 1;
+  EnrollmentStatus status = 2;
+  bytes csr_sha256 = 3;
+  string diagnostic = 4;
+}
+
+message EnrollmentStatusRequest {
+  bytes enrollment_id = 1;
+}
+
+// Approved results carry a leaf-first DER certificate chain. The credential
+// fingerprint is SHA-256 over the leaf certificate DER and is independent from
+// the stable PrincipalId so certificates can rotate without renaming a device.
+message EnrollmentResult {
+  bytes enrollment_id = 1;
+  EnrollmentStatus status = 2;
+  repeated bytes certificate_chain_der = 3;
+  bytes credential_fingerprint_sha256 = 4;
+  uint64 not_after_unix_ms = 5;
+  string diagnostic = 6;
+
+  // Echo the stable identity and exact CSR approved by the authority so the
+  // client can reject a result that was substituted or correlated incorrectly.
+  bytes principal_id = 7;
+  bytes csr_sha256 = 8;
+}
+
 enum MediaHealth {
   MEDIA_HEALTH_UNSPECIFIED = 0;
   MEDIA_HEALTH_IDLE = 1;
@@ -239,5 +291,10 @@ message ControlEnvelope {
 
     InputEvent input_event = 30;
     SessionWorkerStatus session_worker_status = 31;
+
+    EnrollmentRequest enrollment_request = 40;
+    EnrollmentReceipt enrollment_receipt = 41;
+    EnrollmentStatusRequest enrollment_status_request = 42;
+    EnrollmentResult enrollment_result = 43;
   }
 }
