@@ -10,7 +10,7 @@ This file distinguishes **implemented code**, **hosted-CI validation**, **real-h
 
 Phase 4 physical acceptance remains pending. Issue #3 must remain open until two physical Windows PCs pass the documented qualification.
 
-Phase 5 is tracked in Issue #32. Phase 5B is merged with CI #232 green; Phase 5C1 is merged in PR #39 with CI #239 green; Phase 5C2 is merged in PR #40 with CI #243 green; and PR #41 merged the protocol v0.2 PKCS#10 enrollment CSR/receipt/status/result contract. Phase 5C3 continues in PR #42 with bounded, status-dependent validation of terminal enrollment certificate results. CI #256 passed on the PR #42 implementation/wiring commit before these documentation-only updates.
+Phase 5 is tracked in Issue #32. Phase 5B is merged with CI #232 green; Phase 5C1 is merged in PR #39 with CI #239 green; Phase 5C2 is merged in PR #40 with CI #243 green; and PR #41 merged the protocol v0.2 PKCS#10 enrollment CSR/receipt/status/result contract. Phase 5C3 continued through merged PR #42 with bounded, status-dependent validation of terminal enrollment certificate results, then merged PR #43 added explicit pinned bootstrap trust bound to stable PrincipalId and a fresh client nonce. CI #260 passed on Synology Portable and Windows for PR #43.
 
 The hosted CI baseline covers Portable Rust / Ubuntu rustfmt, Clippy with warnings denied, full workspace tests and `classmesh-lab`, plus Windows workspace Clippy/tests and release builds for the media qualification executables. Hosted runners do not replace real interactive GPU/driver or two-PC validation.
 
@@ -43,13 +43,15 @@ Phase 5B provides reliable bidirectional QUIC control streams using Quinn/rustls
 - Signing and public-key data are exposed without exporting private material.
 - Project MSRV remains Rust 1.85; current `rustls-cng` is not an unconditional dependency.
 
-### Phase 5C3 — PR #41 merged; PR #42 active
+### Phase 5C3 — PRs #41, #42 and #43 merged
 
 Merged PR #41 provides the protocol v0.2 PKCS#10 enrollment request/receipt/status/result contract, strict request validation, explicit rejection of enrollment on negotiated v0.1, and result binding to the stable `PrincipalId` plus exact CSR SHA-256.
 
 PR #42 adds status-dependent validation before credential persistence/mTLS wiring. Approved terminal results require a bounded certificate chain, 32-byte credential fingerprint, expiry, and the identity/CSR binding fields. Rejected/revoked/expired terminal results may not carry credential material; pending/unspecified statuses are not accepted as terminal results; certificate count, per-certificate DER size and aggregate chain size are bounded. CI #256 passed after the validator was wired into the public control crate.
 
-This does **not** yet claim certificate authority issuance or production trust behavior. The next security slice is certificate issuance with explicit bootstrap trust, followed by post-enrollment mTLS and revocation/rotation integration without exporting private keys.
+PR #43 adds explicit bootstrap authority pinning using a SHA-256 certificate fingerprint and binds the bootstrap challenge to the expected stable PrincipalId and fresh client nonce. Discovery metadata is not trusted to select the authority and no TOFU behavior is introduced. CI #260 passed on Synology Portable and Windows.
+
+This does **not** yet claim certificate authority issuance or production trust-store behavior. The next security slice is certificate issuance using the explicit bootstrap trust model, followed by post-enrollment mTLS and revocation/rotation integration without exporting private keys.
 
 ## Remaining security/control work
 
@@ -70,8 +72,8 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 ## Next implementation sequence
 
 1. Keep Issue #3 open and perform Phase 4 physical qualification when two Windows PCs are available.
-2. Finish PR #42 and merge only with fresh green Synology Portable + Windows CI.
-3. Implement certificate issuance + explicit bootstrap trust, then post-enrollment mTLS without weakening stable identity or exporting private keys.
+2. Implement certificate issuance against the explicit bootstrap trust model merged in PR #43.
+3. Wire post-enrollment mTLS without weakening stable identity or exporting private keys.
 4. Integrate revocation/rotation with transport authentication, then Phase 5D authorization/replay/session negotiation.
 5. Add malformed-input/reconnect/fuzz and dependency/advisory/license gates when useful to the active phase.
 6. Begin product UI work under `classmesh-design` with runtime/visual verification when Console/Agent UI becomes active.
