@@ -175,9 +175,11 @@ mod tests {
                 classmesh_protocol::control_wire::InputEvent {
                     sequence,
                     timestamp_us: 0,
-                    event: Some(classmesh_protocol::control_wire::input_event::Event::ReleaseAll(
-                        classmesh_protocol::control_wire::ReleaseAllInput {},
-                    )),
+                    event: Some(
+                        classmesh_protocol::control_wire::input_event::Event::ReleaseAll(
+                            classmesh_protocol::control_wire::ReleaseAllInput {},
+                        ),
+                    ),
                 },
             )),
         }
@@ -210,12 +212,7 @@ mod tests {
         let mut handshake = envelope(77, 2);
         handshake.payload = Some(control_envelope::Payload::Hello(hello));
         assert_eq!(
-            guard.authorize(
-                &authorization,
-                &handshake,
-                Permission::ControlInput,
-                150,
-            ),
+            guard.authorize(&authorization, &handshake, Permission::ControlInput, 150,),
             Err(CommandAuthorizationError::HandshakePayloadAfterEstablishment)
         );
         assert_eq!(guard.last_sequence(), 1);
