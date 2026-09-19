@@ -128,7 +128,8 @@ mod tests {
     #[test]
     fn issuance_requires_verified_exact_approved_principal_and_csr() {
         let csr = valid_csr();
-        policy().validate(1_000_000, principal(7), &csr, approval(&csr), validity())
+        policy()
+            .validate(1_000_000, principal(7), &csr, approval(&csr), validity())
             .expect("valid approved CSR");
 
         assert_eq!(
@@ -158,13 +159,40 @@ mod tests {
     fn issuance_rejects_invalid_validity_windows() {
         let csr = valid_csr();
         let cases = [
-            (CertificateValidity { not_before_unix_ms: 1_000_000, not_after_unix_ms: 1_000_000 }, CertificateIssuanceError::InvalidValidityWindow),
-            (CertificateValidity { not_before_unix_ms: 900_000, not_after_unix_ms: 999_999 }, CertificateIssuanceError::AlreadyExpired),
-            (CertificateValidity { not_before_unix_ms: 1_000_000, not_after_unix_ms: 87_400_001 }, CertificateIssuanceError::LifetimeTooLong),
-            (CertificateValidity { not_before_unix_ms: 1_060_001, not_after_unix_ms: 1_060_002 }, CertificateIssuanceError::NotBeforeTooFarInFuture),
+            (
+                CertificateValidity {
+                    not_before_unix_ms: 1_000_000,
+                    not_after_unix_ms: 1_000_000,
+                },
+                CertificateIssuanceError::InvalidValidityWindow,
+            ),
+            (
+                CertificateValidity {
+                    not_before_unix_ms: 900_000,
+                    not_after_unix_ms: 999_999,
+                },
+                CertificateIssuanceError::AlreadyExpired,
+            ),
+            (
+                CertificateValidity {
+                    not_before_unix_ms: 1_000_000,
+                    not_after_unix_ms: 87_400_001,
+                },
+                CertificateIssuanceError::LifetimeTooLong,
+            ),
+            (
+                CertificateValidity {
+                    not_before_unix_ms: 1_060_001,
+                    not_after_unix_ms: 1_060_002,
+                },
+                CertificateIssuanceError::NotBeforeTooFarInFuture,
+            ),
         ];
         for (validity, expected) in cases {
-            assert_eq!(policy().validate(1_000_000, principal(7), &csr, approval(&csr), validity), Err(expected));
+            assert_eq!(
+                policy().validate(1_000_000, principal(7), &csr, approval(&csr), validity),
+                Err(expected)
+            );
         }
     }
 
