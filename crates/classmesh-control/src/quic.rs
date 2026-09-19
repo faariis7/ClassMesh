@@ -505,8 +505,7 @@ mod tests {
         )?;
         let server_address = server.local_addr()?;
 
-        let fingerprint =
-            CredentialFingerprint(Sha256::digest(client_certificate.as_ref()).into());
+        let fingerprint = CredentialFingerprint(Sha256::digest(client_certificate.as_ref()).into());
         let mut credentials = BTreeMap::new();
         credentials.insert(fingerprint, CredentialRecord::active(fingerprint, 100));
         let mut authorization = AuthorizationStore::default();
