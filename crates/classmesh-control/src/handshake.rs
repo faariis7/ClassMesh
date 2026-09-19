@@ -97,7 +97,10 @@ impl Display for HandshakeError {
                 "invalid HelloAck envelope: session={control_session_id}, sequence={sequence}, request_id={request_id}"
             ),
             Self::HelloAckVersionMismatch => {
-                write!(formatter, "HelloAck envelope protocol version does not match negotiated version")
+                write!(
+                    formatter,
+                    "HelloAck envelope protocol version does not match negotiated version"
+                )
             }
             Self::IdentityMismatch {
                 authenticated,
