@@ -185,7 +185,9 @@ impl Principal {
             credential.expires_at_unix_ms = Some(
                 credential
                     .expires_at_unix_ms
-                    .map_or(overlap_until_unix_ms, |current| current.min(overlap_until_unix_ms)),
+                    .map_or(overlap_until_unix_ms, |current| {
+                        current.min(overlap_until_unix_ms)
+                    }),
             );
         }
         self.credentials
