@@ -63,19 +63,14 @@ PR #61 merged the protected mTLS-client slice with CI #314 green. It adapts the 
 
 PR #62 merged live authenticated-credential re-check with CI #316 green. The established peer identity retains both stable `PrincipalId` and the presented credential fingerprint, and privileged authorization re-validates current revocation/expiry/principal-enabled state instead of relying only on handshake-time authentication.
 
-### Phase 5D — authenticated authorization/session integration active
+### Phase 5D/5E — authenticated authorization and negotiation complete through PR #63
 
-The active slice binds `Hello.device_id` to the already verified mTLS principal and rejects identity spoofing explicitly, then guards privileged control envelopes with the exact established `control_session_id`, a strictly increasing sequence number, current credential validity, and the requested permission. A denied in-session sequence is consumed so the same administrative command cannot be replayed after a later permission grant.
+PR #63 merged the authenticated control-session guard with PR CI #330 green. The enrolled server derives identity from the verified QUIC/mTLS connection, binds `Hello.device_id` to that stable PrincipalId, and rejects spoofing before session establishment. Negotiated protocol version and capability intersection are therefore established inside the authenticated Hello path. Privileged envelopes then require the exact established `control_session_id`, a strictly increasing sequence number, current credential validity, and the requested permission. A denied in-session sequence is consumed so the same administrative command cannot be replayed after a later permission grant.
 
 ## Remaining security/control work
 
-- certificate issuance and persistence;
-- explicit bootstrap trust policy;
-- post-enrollment mTLS identity and stable-principal resolution;
-- revocation/key rotation integrated with transport authentication;
-- per-command authorization and replay/duplicate enforcement;
-- authenticated capability/session negotiation;
-- malformed-input/reconnect/fuzz hardening;
+- durable production persistence for issued enrollment/certificate state;
+- malformed-input/reconnect/timeout/compatibility/fuzz hardening around the authenticated control path;
 - encrypted multicast media key distribution/replay/rotation;
 - production per-user SID ACL on local Named Pipes.
 
@@ -86,8 +81,7 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 ## Next implementation sequence
 
 1. Keep Issue #3 open and perform Phase 4 physical qualification when two Windows PCs are available.
-2. Finish the active Phase 5D authenticated Hello/session/sequence/permission guard.
-3. Connect authenticated capability/session negotiation to the guarded control session.
-4. Add malformed-input/reconnect/fuzz hardening around the authenticated control path.
-5. Add malformed-input/reconnect/fuzz and dependency/advisory/license gates when useful to the active phase.
-6. Begin product UI work under `classmesh-design` with runtime/visual verification when Console/Agent UI becomes active.
+2. Begin Phase 5F hardening with malformed authenticated envelopes, reconnect/timeout behavior, compatibility boundaries and fuzz targets.
+3. Add dependency/advisory/license gates when useful to the active phase.
+4. Continue remaining production security work such as durable enrollment/certificate state and protected multicast media key distribution.
+5. Begin product UI work under `classmesh-design` with runtime/visual verification when Console/Agent UI becomes active.
