@@ -12,7 +12,6 @@ const STATUS_REJECTED: i32 = 3;
 const STATUS_REVOKED: i32 = 4;
 const STATUS_EXPIRED: i32 = 5;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovedEnrollmentCredential {
     pub principal_id: PrincipalId,
@@ -28,6 +27,7 @@ pub enum EnrollmentCredentialError {
     CredentialAlreadyExpired,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnrollmentResultError {
     InvalidPrincipalIdLength { length: usize },
     InvalidCsrSha256Length { length: usize },
@@ -209,7 +209,10 @@ mod tests {
         );
         assert_eq!(material.credential.issued_at_unix_ms, 100);
         assert_eq!(material.credential.expires_at_unix_ms, Some(500));
-        assert_eq!(material.certificate_chain_der, approved.certificate_chain_der);
+        assert_eq!(
+            material.certificate_chain_der,
+            approved.certificate_chain_der
+        );
 
         assert_eq!(
             approved_credential_from_result(&approved, 500),
