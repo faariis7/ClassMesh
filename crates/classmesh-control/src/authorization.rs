@@ -5,17 +5,9 @@ use crate::peer_identity::AuthenticatedPeerIdentity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandAuthorizationError {
-    WrongSession {
-        expected: u64,
-        received: u64,
-    },
-    NonIncreasingSequence {
-        previous: u64,
-        received: u64,
-    },
-    Unauthorized {
-        permission: Permission,
-    },
+    WrongSession { expected: u64, received: u64 },
+    NonIncreasingSequence { previous: u64, received: u64 },
+    Unauthorized { permission: Permission },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
