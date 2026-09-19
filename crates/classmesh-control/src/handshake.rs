@@ -290,9 +290,9 @@ fn validate_authenticated_hello(
     authenticated_peer: AuthenticatedPeerIdentity,
     hello: &ControlHello,
 ) -> Result<(), HandshakeError> {
-    if authenticated_peer.principal_id != hello.principal_id {
+    if authenticated_peer.principal_id() != hello.principal_id {
         return Err(HandshakeError::IdentityMismatch {
-            authenticated: authenticated_peer.principal_id,
+            authenticated: authenticated_peer.principal_id(),
             claimed: hello.principal_id,
         });
     }
