@@ -2,6 +2,7 @@
 
 pub mod authorization;
 pub mod bootstrap;
+pub mod client_session;
 pub mod csr;
 pub mod enrollment;
 pub mod enrollment_result;
