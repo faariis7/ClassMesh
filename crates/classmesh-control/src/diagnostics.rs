@@ -24,9 +24,7 @@ pub const fn handshake_diagnostic_code(error: &HandshakeError) -> &'static str {
         HandshakeError::Transport(error) => transport_diagnostic_code(error),
         HandshakeError::MissingProtocolVersion => "control.handshake.missing_version",
         HandshakeError::VersionOutOfRange => "control.handshake.version_out_of_range",
-        HandshakeError::InvalidPrincipalIdLength { .. } => {
-            "control.handshake.invalid_principal_id"
-        }
+        HandshakeError::InvalidPrincipalIdLength { .. } => "control.handshake.invalid_principal_id",
         HandshakeError::UnsupportedRole { .. } => "control.handshake.unsupported_role",
         HandshakeError::UnexpectedPayload => "control.handshake.unexpected_payload",
         HandshakeError::InvalidHelloEnvelope { .. } => "control.handshake.invalid_hello_envelope",
@@ -36,9 +34,7 @@ pub const fn handshake_diagnostic_code(error: &HandshakeError) -> &'static str {
         HandshakeError::InvalidHelloAckEnvelope { .. } => {
             "control.handshake.invalid_hello_ack_envelope"
         }
-        HandshakeError::HelloAckVersionMismatch => {
-            "control.handshake.hello_ack_version_mismatch"
-        }
+        HandshakeError::HelloAckVersionMismatch => "control.handshake.hello_ack_version_mismatch",
         HandshakeError::IdentityMismatch { .. } => "control.handshake.identity_mismatch",
         HandshakeError::PeerIdentity(_) => "control.handshake.peer_identity",
         HandshakeError::Negotiation(_) => "control.handshake.negotiation",
@@ -54,9 +50,7 @@ pub const fn command_authorization_diagnostic_code(
         CommandAuthorizationError::ProtocolVersionOutOfRange => {
             "control.command.version_out_of_range"
         }
-        CommandAuthorizationError::WrongProtocolVersion { .. } => {
-            "control.command.wrong_version"
-        }
+        CommandAuthorizationError::WrongProtocolVersion { .. } => "control.command.wrong_version",
         CommandAuthorizationError::WrongSession { .. } => "control.command.wrong_session",
         CommandAuthorizationError::NonIncreasingSequence { .. } => {
             "control.command.replayed_sequence"
@@ -85,7 +79,10 @@ mod tests {
 
         let wrong_version = CommandAuthorizationError::WrongProtocolVersion {
             expected: ProtocolVersion { major: 0, minor: 2 },
-            received: ProtocolVersion { major: 65_535, minor: 65_535 },
+            received: ProtocolVersion {
+                major: 65_535,
+                minor: 65_535,
+            },
         };
         assert_eq!(
             command_authorization_diagnostic_code(&wrong_version),
