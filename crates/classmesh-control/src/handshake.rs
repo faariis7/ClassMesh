@@ -152,9 +152,8 @@ pub async fn server_hello_enrolled(
     authorization: &AuthorizationStore,
     now_unix_ms: u64,
 ) -> Result<(EstablishedControlSession, EstablishedAuthenticatedPeer), HandshakeError> {
-    let authenticated_peer =
-        authenticated_peer_identity(connection, authorization, now_unix_ms)
-            .map_err(HandshakeError::PeerIdentity)?;
+    let authenticated_peer = authenticated_peer_identity(connection, authorization, now_unix_ms)
+        .map_err(HandshakeError::PeerIdentity)?;
     server_hello_authenticated(channel, config, authenticated_peer).await
 }
 
