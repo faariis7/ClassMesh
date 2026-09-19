@@ -558,8 +558,8 @@ mod tests {
         assert!(store.authorize_credential(old, Permission::ViewMonitoring, 15));
 
         principal
-            .rotate_to(CredentialRecord::active(new, 20))
-            .expect("rotation should succeed");
+            .rotate_to_bounded(CredentialRecord::active(new, 20), 40)
+            .expect("bounded rotation should succeed");
         store
             .upsert(principal.clone())
             .expect("rotated identity should register");
