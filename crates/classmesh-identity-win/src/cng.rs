@@ -5,6 +5,7 @@ use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::{null, null_mut};
 
+use windows_sys::Win32::Foundation::NTE_BAD_SIGNATURE;
 use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_ECCPUBLIC_BLOB, MS_KEY_STORAGE_PROVIDER, NCRYPT_ALLOW_SIGNING_FLAG,
     NCRYPT_ECDSA_P256_ALGORITHM, NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_HANDLE, NCRYPT_KEY_HANDLE,
@@ -213,7 +214,16 @@ impl CngMachineKey {
                 0,
             )
         };
-        Ok(status == 0)
+        if status == 0 {
+            Ok(true)
+        } else if status == NTE_BAD_SIGNATURE {
+            Ok(false)
+        } else {
+            Err(CngKeyError::Windows {
+                operation: "NCryptVerifySignature",
+                status,
+            })
+        }
     }
 
     /// Deletes the persisted key. The CNG delete call also frees the key handle on success.
@@ -402,9 +412,28 @@ mod tests {
         format!("ClassMesh-CI-{}-{nonce}", process::id())
     }
 
+    struct TestKeyCleanup {
+        name: String,
+    }
+
+    impl TestKeyCleanup {
+        fn new(name: String) -> Self {
+            Self { name }
+        }
+    }
+
+    impl Drop for TestKeyCleanup {
+        fn drop(&mut self) {
+            if let Ok(key) = CngMachineKey::open(self.name.clone()) {
+                let _ = key.delete();
+            }
+        }
+    }
+
     #[test]
     fn persisted_machine_key_reopens_signs_and_stays_non_exportable() {
         let name = unique_key_name();
+        let _cleanup = TestKeyCleanup::new(name.clone());
         let key = CngMachineKey::create(name.clone()).expect("machine key should be created");
 
         assert_eq!(key.export_policy().expect("export policy should read"), 0);
@@ -417,6 +446,11 @@ mod tests {
         assert!(
             key.verify_sha256_digest(&digest, &signature)
                 .expect("signature verification should run")
+        );
+        let tampered_digest = [0x5b_u8; SHA256_BYTES];
+        assert!(
+            !key.verify_sha256_digest(&tampered_digest, &signature)
+                .expect("bad signature should be reported, not treated as an API failure")
         );
 
         drop(key);
