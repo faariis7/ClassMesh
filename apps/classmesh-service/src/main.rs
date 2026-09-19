@@ -4,7 +4,12 @@ mod windows_service_app {
     use std::path::PathBuf;
     use std::sync::mpsc;
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity, MachineIdentityBundle};
+    use classmesh_security::persistence::DurableAuthorizationState;
+    use classmesh_security::{AuthorizationStore, CredentialFingerprint, PrincipalId};
+    use sha2::{Digest, Sha256};
 
     use classmesh_win32::{
         NamedPipeServer, SessionProcess, launch_worker_in_session, session_user_sid,
@@ -28,6 +33,16 @@ mod windows_service_app {
 
     const SERVICE_NAME: &str = "ClassMeshService";
     const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
+    const STATE_DIRECTORY: &str = "ClassMesh\\state";
+    const MACHINE_IDENTITY_FILE: &str = "machine-identity.json";
+    const AUTHORIZATION_FILE: &str = "authorization.json";
+
+    #[derive(Debug)]
+    struct ServiceControlState {
+        _identity: MachineIdentityBundle,
+        _authorization: AuthorizationStore,
+        _key: CngMachineKey,
+    }
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
 
@@ -362,6 +377,84 @@ mod windows_service_app {
             .map_err(|error| format!("Worker IPC write failed: {error}"))
     }
 
+    fn program_data_state_dir() -> Result<PathBuf, String> {
+        let program_data = std::env::var_os("ProgramData")
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "ProgramData is unavailable; refusing to start control runtime".to_owned())?;
+        Ok(PathBuf::from(program_data).join(STATE_DIRECTORY))
+    }
+
+    fn unix_time_ms() -> Result<u64, String> {
+        let duration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "system clock is before the Unix epoch".to_owned())?;
+        u64::try_from(duration.as_millis())
+            .map_err(|_| "system clock cannot be represented in milliseconds".to_owned())
+    }
+
+    fn load_control_state() -> Result<ServiceControlState, String> {
+        let state_dir = program_data_state_dir()?;
+        let identity_path = state_dir.join(MACHINE_IDENTITY_FILE);
+        let authorization_path = state_dir.join(AUTHORIZATION_FILE);
+
+        let identity = DurableMachineIdentity::new(&identity_path)
+            .load()
+            .map_err(|error| format!("machine identity state rejected: {error}"))?
+            .ok_or_else(|| {
+                format!(
+                    "machine identity state is missing at {}",
+                    identity_path.display()
+                )
+            })?;
+        let authorization = DurableAuthorizationState::new(&authorization_path)
+            .load()
+            .map_err(|error| format!("authorization state rejected: {error}"))?
+            .ok_or_else(|| {
+                format!(
+                    "authorization state is missing at {}",
+                    authorization_path.display()
+                )
+            })?;
+
+        let now_unix_ms = unix_time_ms()?;
+        if identity.not_after_unix_ms <= now_unix_ms {
+            return Err("machine certificate is expired; refusing control runtime startup".to_owned());
+        }
+
+        let leaf = identity
+            .certificate_chain_der
+            .first()
+            .ok_or_else(|| "machine certificate chain is empty".to_owned())?;
+        let fingerprint = CredentialFingerprint(Sha256::digest(leaf).into());
+        let expected_principal = PrincipalId(identity.principal_id);
+        let authorized_principal = authorization
+            .principal_for_credential(fingerprint, now_unix_ms)
+            .ok_or_else(|| {
+                "machine leaf certificate is not an active authorized credential".to_owned()
+            })?;
+        if authorized_principal != expected_principal {
+            return Err(
+                "machine identity principal does not match authorization state".to_owned(),
+            );
+        }
+
+        let key = CngMachineKey::open(identity.cng_key_name.clone())
+            .map_err(|error| format!("protected CNG machine key is unavailable: {error}"))?;
+        if key
+            .export_policy()
+            .map_err(|error| format!("failed to verify CNG export policy: {error}"))?
+            != 0
+        {
+            return Err("CNG machine key is exportable; refusing control runtime startup".to_owned());
+        }
+
+        Ok(ServiceControlState {
+            _identity: identity,
+            _authorization: authorization,
+            _key: key,
+        })
+    }
+
     pub fn run() -> windows_service::Result<()> {
         service_dispatcher::start(SERVICE_NAME, ffi_service_main)
     }
@@ -395,6 +488,15 @@ mod windows_service_app {
         };
 
         let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
+        let _control_state = match load_control_state() {
+            Ok(state) => state,
+            Err(error) => {
+                eprintln!("ClassMesh control state validation failed: {error}");
+                set_stopped(&status_handle)?;
+                return Ok(());
+            }
+        };
+        eprintln!("ClassMesh control state validated; protected identity is ready");
         set_running(&status_handle)?;
 
         let mut supervisor = SessionSupervisor::default();
