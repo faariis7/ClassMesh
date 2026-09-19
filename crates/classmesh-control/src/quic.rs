@@ -199,7 +199,9 @@ pub async fn connect(
         .map_err(|error| ControlTransportError::Transport(error.to_string()))
 }
 
-pub(crate) fn validate_reconnect_policy(policy: RecoveryPolicy) -> Result<(), ControlTransportError> {
+pub(crate) fn validate_reconnect_policy(
+    policy: RecoveryPolicy,
+) -> Result<(), ControlTransportError> {
     if policy.max_attempts == 0 {
         return Err(ControlTransportError::Configuration(
             "reconnect policy must allow at least one attempt".to_owned(),
