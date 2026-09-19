@@ -10,7 +10,7 @@ This file distinguishes **implemented code**, **hosted-CI validation**, **real-h
 
 Phase 4 physical acceptance remains pending. Issue #3 must remain open until two physical Windows PCs pass the documented qualification.
 
-Phase 5 is tracked in Issue #32. Phase 5B is merged and current-baseline CI #232 passed on the Synology self-hosted Portable job and Windows Build. Phase 5C identity/enrollment work is now split into small independently validated changes: 5C1 identity/rotation (#39), 5C2 Windows protected key storage (#38), then 5C3 enrollment + mTLS.
+Phase 5 is tracked in Issue #32. Phase 5B is merged and current-baseline CI #232 passed on the Synology self-hosted Portable job and Windows Build. Phase 5C1 identity/rotation is merged in PR #39 with CI #239 green. Phase 5C2 Windows protected key storage is active in PR #40, followed by 5C3 enrollment + mTLS.
 
 The hosted CI baseline covers:
 
@@ -180,7 +180,7 @@ This transport runtime is now part of `main`. It remains pre-enrollment: product
 
 ## In progress — Phase 5C identity and enrollment
 
-### 5C1 stable identity and credential rotation — PR #39
+### 5C1 stable identity and credential rotation — merged PR #39
 
 - Stable `PrincipalId` is independent of hostname/IP and credential fingerprints.
 - A principal can own multiple credentials during bounded rotation overlap.
@@ -190,7 +190,7 @@ This transport runtime is now part of `main`. It remains pre-enrollment: product
 - Credential fingerprints map back to the stable principal for future mTLS identity resolution.
 - A credential fingerprint cannot be silently rebound to a different principal.
 
-### 5C2 Windows protected key backend — PR #38
+### 5C2 Windows protected key backend — PR #40
 
 - Machine-scope CNG ECDSA P-256 backend is under active CI validation.
 - Private key export is prohibited by persisted export policy rather than by convention.
@@ -260,8 +260,8 @@ Still required:
 ## Next implementation sequence
 
 1. Keep Issue #3 open and run Phase 4 physical qualification when two Windows PCs are available.
-2. Finish and merge PR #39 (5C1) on the current Phase 5B baseline.
-3. Finish PR #38 (5C2) with real Windows CNG creation/reopen/sign/verify evidence.
+2. Phase 5C1 is complete in PR #39.
+3. Finish PR #40 (5C2) with real Windows CNG creation/reopen/sign/verify/export-policy-zero/delete evidence on current main.
 4. Implement 5C3 enrollment + certificate issuance + post-enrollment mTLS without weakening bootstrap trust or exporting private keys.
 5. Add dependency/advisory/license and fuzzing gates when they become useful to the active phase rather than as unused tooling.
 6. Start product UI work under `classmesh-design` and runtime/visual verification once the Console/Agent surface becomes an active implementation track.

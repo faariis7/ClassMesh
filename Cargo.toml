@@ -10,6 +10,7 @@ members = [
     "crates/classmesh-codec-win",
     "crates/classmesh-render-win",
     "crates/classmesh-security",
+    "crates/classmesh-identity-win",
     "crates/classmesh-discovery",
     "crates/classmesh-windows-runtime",
     "crates/classmesh-win32",
