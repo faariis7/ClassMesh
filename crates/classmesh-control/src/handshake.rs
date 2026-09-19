@@ -46,6 +46,12 @@ pub enum HandshakeError {
         diagnostic: String,
     },
     InvalidSessionId,
+    InvalidHelloAckEnvelope {
+        control_session_id: u64,
+        sequence: u64,
+        request_id: u64,
+    },
+    HelloAckVersionMismatch,
     IdentityMismatch {
         authenticated: PrincipalId,
         claimed: PrincipalId,
@@ -90,6 +96,20 @@ impl Display for HandshakeError {
             }
             Self::InvalidSessionId => {
                 write!(formatter, "server returned invalid control session id")
+            }
+            Self::InvalidHelloAckEnvelope {
+                control_session_id,
+                sequence,
+                request_id,
+            } => write!(
+                formatter,
+                "invalid HelloAck envelope: session={control_session_id}, sequence={sequence}, request_id={request_id}"
+            ),
+            Self::HelloAckVersionMismatch => {
+                write!(
+                    formatter,
+                    "HelloAck envelope protocol version does not match negotiated version"
+                )
             }
             Self::IdentityMismatch {
                 authenticated,
@@ -161,9 +181,10 @@ pub async fn client_hello(
     channel.send(&envelope).await?;
 
     let response = channel.receive().await?;
-    let Some(control_envelope::Payload::HelloAck(ack)) = response.payload else {
+    let Some(control_envelope::Payload::HelloAck(ack)) = response.payload.clone() else {
         return Err(HandshakeError::UnexpectedPayload);
     };
+    validate_hello_ack_envelope(&response, &ack)?;
     established_from_ack(hello, ack)
 }
 
@@ -350,6 +371,43 @@ async fn send_rejected_hello(
         })),
     };
     channel.send(&ack).await?;
+    Ok(())
+}
+
+fn validate_hello_ack_envelope(
+    envelope: &ControlEnvelope,
+    ack: &HelloAck,
+) -> Result<(), HandshakeError> {
+    let expected_session = if ack.accepted {
+        ack.control_session_id
+    } else {
+        0
+    };
+    if envelope.control_session_id != expected_session
+        || envelope.sequence != FIRST_SEQUENCE
+        || envelope.request_id != HELLO_REQUEST_ID
+    {
+        return Err(HandshakeError::InvalidHelloAckEnvelope {
+            control_session_id: envelope.control_session_id,
+            sequence: envelope.sequence,
+            request_id: envelope.request_id,
+        });
+    }
+
+    let envelope_version = version_from_wire(
+        envelope
+            .protocol_version
+            .ok_or(HandshakeError::MissingProtocolVersion)?,
+    )?;
+    if ack.accepted {
+        let negotiated = version_from_wire(
+            ack.negotiated_version
+                .ok_or(HandshakeError::MissingProtocolVersion)?,
+        )?;
+        if envelope_version != negotiated {
+            return Err(HandshakeError::HelloAckVersionMismatch);
+        }
+    }
     Ok(())
 }
 
@@ -676,6 +734,82 @@ mod tests {
             session.negotiated.capabilities,
             capabilities(&[Capability::UdpUnicast])
         );
+    }
+
+    #[test]
+    fn hello_ack_envelope_must_match_payload_session_request_and_version() {
+        let ack = HelloAck {
+            accepted: true,
+            negotiated_version: Some(WireProtocolVersion { major: 0, minor: 2 }),
+            control_session_id: 77,
+            negotiated_capabilities: Vec::new(),
+            reject_reason: 0,
+            diagnostic: String::new(),
+        };
+        let valid = ControlEnvelope {
+            control_session_id: 77,
+            sequence: FIRST_SEQUENCE,
+            protocol_version: Some(WireProtocolVersion { major: 0, minor: 2 }),
+            request_id: HELLO_REQUEST_ID,
+            payload: Some(control_envelope::Payload::HelloAck(ack.clone())),
+        };
+        assert!(validate_hello_ack_envelope(&valid, &ack).is_ok());
+
+        let wrong_session = ControlEnvelope {
+            control_session_id: 78,
+            ..valid.clone()
+        };
+        assert!(matches!(
+            validate_hello_ack_envelope(&wrong_session, &ack),
+            Err(HandshakeError::InvalidHelloAckEnvelope { .. })
+        ));
+
+        let wrong_request = ControlEnvelope {
+            request_id: HELLO_REQUEST_ID + 1,
+            ..valid.clone()
+        };
+        assert!(matches!(
+            validate_hello_ack_envelope(&wrong_request, &ack),
+            Err(HandshakeError::InvalidHelloAckEnvelope { .. })
+        ));
+
+        let wrong_version = ControlEnvelope {
+            protocol_version: Some(WireProtocolVersion { major: 0, minor: 1 }),
+            ..valid
+        };
+        assert!(matches!(
+            validate_hello_ack_envelope(&wrong_version, &ack),
+            Err(HandshakeError::HelloAckVersionMismatch)
+        ));
+    }
+
+    #[test]
+    fn rejected_hello_ack_requires_bootstrap_session_zero() {
+        let ack = HelloAck {
+            accepted: false,
+            negotiated_version: None,
+            control_session_id: 0,
+            negotiated_capabilities: Vec::new(),
+            reject_reason: REJECT_INCOMPATIBLE_PROTOCOL,
+            diagnostic: "no".to_owned(),
+        };
+        let valid = ControlEnvelope {
+            control_session_id: 0,
+            sequence: FIRST_SEQUENCE,
+            protocol_version: Some(WireProtocolVersion { major: 0, minor: 2 }),
+            request_id: HELLO_REQUEST_ID,
+            payload: Some(control_envelope::Payload::HelloAck(ack.clone())),
+        };
+        assert!(validate_hello_ack_envelope(&valid, &ack).is_ok());
+
+        let invalid = ControlEnvelope {
+            control_session_id: 77,
+            ..valid
+        };
+        assert!(matches!(
+            validate_hello_ack_envelope(&invalid, &ack),
+            Err(HandshakeError::InvalidHelloAckEnvelope { .. })
+        ));
     }
 
     #[test]
