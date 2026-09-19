@@ -14,7 +14,7 @@ This is the active execution plan for ClassMesh. It is updated as implementation
 | Phase 5C1 — identity/rotation model | **Complete — PR #39 merged** | Stable PrincipalId, multi-credential lifecycle, enrollment binding and credential→principal mapping; CI #239 green, merge `aaf22a1f0caea908322620667d52f544fb59cb27` |
 | Phase 5C2 — Windows protected key backend | **Complete — PR #40 merged** | CI #243 passed on Synology Portable + Windows; merge `8608a1497a7e339eda2ba4447d08183d29de65bd` |
 | Phase 5C3 — enrollment + mTLS | **In progress — enrolled mTLS active in PR #51** | PR #41–#47 established enrollment, pinned bootstrap trust, bounded issuance, PKCS#10 proof-of-possession and bounded credential rotation; PR #50 merged verified certificate→stable PrincipalId resolution with CI #285 green. PR #51 ports enrolled QUIC mTLS onto current main; X.509 signing/provider integration and transport revocation enforcement remain next |
-| Phase 5D — authorization + session negotiation | Planned | Per-command authorization, replay controls, capability/session negotiation over the real transport |
+| Phase 5D — authorization + session negotiation | **Starting — authenticated peer authorization in PR #53** | Re-check the presented credential against current revocation/expiry/disabled-principal state before privileged authorization, then connect replay/session negotiation over the authenticated transport |
 | Phase 5E — hardening | Planned | Malformed input, reconnect storms, fuzzing, protocol compatibility and security tests |
 | AI quality workflow | **Active** | Project skills + official plugins documented in `docs/AI_QUALITY_STACK.md` |
 
@@ -104,7 +104,7 @@ Current control-plane research baseline:
 3. **5C1 Stable identity + rotation model — complete, PR #39 merged, CI #239.**
 4. **5C2 Windows protected key backend — complete, PR #40 merged, CI #243.**
 5. **5C3 Enrollment + mTLS — active** — PR #41–#47 landed the v0.2 enrollment, trust, issuance-policy, PKCS#10 verification and bounded-rotation slices; PR #50 merged verified certificate→stable PrincipalId resolution with CI #285 green. PR #51 is the active enrolled QUIC mTLS slice; X.509 signing/provider integration and transport revocation/rotation enforcement follow.
-6. **5D Authorization/session integration** — connect authenticated principal to command permissions and stream/session negotiation.
+6. **5D Authorization/session integration — starting in PR #53** — retain both stable PrincipalId and presented credential fingerprint for authenticated peers, re-check credential validity/revocation before privileged authorization, then connect replay controls and capability/session negotiation.
 7. **5E Hardening** — malformed messages, replay/duplicate cases, reconnect storms, fuzz targets and diagnostics.
 
 Quality-tooling changes should stay in small independent PRs so they do not block or obscure Phase implementation diffs.
