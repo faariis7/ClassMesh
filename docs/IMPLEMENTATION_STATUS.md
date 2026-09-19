@@ -1,16 +1,16 @@
 # ClassMesh Implementation Status
 
-Last updated: 2026-09-18
+Last updated: 2026-09-19
 
 This file distinguishes **implemented code**, **hosted-CI validation**, **real-hardware validation still required**, and **future product work**. Architecture documents must not be read as claims that every planned feature is already production-ready.
 
 ## Current baseline
 
-`main` includes Phase 4 implementation and qualification tooling through PR #31 plus the Phase 5A control-session foundation from PR #33 (merge `86e3a09b0e36ec38e29210dacd50b8c7f806e3e4`).
+`main` includes Phase 4 implementation and qualification tooling through PR #31, the Phase 5A control-session foundation from PR #33, and the Phase 5B reliable QUIC/TLS control runtime from PR #36 (merge `794fd45a5a20b6e4c623b7ecbbcfda5264e52ec0`).
 
 Phase 4 physical acceptance remains pending. Issue #3 must remain open until two physical Windows PCs pass the documented qualification.
 
-Phase 5 is tracked in Issue #32. Phase 5B implementation is complete in PR #36 and Linux + Windows CI run #227 passed. The PR is still not merged, so `main` must not yet be described as containing the QUIC/TLS runtime.
+Phase 5 is tracked in Issue #32. Phase 5B is merged and current-baseline CI #232 passed on the Synology self-hosted Portable job and Windows Build. Phase 5C identity/enrollment work is now split into small independently validated changes: 5C1 identity/rotation (#39), 5C2 Windows protected key storage (#38), then 5C3 enrollment + mTLS.
 
 The hosted CI baseline covers:
 
@@ -156,11 +156,11 @@ Repository-level quality instructions are now defined under `.agents/skills/`:
 
 These instructions improve agent consistency; they do not replace tests, security review, CI, runtime inspection or human product decisions.
 
-## Ready to merge
+## Phase 5B merged baseline
 
-### Phase 5B reliable QUIC/TLS control runtime
+### Reliable QUIC/TLS control runtime
 
-PR #36 has completed implementation and passed Linux + Windows CI run #227.
+PR #36 is merged and current-baseline CI #232 passed.
 
 Implemented on the PR branch:
 
@@ -176,7 +176,26 @@ Implemented on the PR branch:
 - loopback TLS/ALPN → QUIC → framing → hello → heartbeat coverage;
 - corrected test lifetime so the server endpoint/connection remain alive through the final control frame.
 
-This section remains distinct from implemented-on-`main` until PR #36 merges.
+This transport runtime is now part of `main`. It remains pre-enrollment: production client identity, certificate issuance and mTLS are Phase 5C.
+
+## In progress — Phase 5C identity and enrollment
+
+### 5C1 stable identity and credential rotation — PR #39
+
+- Stable `PrincipalId` is independent of hostname/IP and credential fingerprints.
+- A principal can own multiple credentials during bounded rotation overlap.
+- Active, retiring and revoked credential states are explicit.
+- Future-issued, expired and revoked credentials do not authenticate.
+- Enrollment approval is bound to the exact pending credential.
+- Credential fingerprints map back to the stable principal for future mTLS identity resolution.
+- A credential fingerprint cannot be silently rebound to a different principal.
+
+### 5C2 Windows protected key backend — PR #38
+
+- Machine-scope CNG ECDSA P-256 backend is under active CI validation.
+- Private key export is prohibited by persisted export policy rather than by convention.
+- The backend exposes signing and public-key data only; rustls/CSR integration remains Phase 5C3.
+- Project MSRV remains Rust 1.85; current `rustls-cng` is not taken as an unconditional dependency.
 
 ## Not implemented or not validated yet
 
@@ -241,7 +260,8 @@ Still required:
 ## Next implementation sequence
 
 1. Keep Issue #3 open and run Phase 4 physical qualification when two Windows PCs are available.
-2. Merge PR #36 Phase 5B after validating its integration with current `main`, then update Issue #32.
-3. Begin Phase 5C persistent identity/enrollment/mTLS with Windows-protected credential storage behind a testable abstraction.
-4. Add dependency/advisory/license and fuzzing gates when they become useful to the active phase rather than as unused tooling.
-5. Start product UI work under `classmesh-design` and runtime/visual verification once the Console/Agent surface becomes an active implementation track.
+2. Finish and merge PR #39 (5C1) on the current Phase 5B baseline.
+3. Finish PR #38 (5C2) with real Windows CNG creation/reopen/sign/verify evidence.
+4. Implement 5C3 enrollment + certificate issuance + post-enrollment mTLS without weakening bootstrap trust or exporting private keys.
+5. Add dependency/advisory/license and fuzzing gates when they become useful to the active phase rather than as unused tooling.
+6. Start product UI work under `classmesh-design` and runtime/visual verification once the Console/Agent surface becomes an active implementation track.
