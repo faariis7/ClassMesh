@@ -37,6 +37,10 @@ pub enum HandshakeError {
         sequence: u64,
         request_id: u64,
     },
+    HelloVersionMismatch {
+        envelope: ProtocolVersion,
+        hello: ProtocolVersion,
+    },
     Rejected {
         reason: i32,
         diagnostic: String,
@@ -75,6 +79,11 @@ impl Display for HandshakeError {
             } => write!(
                 formatter,
                 "invalid Hello envelope: session={control_session_id}, sequence={sequence}, request_id={request_id}"
+            ),
+            Self::HelloVersionMismatch { envelope, hello } => write!(
+                formatter,
+                "Hello envelope protocol version {:?} does not match Hello payload version {:?}",
+                envelope, hello
             ),
             Self::Rejected { reason, diagnostic } => {
                 write!(formatter, "control hello rejected ({reason}): {diagnostic}")
@@ -181,10 +190,11 @@ pub(crate) async fn server_hello_authenticated(
 
     let request = channel.receive().await?;
     validate_hello_envelope(&request)?;
-    let Some(control_envelope::Payload::Hello(hello_wire)) = request.payload else {
+    let Some(control_envelope::Payload::Hello(hello_wire)) = request.payload.clone() else {
         return Err(HandshakeError::UnexpectedPayload);
     };
     let hello = hello_from_wire(hello_wire)?;
+    validate_hello_protocol_version(&request, &hello)?;
     if let Err(error) = validate_authenticated_hello(authenticated_peer, &hello) {
         send_rejected_hello(
             channel,
@@ -215,10 +225,11 @@ pub async fn server_hello(
 
     let request = channel.receive().await?;
     validate_hello_envelope(&request)?;
-    let Some(control_envelope::Payload::Hello(hello_wire)) = request.payload else {
+    let Some(control_envelope::Payload::Hello(hello_wire)) = request.payload.clone() else {
         return Err(HandshakeError::UnexpectedPayload);
     };
     let hello = hello_from_wire(hello_wire)?;
+    validate_hello_protocol_version(&request, &hello)?;
 
     complete_server_hello(channel, config, request.request_id, hello).await
 }
@@ -281,6 +292,24 @@ fn validate_hello_envelope(envelope: &ControlEnvelope) -> Result<(), HandshakeEr
             control_session_id: envelope.control_session_id,
             sequence: envelope.sequence,
             request_id: envelope.request_id,
+        });
+    }
+    Ok(())
+}
+
+fn validate_hello_protocol_version(
+    envelope: &ControlEnvelope,
+    hello: &ControlHello,
+) -> Result<(), HandshakeError> {
+    let envelope_version = version_from_wire(
+        envelope
+            .protocol_version
+            .ok_or(HandshakeError::MissingProtocolVersion)?,
+    )?;
+    if envelope_version != hello.version {
+        return Err(HandshakeError::HelloVersionMismatch {
+            envelope: envelope_version,
+            hello: hello.version,
         });
     }
     Ok(())
@@ -553,6 +582,39 @@ mod tests {
                 Err(HandshakeError::InvalidHelloEnvelope { .. })
             ));
         }
+    }
+
+    #[test]
+    fn hello_envelope_version_must_match_hello_payload_version() {
+        let hello = ControlHello {
+            principal_id: id(7),
+            role: ControlRole::StudentDevice,
+            version: ProtocolVersion { major: 0, minor: 2 },
+            capabilities: BTreeSet::new(),
+            hostname: "student-07".to_owned(),
+            app_version: "0.0.1".to_owned(),
+        };
+        let mut envelope = ControlEnvelope {
+            control_session_id: 0,
+            sequence: FIRST_SEQUENCE,
+            protocol_version: Some(WireProtocolVersion { major: 0, minor: 1 }),
+            request_id: HELLO_REQUEST_ID,
+            payload: Some(control_envelope::Payload::Hello(hello_to_wire(&hello))),
+        };
+
+        assert!(matches!(
+            validate_hello_protocol_version(&envelope, &hello),
+            Err(HandshakeError::HelloVersionMismatch {
+                envelope: ProtocolVersion { major: 0, minor: 1 },
+                hello: ProtocolVersion { major: 0, minor: 2 },
+            })
+        ));
+
+        envelope.protocol_version = None;
+        assert!(matches!(
+            validate_hello_protocol_version(&envelope, &hello),
+            Err(HandshakeError::MissingProtocolVersion)
+        ));
     }
 
     #[test]
