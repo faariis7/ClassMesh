@@ -52,7 +52,7 @@ The flow is intentionally based on standard PKCS#10 rather than a custom key-pro
 4. the client polls with `EnrollmentStatusRequest` while teacher/admin approval is pending;
 5. an approved `EnrollmentResult` carries a leaf-first DER certificate chain and SHA-256 fingerprint of the leaf certificate.
 
-The client nonce is for deduplication/correlation, not authentication. The credential fingerprint never defines or replaces the stable `PrincipalId`. Rejected, revoked and expired states are explicit. Certificate issuance, CSR validation, approval policy and post-enrollment mTLS enforcement are implemented in later Phase 5C3 slices.
+The client nonce is for deduplication/correlation, not authentication. The credential fingerprint never defines or replaces the stable `PrincipalId`. Rejected, revoked and expired states are explicit. PR #45 introduces the authority-side issuance policy boundary: issuance must match the approved stable PrincipalId and exact CSR SHA-256 and use a bounded, non-expired validity window. Cryptographic CSR verification/X.509 signing and post-enrollment mTLS enforcement remain later Phase 5C3 slices.
 
 ### Reliable control envelope
 
