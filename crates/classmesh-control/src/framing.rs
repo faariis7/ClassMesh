@@ -170,6 +170,16 @@ mod tests {
     }
 
     #[test]
+    fn malformed_protobuf_is_rejected_after_length_validation() {
+        let payload = [0xff_u8];
+        let mut frame = Vec::with_capacity(CONTROL_LENGTH_PREFIX_BYTES + payload.len());
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&payload);
+
+        assert!(matches!(decode_frame(&frame), Err(FrameError::Decode(_))));
+    }
+
+    #[test]
     fn declared_length_must_match_payload() {
         let mut frame = encode_frame(&heartbeat_envelope()).expect("frame should encode");
         frame.pop();
