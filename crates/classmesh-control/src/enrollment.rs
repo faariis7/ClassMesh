@@ -36,6 +36,8 @@ pub enum EnrollmentValidationError {
     InvalidCsrSha256Length {
         length: usize,
     },
+    PrincipalBindingMismatch,
+    CsrBindingMismatch,
 }
 
 pub fn validate_enrollment_request(
@@ -104,14 +106,10 @@ pub fn validate_enrollment_result_binding(
     }
 
     if result.principal_id.as_slice() != expected_principal_id {
-        return Err(EnrollmentValidationError::InvalidPrincipalIdLength {
-            length: result.principal_id.len(),
-        });
+        return Err(EnrollmentValidationError::PrincipalBindingMismatch);
     }
     if result.csr_sha256.as_slice() != expected_csr_sha256 {
-        return Err(EnrollmentValidationError::InvalidCsrSha256Length {
-            length: result.csr_sha256.len(),
-        });
+        return Err(EnrollmentValidationError::CsrBindingMismatch);
     }
 
     Ok(())
@@ -245,21 +243,25 @@ mod tests {
         .expect("matching result binding should pass");
 
         let wrong_principal = [6_u8; PRINCIPAL_ID_BYTES];
-        assert!(validate_enrollment_result_binding(
-            ENROLLMENT_MIN_VERSION,
-            &wrong_principal,
-            &csr_sha256,
-            &result,
-        )
-        .is_err());
+        assert_eq!(
+            validate_enrollment_result_binding(
+                ENROLLMENT_MIN_VERSION,
+                &wrong_principal,
+                &csr_sha256,
+                &result,
+            ),
+            Err(EnrollmentValidationError::PrincipalBindingMismatch)
+        );
 
         let wrong_csr = [5_u8; SHA256_BYTES];
-        assert!(validate_enrollment_result_binding(
-            ENROLLMENT_MIN_VERSION,
-            &principal_id,
-            &wrong_csr,
-            &result,
-        )
-        .is_err());
+        assert_eq!(
+            validate_enrollment_result_binding(
+                ENROLLMENT_MIN_VERSION,
+                &principal_id,
+                &wrong_csr,
+                &result,
+            ),
+            Err(EnrollmentValidationError::CsrBindingMismatch)
+        );
     }
 }
