@@ -272,10 +272,20 @@ pub struct ControlChannel {
 }
 
 impl ControlChannel {
+    fn validate_io_timeout(io_timeout: Duration) -> Result<(), ControlTransportError> {
+        if io_timeout.is_zero() {
+            return Err(ControlTransportError::Configuration(
+                "control I/O timeout must be greater than zero".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn open(
         connection: &Connection,
         io_timeout: Duration,
     ) -> Result<Self, ControlTransportError> {
+        Self::validate_io_timeout(io_timeout)?;
         let (send, recv) = timeout(io_timeout, connection.open_bi())
             .await
             .map_err(|_| ControlTransportError::Timeout {
@@ -294,6 +304,7 @@ impl ControlChannel {
         connection: &Connection,
         io_timeout: Duration,
     ) -> Result<Self, ControlTransportError> {
+        Self::validate_io_timeout(io_timeout)?;
         let (send, recv) = timeout(io_timeout, connection.accept_bi())
             .await
             .map_err(|_| ControlTransportError::Timeout {
@@ -783,6 +794,16 @@ mod tests {
         }
 
         assert!(validate_reconnect_policy(DEFAULT_RECONNECT_POLICY).is_ok());
+    }
+
+    #[test]
+    fn control_channel_rejects_zero_io_timeout() {
+        assert!(matches!(
+            ControlChannel::validate_io_timeout(Duration::ZERO),
+            Err(ControlTransportError::Configuration(_))
+        ));
+        assert!(ControlChannel::validate_io_timeout(Duration::from_millis(1)).is_ok());
+        assert!(ControlChannel::validate_io_timeout(DEFAULT_IO_TIMEOUT).is_ok());
     }
 
     #[test]
