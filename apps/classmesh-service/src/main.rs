@@ -1,4 +1,7 @@
 #[cfg(windows)]
+mod control_runtime;
+
+#[cfg(windows)]
 mod windows_service_app {
     use std::ffi::OsString;
     use std::path::PathBuf;
@@ -6,9 +9,9 @@ mod windows_service_app {
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity, MachineIdentityBundle};
+    use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity};
     use classmesh_security::persistence::DurableAuthorizationState;
-    use classmesh_security::{AuthorizationStore, CredentialFingerprint, PrincipalId};
+    use classmesh_security::{CredentialFingerprint, PrincipalId};
     use sha2::{Digest, Sha256};
 
     use classmesh_win32::{
@@ -34,15 +37,12 @@ mod windows_service_app {
     const SERVICE_NAME: &str = "ClassMeshService";
     const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
     const STATE_DIRECTORY: &str = "ClassMesh\\state";
+    const CONFIG_DIRECTORY: &str = "ClassMesh\\config";
     const MACHINE_IDENTITY_FILE: &str = "machine-identity.json";
     const AUTHORIZATION_FILE: &str = "authorization.json";
+    const CONTROL_RUNTIME_CONFIG_FILE: &str = "control-runtime.json";
 
-    #[derive(Debug)]
-    struct ServiceControlState {
-        _identity: MachineIdentityBundle,
-        _authorization: AuthorizationStore,
-        _key: CngMachineKey,
-    }
+    use crate::control_runtime::{ControlRuntime, ControlRuntimeConfig, ControlRuntimeState};
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
 
@@ -377,6 +377,16 @@ mod windows_service_app {
             .map_err(|error| format!("Worker IPC write failed: {error}"))
     }
 
+    fn program_data_root() -> windows_service::Result<PathBuf> {
+        std::env::var_os("ProgramData")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| windows_service::Error::Winapi(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "ProgramData is unavailable",
+            )))
+    }
+
     fn program_data_state_dir() -> Result<PathBuf, String> {
         let program_data = std::env::var_os("ProgramData")
             .filter(|value| !value.is_empty())
@@ -394,7 +404,7 @@ mod windows_service_app {
             .map_err(|_| "system clock cannot be represented in milliseconds".to_owned())
     }
 
-    fn load_control_state() -> Result<ServiceControlState, String> {
+    fn load_control_state() -> Result<ControlRuntimeState, String> {
         let state_dir = program_data_state_dir()?;
         let identity_path = state_dir.join(MACHINE_IDENTITY_FILE);
         let authorization_path = state_dir.join(AUTHORIZATION_FILE);
@@ -452,10 +462,10 @@ mod windows_service_app {
             );
         }
 
-        Ok(ServiceControlState {
-            _identity: identity,
-            _authorization: authorization,
-            _key: key,
+        Ok(ControlRuntimeState {
+            identity,
+            authorization,
+            key,
         })
     }
 
@@ -492,15 +502,37 @@ mod windows_service_app {
         };
 
         let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
-        let _control_state = match load_control_state() {
+        let control_state = match load_control_state() {
             Ok(state) => state,
             Err(error) => {
                 eprintln!("ClassMesh control state validation failed: {error}");
-                set_stopped(&status_handle)?;
+                set_stopped_with_exit(&status_handle, 1)?;
                 return Ok(());
             }
         };
-        eprintln!("ClassMesh control state validated; protected identity is ready");
+        let config_path = program_data_root()?
+            .join(CONFIG_DIRECTORY)
+            .join(CONTROL_RUNTIME_CONFIG_FILE);
+        let control_config = match ControlRuntimeConfig::load(&config_path) {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("ClassMesh control runtime configuration failed: {error}");
+                set_stopped_with_exit(&status_handle, 2)?;
+                return Ok(());
+            }
+        };
+        let mut control_runtime = match ControlRuntime::start(control_state, control_config) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                eprintln!("ClassMesh control runtime failed to start: {error}");
+                set_stopped_with_exit(&status_handle, 3)?;
+                return Ok(());
+            }
+        };
+        eprintln!(
+            "ClassMesh enrolled control listener ready on {}",
+            control_runtime.local_address()
+        );
         set_running(&status_handle)?;
 
         let mut supervisor = SessionSupervisor::default();
@@ -513,6 +545,10 @@ mod windows_service_app {
                     handle_supervisor_action(action, &mut supervisor, &mut workers);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if !control_runtime.is_running() {
+                        eprintln!("ClassMesh control runtime exited unexpectedly; stopping service");
+                        break;
+                    }
                     let event = workers.poll();
                     handle_worker_event(event, &mut supervisor);
                 }
@@ -520,6 +556,7 @@ mod windows_service_app {
         }
 
         workers.stop_any();
+        control_runtime.stop();
         set_stopped(&status_handle)
     }
 
@@ -538,11 +575,18 @@ mod windows_service_app {
     }
 
     fn set_stopped(handle: &ServiceStatusHandle) -> windows_service::Result<()> {
+        set_stopped_with_exit(handle, 0)
+    }
+
+    fn set_stopped_with_exit(
+        handle: &ServiceStatusHandle,
+        exit_code: u32,
+    ) -> windows_service::Result<()> {
         handle.set_service_status(ServiceStatus {
             service_type: SERVICE_TYPE,
             current_state: ServiceState::Stopped,
             controls_accepted: ServiceControlAccept::empty(),
-            exit_code: ServiceExitCode::Win32(0),
+            exit_code: ServiceExitCode::Win32(exit_code),
             checkpoint: 0,
             wait_hint: Duration::default(),
             process_id: None,
