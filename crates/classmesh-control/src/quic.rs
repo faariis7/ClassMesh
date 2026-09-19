@@ -342,6 +342,8 @@ mod tests {
     use classmesh_security::PrincipalId;
     use rcgen::generate_simple_self_signed;
     use rustls::pki_types::PrivatePkcs8KeyDer;
+    use rustls::server::WebPkiClientVerifier;
+    use rustls::sign::{CertifiedKey, SingleCertAndKey};
 
     use super::*;
     use crate::ControlHello;
