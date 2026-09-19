@@ -21,11 +21,20 @@ const MAX_PERMISSIONS_PER_PRINCIPAL: usize = 32;
 pub enum PersistenceError {
     Io(std::io::Error),
     Json(serde_json::Error),
-    StateTooLarge { bytes: usize, maximum: usize },
+    StateTooLarge {
+        bytes: usize,
+        maximum: usize,
+    },
     UnsupportedVersion(u32),
     TooManyPrincipals(usize),
-    TooManyCredentials { principal: PrincipalId, count: usize },
-    TooManyPermissions { principal: PrincipalId, count: usize },
+    TooManyCredentials {
+        principal: PrincipalId,
+        count: usize,
+    },
+    TooManyPermissions {
+        principal: PrincipalId,
+        count: usize,
+    },
     DuplicatePrincipal(PrincipalId),
     DuplicateCredential(CredentialFingerprint),
     InvalidPrincipalKind(u8),
@@ -46,7 +55,9 @@ impl fmt::Display for PersistenceError {
             Self::UnsupportedVersion(version) => {
                 write!(f, "unsupported security state version {version}")
             }
-            Self::TooManyPrincipals(count) => write!(f, "security state has too many principals: {count}"),
+            Self::TooManyPrincipals(count) => {
+                write!(f, "security state has too many principals: {count}")
+            }
             Self::TooManyCredentials { principal, count } => write!(
                 f,
                 "principal {:?} has too many persisted credentials: {count}",
@@ -63,16 +74,25 @@ impl fmt::Display for PersistenceError {
             Self::DuplicateCredential(fingerprint) => {
                 write!(f, "duplicate persisted credential {:?}", fingerprint)
             }
-            Self::InvalidPrincipalKind(value) => write!(f, "invalid persisted principal kind {value}"),
+            Self::InvalidPrincipalKind(value) => {
+                write!(f, "invalid persisted principal kind {value}")
+            }
             Self::InvalidPermission(value) => write!(f, "invalid persisted permission {value}"),
             Self::InvalidCredentialState(value) => {
                 write!(f, "invalid persisted credential state {value}")
             }
             Self::InvalidCredentialTime(fingerprint) => {
-                write!(f, "invalid persisted credential times for {:?}", fingerprint)
+                write!(
+                    f,
+                    "invalid persisted credential times for {:?}",
+                    fingerprint
+                )
             }
             Self::Authorization(error) => {
-                write!(f, "persisted authorization state violates invariants: {error:?}")
+                write!(
+                    f,
+                    "persisted authorization state violates invariants: {error:?}"
+                )
             }
         }
     }
@@ -508,11 +528,7 @@ mod tests {
             Some(id(7))
         );
         assert_eq!(loaded.principal_for_credential(fingerprint(10), 40), None);
-        assert!(loaded.authorize_credential(
-            fingerprint(11),
-            Permission::ControlInput,
-            40
-        ));
+        assert!(loaded.authorize_credential(fingerprint(11), Permission::ControlInput, 40));
 
         let _ = fs::remove_dir_all(path.parent().expect("test parent"));
     }
