@@ -1,5 +1,5 @@
-use classmesh_protocol::control_wire::{EnrollmentRequest, EnrollmentResult};
 use classmesh_protocol::ProtocolVersion;
+use classmesh_protocol::control_wire::{EnrollmentRequest, EnrollmentResult};
 
 pub const ENROLLMENT_MIN_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 2 };
 pub const PRINCIPAL_ID_BYTES: usize = 32;
@@ -146,10 +146,7 @@ mod tests {
     #[test]
     fn version_01_rejects_enrollment_payloads_explicitly() {
         assert_eq!(
-            validate_enrollment_request(
-                ProtocolVersion { major: 0, minor: 1 },
-                &valid_request()
-            ),
+            validate_enrollment_request(ProtocolVersion { major: 0, minor: 1 }, &valid_request()),
             Err(EnrollmentValidationError::UnsupportedProtocolVersion {
                 negotiated: ProtocolVersion { major: 0, minor: 1 },
                 minimum: ENROLLMENT_MIN_VERSION,
