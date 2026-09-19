@@ -32,6 +32,11 @@ pub enum HandshakeError {
         value: i32,
     },
     UnexpectedPayload,
+    InvalidHelloEnvelope {
+        control_session_id: u64,
+        sequence: u64,
+        request_id: u64,
+    },
     Rejected {
         reason: i32,
         diagnostic: String,
@@ -63,6 +68,14 @@ impl Display for HandshakeError {
                 write!(formatter, "unsupported control role {value}")
             }
             Self::UnexpectedPayload => write!(formatter, "unexpected control handshake payload"),
+            Self::InvalidHelloEnvelope {
+                control_session_id,
+                sequence,
+                request_id,
+            } => write!(
+                formatter,
+                "invalid Hello envelope: session={control_session_id}, sequence={sequence}, request_id={request_id}"
+            ),
             Self::Rejected { reason, diagnostic } => {
                 write!(formatter, "control hello rejected ({reason}): {diagnostic}")
             }
@@ -167,6 +180,7 @@ pub(crate) async fn server_hello_authenticated(
     }
 
     let request = channel.receive().await?;
+    validate_hello_envelope(&request)?;
     let Some(control_envelope::Payload::Hello(hello_wire)) = request.payload else {
         return Err(HandshakeError::UnexpectedPayload);
     };
@@ -200,6 +214,7 @@ pub async fn server_hello(
     }
 
     let request = channel.receive().await?;
+    validate_hello_envelope(&request)?;
     let Some(control_envelope::Payload::Hello(hello_wire)) = request.payload else {
         return Err(HandshakeError::UnexpectedPayload);
     };
@@ -255,6 +270,20 @@ async fn complete_server_hello(
         control_session_id: config.control_session_id,
         negotiated,
     })
+}
+
+fn validate_hello_envelope(envelope: &ControlEnvelope) -> Result<(), HandshakeError> {
+    if envelope.control_session_id != 0
+        || envelope.sequence != FIRST_SEQUENCE
+        || envelope.request_id != HELLO_REQUEST_ID
+    {
+        return Err(HandshakeError::InvalidHelloEnvelope {
+            control_session_id: envelope.control_session_id,
+            sequence: envelope.sequence,
+            request_id: envelope.request_id,
+        });
+    }
+    Ok(())
 }
 
 fn validate_authenticated_hello(
@@ -484,6 +513,46 @@ mod tests {
             hello_from_wire(invalid),
             Err(HandshakeError::InvalidPrincipalIdLength { .. })
         ));
+    }
+
+    #[test]
+    fn hello_envelope_requires_bootstrap_session_and_first_sequence() {
+        let hello = ControlHello {
+            principal_id: id(7),
+            role: ControlRole::StudentDevice,
+            version: ProtocolVersion { major: 0, minor: 2 },
+            capabilities: BTreeSet::new(),
+            hostname: "student-07".to_owned(),
+            app_version: "0.0.1".to_owned(),
+        };
+        let valid = ControlEnvelope {
+            control_session_id: 0,
+            sequence: FIRST_SEQUENCE,
+            protocol_version: Some(version_to_wire(hello.version)),
+            request_id: HELLO_REQUEST_ID,
+            payload: Some(control_envelope::Payload::Hello(hello_to_wire(&hello))),
+        };
+        assert!(validate_hello_envelope(&valid).is_ok());
+
+        for invalid in [
+            ControlEnvelope {
+                control_session_id: 77,
+                ..valid.clone()
+            },
+            ControlEnvelope {
+                sequence: FIRST_SEQUENCE + 1,
+                ..valid.clone()
+            },
+            ControlEnvelope {
+                request_id: HELLO_REQUEST_ID + 1,
+                ..valid
+            },
+        ] {
+            assert!(matches!(
+                validate_hello_envelope(&invalid),
+                Err(HandshakeError::InvalidHelloEnvelope { .. })
+            ));
+        }
     }
 
     #[test]
