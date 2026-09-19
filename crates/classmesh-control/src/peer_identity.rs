@@ -5,11 +5,21 @@ use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthenticatedPeerIdentity {
-    pub principal_id: PrincipalId,
-    pub credential_fingerprint: CredentialFingerprint,
+    pub(crate) principal_id: PrincipalId,
+    pub(crate) credential_fingerprint: CredentialFingerprint,
 }
 
 impl AuthenticatedPeerIdentity {
+    #[must_use]
+    pub const fn principal_id(self) -> PrincipalId {
+        self.principal_id
+    }
+
+    #[must_use]
+    pub const fn credential_fingerprint(self) -> CredentialFingerprint {
+        self.credential_fingerprint
+    }
+
     #[must_use]
     pub fn is_currently_authenticated(
         self,
