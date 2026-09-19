@@ -67,9 +67,13 @@ PR #63 merged authenticated Hello identity/session/replay authorization with PR 
 
 ### Phase 5F — hardening active
 
-PR #66 merged after CI #338 green and rejects missing or internally inconsistent Hello protocol versions before negotiation/session establishment. PR #69 merged after CI #343 green and adds explicit malformed-Protobuf control-frame regression coverage. PR #70 merged as `b4b17dd1c6b28f1458f8f269570569368072b72e` after CI #345 green and validates HelloAck envelope session/request/sequence/version consistency before the client accepts the negotiated control session.
+PR #66 merged after CI #338 green and rejects missing or internally inconsistent Hello protocol versions before negotiation/session establishment. PR #69 merged after CI #343 green and adds explicit malformed-Protobuf control-frame regression coverage. PR #70 merged after CI #345 green and validates HelloAck envelope session/request/sequence/version consistency before the client accepts the negotiated control session.
 
-Remaining Phase 5F work includes reconnect/timeout edge cases, broader malformed authenticated-envelope coverage, fuzz targets, and security/compatibility diagnostics.
+PR #73 merged after CI #354 green and adds versioned, bounded durable persistence for authorization metadata without exporting private keys. PR #75 merged after CI #357 green and replaces the Worker pipe NULL DACL with a per-user SID + LocalSystem ACL while retaining exact PID/session validation and remote-client rejection. PR #77 merged after CI #361 green and rejects reconnect policies that could produce zero-delay retry storms or inverted backoff bounds. PR #79 merged after CI #364 green and rejects zero control I/O timeouts as invalid configuration.
+
+PR #81 merged after CI #367 green and requires each privileged post-handshake command to carry the exact negotiated protocol version before its sequence can be consumed. PR #83 merged as `e36d26b8c606e087a47e408717f409dd8b4ac35f` after CI #372 green and adds bounded full-session reconnect: connection + control stream + Hello are retried only for transport failures, while protocol/authentication/administrative rejections remain terminal. The same configured QUIC endpoint/credential resolver is reused, so reconnect does not require re-enrollment.
+
+Remaining Phase 5F work is now concentrated on fuzz targets, broader malformed authenticated-envelope/compatibility coverage, security diagnostics, and wiring the completed control/security primitives into the production Windows Service control runtime.
 
 ### Phase 5D/5E — authenticated authorization and negotiation complete through PR #63
 
@@ -77,10 +81,9 @@ PR #63 merged the authenticated control-session guard with PR CI #330 green. The
 
 ## Remaining security/control work
 
-- durable production persistence for issued enrollment/certificate state;
-- malformed-input/reconnect/timeout/compatibility/fuzz hardening around the authenticated control path;
-- encrypted multicast media key distribution/replay/rotation;
-- production per-user SID ACL on local Named Pipes.
+- production Windows Service integration for the durable authorization/enrollment state and control runtime;
+- broader malformed authenticated-envelope/compatibility coverage, fuzz targets and security diagnostics;
+- encrypted multicast media key distribution/replay/rotation.
 
 ## Other production work still required
 
@@ -89,7 +92,7 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 ## Next implementation sequence
 
 1. Keep Issue #3 open and perform Phase 4 physical qualification when two Windows PCs are available.
-2. Begin Phase 5F hardening with malformed authenticated envelopes, reconnect/timeout behavior, compatibility boundaries and fuzz targets.
+2. Continue Phase 5F with fuzz targets, broader malformed authenticated-envelope/compatibility coverage and security diagnostics; reconnect/timeout hardening is now merged through PR #83.
 3. Add dependency/advisory/license gates when useful to the active phase.
 4. Continue remaining production security work such as durable enrollment/certificate state and protected multicast media key distribution.
 5. Begin product UI work under `classmesh-design` with runtime/visual verification when Console/Agent UI becomes active.
