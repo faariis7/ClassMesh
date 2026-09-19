@@ -7,9 +7,7 @@ use tokio::time::sleep;
 
 use crate::ControlHello;
 use crate::handshake::{EstablishedControlSession, HandshakeError, client_hello};
-use crate::quic::{
-    ControlChannel, ControlTransportError, connect, validate_reconnect_policy,
-};
+use crate::quic::{ControlChannel, ControlTransportError, connect, validate_reconnect_policy};
 
 #[derive(Debug)]
 pub struct ClientControlSession {
@@ -247,8 +245,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(HandshakeError::Rejected { .. })
-                | Err(HandshakeError::Negotiation(_))
+            Err(HandshakeError::Rejected { .. }) | Err(HandshakeError::Negotiation(_))
         ));
 
         let (server, connection) = server_task.await.map_err(|error| error.to_string())??;
