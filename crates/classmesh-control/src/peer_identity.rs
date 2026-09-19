@@ -1,6 +1,4 @@
-use classmesh_security::{
-    AuthorizationStore, CredentialFingerprint, Permission, PrincipalId,
-};
+use classmesh_security::{AuthorizationStore, CredentialFingerprint, Permission, PrincipalId};
 use quinn::Connection;
 use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
@@ -194,11 +192,12 @@ mod tests {
             credentials,
         };
         let mut store = AuthorizationStore::default();
-        store.upsert(record.clone()).expect("principal should register");
+        store
+            .upsert(record.clone())
+            .expect("principal should register");
 
-        let identity =
-            identity_for_verified_certificate_chain(&store, &[certificate], 150)
-                .expect("credential should authenticate");
+        let identity = identity_for_verified_certificate_chain(&store, &[certificate], 150)
+            .expect("credential should authenticate");
         assert!(identity.authorize(&store, Permission::ViewMonitoring, 150));
 
         record
