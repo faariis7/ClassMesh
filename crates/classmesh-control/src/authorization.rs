@@ -238,7 +238,7 @@ mod tests {
         guard
             .authorize(
                 &authorization,
-                &envelope(77, 1),
+                &envelope(77, 2),
                 Permission::ControlInput,
                 150,
             )
@@ -262,7 +262,7 @@ mod tests {
         assert_eq!(
             guard.authorize(
                 &authorization,
-                &envelope(77, 2),
+                &envelope(77, 3),
                 Permission::ControlInput,
                 160,
             ),
