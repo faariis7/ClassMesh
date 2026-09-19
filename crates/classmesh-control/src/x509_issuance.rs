@@ -156,10 +156,9 @@ mod tests {
         let expected_csr_sha256: [u8; SHA256_BYTES] = Sha256::digest(&csr).into();
         assert_eq!(issued.csr_sha256, expected_csr_sha256);
         assert!(!issued.certificate_der.is_empty());
-        assert_eq!(
-            issued.credential_fingerprint_sha256,
-            Sha256::digest(issued.certificate_der.as_ref()).into()
-        );
+        let expected_fingerprint: [u8; SHA256_BYTES] =
+            Sha256::digest(issued.certificate_der.as_ref()).into();
+        assert_eq!(issued.credential_fingerprint_sha256, expected_fingerprint);
         assert_eq!(issued.not_after_unix_ms, validity.not_after_unix_ms);
     }
 
