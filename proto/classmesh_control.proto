@@ -118,6 +118,11 @@ message EnrollmentResult {
   bytes credential_fingerprint_sha256 = 4;
   uint64 not_after_unix_ms = 5;
   string diagnostic = 6;
+
+  // Echo the stable identity and exact CSR approved by the authority so the
+  // client can reject a result that was substituted or correlated incorrectly.
+  bytes principal_id = 7;
+  bytes csr_sha256 = 8;
 }
 
 enum MediaHealth {
