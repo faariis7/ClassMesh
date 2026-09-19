@@ -171,8 +171,14 @@ mod tests {
                 minor: u32::from(VERSION.minor),
             }),
             request_id: 0,
-            payload: Some(control_envelope::Payload::ReleaseAllInput(
-                classmesh_protocol::control_wire::ReleaseAllInput {},
+            payload: Some(control_envelope::Payload::InputEvent(
+                classmesh_protocol::control_wire::InputEvent {
+                    sequence,
+                    timestamp_us: 0,
+                    event: Some(classmesh_protocol::control_wire::input_event::Event::ReleaseAll(
+                        classmesh_protocol::control_wire::ReleaseAllInput {},
+                    )),
+                },
             )),
         }
     }
