@@ -4,24 +4,24 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use classmesh_control::diagnostics::handshake_diagnostic_code;
-use classmesh_control::handshake::{ServerHelloConfig, server_hello_enrolled};
+use classmesh_control::handshake::{server_hello_enrolled, ServerHelloConfig};
 use classmesh_control::quic::{
-    ControlChannel, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
+    enrolled_server_config_with_resolver, ControlChannel, DEFAULT_IO_TIMEOUT,
 };
 use classmesh_identity_win::{
-    CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver,
+    cng_server_cert_resolver, CngMachineKey, MachineIdentityBundle,
 };
 use classmesh_protocol::{Capability, PROTOCOL_VERSION};
 use classmesh_security::AuthorizationStore;
 use quinn::Endpoint;
-use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use rustls::server::WebPkiClientVerifier;
+use rustls::RootCertStore;
 use serde::Deserialize;
 use tokio::sync::oneshot;
 
@@ -155,7 +155,9 @@ impl ControlRuntime {
 
     #[must_use]
     pub(crate) fn is_running(&self) -> bool {
-        self.thread.as_ref().is_some_and(|thread| !thread.is_finished())
+        self.thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
     }
 
     pub(crate) fn stop(&mut self) {
