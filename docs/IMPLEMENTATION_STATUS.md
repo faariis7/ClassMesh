@@ -55,13 +55,17 @@ PR #45 merged bounded authority-side issuance policy; PR #46 merged PKCS#10 proo
 
 PR #51 is the active enrolled-QUIC mTLS slice ported onto the current `main`. It requires caller-supplied client-certificate verification on the server and resolver-backed client credentials so protected keys do not need DER export. Production X.509 signing/provider integration and transport-connected revocation/rotation enforcement still remain before Phase 5C3 is complete.
 
+### Phase 5D — authenticated authorization starting
+
+PR #53 is the first transport-connected authorization slice. It retains the presented credential fingerprint alongside the stable `PrincipalId` and re-checks that credential against `AuthorizationStore` at authorization time, so revocation/expiry/disablement can stop privileged actions on an already established QUIC connection. Per-command replay enforcement and authenticated capability/session negotiation remain next.
+
 ## Remaining security/control work
 
 - certificate issuance and persistence;
 - explicit bootstrap trust policy;
 - post-enrollment mTLS identity and stable-principal resolution;
 - revocation/key rotation integrated with transport authentication;
-- per-command authorization and replay/duplicate enforcement;
+- per-command authorization and replay/duplicate enforcement (authorization re-check begins in PR #53);
 - authenticated capability/session negotiation;
 - malformed-input/reconnect/fuzz hardening;
 - encrypted multicast media key distribution/replay/rotation;
