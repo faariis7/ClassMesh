@@ -120,10 +120,8 @@ mod tests {
 
     fn csr() -> Vec<u8> {
         let key = KeyPair::generate().expect("leaf key");
-        let mut params =
+        let params =
             CertificateParams::new(vec!["student.classmesh".to_owned()]).expect("leaf params");
-        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
         params.serialize_request(&key).expect("CSR").der().to_vec()
     }
 
