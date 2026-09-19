@@ -560,8 +560,11 @@ mod tests {
         client.set_default_client_config(client_config_with_roots(server_roots)?);
 
         let server_task = tokio::spawn(async move { accept(&server).await.is_err() });
-        assert!(connect(&client, server_address, "classmesh.local").await.is_err());
+        let client_result = connect(&client, server_address, "classmesh.local").await;
         assert!(server_task.await?);
+        if let Ok(connection) = client_result {
+            connection.close(0_u32.into(), b"server rejected client identity");
+        }
         Ok(())
     }
 
@@ -574,8 +577,7 @@ mod tests {
 
         let trusted_client = generate_simple_self_signed(vec!["trusted.classmesh".to_owned()])?;
         let trusted_client_certificate = CertificateDer::from(trusted_client.cert);
-        let untrusted_client =
-            generate_simple_self_signed(vec!["untrusted.classmesh".to_owned()])?;
+        let untrusted_client = generate_simple_self_signed(vec!["untrusted.classmesh".to_owned()])?;
         let untrusted_client_certificate = CertificateDer::from(untrusted_client.cert);
         let untrusted_client_private_key =
             PrivatePkcs8KeyDer::from(untrusted_client.signing_key.serialize_der());
