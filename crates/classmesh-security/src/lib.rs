@@ -139,27 +139,6 @@ impl Principal {
         Ok(())
     }
 
-    /// Adds a replacement credential while keeping existing active credentials
-    /// valid as retiring credentials until they are explicitly revoked or expire.
-    pub fn rotate_to(
-        &mut self,
-        replacement: CredentialRecord,
-    ) -> Result<(), CredentialMutationError> {
-        if replacement.state != CredentialState::Active {
-            return Err(CredentialMutationError::ReplacementMustBeActive);
-        }
-        if self.credentials.contains_key(&replacement.fingerprint) {
-            return Err(CredentialMutationError::DuplicateCredential);
-        }
-
-        for credential in self.credentials.values_mut() {
-            credential.mark_retiring();
-        }
-        self.credentials
-            .insert(replacement.fingerprint, replacement);
-        Ok(())
-    }
-
     /// Adds a replacement credential and bounds the overlap of all previous credentials.
     ///
     /// Existing credentials become retiring and may authenticate only until the earlier of
@@ -579,8 +558,8 @@ mod tests {
         assert!(store.authorize_credential(old, Permission::ViewMonitoring, 15));
 
         principal
-            .rotate_to(CredentialRecord::active(new, 20))
-            .expect("rotation should succeed");
+            .rotate_to_bounded(CredentialRecord::active(new, 20), 40)
+            .expect("bounded rotation should succeed");
         store
             .upsert(principal.clone())
             .expect("rotated identity should register");
