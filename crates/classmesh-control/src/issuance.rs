@@ -1,6 +1,6 @@
 use classmesh_security::PrincipalId;
 
-use crate::enrollment::{MAX_ENROLLMENT_CSR_BYTES, PRINCIPAL_ID_BYTES, SHA256_BYTES};
+use crate::enrollment::{MAX_ENROLLMENT_CSR_BYTES, SHA256_BYTES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnrollmentApproval {
@@ -28,6 +28,7 @@ pub enum CertificateIssuanceError {
     CsrBindingMismatch,
     InvalidValidityWindow,
     NotBeforeTooFarInFuture,
+    AlreadyExpired,
     LifetimeTooLong,
 }
 
@@ -65,6 +66,10 @@ impl CertificateIssuancePolicy {
             return Err(CertificateIssuanceError::NotBeforeTooFarInFuture);
         }
 
+        if validity.not_after_unix_ms <= now_unix_ms {
+            return Err(CertificateIssuanceError::AlreadyExpired);
+        }
+
         let lifetime = validity
             .not_after_unix_ms
             .saturating_sub(validity.not_before_unix_ms);
@@ -76,11 +81,10 @@ impl CertificateIssuancePolicy {
     }
 }
 
-const _: usize = PRINCIPAL_ID_BYTES;
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::enrollment::PRINCIPAL_ID_BYTES;
 
     fn principal(value: u8) -> PrincipalId {
         PrincipalId([value; PRINCIPAL_ID_BYTES])
@@ -158,6 +162,22 @@ mod tests {
                 invalid,
             ),
             Err(CertificateIssuanceError::InvalidValidityWindow)
+        );
+
+        let expired = CertificateValidity {
+            not_before_unix_ms: 900_000,
+            not_after_unix_ms: 999_999,
+        };
+        assert_eq!(
+            policy().validate(
+                1_000_000,
+                principal(7),
+                &[1],
+                [8; SHA256_BYTES],
+                approval(),
+                expired,
+            ),
+            Err(CertificateIssuanceError::AlreadyExpired)
         );
 
         let too_long = CertificateValidity {
