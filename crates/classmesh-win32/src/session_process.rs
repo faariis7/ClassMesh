@@ -8,6 +8,9 @@ use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
+use windows_sys::Win32::Security::{
+    CopySid, GetLengthSid, GetTokenInformation, IsValidSid, TOKEN_USER, TokenUser,
+};
 use windows_sys::Win32::System::RemoteDesktop::WTSQueryUserToken;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, PROCESS_INFORMATION,
@@ -86,6 +89,64 @@ impl Drop for SessionProcess {
             self.process = null_mut();
         }
     }
+}
+
+pub fn session_user_sid(session_id: u32) -> Result<Vec<u8>, LaunchError> {
+    let mut user_token: HANDLE = null_mut();
+    // SAFETY: WTSQueryUserToken writes one HANDLE to the provided valid pointer. The caller is the
+    // LocalSystem service; lack of the required privilege is returned as a normal Win32 error.
+    if unsafe { WTSQueryUserToken(session_id, &mut user_token) } == 0 {
+        return Err(last_error("WTSQueryUserToken"));
+    }
+    let token_guard = HandleGuard(user_token);
+
+    let mut required = 0_u32;
+    // SAFETY: the first query intentionally passes no output buffer so Windows reports the size.
+    unsafe {
+        GetTokenInformation(token_guard.0, TokenUser, null_mut(), 0, &mut required);
+    }
+    if required == 0 {
+        return Err(last_error("GetTokenInformation(TokenUser,size)"));
+    }
+
+    let word = size_of::<usize>();
+    let words = usize::try_from(required)
+        .unwrap_or(usize::MAX)
+        .saturating_add(word - 1)
+        / word;
+    let mut buffer = vec![0_usize; words];
+    // SAFETY: buffer is aligned storage of at least required bytes and remains alive while
+    // TOKEN_USER and its SID pointer are inspected.
+    if unsafe {
+        GetTokenInformation(
+            token_guard.0,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            required,
+            &mut required,
+        )
+    } == 0
+    {
+        return Err(last_error("GetTokenInformation(TokenUser)"));
+    }
+
+    // SAFETY: successful TokenUser query populated a TOKEN_USER at the start of the aligned buffer.
+    let token_user = unsafe { &*(buffer.as_ptr().cast::<TOKEN_USER>()) };
+    // SAFETY: the SID pointer belongs to the live TokenUser buffer.
+    if unsafe { IsValidSid(token_user.User.Sid) } == 0 {
+        return Err(LaunchError {
+            stage: "IsValidSid(TokenUser)",
+            win32_error: 0,
+        });
+    }
+    // SAFETY: the SID was validated above.
+    let sid_len = unsafe { GetLengthSid(token_user.User.Sid) };
+    let mut sid = vec![0_u8; usize::try_from(sid_len).expect("SID length fits usize")];
+    // SAFETY: destination has exactly sid_len writable bytes; source is a validated SID.
+    if unsafe { CopySid(sid_len, sid.as_mut_ptr().cast(), token_user.User.Sid) } == 0 {
+        return Err(last_error("CopySid(TokenUser)"));
+    }
+    Ok(sid)
 }
 
 pub fn launch_worker_in_session(
