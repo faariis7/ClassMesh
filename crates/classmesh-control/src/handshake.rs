@@ -368,13 +368,11 @@ fn validate_hello_ack_envelope(
     let envelope_version = version_from_wire(
         envelope
             .protocol_version
-            .clone()
             .ok_or(HandshakeError::MissingProtocolVersion)?,
     )?;
     if ack.accepted {
         let negotiated = version_from_wire(
             ack.negotiated_version
-                .clone()
                 .ok_or(HandshakeError::MissingProtocolVersion)?,
         )?;
         if envelope_version != negotiated {
