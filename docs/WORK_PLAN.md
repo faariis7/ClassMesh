@@ -14,8 +14,9 @@ This is the active execution plan for ClassMesh. It is updated as implementation
 | Phase 5C1 — identity/rotation model | **Complete — PR #39 merged** | Stable PrincipalId, multi-credential lifecycle, enrollment binding and credential→principal mapping; CI #239 green, merge `aaf22a1f0caea908322620667d52f544fb59cb27` |
 | Phase 5C2 — Windows protected key backend | **Complete — PR #40 merged** | CI #243 passed on Synology Portable + Windows; merge `8608a1497a7e339eda2ba4447d08183d29de65bd` |
 | Phase 5C3 — enrollment + mTLS | **Core path complete through PR #62** | PR #41–#47 established enrollment/trust/issuance-policy/PKCS#10/bounded rotation; PR #50 merged verified certificate→stable PrincipalId resolution with CI #285 green; PR #51 merged enrolled QUIC mTLS with CI #288 green; PR #55 removed unbounded rotation; PR #58 merged safe credential persistence with CI #307 green; PR #59 merged bounded X.509 issuance with PR CI #309/current-main CI #310 green; PR #60 merged protected CNG→rcgen signing with PR CI #311/current-main CI #312 green; PR #61 merged protected CNG→rustls client signing and negative mTLS coverage with CI #314 green; PR #62 merged live credential re-check with CI #316 green |
-| Phase 5D — authorization + session negotiation | **Active — authenticated session guard** | Bind Hello.device_id to the verified mTLS PrincipalId, require exact control_session_id + strictly increasing sequence, and re-check permission/current credential before privileged commands |
-| Phase 5E — hardening | Planned | Malformed input, reconnect storms, fuzzing, protocol compatibility and security tests |
+| Phase 5D — authorization + replay controls | **Complete — PR #63 merged** | Verified mTLS PrincipalId is bound to Hello.device_id; exact control_session_id, strictly increasing sequence, live credential state and per-command permission are enforced; PR CI #330 green, merge `221e53bf981f9fdd33526fb5ac359b1282cb655f` |
+| Phase 5E — authenticated capability/session negotiation | **Complete — PR #63 merged** | Capability intersection and negotiated protocol/session are established inside the authenticated enrolled Hello path; spoofed application identity is rejected before the session is accepted |
+| Phase 5F — hardening | **Next** | Malformed input, reconnect storms, timeout/compatibility cases, fuzzing and security tests |
 | AI quality workflow | **Active** | Project skills + official plugins documented in `docs/AI_QUALITY_STACK.md` |
 
 Tracking issue: #32.
@@ -103,9 +104,10 @@ Current control-plane research baseline:
 2. **5B QUIC/TLS transport — complete, PR #36 merged, CI #232.**
 3. **5C1 Stable identity + rotation model — complete, PR #39 merged, CI #239.**
 4. **5C2 Windows protected key backend — complete, PR #40 merged, CI #243.**
-5. **5C3 Enrollment + mTLS — active** — PR #41–#47 landed enrollment/trust/issuance-policy/PKCS#10/bounded-rotation slices; PR #50 merged verified certificate→stable PrincipalId resolution with CI #285 green; PR #51 merged enrolled QUIC mTLS with CI #288 green; PR #55 removed unbounded rotation; PR #58 merged safe credential persistence with CI #307 green; PR #59 merged bounded X.509 issuance with CI #309 green. PR #60 is the active protected CNG signing-provider slice; negative mTLS coverage and transport revocation integration follow.
-6. **5D Authorization/session integration** — connect authenticated principal to command permissions and stream/session negotiation.
-7. **5E Hardening** — malformed messages, replay/duplicate cases, reconnect storms, fuzz targets and diagnostics.
+5. **5C3 Enrollment + mTLS — core path complete** — PR #41–#47 landed enrollment/trust/issuance-policy/PKCS#10/bounded-rotation slices; PR #50 merged verified certificate→stable PrincipalId resolution with CI #285 green; PR #51 merged enrolled QUIC mTLS with CI #288 green; PR #55 removed unbounded rotation; PR #58 merged safe credential persistence with CI #307 green; PR #59 merged bounded X.509 issuance with CI #309 green. PR #60–#62 completed protected signing, enrolled mTLS negative coverage, and live credential re-check.
+6. **5D Authorization/replay integration — complete, PR #63.** Verified identity, session binding, monotonic command sequence and live per-command permission checks are connected.
+7. **5E Authenticated capability/session negotiation — complete, PR #63.** Negotiated protocol/capabilities and session establishment occur inside the enrolled authenticated Hello path.
+8. **5F Hardening — next.** Malformed messages, reconnect/timeout cases, fuzz targets, compatibility tests and diagnostics.
 
 Quality-tooling changes should stay in small independent PRs so they do not block or obscure Phase implementation diffs.
 
