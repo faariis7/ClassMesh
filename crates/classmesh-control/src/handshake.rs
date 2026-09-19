@@ -475,7 +475,7 @@ mod tests {
             app_version: "0.0.1".to_owned(),
         };
 
-        assert_eq!(validate_authenticated_hello(authenticated, &hello), Ok(()));
+        assert!(validate_authenticated_hello(authenticated, &hello).is_ok());
 
         hello.principal_id = id(8);
         assert!(matches!(
