@@ -7,11 +7,11 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_ECCPUBLIC_BLOB, MS_KEY_STORAGE_PROVIDER, NCRYPT_ALLOW_SIGNING_FLAG,
-    NCRYPT_ECDSA_P256_ALGORITHM, NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_KEY_USAGE_PROPERTY,
-    NCRYPT_MACHINE_KEY_FLAG, NCRYPT_PERSIST_FLAG, NCRYPT_SILENT_FLAG, NCryptCreatePersistedKey,
-    NCryptDeleteKey, NCryptExportKey, NCryptFinalizeKey, NCryptFreeObject, NCryptGetProperty,
-    NCryptOpenKey, NCryptOpenStorageProvider, NCryptSetProperty, NCryptSignHash,
-    NCryptVerifySignature, NCRYPT_HANDLE, NCRYPT_KEY_HANDLE, NCRYPT_PROV_HANDLE,
+    NCRYPT_ECDSA_P256_ALGORITHM, NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_HANDLE, NCRYPT_KEY_HANDLE,
+    NCRYPT_KEY_USAGE_PROPERTY, NCRYPT_MACHINE_KEY_FLAG, NCRYPT_PERSIST_FLAG, NCRYPT_PROV_HANDLE,
+    NCRYPT_SILENT_FLAG, NCryptCreatePersistedKey, NCryptDeleteKey, NCryptExportKey,
+    NCryptFinalizeKey, NCryptFreeObject, NCryptGetProperty, NCryptOpenKey,
+    NCryptOpenStorageProvider, NCryptSetProperty, NCryptSignHash, NCryptVerifySignature,
 };
 
 const SHA256_BYTES: usize = 32;
@@ -33,9 +33,16 @@ pub enum CngKeyError {
 impl Display for CngKeyError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidKeyName => write!(formatter, "CNG key name must be non-empty and contain no NUL"),
+            Self::InvalidKeyName => write!(
+                formatter,
+                "CNG key name must be non-empty and contain no NUL"
+            ),
             Self::Windows { operation, status } => {
-                write!(formatter, "{operation} failed with CNG status 0x{:08x}", *status as u32)
+                write!(
+                    formatter,
+                    "{operation} failed with CNG status 0x{:08x}",
+                    *status as u32
+                )
             }
             Self::UnexpectedPropertySize {
                 property,
@@ -243,17 +250,12 @@ fn validate_key_name(name: String) -> Result<String, CngKeyError> {
 fn open_provider() -> Result<OwnedNcryptHandle, CngKeyError> {
     let mut provider: NCRYPT_PROV_HANDLE = 0;
     // SAFETY: output points to writable storage and MS_KEY_STORAGE_PROVIDER is a valid PCWSTR.
-    let status = unsafe {
-        NCryptOpenStorageProvider(&mut provider, MS_KEY_STORAGE_PROVIDER, 0)
-    };
+    let status = unsafe { NCryptOpenStorageProvider(&mut provider, MS_KEY_STORAGE_PROVIDER, 0) };
     check_status("NCryptOpenStorageProvider", status)?;
     Ok(OwnedNcryptHandle::new(provider as NCRYPT_HANDLE))
 }
 
-fn open_key(
-    provider: &OwnedNcryptHandle,
-    name: &str,
-) -> Result<OwnedNcryptHandle, CngKeyError> {
+fn open_key(provider: &OwnedNcryptHandle, name: &str) -> Result<OwnedNcryptHandle, CngKeyError> {
     let wide_name = wide_null(OsStr::new(name));
     let mut key: NCRYPT_KEY_HANDLE = 0;
     // SAFETY: provider is valid, key output is writable, and wide_name is NUL-terminated.
@@ -319,24 +321,11 @@ fn get_u32_property(
     Ok(value)
 }
 
-fn export_blob(
-    key: NCRYPT_KEY_HANDLE,
-    blob_type: *const u16,
-) -> Result<Vec<u8>, CngKeyError> {
+fn export_blob(key: NCRYPT_KEY_HANDLE, blob_type: *const u16) -> Result<Vec<u8>, CngKeyError> {
     let mut bytes = 0_u32;
     // SAFETY: key/blob type are valid; the first call requests only output size.
-    let status = unsafe {
-        NCryptExportKey(
-            key,
-            0,
-            blob_type,
-            null(),
-            null_mut(),
-            0,
-            &mut bytes,
-            0,
-        )
-    };
+    let status =
+        unsafe { NCryptExportKey(key, 0, blob_type, null(), null_mut(), 0, &mut bytes, 0) };
     check_status("NCryptExportKey(size)", status)?;
 
     let mut output = vec![0_u8; bytes as usize];
@@ -423,9 +412,7 @@ mod tests {
         assert!(!public_key.is_empty());
 
         let digest = [0x5a_u8; SHA256_BYTES];
-        let signature = key
-            .sign_sha256_digest(&digest)
-            .expect("digest should sign");
+        let signature = key.sign_sha256_digest(&digest).expect("digest should sign");
         assert!(!signature.is_empty());
         assert!(
             key.verify_sha256_digest(&digest, &signature)
