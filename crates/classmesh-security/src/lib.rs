@@ -63,6 +63,9 @@ impl CredentialRecord {
 
     #[must_use]
     pub fn is_accepted_at(&self, now_unix_ms: u64) -> bool {
+        if self.issued_at_unix_ms > now_unix_ms {
+            return false;
+        }
         if self.state == CredentialState::Revoked {
             return false;
         }
@@ -116,11 +119,7 @@ impl Principal {
     }
 
     #[must_use]
-    pub fn accepts_credential(
-        &self,
-        fingerprint: CredentialFingerprint,
-        now_unix_ms: u64,
-    ) -> bool {
+    pub fn accepts_credential(&self, fingerprint: CredentialFingerprint, now_unix_ms: u64) -> bool {
         self.enabled
             && self
                 .credentials
@@ -210,10 +209,7 @@ impl EnrollmentRecord {
         }
     }
 
-    pub fn request(
-        &mut self,
-        credential: CredentialFingerprint,
-    ) -> Result<(), EnrollmentError> {
+    pub fn request(&mut self, credential: CredentialFingerprint) -> Result<(), EnrollmentError> {
         match self.state {
             EnrollmentState::Unenrolled => {
                 self.state = EnrollmentState::PendingApproval;
@@ -232,10 +228,7 @@ impl EnrollmentRecord {
         }
     }
 
-    pub fn approve(
-        &mut self,
-        now_unix_ms: u64,
-    ) -> Result<CredentialFingerprint, EnrollmentError> {
+    pub fn approve(&mut self, now_unix_ms: u64) -> Result<CredentialFingerprint, EnrollmentError> {
         if self.state != EnrollmentState::PendingApproval {
             return Err(EnrollmentError::NotPending);
         }
@@ -271,10 +264,7 @@ pub struct AuthorizationStore {
 }
 
 impl AuthorizationStore {
-    pub fn upsert(
-        &mut self,
-        principal: Principal,
-    ) -> Result<(), AuthorizationStoreError> {
+    pub fn upsert(&mut self, principal: Principal) -> Result<(), AuthorizationStoreError> {
         for fingerprint in principal.credentials.keys() {
             if let Some(owner) = self.credential_owners.get(fingerprint) {
                 if *owner != principal.id {
@@ -439,10 +429,7 @@ mod tests {
         let mut permissions = BTreeSet::new();
         permissions.insert(Permission::ViewMonitoring);
         let mut credentials = BTreeMap::new();
-        credentials.insert(
-            credential,
-            CredentialRecord::active(credential, 10),
-        );
+        credentials.insert(credential, CredentialRecord::active(credential, 10));
         Principal {
             id: principal_id,
             kind: PrincipalKind::Teacher,
@@ -484,7 +471,10 @@ mod tests {
 
         assert_eq!(principal.id, principal_id);
         assert_eq!(
-            principal.credentials.get(&old).map(|credential| credential.state),
+            principal
+                .credentials
+                .get(&old)
+                .map(|credential| credential.state),
             Some(CredentialState::Retiring)
         );
         assert!(principal.accepts_credential(old, 30));
@@ -504,6 +494,8 @@ mod tests {
         let fp = fingerprint(5);
         let mut credential = CredentialRecord::active(fp, 10);
         credential.expires_at_unix_ms = Some(30);
+        assert!(!credential.is_accepted_at(9));
+        assert!(credential.is_accepted_at(10));
         assert!(credential.is_accepted_at(29));
         assert!(!credential.is_accepted_at(30));
 
@@ -524,15 +516,8 @@ mod tests {
         store
             .upsert(principal.clone())
             .expect("initial identity should register");
-        assert_eq!(
-            store.principal_for_credential(old, 15),
-            Some(principal_id)
-        );
-        assert!(store.authorize_credential(
-            old,
-            Permission::ViewMonitoring,
-            15
-        ));
+        assert_eq!(store.principal_for_credential(old, 15), Some(principal_id));
+        assert!(store.authorize_credential(old, Permission::ViewMonitoring, 15));
 
         principal
             .rotate_to(CredentialRecord::active(new, 20))
@@ -541,14 +526,8 @@ mod tests {
             .upsert(principal.clone())
             .expect("rotated identity should register");
 
-        assert_eq!(
-            store.principal_for_credential(old, 25),
-            Some(principal_id)
-        );
-        assert_eq!(
-            store.principal_for_credential(new, 25),
-            Some(principal_id)
-        );
+        assert_eq!(store.principal_for_credential(old, 25), Some(principal_id));
+        assert_eq!(store.principal_for_credential(new, 25), Some(principal_id));
 
         principal
             .revoke_credential(old, 30)
@@ -558,10 +537,7 @@ mod tests {
             .expect("revoked identity should update");
 
         assert_eq!(store.principal_for_credential(old, 30), None);
-        assert_eq!(
-            store.principal_for_credential(new, 30),
-            Some(principal_id)
-        );
+        assert_eq!(store.principal_for_credential(new, 30), Some(principal_id));
     }
 
     #[test]
