@@ -1,6 +1,6 @@
 # ClassMesh Living Work Plan
 
-Last updated: 2026-09-18
+Last updated: 2026-09-19
 
 This is the active execution plan for ClassMesh. It is updated as implementation evidence changes so roadmap intent, code status, hosted-CI evidence, and physical validation are not confused.
 
@@ -10,8 +10,10 @@ This is the active execution plan for ClassMesh. It is updated as implementation
 |---|---|---|
 | Phase 4 — one-to-one live video | **Implementation complete; physical qualification pending** | Issue #3 stays open until two physical Windows PCs pass the documented 1080p30, latency, impairment and soak criteria |
 | Phase 5A — control protocol foundation | **Complete — PR #33 merged** | Generated Protobuf, version/capability negotiation and heartbeat/liveness are on `main` |
-| Phase 5B — QUIC/TLS runtime | **Implementation complete — PR #36 ready** | Linux + Windows CI #227 on the predecessor branch; PR #36 must revalidate on the current baseline passed; merge remains pending until branch integration with current `main` is validated |
-| Phase 5C — identity + enrollment | Next | Persistent stable principal IDs, protected credential storage, approval flow, mTLS, revocation and key rotation |
+| Phase 5B — QUIC/TLS runtime | **Complete — PR #36 merged** | Current-baseline CI #232 passed on Synology Portable + Windows; merge `794fd45a5a20b6e4c623b7ecbbcfda5264e52ec0` |
+| Phase 5C1 — identity/rotation model | **In progress — PR #39** | Stable PrincipalId, multi-credential lifecycle, enrollment binding and credential→principal mapping; current-baseline CI required |
+| Phase 5C2 — Windows protected key backend | **In progress — PR #38** | Machine-scope CNG ECDSA P-256, export policy 0, signing-only, real Windows CI |
+| Phase 5C3 — enrollment + mTLS | Next | CSR/certificate issuance, explicit bootstrap trust, post-enrollment mutual TLS, revocation and rotation integration |
 | Phase 5D — authorization + session negotiation | Planned | Per-command authorization, replay controls, capability/session negotiation over the real transport |
 | Phase 5E — hardening | Planned | Malformed input, reconnect storms, fuzzing, protocol compatibility and security tests |
 | AI quality workflow | **Active** | Project skills + official plugins documented in `docs/AI_QUALITY_STACK.md` |
@@ -97,10 +99,12 @@ Current control-plane research baseline:
 ## Planned PR sequence
 
 1. **5A Control foundation — complete, PR #33.**
-2. **5B QUIC/TLS transport — implementation complete, PR #36 ready.**
-3. **5C Identity store + enrollment** — stable IDs, local credential persistence, bootstrap approval, post-enrollment mTLS, rotation/revocation.
-4. **5D Authorization/session integration** — connect authenticated principal to command permissions and stream/session negotiation.
-5. **5E Hardening** — malformed messages, replay/duplicate cases, reconnect storms, fuzz targets and diagnostics.
+2. **5B QUIC/TLS transport — complete, PR #36 merged, CI #232.**
+3. **5C1 Stable identity + rotation model — active, PR #39.**
+4. **5C2 Windows protected key backend — active, PR #38.**
+5. **5C3 Enrollment + mTLS** — CSR/certificate issuance, explicit bootstrap trust, mutual authentication, revocation/rotation integration.
+6. **5D Authorization/session integration** — connect authenticated principal to command permissions and stream/session negotiation.
+7. **5E Hardening** — malformed messages, replay/duplicate cases, reconnect storms, fuzz targets and diagnostics.
 
 Quality-tooling changes should stay in small independent PRs so they do not block or obscure Phase implementation diffs.
 
