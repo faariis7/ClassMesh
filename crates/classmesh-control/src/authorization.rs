@@ -190,7 +190,8 @@ mod tests {
         let authorization = store(BTreeSet::from([Permission::ControlInput]));
         let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
 
-        let missing = envelope(77, 2);
+        let mut missing = envelope(77, 2);
+        missing.payload = None;
         assert_eq!(
             guard.authorize(&authorization, &missing, Permission::ControlInput, 150),
             Err(CommandAuthorizationError::MissingPayload)
