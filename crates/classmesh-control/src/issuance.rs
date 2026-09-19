@@ -155,7 +155,7 @@ mod tests {
                 1_000_000,
                 principal(7),
                 &[1],
-                approval(&[0x30, 0x01, 0x00]),
+                approval(&[1]),
                 invalid,
             ),
             Err(CertificateIssuanceError::InvalidValidityWindow)
@@ -170,7 +170,7 @@ mod tests {
                 1_000_000,
                 principal(7),
                 &[1],
-                approval(&[0x30, 0x01, 0x00]),
+                approval(&[1]),
                 expired,
             ),
             Err(CertificateIssuanceError::AlreadyExpired)
@@ -185,7 +185,7 @@ mod tests {
                 1_000_000,
                 principal(7),
                 &[1],
-                approval(&[0x30, 0x01, 0x00]),
+                approval(&[1]),
                 too_long,
             ),
             Err(CertificateIssuanceError::LifetimeTooLong)
@@ -200,7 +200,7 @@ mod tests {
                 1_000_000,
                 principal(7),
                 &[1],
-                approval(&[0x30, 0x01, 0x00]),
+                approval(&[1]),
                 future,
             ),
             Err(CertificateIssuanceError::NotBeforeTooFarInFuture)
