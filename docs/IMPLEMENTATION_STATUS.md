@@ -53,7 +53,9 @@ PR #43 adds explicit bootstrap authority pinning using a SHA-256 certificate fin
 
 PR #45 merged bounded authority-side issuance policy; PR #46 merged PKCS#10 proof-of-possession verification; PR #47 merged explicit bounded credential overlap. PR #50 merged verified TLS leaf-certificate fingerprint resolution through `AuthorizationStore` to the stable `PrincipalId`, preserving revocation/expiry/future-issued/disabled-principal checks. CI #285 passed before merge.
 
-PR #51 is the active enrolled-QUIC mTLS slice ported onto the current `main`. It requires caller-supplied client-certificate verification on the server and resolver-backed client credentials so protected keys do not need DER export. Production X.509 signing/provider integration and transport-connected revocation/rotation enforcement still remain before Phase 5C3 is complete.
+PR #51 merged enrolled-QUIC mTLS with CI #288 green. PR #55 then removed the legacy unbounded credential-rotation path, and PR #58 merged safe conversion of validated approved enrollment results into bounded active credentials with CI #307 green.
+
+PR #59 is the active bounded X.509 issuance slice. It signs verified approved PKCS#10 requests through rcgen's `SigningKey` abstraction, forces end-entity CA/key-usage constraints instead of trusting CSR-requested privilege, and returns the issued leaf DER/fingerprint together with the exact stable PrincipalId + CSR binding. Protected authority-provider integration and transport-connected revocation/rotation enforcement still remain before Phase 5C3 is complete.
 
 ## Remaining security/control work
 
@@ -74,8 +76,8 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 ## Next implementation sequence
 
 1. Keep Issue #3 open and perform Phase 4 physical qualification when two Windows PCs are available.
-2. Finish PR #51 enrolled mTLS on the current baseline without weakening stable identity or exporting private keys.
-3. Integrate X.509 signing/provider support against the explicit bootstrap trust model, then enforce revocation/rotation on authenticated transport sessions.
+2. Finish PR #59 bounded X.509 issuance against the explicit bootstrap trust and approved CSR binding.
+3. Port the Windows protected authority signing adapter onto the current baseline without private-key export, then enforce revocation/rotation on authenticated transport sessions.
 4. Integrate revocation/rotation with transport authentication, then Phase 5D authorization/replay/session negotiation.
 5. Add malformed-input/reconnect/fuzz and dependency/advisory/license gates when useful to the active phase.
 6. Begin product UI work under `classmesh-design` with runtime/visual verification when Console/Agent UI becomes active.
