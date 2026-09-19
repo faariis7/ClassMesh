@@ -146,7 +146,10 @@ mod tests {
     #[test]
     fn version_01_rejects_enrollment_payloads_explicitly() {
         assert_eq!(
-            validate_enrollment_request(ProtocolVersion { major: 0, minor: 1 }, &valid_request()),
+            validate_enrollment_request(
+                ProtocolVersion { major: 0, minor: 1 },
+                &valid_request()
+            ),
             Err(EnrollmentValidationError::UnsupportedProtocolVersion {
                 negotiated: ProtocolVersion { major: 0, minor: 1 },
                 minimum: ENROLLMENT_MIN_VERSION,
