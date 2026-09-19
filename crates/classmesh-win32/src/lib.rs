@@ -12,4 +12,6 @@ pub use named_pipe::{NamedPipeClient, NamedPipeServer, PipeError, PipePeer, work
 #[cfg(windows)]
 pub use session::current_session_id;
 #[cfg(windows)]
-pub use session_process::{LaunchError, SessionProcess, launch_worker_in_session};
+pub use session_process::{
+    LaunchError, SessionProcess, launch_worker_in_session, session_user_sid,
+};

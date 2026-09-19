@@ -7,7 +7,8 @@ mod windows_service_app {
     use std::time::{Duration, Instant};
 
     use classmesh_win32::{
-        NamedPipeServer, SessionProcess, launch_worker_in_session, worker_pipe_name,
+        NamedPipeServer, SessionProcess, launch_worker_in_session, session_user_sid,
+        worker_pipe_name,
     };
     use classmesh_windows_runtime::ipc::{
         IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage,
@@ -84,7 +85,18 @@ mod windows_service_app {
 
             let pipe_name = worker_pipe_name(std::process::id(), session.0, self.generation);
             self.generation = self.generation.wrapping_add(1);
-            let mut pipe = match NamedPipeServer::create(&pipe_name) {
+            let user_sid = match session_user_sid(session.0) {
+                Ok(sid) => sid,
+                Err(error) => {
+                    eprintln!(
+                        "failed to resolve Worker user SID for session {}: {error}",
+                        session.0
+                    );
+                    let decision = self.watchdog.launch_failed(session);
+                    return self.apply_restart_decision(decision);
+                }
+            };
+            let mut pipe = match NamedPipeServer::create_for_user(&pipe_name, &user_sid) {
                 Ok(pipe) => pipe,
                 Err(error) => {
                     eprintln!(
