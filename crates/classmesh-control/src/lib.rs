@@ -7,6 +7,7 @@ pub mod enrollment_result;
 pub mod framing;
 pub mod handshake;
 pub mod issuance;
+pub mod peer_identity;
 pub mod quic;
 
 use std::collections::BTreeSet;
