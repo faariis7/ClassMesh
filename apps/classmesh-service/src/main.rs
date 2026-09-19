@@ -380,7 +380,9 @@ mod windows_service_app {
     fn program_data_state_dir() -> Result<PathBuf, String> {
         let program_data = std::env::var_os("ProgramData")
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| "ProgramData is unavailable; refusing to start control runtime".to_owned())?;
+            .ok_or_else(|| {
+                "ProgramData is unavailable; refusing to start control runtime".to_owned()
+            })?;
         Ok(PathBuf::from(program_data).join(STATE_DIRECTORY))
     }
 
@@ -418,7 +420,9 @@ mod windows_service_app {
 
         let now_unix_ms = unix_time_ms()?;
         if identity.not_after_unix_ms <= now_unix_ms {
-            return Err("machine certificate is expired; refusing control runtime startup".to_owned());
+            return Err(
+                "machine certificate is expired; refusing control runtime startup".to_owned(),
+            );
         }
 
         let leaf = identity
@@ -433,9 +437,7 @@ mod windows_service_app {
                 "machine leaf certificate is not an active authorized credential".to_owned()
             })?;
         if authorized_principal != expected_principal {
-            return Err(
-                "machine identity principal does not match authorization state".to_owned(),
-            );
+            return Err("machine identity principal does not match authorization state".to_owned());
         }
 
         let key = CngMachineKey::open(identity.cng_key_name.clone())
@@ -445,7 +447,9 @@ mod windows_service_app {
             .map_err(|error| format!("failed to verify CNG export policy: {error}"))?
             != 0
         {
-            return Err("CNG machine key is exportable; refusing control runtime startup".to_owned());
+            return Err(
+                "CNG machine key is exportable; refusing control runtime startup".to_owned(),
+            );
         }
 
         Ok(ServiceControlState {
