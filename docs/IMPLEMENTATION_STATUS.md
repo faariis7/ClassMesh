@@ -57,7 +57,9 @@ PR #51 merged enrolled-QUIC mTLS with CI #288 green. PR #55 then removed the leg
 
 PR #59 merged bounded X.509 issuance with CI #309 green. It signs verified approved PKCS#10 requests through rcgen's `SigningKey` abstraction, forces end-entity CA/key-usage constraints instead of trusting CSR-requested privilege, and returns the issued leaf DER/fingerprint together with the exact stable PrincipalId + CSR binding.
 
-PR #60 is the active Windows protected signing-provider slice. It adapts the persisted non-exportable CNG ECDSA P-256 key to rcgen's `SigningKey` interface, converts the CNG public blob to SEC1 public-point bytes, and converts fixed-width CNG ECDSA signatures to DER without exporting private-key material.
+PR #60 merged the Windows protected rcgen signing provider with CI #311 green. It adapts the persisted non-exportable CNG ECDSA P-256 key to rcgen's `SigningKey` interface, converts the CNG public blob to SEC1 public-point bytes, and converts fixed-width CNG ECDSA signatures to DER without exporting private-key material.
+
+PR #61 is the active protected mTLS-client slice. It adapts the same CNG key to rustls `SigningKey`/`Signer`, validates certificate/key SPKI consistency with `CertifiedKey::keys_match`, produces a `ResolvesClientCert` without private-key DER, and adds negative tests proving the enrolled server rejects missing or untrusted client certificates.
 
 ## Remaining security/control work
 
@@ -78,8 +80,8 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 ## Next implementation sequence
 
 1. Keep Issue #3 open and perform Phase 4 physical qualification when two Windows PCs are available.
-2. Finish PR #60 protected Windows CNG authority signing adapter on the current baseline without private-key export.
-3. Port negative enrolled-mTLS tests and then enforce revocation/rotation on authenticated transport sessions.
+2. Finish PR #61 protected Windows CNG rustls client credential + negative enrolled-mTLS coverage.
+3. Enforce live revocation/rotation and authenticated Hello identity binding on established control sessions.
 4. Integrate revocation/rotation with transport authentication, then Phase 5D authorization/replay/session negotiation.
 5. Add malformed-input/reconnect/fuzz and dependency/advisory/license gates when useful to the active phase.
 6. Begin product UI work under `classmesh-design` with runtime/visual verification when Console/Agent UI becomes active.
