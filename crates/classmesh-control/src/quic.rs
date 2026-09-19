@@ -552,7 +552,8 @@ mod tests {
                 result,
                 Err(HandshakeError::IdentityMismatch { .. })
             ));
-            Ok::<Endpoint, String>(server)
+            channel.finish().map_err(|error| error.to_string())?;
+            Ok::<(Endpoint, Connection), String>((server, connection))
         });
 
         let connection = connect(&client, server_address, "classmesh.local").await?;
@@ -571,7 +572,9 @@ mod tests {
         ));
 
         connection.close(0_u32.into(), b"identity mismatch test complete");
-        let server = server_task.await.map_err(|error| error.to_string())??;
+        let (server, server_connection) =
+            server_task.await.map_err(|error| error.to_string())??;
+        server_connection.close(0_u32.into(), b"identity mismatch test complete");
         server.close(0_u32.into(), b"identity mismatch test complete");
         client.wait_idle().await;
         Ok(())
