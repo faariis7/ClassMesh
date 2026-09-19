@@ -26,7 +26,7 @@ Enrollment establishes which teacher/classroom authority can control an agent.
 ## Control plane
 
 - QUIC reliable streams with TLS 1.3.
-- Mutual authentication after enrollment.
+- Mutual authentication after enrollment. The Phase 5B transport test/bootstrap configuration authenticates the server only; it is not the production enrolled mode and must not be treated as authorization.
 - Explicit ALPN plus application protocol version and capability negotiation.
 - Authorization checked per command, not only at connection creation.
 - Replay-sensitive administrative commands carry control-session, sequence and request identifiers.

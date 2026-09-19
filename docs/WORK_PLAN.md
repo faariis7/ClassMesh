@@ -10,7 +10,7 @@ This is the active execution plan for ClassMesh. It is updated as implementation
 |---|---|---|
 | Phase 4 — one-to-one live video | **Implementation complete; physical qualification pending** | Issue #3 stays open until two physical Windows PCs pass the documented 1080p30, latency, impairment and soak criteria |
 | Phase 5A — control protocol foundation | **Complete — PR #33 merged** | Generated Protobuf, version/capability negotiation and heartbeat/liveness are on `main` |
-| Phase 5B — QUIC/TLS runtime | **In progress — PR #34** | Reliable bounded control streams, TLS 1.3, ALPN, framing, timeouts/reconnect and transport tests; do not merge until CI is green |
+| Phase 5B — QUIC/TLS runtime | **Implementation complete — PR #36 ready** | Linux + Windows CI #227 on the predecessor branch; PR #36 must revalidate on the current baseline passed; merge remains pending until branch integration with current `main` is validated |
 | Phase 5C — identity + enrollment | Next | Persistent stable principal IDs, protected credential storage, approval flow, mTLS, revocation and key rotation |
 | Phase 5D — authorization + session negotiation | Planned | Per-command authorization, replay controls, capability/session negotiation over the real transport |
 | Phase 5E — hardening | Planned | Malformed input, reconnect storms, fuzzing, protocol compatibility and security tests |
@@ -97,7 +97,7 @@ Current control-plane research baseline:
 ## Planned PR sequence
 
 1. **5A Control foundation — complete, PR #33.**
-2. **5B QUIC/TLS transport — active, PR #34.**
+2. **5B QUIC/TLS transport — implementation complete, PR #36 ready.**
 3. **5C Identity store + enrollment** — stable IDs, local credential persistence, bootstrap approval, post-enrollment mTLS, rotation/revocation.
 4. **5D Authorization/session integration** — connect authenticated principal to command permissions and stream/session negotiation.
 5. **5E Hardening** — malformed messages, replay/duplicate cases, reconnect storms, fuzz targets and diagnostics.

@@ -10,7 +10,7 @@ This file distinguishes **implemented code**, **hosted-CI validation**, **real-h
 
 Phase 4 physical acceptance remains pending. Issue #3 must remain open until two physical Windows PCs pass the documented qualification.
 
-Phase 5 is tracked in Issue #32. Phase 5B is being developed in PR #34 and is **not merged yet**; it must not be treated as the current production baseline until required CI is green and the PR is merged.
+Phase 5 is tracked in Issue #32. Phase 5B implementation is complete in PR #36 and Linux + Windows CI run #227 passed. The PR is still not merged, so `main` must not yet be described as containing the QUIC/TLS runtime.
 
 The hosted CI baseline covers:
 
@@ -156,25 +156,27 @@ Repository-level quality instructions are now defined under `.agents/skills/`:
 
 These instructions improve agent consistency; they do not replace tests, security review, CI, runtime inspection or human product decisions.
 
-## In progress
+## Ready to merge
 
 ### Phase 5B reliable QUIC/TLS control runtime
 
-PR #34 is active and not yet merged.
+PR #36 has completed implementation and passed Linux + Windows CI run #227.
 
-Its intended scope includes:
+Implemented on the PR branch:
 
 - reliable bidirectional QUIC control streams using Quinn/rustls;
 - ALPN `classmesh-control/1`;
-- TLS 1.3 with application 0-RTT disabled;
-- bounded length-prefixed Protobuf framing;
-- message-size limits enforced before allocation;
+- explicit rustls `ring` CryptoProvider with TLS 1.3 only;
+- application 0-RTT disabled;
+- 4-byte big-endian length-prefixed Protobuf framing;
+- 256 KiB maximum message size enforced before allocation;
 - connect/I/O/idle/keepalive timeouts;
 - bounded reconnect policy;
 - Hello/HelloAck and heartbeat over the real transport;
-- loopback integration coverage.
+- loopback TLS/ALPN → QUIC → framing → hello → heartbeat coverage;
+- corrected test lifetime so the server endpoint/connection remain alive through the final control frame.
 
-Do not move this section to implemented-on-`main` until the PR passes required CI and merges.
+This section remains distinct from implemented-on-`main` until PR #36 merges.
 
 ## Not implemented or not validated yet
 
@@ -239,7 +241,7 @@ Still required:
 ## Next implementation sequence
 
 1. Keep Issue #3 open and run Phase 4 physical qualification when two Windows PCs are available.
-2. Finish PR #34 Phase 5B; fix any CI failures, merge only when required Linux/Windows validation is green, then update Issue #32.
+2. Merge PR #36 Phase 5B after validating its integration with current `main`, then update Issue #32.
 3. Begin Phase 5C persistent identity/enrollment/mTLS with Windows-protected credential storage behind a testable abstraction.
 4. Add dependency/advisory/license and fuzzing gates when they become useful to the active phase rather than as unused tooling.
 5. Start product UI work under `classmesh-design` and runtime/visual verification once the Console/Agent surface becomes an active implementation track.
