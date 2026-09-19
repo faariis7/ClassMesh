@@ -51,7 +51,9 @@ PR #42 adds status-dependent validation before credential persistence/mTLS wirin
 
 PR #43 adds explicit bootstrap authority pinning using a SHA-256 certificate fingerprint and binds the bootstrap challenge to the expected stable PrincipalId and fresh client nonce. Discovery metadata is not trusted to select the authority and no TOFU behavior is introduced. CI #260 passed on Synology Portable and Windows.
 
-This does **not** yet claim certificate authority issuance or production trust-store behavior. The next security slice is certificate issuance using the explicit bootstrap trust model, followed by post-enrollment mTLS and revocation/rotation integration without exporting private keys.
+PR #45 is the active certificate-issuance policy slice. It requires exact approved PrincipalId/CSR binding and bounded validity before an authority may issue a credential, while rejecting empty/oversized CSRs, expired windows and excessive future skew/lifetime. It deliberately does not yet perform X.509 signing.
+
+This does **not** yet claim production certificate authority issuance or trust-store behavior. Cryptographic CSR verification/signing must be integrated behind this policy without raising the Rust 1.85 MSRV or exporting private keys, followed by post-enrollment mTLS and revocation/rotation integration.
 
 ## Remaining security/control work
 
@@ -72,7 +74,7 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 ## Next implementation sequence
 
 1. Keep Issue #3 open and perform Phase 4 physical qualification when two Windows PCs are available.
-2. Implement certificate issuance against the explicit bootstrap trust model merged in PR #43.
+2. Finish PR #45's bounded issuance policy, then integrate CSR verification/X.509 signing against the explicit bootstrap trust model merged in PR #43.
 3. Wire post-enrollment mTLS without weakening stable identity or exporting private keys.
 4. Integrate revocation/rotation with transport authentication, then Phase 5D authorization/replay/session negotiation.
 5. Add malformed-input/reconnect/fuzz and dependency/advisory/license gates when useful to the active phase.
