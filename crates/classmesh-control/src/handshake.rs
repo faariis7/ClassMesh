@@ -304,7 +304,6 @@ fn validate_hello_protocol_version(
     let envelope_version = version_from_wire(
         envelope
             .protocol_version
-            .clone()
             .ok_or(HandshakeError::MissingProtocolVersion)?,
     )?;
     if envelope_version != hello.version {
