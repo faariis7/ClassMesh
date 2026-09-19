@@ -190,7 +190,7 @@ pub(crate) async fn server_hello_authenticated(
 
     let request = channel.receive().await?;
     validate_hello_envelope(&request)?;
-    let Some(control_envelope::Payload::Hello(hello_wire)) = request.payload else {
+    let Some(control_envelope::Payload::Hello(hello_wire)) = request.payload.clone() else {
         return Err(HandshakeError::UnexpectedPayload);
     };
     let hello = hello_from_wire(hello_wire)?;
@@ -225,7 +225,7 @@ pub async fn server_hello(
 
     let request = channel.receive().await?;
     validate_hello_envelope(&request)?;
-    let Some(control_envelope::Payload::Hello(hello_wire)) = request.payload else {
+    let Some(control_envelope::Payload::Hello(hello_wire)) = request.payload.clone() else {
         return Err(HandshakeError::UnexpectedPayload);
     };
     let hello = hello_from_wire(hello_wire)?;
