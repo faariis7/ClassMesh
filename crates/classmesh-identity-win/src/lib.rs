@@ -4,4 +4,4 @@
 mod cng;
 
 #[cfg(windows)]
-pub use cng::{CngKeyError, CngMachineKey};
+pub use cng::{CngKeyError, CngMachineKey, CngRcgenSigningKey};
