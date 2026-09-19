@@ -294,8 +294,9 @@ impl PersistedPrincipal {
         let mut credentials = BTreeMap::new();
         for credential in self.credentials {
             let record = credential.into_record()?;
-            if credentials.insert(record.fingerprint, record.clone()).is_some() {
-                return Err(PersistenceError::DuplicateCredential(record.fingerprint));
+            let fingerprint = record.fingerprint;
+            if credentials.insert(fingerprint, record).is_some() {
+                return Err(PersistenceError::DuplicateCredential(fingerprint));
             }
         }
 
