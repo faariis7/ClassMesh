@@ -14,3 +14,7 @@ Thumbs.db
 *.log
 artifacts/
 bench-output/
+
+# cargo-fuzz findings are local until minimized into regressions
+fuzz/artifacts/
+fuzz/corpus/
