@@ -22,10 +22,17 @@ pub enum HandshakeError {
     Transport(ControlTransportError),
     MissingProtocolVersion,
     VersionOutOfRange,
-    InvalidPrincipalIdLength { length: usize },
-    UnsupportedRole { value: i32 },
+    InvalidPrincipalIdLength {
+        length: usize,
+    },
+    UnsupportedRole {
+        value: i32,
+    },
     UnexpectedPayload,
-    Rejected { reason: i32, diagnostic: String },
+    Rejected {
+        reason: i32,
+        diagnostic: String,
+    },
     InvalidSessionId,
     IdentityMismatch {
         authenticated: PrincipalId,
