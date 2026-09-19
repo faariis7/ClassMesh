@@ -43,7 +43,7 @@ Phase 5B provides reliable bidirectional QUIC control streams using Quinn/rustls
 - Signing and public-key data are exposed without exporting private material.
 - Project MSRV remains Rust 1.85; current `rustls-cng` is not an unconditional dependency.
 
-### Phase 5C3 — PRs #41, #42 and #43 merged
+### Phase 5C3 — enrollment, credential binding and mTLS integration in progress
 
 Merged PR #41 provides the protocol v0.2 PKCS#10 enrollment request/receipt/status/result contract, strict request validation, explicit rejection of enrollment on negotiated v0.1, and result binding to the stable `PrincipalId` plus exact CSR SHA-256.
 
@@ -51,9 +51,9 @@ PR #42 adds status-dependent validation before credential persistence/mTLS wirin
 
 PR #43 adds explicit bootstrap authority pinning using a SHA-256 certificate fingerprint and binds the bootstrap challenge to the expected stable PrincipalId and fresh client nonce. Discovery metadata is not trusted to select the authority and no TOFU behavior is introduced. CI #260 passed on Synology Portable and Windows.
 
-PR #45 is the active certificate-issuance policy slice. It requires exact approved PrincipalId/CSR binding and bounded validity before an authority may issue a credential, while rejecting empty/oversized CSRs, expired windows and excessive future skew/lifetime. It deliberately does not yet perform X.509 signing.
+PR #45 merged bounded authority-side issuance policy; PR #46 merged PKCS#10 proof-of-possession verification; PR #47 merged explicit bounded credential overlap. PR #50 merged verified TLS leaf-certificate fingerprint resolution through `AuthorizationStore` to the stable `PrincipalId`, preserving revocation/expiry/future-issued/disabled-principal checks. CI #285 passed before merge.
 
-This does **not** yet claim production certificate authority issuance or trust-store behavior. Cryptographic CSR verification/signing must be integrated behind this policy without raising the Rust 1.85 MSRV or exporting private keys, followed by post-enrollment mTLS and revocation/rotation integration.
+PR #51 is the active enrolled-QUIC mTLS slice ported onto the current `main`. It requires caller-supplied client-certificate verification on the server and resolver-backed client credentials so protected keys do not need DER export. Production X.509 signing/provider integration and transport-connected revocation/rotation enforcement still remain before Phase 5C3 is complete.
 
 ## Remaining security/control work
 
@@ -74,8 +74,8 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 ## Next implementation sequence
 
 1. Keep Issue #3 open and perform Phase 4 physical qualification when two Windows PCs are available.
-2. Finish PR #45's bounded issuance policy, then integrate CSR verification/X.509 signing against the explicit bootstrap trust model merged in PR #43.
-3. Wire post-enrollment mTLS without weakening stable identity or exporting private keys.
+2. Finish PR #51 enrolled mTLS on the current baseline without weakening stable identity or exporting private keys.
+3. Integrate X.509 signing/provider support against the explicit bootstrap trust model, then enforce revocation/rotation on authenticated transport sessions.
 4. Integrate revocation/rotation with transport authentication, then Phase 5D authorization/replay/session negotiation.
 5. Add malformed-input/reconnect/fuzz and dependency/advisory/license gates when useful to the active phase.
 6. Begin product UI work under `classmesh-design` with runtime/visual verification when Console/Agent UI becomes active.
