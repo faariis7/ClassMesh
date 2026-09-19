@@ -10,6 +10,7 @@ pub mod handshake;
 pub mod issuance;
 pub mod peer_identity;
 pub mod quic;
+pub mod session_policy;
 pub mod x509_issuance;
 
 use std::collections::BTreeSet;
