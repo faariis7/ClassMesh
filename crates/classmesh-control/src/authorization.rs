@@ -1,3 +1,4 @@
+use classmesh_protocol::ProtocolVersion;
 use classmesh_protocol::control_wire::ControlEnvelope;
 use classmesh_security::{AuthorizationStore, Permission};
 
@@ -5,6 +6,12 @@ use crate::peer_identity::AuthenticatedPeerIdentity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandAuthorizationError {
+    MissingProtocolVersion,
+    ProtocolVersionOutOfRange,
+    WrongProtocolVersion {
+        expected: ProtocolVersion,
+        received: ProtocolVersion,
+    },
     WrongSession { expected: u64, received: u64 },
     NonIncreasingSequence { previous: u64, received: u64 },
     Unauthorized { permission: Permission },
@@ -14,6 +21,7 @@ pub enum CommandAuthorizationError {
 pub struct AuthenticatedControlGuard {
     peer: AuthenticatedPeerIdentity,
     control_session_id: u64,
+    protocol_version: ProtocolVersion,
     last_sequence: u64,
 }
 
@@ -22,11 +30,13 @@ impl AuthenticatedControlGuard {
     pub const fn new(
         peer: AuthenticatedPeerIdentity,
         control_session_id: u64,
+        protocol_version: ProtocolVersion,
         last_sequence: u64,
     ) -> Self {
         Self {
             peer,
             control_session_id,
+            protocol_version,
             last_sequence,
         }
     }
@@ -53,6 +63,22 @@ impl AuthenticatedControlGuard {
         permission: Permission,
         now_unix_ms: u64,
     ) -> Result<(), CommandAuthorizationError> {
+        let wire_version = envelope
+            .protocol_version
+            .as_ref()
+            .ok_or(CommandAuthorizationError::MissingProtocolVersion)?;
+        let major = u16::try_from(wire_version.major)
+            .map_err(|_| CommandAuthorizationError::ProtocolVersionOutOfRange)?;
+        let minor = u16::try_from(wire_version.minor)
+            .map_err(|_| CommandAuthorizationError::ProtocolVersionOutOfRange)?;
+        let received_version = ProtocolVersion { major, minor };
+        if received_version != self.protocol_version {
+            return Err(CommandAuthorizationError::WrongProtocolVersion {
+                expected: self.protocol_version,
+                received: received_version,
+            });
+        }
+
         if envelope.control_session_id != self.control_session_id {
             return Err(CommandAuthorizationError::WrongSession {
                 expected: self.control_session_id,
@@ -113,20 +139,63 @@ mod tests {
         store
     }
 
+    const VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 2 };
+
     fn envelope(session: u64, sequence: u64) -> ControlEnvelope {
         ControlEnvelope {
             control_session_id: session,
             sequence,
-            protocol_version: None,
+            protocol_version: Some(classmesh_protocol::control_wire::ProtocolVersion {
+                major: u32::from(VERSION.major),
+                minor: u32::from(VERSION.minor),
+            }),
             request_id: 0,
             payload: None,
         }
     }
 
     #[test]
+    fn guard_requires_negotiated_protocol_version_without_consuming_sequence() {
+        let authorization = store(BTreeSet::from([Permission::ControlInput]));
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+
+        let mut missing = envelope(77, 2);
+        missing.protocol_version = None;
+        assert_eq!(
+            guard.authorize(&authorization, &missing, Permission::ControlInput, 150),
+            Err(CommandAuthorizationError::MissingProtocolVersion)
+        );
+        assert_eq!(guard.last_sequence(), 1);
+
+        let mut wrong = envelope(77, 2);
+        wrong.protocol_version = Some(classmesh_protocol::control_wire::ProtocolVersion {
+            major: 0,
+            minor: 1,
+        });
+        assert_eq!(
+            guard.authorize(&authorization, &wrong, Permission::ControlInput, 150),
+            Err(CommandAuthorizationError::WrongProtocolVersion {
+                expected: VERSION,
+                received: ProtocolVersion { major: 0, minor: 1 },
+            })
+        );
+        assert_eq!(guard.last_sequence(), 1);
+
+        guard
+            .authorize(
+                &authorization,
+                &envelope(77, 2),
+                Permission::ControlInput,
+                150,
+            )
+            .expect("matching negotiated version should authorize");
+        assert_eq!(guard.last_sequence(), 2);
+    }
+
+    #[test]
     fn guard_requires_exact_session_and_strictly_increasing_sequence() {
         let authorization = store(BTreeSet::from([Permission::ControlInput]));
-        let mut guard = AuthenticatedControlGuard::new(identity(), 77, 1);
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
 
         assert_eq!(
             guard.authorize(
@@ -179,7 +248,7 @@ mod tests {
     #[test]
     fn denied_sequence_cannot_be_replayed_after_permission_change() {
         let mut authorization = store(BTreeSet::new());
-        let mut guard = AuthenticatedControlGuard::new(identity(), 77, 1);
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
         assert_eq!(
             guard.authorize(
                 &authorization,
@@ -234,7 +303,7 @@ mod tests {
     #[test]
     fn credential_revocation_blocks_next_privileged_command() {
         let mut authorization = store(BTreeSet::from([Permission::ControlInput]));
-        let mut guard = AuthenticatedControlGuard::new(identity(), 77, 1);
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
         guard
             .authorize(
                 &authorization,
