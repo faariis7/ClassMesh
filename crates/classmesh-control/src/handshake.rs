@@ -6,9 +6,12 @@ use classmesh_protocol::control_wire::{
     ControlEnvelope, Hello, HelloAck, ProtocolVersion as WireProtocolVersion, control_envelope,
 };
 use classmesh_protocol::{Capability, ControlRole, ProtocolVersion};
-use classmesh_security::PrincipalId;
+use classmesh_security::{AuthorizationStore, PrincipalId};
+use quinn::Connection;
 
-use crate::peer_identity::AuthenticatedPeerIdentity;
+use crate::peer_identity::{
+    AuthenticatedPeerIdentity, PeerIdentityError, authenticated_peer_identity,
+};
 use crate::quic::{ControlChannel, ControlTransportError};
 use crate::{ControlHello, NegotiatedHello, NegotiationError, negotiate_hello};
 
@@ -38,6 +41,7 @@ pub enum HandshakeError {
         authenticated: PrincipalId,
         claimed: PrincipalId,
     },
+    PeerIdentity(PeerIdentityError),
     Negotiation(NegotiationError),
 }
 
@@ -73,6 +77,9 @@ impl Display for HandshakeError {
                 "authenticated principal {:?} does not match Hello principal {:?}",
                 authenticated, claimed
             ),
+            Self::PeerIdentity(error) => {
+                write!(formatter, "authenticated peer identity failed: {error:?}")
+            }
             Self::Negotiation(error) => write!(formatter, "control negotiation failed: {error:?}"),
         }
     }
@@ -138,7 +145,20 @@ pub async fn client_hello(
     established_from_ack(hello, ack)
 }
 
-pub async fn server_hello_authenticated(
+pub async fn server_hello_enrolled(
+    connection: &Connection,
+    channel: &mut ControlChannel,
+    config: &ServerHelloConfig,
+    authorization: &AuthorizationStore,
+    now_unix_ms: u64,
+) -> Result<(EstablishedControlSession, EstablishedAuthenticatedPeer), HandshakeError> {
+    let authenticated_peer =
+        authenticated_peer_identity(connection, authorization, now_unix_ms)
+            .map_err(HandshakeError::PeerIdentity)?;
+    server_hello_authenticated(channel, config, authenticated_peer).await
+}
+
+pub(crate) async fn server_hello_authenticated(
     channel: &mut ControlChannel,
     config: &ServerHelloConfig,
     authenticated_peer: AuthenticatedPeerIdentity,
