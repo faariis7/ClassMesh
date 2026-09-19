@@ -46,6 +46,10 @@ pub const fn command_authorization_diagnostic_code(
     error: &CommandAuthorizationError,
 ) -> &'static str {
     match error {
+        CommandAuthorizationError::MissingPayload => "control.command.missing_payload",
+        CommandAuthorizationError::HandshakePayloadAfterEstablishment => {
+            "control.command.handshake_payload_after_establishment"
+        }
         CommandAuthorizationError::MissingProtocolVersion => "control.command.missing_version",
         CommandAuthorizationError::ProtocolVersionOutOfRange => {
             "control.command.version_out_of_range"
