@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod persistence;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
