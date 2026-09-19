@@ -331,7 +331,7 @@ impl ControlChannel {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::net::{IpAddr, Ipv4Addr};
 
     use classmesh_protocol::control_wire::{
@@ -339,18 +339,21 @@ mod tests {
         control_envelope,
     };
     use classmesh_protocol::{Capability, ControlRole, ProtocolVersion};
-    use classmesh_security::{CredentialFingerprint, PrincipalId};
+    use classmesh_security::{
+        AuthorizationStore, CredentialFingerprint, CredentialRecord, Principal, PrincipalId,
+        PrincipalKind,
+    };
     use rcgen::generate_simple_self_signed;
     use rustls::pki_types::PrivatePkcs8KeyDer;
     use rustls::server::WebPkiClientVerifier;
     use rustls::sign::{CertifiedKey, SingleCertAndKey};
+    use sha2::{Digest, Sha256};
 
     use super::*;
     use crate::ControlHello;
     use crate::handshake::{
-        HandshakeError, ServerHelloConfig, client_hello, server_hello, server_hello_authenticated,
+        HandshakeError, ServerHelloConfig, client_hello, server_hello, server_hello_enrolled,
     };
-    use crate::peer_identity::AuthenticatedPeerIdentity;
 
     type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -474,37 +477,76 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn authenticated_hello_rejects_claimed_principal_mismatch() -> TestResult {
-        let certified = generate_simple_self_signed(vec!["classmesh.local".to_owned()])?;
-        let certificate = CertificateDer::from(certified.cert);
-        let private_key = PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
+        let server_identity = generate_simple_self_signed(vec!["classmesh.local".to_owned()])?;
+        let server_certificate = CertificateDer::from(server_identity.cert);
+        let server_private_key =
+            PrivatePkcs8KeyDer::from(server_identity.signing_key.serialize_der());
+
+        let client_identity = generate_simple_self_signed(vec!["student.classmesh".to_owned()])?;
+        let client_certificate = CertificateDer::from(client_identity.cert);
+        let client_private_key =
+            PrivatePkcs8KeyDer::from(client_identity.signing_key.serialize_der());
+
+        let mut client_roots = RootCertStore::empty();
+        client_roots.add(client_certificate.clone())?;
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier =
+            WebPkiClientVerifier::builder_with_provider(Arc::new(client_roots), provider)
+                .build()
+                .map_err(|error| error.to_string())?;
 
         let server = Endpoint::server(
-            server_config_with_certificate(vec![certificate.clone()], private_key.into())?,
+            enrolled_server_config(
+                vec![server_certificate.clone()],
+                server_private_key.into(),
+                verifier,
+            )?,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         )?;
         let server_address = server.local_addr()?;
 
-        let mut roots = RootCertStore::empty();
-        roots.add(certificate)?;
+        let fingerprint =
+            CredentialFingerprint(Sha256::digest(client_certificate.as_ref()).into());
+        let mut credentials = BTreeMap::new();
+        credentials.insert(fingerprint, CredentialRecord::active(fingerprint, 100));
+        let mut authorization = AuthorizationStore::default();
+        authorization
+            .upsert(Principal {
+                id: PrincipalId([7; 32]),
+                kind: PrincipalKind::StudentDevice,
+                enabled: true,
+                permissions: BTreeSet::new(),
+                credentials,
+            })
+            .expect("test principal should register");
+
+        let mut server_roots = RootCertStore::empty();
+        server_roots.add(server_certificate)?;
+        let provider = rustls::crypto::ring::default_provider();
+        let certified_key = CertifiedKey::from_der(
+            vec![client_certificate],
+            client_private_key.into(),
+            &provider,
+        )?;
+        let resolver = Arc::new(SingleCertAndKey::from(certified_key));
         let mut client = Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
-        client.set_default_client_config(client_config_with_roots(roots)?);
+        client.set_default_client_config(enrolled_client_config(server_roots, resolver)?);
 
         let server_task = tokio::spawn(async move {
             let connection = accept(&server).await.map_err(|error| error.to_string())?;
             let mut channel = ControlChannel::accept(&connection, DEFAULT_IO_TIMEOUT)
                 .await
                 .map_err(|error| error.to_string())?;
-            let result = server_hello_authenticated(
+            let result = server_hello_enrolled(
+                &connection,
                 &mut channel,
                 &ServerHelloConfig {
                     local_version: ProtocolVersion { major: 0, minor: 2 },
                     local_capabilities: BTreeSet::new(),
                     control_session_id: 77,
                 },
-                AuthenticatedPeerIdentity {
-                    principal_id: PrincipalId([7; 32]),
-                    credential_fingerprint: CredentialFingerprint([9; 32]),
-                },
+                &authorization,
+                150,
             )
             .await;
             assert!(matches!(
