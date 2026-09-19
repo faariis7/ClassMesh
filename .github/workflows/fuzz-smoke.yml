@@ -1,0 +1,30 @@
+name: Fuzz smoke
+
+on:
+  pull_request:
+    paths:
+      - "fuzz/**"
+      - ".github/workflows/fuzz-smoke.yml"
+      - "crates/classmesh-control/src/framing.rs"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  control-frame:
+    name: Control frame fuzz build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Build control frame fuzz target
+        working-directory: fuzz
+        run: cargo +nightly fuzz build control_frame
+      - name: Bounded fuzz smoke
+        working-directory: fuzz
+        run: cargo +nightly fuzz run control_frame -- -runs=1000
