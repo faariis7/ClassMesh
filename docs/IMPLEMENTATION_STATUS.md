@@ -63,6 +63,14 @@ PR #61 merged the protected mTLS-client slice with CI #314 green. It adapts the 
 
 PR #62 merged live authenticated-credential re-check with CI #316 green. The established peer identity retains both stable `PrincipalId` and the presented credential fingerprint, and privileged authorization re-validates current revocation/expiry/principal-enabled state instead of relying only on handshake-time authentication.
 
+PR #63 merged authenticated Hello identity/session/replay authorization with PR CI #330 green, completing Phase 5D/5E on the authenticated control path.
+
+### Phase 5F — hardening active
+
+PR #66 merged after CI #338 green and rejects missing or internally inconsistent Hello protocol versions before negotiation/session establishment. PR #69 merged after CI #343 green and adds explicit malformed-Protobuf control-frame regression coverage. PR #70 merged as `b4b17dd1c6b28f1458f8f269570569368072b72e` after CI #345 green and validates HelloAck envelope session/request/sequence/version consistency before the client accepts the negotiated control session.
+
+Remaining Phase 5F work includes reconnect/timeout edge cases, broader malformed authenticated-envelope coverage, fuzz targets, and security/compatibility diagnostics.
+
 ### Phase 5D/5E — authenticated authorization and negotiation complete through PR #63
 
 PR #63 merged the authenticated control-session guard with PR CI #330 green. The enrolled server derives identity from the verified QUIC/mTLS connection, binds `Hello.device_id` to that stable PrincipalId, and rejects spoofing before session establishment. Negotiated protocol version and capability intersection are therefore established inside the authenticated Hello path. Privileged envelopes then require the exact established `control_session_id`, a strictly increasing sequence number, current credential validity, and the requested permission. A denied in-session sequence is consumed so the same administrative command cannot be replayed after a later permission grant.
