@@ -199,17 +199,37 @@ pub async fn connect(
         .map_err(|error| ControlTransportError::Transport(error.to_string()))
 }
 
+fn validate_reconnect_policy(policy: RecoveryPolicy) -> Result<(), ControlTransportError> {
+    if policy.max_attempts == 0 {
+        return Err(ControlTransportError::Configuration(
+            "reconnect policy must allow at least one attempt".to_owned(),
+        ));
+    }
+    if policy.base_backoff_ms == 0 {
+        return Err(ControlTransportError::Configuration(
+            "reconnect base backoff must be greater than zero".to_owned(),
+        ));
+    }
+    if policy.max_backoff_ms == 0 {
+        return Err(ControlTransportError::Configuration(
+            "reconnect maximum backoff must be greater than zero".to_owned(),
+        ));
+    }
+    if policy.base_backoff_ms > policy.max_backoff_ms {
+        return Err(ControlTransportError::Configuration(
+            "reconnect base backoff must not exceed maximum backoff".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn connect_with_retries(
     endpoint: &Endpoint,
     remote: SocketAddr,
     server_name: &str,
     policy: RecoveryPolicy,
 ) -> Result<Connection, ControlTransportError> {
-    if policy.max_attempts == 0 {
-        return Err(ControlTransportError::Configuration(
-            "reconnect policy must allow at least one attempt".to_owned(),
-        ));
-    }
+    validate_reconnect_policy(policy)?;
 
     let mut last_error = None;
     for attempt in 1..=policy.max_attempts {
@@ -730,6 +750,39 @@ mod tests {
             connection.close(0_u32.into(), b"server rejected untrusted client identity");
         }
         Ok(())
+    }
+
+    #[test]
+    fn reconnect_policy_rejects_zero_or_inverted_backoff() {
+        for policy in [
+            RecoveryPolicy {
+                max_attempts: 0,
+                base_backoff_ms: 200,
+                max_backoff_ms: 5_000,
+            },
+            RecoveryPolicy {
+                max_attempts: 1,
+                base_backoff_ms: 0,
+                max_backoff_ms: 5_000,
+            },
+            RecoveryPolicy {
+                max_attempts: 1,
+                base_backoff_ms: 200,
+                max_backoff_ms: 0,
+            },
+            RecoveryPolicy {
+                max_attempts: 1,
+                base_backoff_ms: 5_001,
+                max_backoff_ms: 5_000,
+            },
+        ] {
+            assert!(matches!(
+                validate_reconnect_policy(policy),
+                Err(ControlTransportError::Configuration(_))
+            ));
+        }
+
+        assert!(validate_reconnect_policy(DEFAULT_RECONNECT_POLICY).is_ok());
     }
 
     #[test]
