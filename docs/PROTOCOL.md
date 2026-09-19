@@ -1,4 +1,4 @@
-# ClassMesh Protocol Baseline v0.1
+# ClassMesh Protocol Baseline v0.2
 
 This document describes the protocol intent currently represented by `classmesh-protocol`, `classmesh-network` and the `.proto` schemas. It is **not** a frozen wire-compatibility promise yet.
 
@@ -39,6 +39,20 @@ Current transport bounds:
 - application 0-RTT remains disabled.
 
 The current server TLS helper is explicitly **pre-enrollment**: it authenticates the server certificate but does not yet require a client certificate. Phase 5C replaces this bootstrap mode with enrolled mutual authentication.
+
+### Enrollment wire contract (v0.2)
+
+Protocol minor 0.2 introduces the first enrollment messages. The pre-enrollment connection must already trust the intended ClassMesh authority/server certificate through explicit configuration or pinning; LAN discovery is never a trust anchor.
+
+The flow is intentionally based on standard PKCS#10 rather than a custom key-proof format:
+
+1. the enrolling peer creates a protected local key and a DER PKCS#10 CSR signed by that key;
+2. `EnrollmentRequest` carries the stable `PrincipalId`, requested role, CSR, a fresh 32-byte client nonce and a display label;
+3. the authority returns an opaque `enrollment_id` plus `csr_sha256` so approval/status is bound to the exact CSR;
+4. the client polls with `EnrollmentStatusRequest` while teacher/admin approval is pending;
+5. an approved `EnrollmentResult` carries a leaf-first DER certificate chain and SHA-256 fingerprint of the leaf certificate.
+
+The client nonce is for deduplication/correlation, not authentication. The credential fingerprint never defines or replaces the stable `PrincipalId`. Rejected, revoked and expired states are explicit. Certificate issuance, CSR validation, approval policy and post-enrollment mTLS enforcement are implemented in later Phase 5C3 slices.
 
 ### Reliable control envelope
 
