@@ -1,4 +1,5 @@
 use classmesh_security::PrincipalId;
+use sha2::{Digest, Sha256};
 
 use crate::enrollment::{MAX_ENROLLMENT_CSR_BYTES, SHA256_BYTES};
 
@@ -38,7 +39,6 @@ impl CertificateIssuancePolicy {
         now_unix_ms: u64,
         principal_id: PrincipalId,
         csr_der: &[u8],
-        csr_sha256: [u8; SHA256_BYTES],
         approval: EnrollmentApproval,
         validity: CertificateValidity,
     ) -> Result<(), CertificateIssuanceError> {
@@ -54,7 +54,8 @@ impl CertificateIssuancePolicy {
         if approval.principal_id != principal_id {
             return Err(CertificateIssuanceError::PrincipalBindingMismatch);
         }
-        if approval.csr_sha256 != csr_sha256 {
+        let actual_csr_sha256: [u8; SHA256_BYTES] = Sha256::digest(csr_der).into();
+        if approval.csr_sha256 != actual_csr_sha256 {
             return Err(CertificateIssuanceError::CsrBindingMismatch);
         }
         if validity.not_after_unix_ms <= validity.not_before_unix_ms {
@@ -97,10 +98,10 @@ mod tests {
         }
     }
 
-    fn approval() -> EnrollmentApproval {
+    fn approval(csr_der: &[u8]) -> EnrollmentApproval {
         EnrollmentApproval {
             principal_id: principal(7),
-            csr_sha256: [8; SHA256_BYTES],
+            csr_sha256: Sha256::digest(csr_der).into(),
         }
     }
 
@@ -118,8 +119,7 @@ mod tests {
                 1_000_000,
                 principal(7),
                 &[0x30, 0x01, 0x00],
-                [8; SHA256_BYTES],
-                approval(),
+                approval(&[0x30, 0x01, 0x00]),
                 validity(),
             )
             .expect("approved principal and CSR should pass issuance policy");
@@ -129,8 +129,7 @@ mod tests {
                 1_000_000,
                 principal(9),
                 &[0x30, 0x01, 0x00],
-                [8; SHA256_BYTES],
-                approval(),
+                approval(&[0x30, 0x01, 0x00]),
                 validity(),
             ),
             Err(CertificateIssuanceError::PrincipalBindingMismatch)
@@ -140,8 +139,7 @@ mod tests {
                 1_000_000,
                 principal(7),
                 &[0x30, 0x01, 0x00],
-                [9; SHA256_BYTES],
-                approval(),
+                approval(&[0x30, 0x01, 0x01]),
                 validity(),
             ),
             Err(CertificateIssuanceError::CsrBindingMismatch)
@@ -157,8 +155,7 @@ mod tests {
                 1_000_000,
                 principal(7),
                 &[1],
-                [8; SHA256_BYTES],
-                approval(),
+                approval(&[0x30, 0x01, 0x00]),
                 invalid,
             ),
             Err(CertificateIssuanceError::InvalidValidityWindow)
@@ -173,8 +170,7 @@ mod tests {
                 1_000_000,
                 principal(7),
                 &[1],
-                [8; SHA256_BYTES],
-                approval(),
+                approval(&[0x30, 0x01, 0x00]),
                 expired,
             ),
             Err(CertificateIssuanceError::AlreadyExpired)
@@ -189,8 +185,7 @@ mod tests {
                 1_000_000,
                 principal(7),
                 &[1],
-                [8; SHA256_BYTES],
-                approval(),
+                approval(&[0x30, 0x01, 0x00]),
                 too_long,
             ),
             Err(CertificateIssuanceError::LifetimeTooLong)
@@ -205,8 +200,7 @@ mod tests {
                 1_000_000,
                 principal(7),
                 &[1],
-                [8; SHA256_BYTES],
-                approval(),
+                approval(&[0x30, 0x01, 0x00]),
                 future,
             ),
             Err(CertificateIssuanceError::NotBeforeTooFarInFuture)
@@ -220,8 +214,7 @@ mod tests {
                 1_000_000,
                 principal(7),
                 &[],
-                [8; SHA256_BYTES],
-                approval(),
+                approval(&[0x30, 0x01, 0x00]),
                 validity(),
             ),
             Err(CertificateIssuanceError::EmptyCsr)
@@ -233,8 +226,7 @@ mod tests {
                 1_000_000,
                 principal(7),
                 &oversized,
-                [8; SHA256_BYTES],
-                approval(),
+                approval(&[0x30, 0x01, 0x00]),
                 validity(),
             ),
             Err(CertificateIssuanceError::CsrTooLarge { .. })
