@@ -10,7 +10,7 @@ This file distinguishes **implemented code**, **hosted-CI validation**, **real-h
 
 Phase 4 physical acceptance remains pending. Issue #3 must remain open until two physical Windows PCs pass the documented qualification.
 
-Phase 5 is tracked in Issue #32. Phase 5B is merged and current-baseline CI #232 passed on the Synology self-hosted Portable job and Windows Build. Phase 5C1 identity/rotation is merged in PR #39 with CI #239 green. Phase 5C2 Windows protected key storage is active in PR #40, followed by 5C3 enrollment + mTLS.
+Phase 5 is tracked in Issue #32. Phase 5B is merged and current-baseline CI #232 passed on the Synology self-hosted Portable job and Windows Build. Phase 5C1 identity/rotation is merged in PR #39 with CI #239 green. Phase 5C2 Windows protected key storage is merged in PR #40 with CI #243 green. Phase 5C3 enrollment + mTLS is active in PR #41, beginning with the protocol v0.2 CSR contract.
 
 The hosted CI baseline covers:
 
@@ -190,9 +190,9 @@ This transport runtime is now part of `main`. It remains pre-enrollment: product
 - Credential fingerprints map back to the stable principal for future mTLS identity resolution.
 - A credential fingerprint cannot be silently rebound to a different principal.
 
-### 5C2 Windows protected key backend — PR #40
+### 5C2 Windows protected key backend — merged PR #40
 
-- Machine-scope CNG ECDSA P-256 backend is under active CI validation.
+- Machine-scope CNG ECDSA P-256 backend passed current-baseline CI #243 and is merged.
 - Private key export is prohibited by persisted export policy rather than by convention.
 - The backend exposes signing and public-key data only; rustls/CSR integration remains Phase 5C3.
 - Project MSRV remains Rust 1.85; current `rustls-cng` is not taken as an unconditional dependency.
@@ -261,7 +261,7 @@ Still required:
 
 1. Keep Issue #3 open and run Phase 4 physical qualification when two Windows PCs are available.
 2. Phase 5C1 is complete in PR #39.
-3. Finish PR #40 (5C2) with real Windows CNG creation/reopen/sign/verify/export-policy-zero/delete evidence on current main.
-4. Implement 5C3 enrollment + certificate issuance + post-enrollment mTLS without weakening bootstrap trust or exporting private keys.
+3. Phase 5C2 is complete in PR #40 with real Windows CNG creation/reopen/sign/verify/export-policy-zero/delete evidence.
+4. Finish PR #41's protocol v0.2 enrollment CSR contract, then implement certificate issuance + post-enrollment mTLS without weakening bootstrap trust or exporting private keys.
 5. Add dependency/advisory/license and fuzzing gates when they become useful to the active phase rather than as unused tooling.
 6. Start product UI work under `classmesh-design` and runtime/visual verification once the Console/Agent surface becomes an active implementation track.
