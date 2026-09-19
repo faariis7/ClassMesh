@@ -1,4 +1,5 @@
 use classmesh_protocol::control_wire::EnrollmentResult;
+use classmesh_security::{CredentialFingerprint, CredentialRecord, PrincipalId};
 
 use crate::enrollment::{PRINCIPAL_ID_BYTES, SHA256_BYTES};
 
@@ -10,6 +11,21 @@ const STATUS_APPROVED: i32 = 2;
 const STATUS_REJECTED: i32 = 3;
 const STATUS_REVOKED: i32 = 4;
 const STATUS_EXPIRED: i32 = 5;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovedEnrollmentCredential {
+    pub principal_id: PrincipalId,
+    pub csr_sha256: [u8; SHA256_BYTES],
+    pub credential: CredentialRecord,
+    pub certificate_chain_der: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrollmentCredentialError {
+    InvalidResult(EnrollmentResultError),
+    ResultNotApproved,
+    CredentialAlreadyExpired,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnrollmentResultError {
@@ -54,6 +70,48 @@ pub fn validate_enrollment_result(result: &EnrollmentResult) -> Result<(), Enrol
         }
         value => Err(EnrollmentResultError::UnsupportedTerminalStatus { value }),
     }
+}
+
+pub fn approved_credential_from_result(
+    result: &EnrollmentResult,
+    now_unix_ms: u64,
+) -> Result<ApprovedEnrollmentCredential, EnrollmentCredentialError> {
+    validate_enrollment_result(result).map_err(EnrollmentCredentialError::InvalidResult)?;
+    if result.status != STATUS_APPROVED {
+        return Err(EnrollmentCredentialError::ResultNotApproved);
+    }
+    if result.not_after_unix_ms <= now_unix_ms {
+        return Err(EnrollmentCredentialError::CredentialAlreadyExpired);
+    }
+
+    let principal_id = PrincipalId(
+        result
+            .principal_id
+            .as_slice()
+            .try_into()
+            .expect("validated principal ID length"),
+    );
+    let csr_sha256 = result
+        .csr_sha256
+        .as_slice()
+        .try_into()
+        .expect("validated CSR SHA-256 length");
+    let fingerprint = CredentialFingerprint(
+        result
+            .credential_fingerprint_sha256
+            .as_slice()
+            .try_into()
+            .expect("validated credential fingerprint length"),
+    );
+    let mut credential = CredentialRecord::active(fingerprint, now_unix_ms);
+    credential.expires_at_unix_ms = Some(result.not_after_unix_ms);
+
+    Ok(ApprovedEnrollmentCredential {
+        principal_id,
+        csr_sha256,
+        credential,
+        certificate_chain_der: result.certificate_chain_der.clone(),
+    })
 }
 
 fn validate_approved_result(result: &EnrollmentResult) -> Result<(), EnrollmentResultError> {
@@ -132,6 +190,34 @@ mod tests {
             validate_enrollment_result(&approved),
             Err(EnrollmentResultError::CertificateChainTooLong { .. })
         ));
+    }
+
+    #[test]
+    fn approved_result_maps_to_bounded_credential_record() {
+        let mut approved = result(STATUS_APPROVED);
+        approved.certificate_chain_der.push(vec![0x30, 0x01, 0x00]);
+        approved.credential_fingerprint_sha256 = vec![9; SHA256_BYTES];
+        approved.not_after_unix_ms = 500;
+
+        let material =
+            approved_credential_from_result(&approved, 100).expect("approved credential material");
+        assert_eq!(material.principal_id, PrincipalId([7; PRINCIPAL_ID_BYTES]));
+        assert_eq!(material.csr_sha256, [8; SHA256_BYTES]);
+        assert_eq!(
+            material.credential.fingerprint,
+            CredentialFingerprint([9; SHA256_BYTES])
+        );
+        assert_eq!(material.credential.issued_at_unix_ms, 100);
+        assert_eq!(material.credential.expires_at_unix_ms, Some(500));
+        assert_eq!(
+            material.certificate_chain_der,
+            approved.certificate_chain_der
+        );
+
+        assert_eq!(
+            approved_credential_from_result(&approved, 500),
+            Err(EnrollmentCredentialError::CredentialAlreadyExpired)
+        );
     }
 
     #[test]
