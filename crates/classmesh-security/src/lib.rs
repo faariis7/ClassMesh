@@ -101,6 +101,7 @@ pub enum CredentialMutationError {
     DuplicateCredential,
     CredentialNotFound,
     ReplacementMustBeActive,
+    InvalidRotationOverlapDeadline,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +154,39 @@ impl Principal {
 
         for credential in self.credentials.values_mut() {
             credential.mark_retiring();
+        }
+        self.credentials
+            .insert(replacement.fingerprint, replacement);
+        Ok(())
+    }
+
+    /// Adds a replacement credential and bounds the overlap of all previous credentials.
+    ///
+    /// Existing credentials become retiring and may authenticate only until the earlier of
+    /// their current expiry or `overlap_until_unix_ms`. The overlap deadline must be later
+    /// than the replacement credential's issue time.
+    pub fn rotate_to_bounded(
+        &mut self,
+        replacement: CredentialRecord,
+        overlap_until_unix_ms: u64,
+    ) -> Result<(), CredentialMutationError> {
+        if overlap_until_unix_ms <= replacement.issued_at_unix_ms {
+            return Err(CredentialMutationError::InvalidRotationOverlapDeadline);
+        }
+        if replacement.state != CredentialState::Active {
+            return Err(CredentialMutationError::ReplacementMustBeActive);
+        }
+        if self.credentials.contains_key(&replacement.fingerprint) {
+            return Err(CredentialMutationError::DuplicateCredential);
+        }
+
+        for credential in self.credentials.values_mut() {
+            credential.mark_retiring();
+            credential.expires_at_unix_ms = Some(
+                credential
+                    .expires_at_unix_ms
+                    .map_or(overlap_until_unix_ms, |current| current.min(overlap_until_unix_ms)),
+            );
         }
         self.credentials
             .insert(replacement.fingerprint, replacement);
@@ -459,34 +493,57 @@ mod tests {
     }
 
     #[test]
-    fn credential_rotation_keeps_principal_identity_and_supports_bounded_overlap() {
+    fn credential_rotation_keeps_principal_identity_and_bounds_overlap() {
         let principal_id = id(2);
         let old = fingerprint(10);
         let new = fingerprint(11);
         let mut principal = teacher_with_credential(principal_id, old);
 
         principal
-            .rotate_to(CredentialRecord::active(new, 20))
-            .expect("rotation should succeed");
+            .rotate_to_bounded(CredentialRecord::active(new, 20), 40)
+            .expect("bounded rotation should succeed");
 
         assert_eq!(principal.id, principal_id);
         assert_eq!(
             principal
                 .credentials
                 .get(&old)
-                .map(|credential| credential.state),
-            Some(CredentialState::Retiring)
+                .map(|credential| (credential.state, credential.expires_at_unix_ms)),
+            Some((CredentialState::Retiring, Some(40)))
         );
-        assert!(principal.accepts_credential(old, 30));
-        assert!(principal.accepts_credential(new, 30));
-
-        principal
-            .revoke_credential(old, 40)
-            .expect("old credential should revoke");
-
-        assert_eq!(principal.id, principal_id);
+        assert!(principal.accepts_credential(old, 39));
         assert!(!principal.accepts_credential(old, 40));
         assert!(principal.accepts_credential(new, 40));
+    }
+
+    #[test]
+    fn bounded_rotation_preserves_earlier_expiry_and_rejects_invalid_deadline() {
+        let principal_id = id(12);
+        let old = fingerprint(50);
+        let new = fingerprint(51);
+        let mut principal = teacher_with_credential(principal_id, old);
+        principal
+            .credentials
+            .get_mut(&old)
+            .expect("old credential")
+            .expires_at_unix_ms = Some(30);
+
+        principal
+            .rotate_to_bounded(CredentialRecord::active(new, 20), 40)
+            .expect("bounded rotation should succeed");
+        assert_eq!(
+            principal
+                .credentials
+                .get(&old)
+                .and_then(|credential| credential.expires_at_unix_ms),
+            Some(30)
+        );
+
+        let another = fingerprint(52);
+        assert_eq!(
+            principal.rotate_to_bounded(CredentialRecord::active(another, 60), 60),
+            Err(CredentialMutationError::InvalidRotationOverlapDeadline)
+        );
     }
 
     #[test]
