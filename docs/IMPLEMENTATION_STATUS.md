@@ -55,7 +55,9 @@ PR #45 merged bounded authority-side issuance policy; PR #46 merged PKCS#10 proo
 
 PR #51 merged enrolled-QUIC mTLS with CI #288 green. PR #55 then removed the legacy unbounded credential-rotation path, and PR #58 merged safe conversion of validated approved enrollment results into bounded active credentials with CI #307 green.
 
-PR #59 is the active bounded X.509 issuance slice. It signs verified approved PKCS#10 requests through rcgen's `SigningKey` abstraction, forces end-entity CA/key-usage constraints instead of trusting CSR-requested privilege, and returns the issued leaf DER/fingerprint together with the exact stable PrincipalId + CSR binding. Protected authority-provider integration and transport-connected revocation/rotation enforcement still remain before Phase 5C3 is complete.
+PR #59 merged bounded X.509 issuance with CI #309 green. It signs verified approved PKCS#10 requests through rcgen's `SigningKey` abstraction, forces end-entity CA/key-usage constraints instead of trusting CSR-requested privilege, and returns the issued leaf DER/fingerprint together with the exact stable PrincipalId + CSR binding.
+
+PR #60 is the active Windows protected signing-provider slice. It adapts the persisted non-exportable CNG ECDSA P-256 key to rcgen's `SigningKey` interface, converts the CNG public blob to SEC1 public-point bytes, and converts fixed-width CNG ECDSA signatures to DER without exporting private-key material.
 
 ## Remaining security/control work
 
@@ -76,8 +78,8 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 ## Next implementation sequence
 
 1. Keep Issue #3 open and perform Phase 4 physical qualification when two Windows PCs are available.
-2. Finish PR #59 bounded X.509 issuance against the explicit bootstrap trust and approved CSR binding.
-3. Port the Windows protected authority signing adapter onto the current baseline without private-key export, then enforce revocation/rotation on authenticated transport sessions.
+2. Finish PR #60 protected Windows CNG authority signing adapter on the current baseline without private-key export.
+3. Port negative enrolled-mTLS tests and then enforce revocation/rotation on authenticated transport sessions.
 4. Integrate revocation/rotation with transport authentication, then Phase 5D authorization/replay/session negotiation.
 5. Add malformed-input/reconnect/fuzz and dependency/advisory/license gates when useful to the active phase.
 6. Begin product UI work under `classmesh-design` with runtime/visual verification when Console/Agent UI becomes active.
