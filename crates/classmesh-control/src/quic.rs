@@ -483,9 +483,11 @@ mod tests {
 
         let mut client_roots = RootCertStore::empty();
         client_roots.add(client_certificate.clone())?;
-        let verifier = WebPkiClientVerifier::builder(Arc::new(client_roots))
-            .build()
-            .map_err(|error| error.to_string())?;
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier =
+            WebPkiClientVerifier::builder_with_provider(Arc::new(client_roots), provider)
+                .build()
+                .map_err(|error| error.to_string())?;
 
         let server = Endpoint::server(
             enrolled_server_config(
