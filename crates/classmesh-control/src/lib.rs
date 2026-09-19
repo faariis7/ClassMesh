@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+pub mod framing;
+pub mod handshake;
+pub mod quic;
+
 use std::collections::BTreeSet;
 use std::time::Duration;
 
