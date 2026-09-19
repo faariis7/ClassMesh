@@ -339,7 +339,7 @@ mod tests {
         control_envelope,
     };
     use classmesh_protocol::{Capability, ControlRole, ProtocolVersion};
-    use classmesh_security::PrincipalId;
+    use classmesh_security::{CredentialFingerprint, PrincipalId};
     use rcgen::generate_simple_self_signed;
     use rustls::pki_types::PrivatePkcs8KeyDer;
     use rustls::server::WebPkiClientVerifier;
@@ -347,7 +347,10 @@ mod tests {
 
     use super::*;
     use crate::ControlHello;
-    use crate::handshake::{ServerHelloConfig, client_hello, server_hello};
+    use crate::handshake::{
+        HandshakeError, ServerHelloConfig, client_hello, server_hello, server_hello_authenticated,
+    };
+    use crate::peer_identity::AuthenticatedPeerIdentity;
 
     type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -465,6 +468,70 @@ mod tests {
             server_task.await.map_err(|error| error.to_string())??;
         server_connection.close(0_u32.into(), b"test complete");
         server.close(0_u32.into(), b"test complete");
+        client.wait_idle().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authenticated_hello_rejects_claimed_principal_mismatch() -> TestResult {
+        let certified = generate_simple_self_signed(vec!["classmesh.local".to_owned()])?;
+        let certificate = CertificateDer::from(certified.cert);
+        let private_key = PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
+
+        let server = Endpoint::server(
+            server_config_with_certificate(vec![certificate.clone()], private_key.into())?,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        )?;
+        let server_address = server.local_addr()?;
+
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate)?;
+        let mut client = Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
+        client.set_default_client_config(client_config_with_roots(roots)?);
+
+        let server_task = tokio::spawn(async move {
+            let connection = accept(&server).await.map_err(|error| error.to_string())?;
+            let mut channel = ControlChannel::accept(&connection, DEFAULT_IO_TIMEOUT)
+                .await
+                .map_err(|error| error.to_string())?;
+            let result = server_hello_authenticated(
+                &mut channel,
+                &ServerHelloConfig {
+                    local_version: ProtocolVersion { major: 0, minor: 2 },
+                    local_capabilities: BTreeSet::new(),
+                    control_session_id: 77,
+                },
+                AuthenticatedPeerIdentity {
+                    principal_id: PrincipalId([7; 32]),
+                    credential_fingerprint: CredentialFingerprint([9; 32]),
+                },
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(HandshakeError::IdentityMismatch { .. })
+            ));
+            Ok::<Endpoint, String>(server)
+        });
+
+        let connection = connect(&client, server_address, "classmesh.local").await?;
+        let mut channel = ControlChannel::open(&connection, DEFAULT_IO_TIMEOUT).await?;
+        let hello = ControlHello {
+            principal_id: PrincipalId([8; 32]),
+            role: ControlRole::StudentDevice,
+            version: ProtocolVersion { major: 0, minor: 2 },
+            capabilities: BTreeSet::new(),
+            hostname: "spoofed-student".to_owned(),
+            app_version: "0.0.1".to_owned(),
+        };
+        assert!(matches!(
+            client_hello(&mut channel, &hello).await,
+            Err(HandshakeError::Rejected { reason: 4, .. })
+        ));
+
+        connection.close(0_u32.into(), b"identity mismatch test complete");
+        let server = server_task.await.map_err(|error| error.to_string())??;
+        server.close(0_u32.into(), b"identity mismatch test complete");
         client.wait_idle().await;
         Ok(())
     }
