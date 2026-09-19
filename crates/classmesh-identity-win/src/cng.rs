@@ -80,7 +80,7 @@ pub struct CngRcgenSigningKey {
 
 impl CngRcgenSigningKey {
     pub fn new(key: CngMachineKey) -> Result<Self, CngKeyError> {
-        let public_key_sec1 = sec1_public_key_from_cng_blob(&key.public_key_blob()?)?;
+        let public_key_sec1 = key.public_key_sec1()?;
         Ok(Self {
             key,
             public_key_sec1,
@@ -184,6 +184,10 @@ impl CngMachineKey {
         let provider = open_provider()?;
         let key = open_key(&provider, &self.name)?;
         export_blob(key.raw as NCRYPT_KEY_HANDLE, BCRYPT_ECCPUBLIC_BLOB)
+    }
+
+    pub(crate) fn public_key_sec1(&self) -> Result<Vec<u8>, CngKeyError> {
+        sec1_public_key_from_cng_blob(&self.public_key_blob()?)
     }
 
     /// Returns the persisted CNG export policy. ClassMesh-created keys must return zero.
