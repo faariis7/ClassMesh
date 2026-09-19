@@ -59,7 +59,13 @@ PR #59 merged bounded X.509 issuance with CI #309 green. It signs verified appro
 
 PR #60 merged the Windows protected rcgen signing provider with CI #311 green. It adapts the persisted non-exportable CNG ECDSA P-256 key to rcgen's `SigningKey` interface, converts the CNG public blob to SEC1 public-point bytes, and converts fixed-width CNG ECDSA signatures to DER without exporting private-key material.
 
-PR #61 is the active protected mTLS-client slice. It adapts the same CNG key to rustls `SigningKey`/`Signer`, validates certificate/key SPKI consistency with `CertifiedKey::keys_match`, produces a `ResolvesClientCert` without private-key DER, and adds negative tests proving the enrolled server rejects missing or untrusted client certificates.
+PR #61 merged the protected mTLS-client slice with CI #314 green. It adapts the same CNG key to rustls `SigningKey`/`Signer`, validates certificate/key SPKI consistency with `CertifiedKey::keys_match`, produces a `ResolvesClientCert` without private-key DER, and adds negative tests proving the enrolled server rejects missing or untrusted client certificates.
+
+PR #62 merged live authenticated-credential re-check with CI #316 green. The established peer identity retains both stable `PrincipalId` and the presented credential fingerprint, and privileged authorization re-validates current revocation/expiry/principal-enabled state instead of relying only on handshake-time authentication.
+
+### Phase 5D — authenticated authorization/session integration active
+
+The active slice binds `Hello.device_id` to the already verified mTLS principal and rejects identity spoofing explicitly, then guards privileged control envelopes with the exact established `control_session_id`, a strictly increasing sequence number, current credential validity, and the requested permission. A denied in-session sequence is consumed so the same administrative command cannot be replayed after a later permission grant.
 
 ## Remaining security/control work
 
@@ -80,8 +86,8 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 ## Next implementation sequence
 
 1. Keep Issue #3 open and perform Phase 4 physical qualification when two Windows PCs are available.
-2. Finish PR #61 protected Windows CNG rustls client credential + negative enrolled-mTLS coverage.
-3. Enforce live revocation/rotation and authenticated Hello identity binding on established control sessions.
-4. Integrate revocation/rotation with transport authentication, then Phase 5D authorization/replay/session negotiation.
+2. Finish the active Phase 5D authenticated Hello/session/sequence/permission guard.
+3. Connect authenticated capability/session negotiation to the guarded control session.
+4. Add malformed-input/reconnect/fuzz hardening around the authenticated control path.
 5. Add malformed-input/reconnect/fuzz and dependency/advisory/license gates when useful to the active phase.
 6. Begin product UI work under `classmesh-design` with runtime/visual verification when Console/Agent UI becomes active.

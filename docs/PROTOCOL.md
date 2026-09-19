@@ -52,13 +52,15 @@ The flow is intentionally based on standard PKCS#10 rather than a custom key-pro
 4. the client polls with `EnrollmentStatusRequest` while teacher/admin approval is pending;
 5. an approved `EnrollmentResult` carries a leaf-first DER certificate chain and SHA-256 fingerprint of the leaf certificate.
 
-The client nonce is for deduplication/correlation, not authentication. The credential fingerprint never defines or replaces the stable `PrincipalId`. Rejected, revoked and expired states are explicit. PR #45 introduces the authority-side issuance policy boundary: issuance must match the approved stable PrincipalId and exact CSR SHA-256 and use a bounded, non-expired validity window. Cryptographic CSR verification/X.509 signing and post-enrollment mTLS enforcement remain later Phase 5C3 slices.
+The client nonce is for deduplication/correlation, not authentication. The credential fingerprint never defines or replaces the stable `PrincipalId`. Rejected, revoked and expired states are explicit. Authority-side issuance must match the approved stable PrincipalId and exact CSR SHA-256 and use a bounded, non-expired validity window. Phase 5C3 now verifies PKCS#10 proof-of-possession, issues bounded end-entity X.509 credentials, supports protected Windows CNG signing without private-key export, and uses enrolled mutual TLS with verified certificate→stable PrincipalId resolution and live credential re-check.
 
 ### Reliable control envelope
 
 Phase 5 uses a `ControlEnvelope` around control messages. The envelope carries a control-session ID, a monotonically increasing application sequence, negotiated protocol version, optional request ID, and a typed Protobuf payload. The sequence/request fields are application semantics for duplicate/replay suppression and correlation; they do not replace QUIC/TLS integrity.
 
-A `Hello` / `HelloAck` exchange explicitly negotiates the protocol minor version and shared capabilities. A major-version mismatch is rejected rather than silently downgraded.
+A `Hello` / `HelloAck` exchange explicitly negotiates the protocol minor version and shared capabilities. A major-version mismatch is rejected rather than silently downgraded. On enrolled sessions, the claimed `Hello.device_id` must match the stable PrincipalId resolved from the verified mTLS credential; application identity claims never override TLS-authenticated identity.
+
+After establishment, privileged control messages must use the exact established `control_session_id` and a strictly increasing application sequence on the ordered QUIC control stream. Permission checks re-validate the current credential/principal state for each privileged command; revoked, expired, future-issued, or disabled identities therefore stop authorizing even on an already-established transport.
 
 Application heartbeat tracks device/control liveness independently from `MediaHealth`. The initial policy is a 2-second heartbeat interval, suspect after 6 seconds, and offline after 10 seconds. Peer monotonic timestamps are diagnostic only and are never directly compared across machines.
 
