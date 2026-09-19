@@ -51,13 +51,11 @@ pub fn issue_certificate<S: SigningKey>(
         .map_err(X509IssuanceError::Policy)?;
 
     let csr_der = CertificateSigningRequestDer::from(csr_der);
-    let mut request =
-        CertificateSigningRequestParams::from_der(&csr_der).map_err(|_| X509IssuanceError::InvalidCsr)?;
+    let mut request = CertificateSigningRequestParams::from_der(&csr_der)
+        .map_err(|_| X509IssuanceError::InvalidCsr)?;
 
-    request.params.not_before = unix_ms_to_system_time(validity.not_before_unix_ms)?
-        .into();
-    request.params.not_after = unix_ms_to_system_time(validity.not_after_unix_ms)?
-        .into();
+    request.params.not_before = unix_ms_to_system_time(validity.not_before_unix_ms)?.into();
+    request.params.not_after = unix_ms_to_system_time(validity.not_after_unix_ms)?.into();
     request.params.is_ca = IsCa::NoCa;
     request.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     request.params.extended_key_usages = vec![
@@ -90,9 +88,7 @@ fn unix_ms_to_system_time(unix_ms: u64) -> Result<SystemTime, X509IssuanceError>
 
 #[cfg(test)]
 mod tests {
-    use rcgen::{
-        BasicConstraints, CertificateParams, CertifiedIssuer, DnType, KeyPair,
-    };
+    use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, DnType, KeyPair};
 
     use super::*;
 
@@ -124,15 +120,11 @@ mod tests {
 
     fn csr() -> Vec<u8> {
         let key = KeyPair::generate().expect("leaf key");
-        let mut params = CertificateParams::new(vec!["student.classmesh".to_owned()])
-            .expect("leaf params");
+        let mut params =
+            CertificateParams::new(vec!["student.classmesh".to_owned()]).expect("leaf params");
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
-        params
-            .serialize_request(&key)
-            .expect("CSR")
-            .der()
-            .to_vec()
+        params.serialize_request(&key).expect("CSR").der().to_vec()
     }
 
     fn approval(csr: &[u8]) -> EnrollmentApproval {
@@ -161,7 +153,8 @@ mod tests {
         .expect("certificate should issue");
 
         assert_eq!(issued.principal_id, principal(7));
-        assert_eq!(issued.csr_sha256, Sha256::digest(&csr).into());
+        let expected_csr_sha256: [u8; SHA256_BYTES] = Sha256::digest(&csr).into();
+        assert_eq!(issued.csr_sha256, expected_csr_sha256);
         assert!(!issued.certificate_der.is_empty());
         assert_eq!(
             issued.credential_fingerprint_sha256,
