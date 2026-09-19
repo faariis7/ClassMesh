@@ -4,8 +4,8 @@ pub mod bootstrap;
 pub mod enrollment;
 pub mod enrollment_result;
 pub mod framing;
-pub mod issuance;
 pub mod handshake;
+pub mod issuance;
 pub mod quic;
 
 use std::collections::BTreeSet;
