@@ -31,6 +31,7 @@ pub enum CertificateIssuanceError {
     NotBeforeTooFarInFuture,
     AlreadyExpired,
     LifetimeTooLong,
+    InvalidCsrSignature,
 }
 
 impl CertificateIssuancePolicy {
@@ -50,6 +51,9 @@ impl CertificateIssuancePolicy {
                 length: csr_der.len(),
                 maximum: MAX_ENROLLMENT_CSR_BYTES,
             });
+        }
+        if crate::csr::verify_pkcs10_csr(csr_der).is_err() {
+            return Err(CertificateIssuanceError::InvalidCsrSignature);
         }
         if approval.principal_id != principal_id {
             return Err(CertificateIssuanceError::PrincipalBindingMismatch);
@@ -98,6 +102,16 @@ mod tests {
         }
     }
 
+    fn valid_csr() -> Vec<u8> {
+        let key = rcgen::KeyPair::generate().expect("test key");
+        rcgen::CertificateParams::new(Vec::<String>::new())
+            .expect("params")
+            .serialize_request(&key)
+            .expect("CSR")
+            .der()
+            .to_vec()
+    }
+
     fn approval(csr_der: &[u8]) -> EnrollmentApproval {
         EnrollmentApproval {
             principal_id: principal(7),
@@ -114,34 +128,15 @@ mod tests {
 
     #[test]
     fn issuance_requires_exact_approved_principal_and_csr() {
-        policy()
-            .validate(
-                1_000_000,
-                principal(7),
-                &[0x30, 0x01, 0x00],
-                approval(&[0x30, 0x01, 0x00]),
-                validity(),
-            )
+        { let csr = valid_csr(); policy().validate(1_000_000, principal(7), &csr, approval(&csr), validity()) }
             .expect("approved principal and CSR should pass issuance policy");
 
         assert_eq!(
-            policy().validate(
-                1_000_000,
-                principal(9),
-                &[0x30, 0x01, 0x00],
-                approval(&[0x30, 0x01, 0x00]),
-                validity(),
-            ),
+            { let csr = valid_csr(); policy().validate(1_000_000, principal(9), &csr, approval(&csr), validity()) },
             Err(CertificateIssuanceError::PrincipalBindingMismatch)
         );
         assert_eq!(
-            policy().validate(
-                1_000_000,
-                principal(7),
-                &[0x30, 0x01, 0x00],
-                approval(&[0x30, 0x01, 0x01]),
-                validity(),
-            ),
+            { let csr = valid_csr(); let other = valid_csr(); policy().validate(1_000_000, principal(7), &csr, approval(&other), validity()) },
             Err(CertificateIssuanceError::CsrBindingMismatch)
         );
     }
