@@ -11,12 +11,12 @@ use sha2::{Digest, Sha256};
 use windows_sys::Win32::Foundation::NTE_BAD_SIGNATURE;
 use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_ECCPUBLIC_BLOB, BCRYPT_ECDSA_PUBLIC_P256_MAGIC, MS_KEY_STORAGE_PROVIDER,
-    NCRYPT_ALLOW_SIGNING_FLAG,
-    NCRYPT_ECDSA_P256_ALGORITHM, NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_HANDLE, NCRYPT_KEY_HANDLE,
-    NCRYPT_KEY_USAGE_PROPERTY, NCRYPT_MACHINE_KEY_FLAG, NCRYPT_PERSIST_FLAG, NCRYPT_PROV_HANDLE,
-    NCRYPT_SILENT_FLAG, NCryptCreatePersistedKey, NCryptDeleteKey, NCryptExportKey,
-    NCryptFinalizeKey, NCryptFreeObject, NCryptGetProperty, NCryptOpenKey,
-    NCryptOpenStorageProvider, NCryptSetProperty, NCryptSignHash, NCryptVerifySignature,
+    NCRYPT_ALLOW_SIGNING_FLAG, NCRYPT_ECDSA_P256_ALGORITHM, NCRYPT_EXPORT_POLICY_PROPERTY,
+    NCRYPT_HANDLE, NCRYPT_KEY_HANDLE, NCRYPT_KEY_USAGE_PROPERTY, NCRYPT_MACHINE_KEY_FLAG,
+    NCRYPT_PERSIST_FLAG, NCRYPT_PROV_HANDLE, NCRYPT_SILENT_FLAG, NCryptCreatePersistedKey,
+    NCryptDeleteKey, NCryptExportKey, NCryptFinalizeKey, NCryptFreeObject, NCryptGetProperty,
+    NCryptOpenKey, NCryptOpenStorageProvider, NCryptSetProperty, NCryptSignHash,
+    NCryptVerifySignature,
 };
 
 const SHA256_BYTES: usize = 32;
@@ -302,7 +302,6 @@ impl CngMachineKey {
     }
 }
 
-
 fn sec1_public_key_from_cng_blob(blob: &[u8]) -> Result<Vec<u8>, CngKeyError> {
     const HEADER_BYTES: usize = 8;
     const P256_COORDINATE_BYTES: usize = 32;
@@ -563,8 +562,8 @@ mod tests {
                 .expect("adapter key export policy"),
             0
         );
-        let mut params = rcgen::CertificateParams::new(Vec::<String>::new())
-            .expect("certificate params");
+        let mut params =
+            rcgen::CertificateParams::new(Vec::<String>::new()).expect("certificate params");
         params.serial_number = Some(1_u64.into());
         params
             .distinguished_name
@@ -576,8 +575,8 @@ mod tests {
             rcgen::KeyUsagePurpose::CrlSign,
         ];
 
-        let issuer =
-            rcgen::CertifiedIssuer::self_signed(params, adapter).expect("CNG key should sign X.509");
+        let issuer = rcgen::CertifiedIssuer::self_signed(params, adapter)
+            .expect("CNG key should sign X.509");
         assert!(!issuer.der().is_empty());
 
         drop(issuer);
