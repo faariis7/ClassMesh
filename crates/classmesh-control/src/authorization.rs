@@ -19,11 +19,15 @@ pub struct AuthenticatedControlGuard {
 
 impl AuthenticatedControlGuard {
     #[must_use]
-    pub const fn new(peer: AuthenticatedPeerIdentity, control_session_id: u64) -> Self {
+    pub const fn new(
+        peer: AuthenticatedPeerIdentity,
+        control_session_id: u64,
+        last_sequence: u64,
+    ) -> Self {
         Self {
             peer,
             control_session_id,
-            last_sequence: 0,
+            last_sequence,
         }
     }
 
@@ -122,7 +126,7 @@ mod tests {
     #[test]
     fn guard_requires_exact_session_and_strictly_increasing_sequence() {
         let authorization = store(BTreeSet::from([Permission::ControlInput]));
-        let mut guard = AuthenticatedControlGuard::new(identity(), 77);
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, 1);
 
         assert_eq!(
             guard.authorize(
@@ -136,26 +140,26 @@ mod tests {
                 received: 78,
             })
         );
-        assert_eq!(guard.last_sequence(), 0);
+        assert_eq!(guard.last_sequence(), 1);
 
         guard
             .authorize(
                 &authorization,
-                &envelope(77, 1),
+                &envelope(77, 2),
                 Permission::ControlInput,
                 150,
             )
-            .expect("first command should authorize");
+            .expect("first post-handshake command should authorize");
         assert_eq!(
             guard.authorize(
                 &authorization,
-                &envelope(77, 1),
+                &envelope(77, 2),
                 Permission::ControlInput,
                 150,
             ),
             Err(CommandAuthorizationError::NonIncreasingSequence {
-                previous: 1,
-                received: 1,
+                previous: 2,
+                received: 2,
             })
         );
         assert_eq!(
@@ -166,7 +170,7 @@ mod tests {
                 150,
             ),
             Err(CommandAuthorizationError::NonIncreasingSequence {
-                previous: 1,
+                previous: 2,
                 received: 0,
             })
         );
@@ -175,7 +179,7 @@ mod tests {
     #[test]
     fn denied_sequence_cannot_be_replayed_after_permission_change() {
         let mut authorization = store(BTreeSet::new());
-        let mut guard = AuthenticatedControlGuard::new(identity(), 77);
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, 1);
         assert_eq!(
             guard.authorize(
                 &authorization,
@@ -230,7 +234,7 @@ mod tests {
     #[test]
     fn credential_revocation_blocks_next_privileged_command() {
         let mut authorization = store(BTreeSet::from([Permission::ControlInput]));
-        let mut guard = AuthenticatedControlGuard::new(identity(), 77);
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, 1);
         guard
             .authorize(
                 &authorization,
