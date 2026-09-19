@@ -47,26 +47,41 @@ impl std::fmt::Display for MachineIdentityStateError {
                 write!(f, "unsupported machine identity state version {version}")
             }
             Self::StateTooLarge { bytes, maximum } => {
-                write!(f, "machine identity state is {bytes} bytes; maximum is {maximum}")
+                write!(
+                    f,
+                    "machine identity state is {bytes} bytes; maximum is {maximum}"
+                )
             }
             Self::EmptyKeyName => write!(f, "CNG machine key name must not be empty"),
             Self::KeyNameTooLong { bytes, maximum } => {
-                write!(f, "CNG machine key name is {bytes} bytes; maximum is {maximum}")
+                write!(
+                    f,
+                    "CNG machine key name is {bytes} bytes; maximum is {maximum}"
+                )
             }
             Self::InvalidKeyName => write!(f, "CNG machine key name contains a NUL"),
             Self::EmptyCertificateChain => write!(f, "machine certificate chain must not be empty"),
             Self::MissingExpiry => write!(f, "machine certificate expiry must be non-zero"),
             Self::TooManyCertificates { count, maximum } => {
-                write!(f, "machine certificate chain has {count} entries; maximum is {maximum}")
+                write!(
+                    f,
+                    "machine certificate chain has {count} entries; maximum is {maximum}"
+                )
             }
             Self::TooManyTrustRoots { count, maximum } => {
-                write!(f, "machine trust store has {count} roots; maximum is {maximum}")
+                write!(
+                    f,
+                    "machine trust store has {count} roots; maximum is {maximum}"
+                )
             }
             Self::CertificateTooLarge { bytes, maximum } => {
                 write!(f, "certificate is {bytes} bytes; maximum is {maximum}")
             }
             Self::CertificateSetTooLarge { bytes, maximum } => {
-                write!(f, "certificate material is {bytes} bytes; maximum is {maximum}")
+                write!(
+                    f,
+                    "certificate material is {bytes} bytes; maximum is {maximum}"
+                )
             }
         }
     }
@@ -366,10 +381,7 @@ mod tests {
 
         let backup = sibling_with_suffix(&path, ".bak");
         fs::rename(&path, &backup).expect("simulate interrupted replace");
-        assert_eq!(
-            durable.load().expect("backup should load"),
-            Some(bundle())
-        );
+        assert_eq!(durable.load().expect("backup should load"), Some(bundle()));
 
         let _ = fs::remove_dir_all(path.parent().expect("test parent"));
     }
