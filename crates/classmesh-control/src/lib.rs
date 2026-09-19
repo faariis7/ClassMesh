@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod authorization;
 pub mod bootstrap;
 pub mod csr;
 pub mod enrollment;
