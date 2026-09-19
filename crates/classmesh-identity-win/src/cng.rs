@@ -5,9 +5,13 @@ use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::{null, null_mut};
 
+use p256::ecdsa::Signature;
+use rcgen::{PKCS_ECDSA_P256_SHA256, PublicKeyData, SigningKey};
+use sha2::{Digest, Sha256};
 use windows_sys::Win32::Foundation::NTE_BAD_SIGNATURE;
 use windows_sys::Win32::Security::Cryptography::{
-    BCRYPT_ECCPUBLIC_BLOB, MS_KEY_STORAGE_PROVIDER, NCRYPT_ALLOW_SIGNING_FLAG,
+    BCRYPT_ECCPUBLIC_BLOB, BCRYPT_ECDSA_PUBLIC_P256_MAGIC, MS_KEY_STORAGE_PROVIDER,
+    NCRYPT_ALLOW_SIGNING_FLAG,
     NCRYPT_ECDSA_P256_ALGORITHM, NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_HANDLE, NCRYPT_KEY_HANDLE,
     NCRYPT_KEY_USAGE_PROPERTY, NCRYPT_MACHINE_KEY_FLAG, NCRYPT_PERSIST_FLAG, NCRYPT_PROV_HANDLE,
     NCRYPT_SILENT_FLAG, NCryptCreatePersistedKey, NCryptDeleteKey, NCryptExportKey,
@@ -29,6 +33,8 @@ pub enum CngKeyError {
         expected: u32,
         actual: u32,
     },
+    InvalidPublicKeyBlob,
+    InvalidSignatureEncoding,
 }
 
 impl Display for CngKeyError {
@@ -53,6 +59,8 @@ impl Display for CngKeyError {
                 formatter,
                 "{property} returned {actual} bytes; expected {expected}"
             ),
+            Self::InvalidPublicKeyBlob => write!(formatter, "unexpected CNG ECDSA P-256 public key blob"),
+            Self::InvalidSignatureEncoding => write!(formatter, "unexpected CNG ECDSA P-256 signature encoding"),
         }
     }
 }
@@ -62,6 +70,50 @@ impl Error for CngKeyError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CngMachineKey {
     name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CngRcgenSigningKey {
+    key: CngMachineKey,
+    public_key_sec1: Vec<u8>,
+}
+
+impl CngRcgenSigningKey {
+    pub fn new(key: CngMachineKey) -> Result<Self, CngKeyError> {
+        let public_key_sec1 = sec1_public_key_from_cng_blob(&key.public_key_blob()?)?;
+        Ok(Self {
+            key,
+            public_key_sec1,
+        })
+    }
+
+    #[must_use]
+    pub fn machine_key(&self) -> &CngMachineKey {
+        &self.key
+    }
+}
+
+impl PublicKeyData for CngRcgenSigningKey {
+    fn der_bytes(&self) -> &[u8] {
+        &self.public_key_sec1
+    }
+
+    fn algorithm(&self) -> &'static rcgen::SignatureAlgorithm {
+        &PKCS_ECDSA_P256_SHA256
+    }
+}
+
+impl SigningKey for CngRcgenSigningKey {
+    fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, rcgen::Error> {
+        let digest: [u8; SHA256_BYTES] = Sha256::digest(msg).into();
+        let raw_signature = self
+            .key
+            .sign_sha256_digest(&digest)
+            .map_err(|_| rcgen::Error::RemoteKeyError)?;
+        let signature =
+            Signature::from_slice(&raw_signature).map_err(|_| rcgen::Error::RemoteKeyError)?;
+        Ok(signature.to_der().as_bytes().to_vec())
+    }
 }
 
 impl CngMachineKey {
@@ -248,6 +300,35 @@ impl CngMachineKey {
         }
         Ok(())
     }
+}
+
+
+fn sec1_public_key_from_cng_blob(blob: &[u8]) -> Result<Vec<u8>, CngKeyError> {
+    const HEADER_BYTES: usize = 8;
+    const P256_COORDINATE_BYTES: usize = 32;
+    const P256_BLOB_BYTES: usize = HEADER_BYTES + (P256_COORDINATE_BYTES * 2);
+
+    if blob.len() != P256_BLOB_BYTES {
+        return Err(CngKeyError::InvalidPublicKeyBlob);
+    }
+    let magic = u32::from_le_bytes(
+        blob[0..4]
+            .try_into()
+            .map_err(|_| CngKeyError::InvalidPublicKeyBlob)?,
+    );
+    let key_bytes = u32::from_le_bytes(
+        blob[4..8]
+            .try_into()
+            .map_err(|_| CngKeyError::InvalidPublicKeyBlob)?,
+    );
+    if magic != BCRYPT_ECDSA_PUBLIC_P256_MAGIC || key_bytes != P256_COORDINATE_BYTES as u32 {
+        return Err(CngKeyError::InvalidPublicKeyBlob);
+    }
+
+    let mut sec1 = Vec::with_capacity(1 + (P256_COORDINATE_BYTES * 2));
+    sec1.push(0x04);
+    sec1.extend_from_slice(&blob[HEADER_BYTES..]);
+    Ok(sec1)
 }
 
 fn validate_key_name(name: String) -> Result<String, CngKeyError> {
@@ -465,6 +546,46 @@ mod tests {
         );
 
         reopened.delete().expect("test key should delete");
+    }
+
+    #[test]
+    fn rcgen_adapter_signs_without_private_key_export() {
+        let name = unique_key_name();
+        let _cleanup = TestKeyCleanup::new(name.clone());
+        let key = CngMachineKey::create(name.clone()).expect("machine key should be created");
+        assert_eq!(key.export_policy().expect("export policy should read"), 0);
+
+        let adapter = CngRcgenSigningKey::new(key).expect("rcgen adapter should initialize");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new())
+            .expect("certificate params");
+        params.serial_number = Some(1_u64.into());
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "ClassMesh CNG Test Authority");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::DigitalSignature,
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+
+        let issuer =
+            rcgen::CertifiedIssuer::self_signed(params, adapter).expect("CNG key should sign X.509");
+        assert!(!issuer.der().is_empty());
+        assert_eq!(
+            issuer
+                .signing_key()
+                .machine_key()
+                .export_policy()
+                .expect("export policy should remain readable"),
+            0
+        );
+
+        drop(issuer);
+        CngMachineKey::open(name)
+            .expect("persisted key should reopen")
+            .delete()
+            .expect("test key should delete");
     }
 
     #[test]
