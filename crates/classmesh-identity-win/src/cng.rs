@@ -34,7 +34,6 @@ pub enum CngKeyError {
         actual: u32,
     },
     InvalidPublicKeyBlob,
-    InvalidSignatureEncoding,
 }
 
 impl Display for CngKeyError {
@@ -59,8 +58,9 @@ impl Display for CngKeyError {
                 formatter,
                 "{property} returned {actual} bytes; expected {expected}"
             ),
-            Self::InvalidPublicKeyBlob => write!(formatter, "unexpected CNG ECDSA P-256 public key blob"),
-            Self::InvalidSignatureEncoding => write!(formatter, "unexpected CNG ECDSA P-256 signature encoding"),
+            Self::InvalidPublicKeyBlob => {
+                write!(formatter, "unexpected CNG ECDSA P-256 public key blob")
+            }
         }
     }
 }
@@ -556,6 +556,13 @@ mod tests {
         assert_eq!(key.export_policy().expect("export policy should read"), 0);
 
         let adapter = CngRcgenSigningKey::new(key).expect("rcgen adapter should initialize");
+        assert_eq!(
+            adapter
+                .machine_key()
+                .export_policy()
+                .expect("adapter key export policy"),
+            0
+        );
         let mut params = rcgen::CertificateParams::new(Vec::<String>::new())
             .expect("certificate params");
         params.serial_number = Some(1_u64.into());
@@ -572,14 +579,6 @@ mod tests {
         let issuer =
             rcgen::CertifiedIssuer::self_signed(params, adapter).expect("CNG key should sign X.509");
         assert!(!issuer.der().is_empty());
-        assert_eq!(
-            issuer
-                .signing_key()
-                .machine_key()
-                .export_policy()
-                .expect("export policy should remain readable"),
-            0
-        );
 
         drop(issuer);
         CngMachineKey::open(name)
