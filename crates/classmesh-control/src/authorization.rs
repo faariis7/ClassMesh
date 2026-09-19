@@ -12,9 +12,17 @@ pub enum CommandAuthorizationError {
         expected: ProtocolVersion,
         received: ProtocolVersion,
     },
-    WrongSession { expected: u64, received: u64 },
-    NonIncreasingSequence { previous: u64, received: u64 },
-    Unauthorized { permission: Permission },
+    WrongSession {
+        expected: u64,
+        received: u64,
+    },
+    NonIncreasingSequence {
+        previous: u64,
+        received: u64,
+    },
+    Unauthorized {
+        permission: Permission,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,10 +176,8 @@ mod tests {
         assert_eq!(guard.last_sequence(), 1);
 
         let mut wrong = envelope(77, 2);
-        wrong.protocol_version = Some(classmesh_protocol::control_wire::ProtocolVersion {
-            major: 0,
-            minor: 1,
-        });
+        wrong.protocol_version =
+            Some(classmesh_protocol::control_wire::ProtocolVersion { major: 0, minor: 1 });
         assert_eq!(
             guard.authorize(&authorization, &wrong, Permission::ControlInput, 150),
             Err(CommandAuthorizationError::WrongProtocolVersion {
