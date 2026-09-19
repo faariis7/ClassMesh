@@ -31,6 +31,36 @@ The following decision remains deliberately open until Phase 4 physical evidence
 
 Do not close Issue #3 or claim Phase 4 acceptance from hosted CI.
 
+### 2026-09-19 Parallels qualification attempt
+
+Two running Windows 11 ARM Parallels VMs were used for a preliminary Phase 4
+diagnostic run against `main` commit
+`27f97bfb3e07d9a7e06479cde76d2a14098faa64` and CI #353 artifact 10588923268.
+
+- Synthetic transport measurement completed: UDP p50/p95 2.58/10.80 ms and
+  QUIC Datagram p50/p95 1.83/7.31 ms, with 0.00% final effective loss and zero
+  send errors in both valid 60-second client runs.
+- The nominal 500 packets/s workload was not achieved in the VMs: UDP attempted
+  13,187 and QUIC attempted 11,398 rather than 30,000 datagrams. Record the
+  actual counts; do not normalize or claim the requested rate passed.
+- Live media is blocked in this environment. Teacher capture found the display
+  but returned `NoHardwareEncoder`; Student failed to activate a D3D11-aware
+  H.264 decoder with `0x80004005`. The zero-loss proxy consequently received
+  zero media datagrams.
+- The standalone 10-cycle GPU recovery probe also stopped before cycle 1 with
+  the same decoder activation error; it did not measure recovery latency.
+- A follow-up Parallels configuration audit confirmed both VMs already have
+  `3d-acceleration=highest`, automatic video memory, and current Parallels Tools
+  27.0.0-58628. Do not spend another run toggling VM 3D acceleration; the gate
+  needs physical Windows GPU hardware or a future explicitly supported virtual
+  hardware Media Foundation path.
+- 1080p30 render, glass-to-glass latency, 1/3/5% media recovery, GPU recovery,
+  and the 30-minute no-growing-delay soak remain **not measured**.
+- Do not select UDP or QUIC as the default and do not close Issue #3. Resume the
+  live-media matrix on two physical Windows PCs with hardware Media Foundation
+  H.264 encode/decode support. See `docs/PHASE4_TWO_PC_RESULTS.md` for the exact
+  environment, artifact identity, measurements, and blocker evidence.
+
 ## Engineering workflow
 
 For non-trivial repository work, follow:
