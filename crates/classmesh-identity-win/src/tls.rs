@@ -5,9 +5,7 @@ use std::sync::Arc;
 use p256::ecdsa::Signature;
 use rustls::client::ResolvesClientCert;
 use rustls::pki_types::{CertificateDer, SubjectPublicKeyInfoDer, alg_id::ECDSA_P256};
-use rustls::sign::{
-    CertifiedKey, Signer, SigningKey, SingleCertAndKey, public_key_to_spki,
-};
+use rustls::sign::{CertifiedKey, Signer, SigningKey, SingleCertAndKey, public_key_to_spki};
 use rustls::{Error, SignatureAlgorithm, SignatureScheme};
 use sha2::{Digest, Sha256};
 
@@ -77,7 +75,11 @@ impl SigningKey for CngRustlsSigningKey {
     fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
         offered
             .contains(&SignatureScheme::ECDSA_NISTP256_SHA256)
-            .then(|| Box::new(CngRustlsSigner { key: self.key.clone() }) as Box<dyn Signer>)
+            .then(|| {
+                Box::new(CngRustlsSigner {
+                    key: self.key.clone(),
+                }) as Box<dyn Signer>
+            })
     }
 
     fn algorithm(&self) -> SignatureAlgorithm {
