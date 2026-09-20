@@ -34,12 +34,12 @@ Open `tools/phase4-latency-source.html` on the Teacher PC and make it fullscreen
 Then run:
 
 ```powershell
-C:\ClassMesh\phase4\artifacts\classmesh-media-probe.exe --benchmark-h264 --seconds 10
+.\scripts\phase4-two-pc.ps1 -Mode EncoderBenchmark -BinDir C:\ClassMesh\phase4\artifacts -Seconds 10
 ```
 
 The benchmark is bounded to the existing 720p30 compatibility profile and fixed sample count. It records real Media Foundation submission-to-output latency, output/missing counts, whether `MF_LOW_LATENCY` was accepted, keyframe request/observation, and whether the same encoder CLSID can be recreated and accept input after drain. A 720p result is never promoted to a 1080p capability class.
 
-Save the final `H.264 benchmark evidence` line with the other qualification logs. A successful result is prerequisite evidence for later runtime capability wiring only; the runtime must not advertise `H264HardwareEncode` merely because this standalone diagnostic exists.
+The runner saves the output under `phase4-results`; retain the final `H.264 benchmark evidence` line with the other qualification logs. A successful result is prerequisite evidence for later runtime capability wiring only; the runtime must not advertise `H264HardwareEncode` merely because this standalone diagnostic exists.
 
 ## Network preparation
 
