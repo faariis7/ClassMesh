@@ -3,6 +3,7 @@ use crate::authorization::CommandAuthorizationError;
 use crate::dispatch::PrivilegedDispatchError;
 use crate::handshake::HandshakeError;
 use crate::quic::ControlTransportError;
+use crate::stream::StreamOfferError;
 
 /// Stable, non-sensitive diagnostic code for logs/telemetry.
 ///
@@ -74,6 +75,26 @@ pub const fn heartbeat_diagnostic_code(error: &HeartbeatError) -> &'static str {
 }
 
 #[must_use]
+pub const fn stream_offer_diagnostic_code(error: &StreamOfferError) -> &'static str {
+    match error {
+        StreamOfferError::InvalidStreamId => "control.stream.invalid_stream",
+        StreamOfferError::UnsupportedKind => "control.stream.unsupported_kind",
+        StreamOfferError::MissingProfile => "control.stream.missing_profile",
+        StreamOfferError::UnsupportedCodec => "control.stream.unsupported_codec",
+        StreamOfferError::ProfileValueOutOfRange | StreamOfferError::InvalidProfile(_) => {
+            "control.stream.invalid_profile"
+        }
+        StreamOfferError::UnsupportedTransport => "control.stream.unsupported_transport",
+        StreamOfferError::TransportCapabilityNotNegotiated => {
+            "control.stream.transport_not_negotiated"
+        }
+        StreamOfferError::TransportParametersTooLarge => {
+            "control.stream.transport_parameters_too_large"
+        }
+    }
+}
+
+#[must_use]
 pub const fn privileged_dispatch_diagnostic_code(error: &PrivilegedDispatchError) -> &'static str {
     match error {
         PrivilegedDispatchError::UnsupportedPayload => "control.command.unsupported_payload",
@@ -129,6 +150,24 @@ mod tests {
         assert_eq!(
             command_authorization_diagnostic_code(&unauthorized),
             "control.command.unauthorized"
+        );
+    }
+
+    #[test]
+    fn stream_offer_codes_are_stable_and_non_sensitive() {
+        assert_eq!(
+            stream_offer_diagnostic_code(&StreamOfferError::InvalidStreamId),
+            "control.stream.invalid_stream"
+        );
+        assert_eq!(
+            stream_offer_diagnostic_code(&StreamOfferError::TransportCapabilityNotNegotiated),
+            "control.stream.transport_not_negotiated"
+        );
+        assert_eq!(
+            stream_offer_diagnostic_code(&StreamOfferError::InvalidProfile(
+                classmesh_core::adaptation::StreamProfileError::InvalidGeometry
+            )),
+            "control.stream.invalid_profile"
         );
     }
 
