@@ -20,24 +20,6 @@ pub enum StreamOfferError {
     TransportParametersTooLarge,
 }
 
-impl StreamOfferError {
-    #[must_use]
-    pub const fn diagnostic_code(self) -> &'static str {
-        match self {
-            Self::InvalidStreamId => "control.stream.invalid_stream",
-            Self::UnsupportedKind => "control.stream.unsupported_kind",
-            Self::MissingProfile => "control.stream.missing_profile",
-            Self::UnsupportedCodec => "control.stream.unsupported_codec",
-            Self::ProfileValueOutOfRange | Self::InvalidProfile(_) => {
-                "control.stream.invalid_profile"
-            }
-            Self::UnsupportedTransport => "control.stream.unsupported_transport",
-            Self::TransportCapabilityNotNegotiated => "control.stream.transport_not_negotiated",
-            Self::TransportParametersTooLarge => "control.stream.transport_parameters_too_large",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedInteractiveStreamOffer {
     pub stream_id: u64,
@@ -214,23 +196,6 @@ mod tests {
         assert_eq!(
             validate_interactive_stream_offer(&hevc, &capabilities),
             Err(StreamOfferError::UnsupportedCodec)
-        );
-    }
-
-    #[test]
-    fn stream_offer_error_diagnostics_are_stable_and_non_sensitive() {
-        assert_eq!(
-            StreamOfferError::InvalidStreamId.diagnostic_code(),
-            "control.stream.invalid_stream"
-        );
-        assert_eq!(
-            StreamOfferError::TransportCapabilityNotNegotiated.diagnostic_code(),
-            "control.stream.transport_not_negotiated"
-        );
-        assert_eq!(
-            StreamOfferError::InvalidProfile(StreamProfileError::InvalidGeometry)
-                .diagnostic_code(),
-            "control.stream.invalid_profile"
         );
     }
 
