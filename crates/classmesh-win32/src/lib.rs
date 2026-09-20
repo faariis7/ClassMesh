@@ -11,7 +11,8 @@ mod session_process;
 
 #[cfg(windows)]
 pub use input::{
-    ABSOLUTE_COORDINATE_MAX, InputAction, InputError, InputInjector, InputKey, MouseButton,
+    ABSOLUTE_COORDINATE_MAX, InputAction, InputDesktopUnavailable, InputError, InputInjector,
+    InputKey, MouseButton,
 };
 #[cfg(windows)]
 pub use named_pipe::{NamedPipeClient, NamedPipeServer, PipeError, PipePeer, worker_pipe_name};

@@ -71,6 +71,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 classmesh_windows_runtime::ipc::IpcControlCommand::ResumeMedia => {
+                    // A release attempted during lock/secure-desktop may have been blocked.
+                    // Retry once the interactive desktop is active again before accepting input.
+                    release_tracked_input(&mut input_injector);
                     capture = match start_capture() {
                         Ok(capture) => Some(capture),
                         Err(error) => {
@@ -96,7 +99,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(WorkerEvent::Input(event)) => match input_action_from_wire(event) {
                 Ok(action) => {
                     if let Err(error) = input_injector.apply(action) {
-                        eprintln!("ClassMesh Worker input execution failed: {error}");
+                        eprintln!(
+                            "ClassMesh Worker input rejected: {}",
+                            error.diagnostic_code()
+                        );
                     }
                 }
                 Err(error) => {
@@ -177,7 +183,10 @@ enum WorkerEvent {
 #[cfg(windows)]
 fn release_tracked_input(injector: &mut classmesh_win32::InputInjector) {
     if let Err(error) = injector.release_all() {
-        eprintln!("ClassMesh Worker failed to release tracked input during teardown: {error}");
+        eprintln!(
+            "ClassMesh Worker input cleanup deferred: {}",
+            error.diagnostic_code()
+        );
     }
 }
 

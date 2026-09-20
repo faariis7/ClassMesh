@@ -3,6 +3,10 @@ use std::fmt::{Display, Formatter};
 use std::io;
 use std::mem::size_of;
 
+use windows_sys::Win32::System::StationsAndDesktops::{
+    GetThreadDesktop, GetUserObjectInformationW, UOI_IO,
+};
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
     KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
@@ -53,6 +57,12 @@ pub enum InputAction {
     ReleaseAll,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputDesktopUnavailable {
+    NotInputDesktop,
+    ProbeFailed,
+}
+
 #[derive(Debug)]
 pub enum InputError {
     AbsoluteCoordinateOutOfRange {
@@ -64,6 +74,7 @@ pub enum InputError {
         scan_code: u32,
     },
     MissingKeyCode,
+    DesktopUnavailable(InputDesktopUnavailable),
     SendInput {
         requested: u32,
         inserted: u32,
@@ -91,6 +102,15 @@ impl Display for InputError {
                     "input key requires a scan code or virtual-key code"
                 )
             }
+            Self::DesktopUnavailable(InputDesktopUnavailable::NotInputDesktop) => {
+                write!(formatter, "Worker desktop is not the current input desktop")
+            }
+            Self::DesktopUnavailable(InputDesktopUnavailable::ProbeFailed) => {
+                write!(
+                    formatter,
+                    "Worker could not verify the current input desktop"
+                )
+            }
             Self::SendInput {
                 requested,
                 inserted,
@@ -112,6 +132,24 @@ impl std::error::Error for InputError {
     }
 }
 
+impl InputError {
+    #[must_use]
+    pub const fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::AbsoluteCoordinateOutOfRange { .. } => "worker.input.absolute_out_of_range",
+            Self::KeyCodeOutOfRange { .. } => "worker.input.key_code_out_of_range",
+            Self::MissingKeyCode => "worker.input.missing_key_code",
+            Self::DesktopUnavailable(InputDesktopUnavailable::NotInputDesktop) => {
+                "worker.input.desktop_unavailable"
+            }
+            Self::DesktopUnavailable(InputDesktopUnavailable::ProbeFailed) => {
+                "worker.input.desktop_probe_failed"
+            }
+            Self::SendInput { .. } => "worker.input.send_rejected",
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct InputInjector {
     pressed_keys: BTreeSet<InputKey>,
@@ -120,6 +158,7 @@ pub struct InputInjector {
 
 impl InputInjector {
     pub fn apply(&mut self, action: InputAction) -> Result<(), InputError> {
+        ensure_input_desktop()?;
         match action {
             InputAction::MouseMove { x, y, absolute } => {
                 let input = mouse_move_input(x, y, absolute)?;
@@ -298,6 +337,42 @@ fn key_input(key: InputKey, down: bool) -> INPUT {
     }
 }
 
+fn ensure_input_desktop() -> Result<(), InputError> {
+    // SAFETY: GetCurrentThreadId has no preconditions. GetThreadDesktop returns a borrowed
+    // desktop handle for this thread; it must not be closed by the caller. UOI_IO writes
+    // a BOOL-sized value into the provided initialized stack slot.
+    let thread_id = unsafe { GetCurrentThreadId() };
+    let desktop = unsafe { GetThreadDesktop(thread_id) };
+    if desktop.is_null() {
+        return Err(InputError::DesktopUnavailable(
+            InputDesktopUnavailable::ProbeFailed,
+        ));
+    }
+
+    let mut is_input_desktop = 0_i32;
+    let mut bytes_needed = 0_u32;
+    let ok = unsafe {
+        GetUserObjectInformationW(
+            desktop,
+            UOI_IO,
+            (&mut is_input_desktop as *mut i32).cast(),
+            u32::try_from(size_of::<i32>()).expect("BOOL size fits u32"),
+            &mut bytes_needed,
+        )
+    };
+    if ok == 0 {
+        return Err(InputError::DesktopUnavailable(
+            InputDesktopUnavailable::ProbeFailed,
+        ));
+    }
+    if is_input_desktop == 0 {
+        return Err(InputError::DesktopUnavailable(
+            InputDesktopUnavailable::NotInputDesktop,
+        ));
+    }
+    Ok(())
+}
+
 fn send_inputs(inputs: &[INPUT]) -> Result<(), InputError> {
     if inputs.is_empty() {
         return Ok(());
@@ -355,6 +430,23 @@ mod tests {
             validate_key(u32::from(u16::MAX) + 1, 0, false),
             Err(InputError::KeyCodeOutOfRange { .. })
         ));
+    }
+
+    #[test]
+    fn input_diagnostic_codes_are_stable_and_value_free() {
+        assert_eq!(
+            InputError::DesktopUnavailable(InputDesktopUnavailable::NotInputDesktop)
+                .diagnostic_code(),
+            "worker.input.desktop_unavailable"
+        );
+        assert_eq!(
+            InputError::DesktopUnavailable(InputDesktopUnavailable::ProbeFailed).diagnostic_code(),
+            "worker.input.desktop_probe_failed"
+        );
+        assert_eq!(
+            InputError::MissingKeyCode.diagnostic_code(),
+            "worker.input.missing_key_code"
+        );
     }
 
     #[test]
