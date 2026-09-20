@@ -1,5 +1,7 @@
 #![deny(unsafe_code)]
 
+use std::time::Duration;
+
 use classmesh_video::{Codec, EncoderClass, EncoderProbeResult};
 
 #[cfg(windows)]
@@ -70,6 +72,112 @@ impl EncoderBenchmarkConfig {
 pub struct EncodeSample {
     pub encode_ms: f32,
     pub produced_output: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BenchmarkAccumulatorError {
+    InvalidTarget,
+    OutputWithoutSubmission,
+    InvalidLatency,
+    Finalized,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundedEncoderBenchmark {
+    target_samples: usize,
+    submitted: usize,
+    samples: Vec<EncodeSample>,
+    finalized: bool,
+}
+
+impl BoundedEncoderBenchmark {
+    pub fn from_config(config: EncoderBenchmarkConfig) -> Result<Self, BenchmarkAccumulatorError> {
+        let target_samples = usize::from(config.sample_frames);
+        if target_samples == 0 {
+            return Err(BenchmarkAccumulatorError::InvalidTarget);
+        }
+        Ok(Self {
+            target_samples,
+            submitted: 0,
+            samples: Vec::with_capacity(target_samples),
+            finalized: false,
+        })
+    }
+
+    #[must_use]
+    pub const fn submitted(&self) -> usize {
+        self.submitted
+    }
+
+    #[must_use]
+    pub fn outputs(&self) -> usize {
+        self.samples
+            .iter()
+            .filter(|sample| sample.produced_output)
+            .count()
+    }
+
+    #[must_use]
+    pub fn is_submission_complete(&self) -> bool {
+        self.submitted >= self.target_samples
+    }
+
+    #[must_use]
+    pub fn samples(&self) -> &[EncodeSample] {
+        &self.samples
+    }
+
+    #[must_use]
+    pub const fn is_finalized(&self) -> bool {
+        self.finalized
+    }
+
+    pub fn record_submission(&mut self) -> bool {
+        if self.finalized || self.is_submission_complete() {
+            return false;
+        }
+        self.submitted += 1;
+        true
+    }
+
+    pub fn record_output(&mut self, latency: Duration) -> Result<(), BenchmarkAccumulatorError> {
+        if self.finalized {
+            return Err(BenchmarkAccumulatorError::Finalized);
+        }
+        if self.samples.len() >= self.submitted {
+            return Err(BenchmarkAccumulatorError::OutputWithoutSubmission);
+        }
+        let encode_ms = latency.as_secs_f32() * 1_000.0;
+        if !encode_ms.is_finite() || encode_ms <= 0.0 {
+            return Err(BenchmarkAccumulatorError::InvalidLatency);
+        }
+        self.samples.push(EncodeSample {
+            encode_ms,
+            produced_output: true,
+        });
+        Ok(())
+    }
+
+    pub fn finalize_missing(
+        &mut self,
+        timeout_latency: Duration,
+    ) -> Result<(), BenchmarkAccumulatorError> {
+        if self.finalized {
+            return Err(BenchmarkAccumulatorError::Finalized);
+        }
+        let encode_ms = timeout_latency.as_secs_f32() * 1_000.0;
+        if !encode_ms.is_finite() || encode_ms <= 0.0 {
+            return Err(BenchmarkAccumulatorError::InvalidLatency);
+        }
+        while self.samples.len() < self.submitted {
+            self.samples.push(EncodeSample {
+                encode_ms,
+                produced_output: false,
+            });
+        }
+        self.finalized = true;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,6 +316,89 @@ mod tests {
             advertised_hardware: true,
             advertised_async: true,
         }
+    }
+
+    #[test]
+    fn bounded_benchmark_rejects_zero_sample_target() {
+        assert_eq!(
+            BoundedEncoderBenchmark::from_config(EncoderBenchmarkConfig {
+                sample_frames: 0,
+                ..EncoderBenchmarkConfig::compatibility_720p30()
+            }),
+            Err(BenchmarkAccumulatorError::InvalidTarget)
+        );
+    }
+
+    #[test]
+    fn bounded_benchmark_never_accepts_more_than_configured_submissions() {
+        let mut benchmark = BoundedEncoderBenchmark::from_config(EncoderBenchmarkConfig {
+            sample_frames: 2,
+            ..EncoderBenchmarkConfig::compatibility_720p30()
+        })
+        .expect("valid benchmark");
+        assert!(benchmark.record_submission());
+        assert!(benchmark.record_submission());
+        assert!(!benchmark.record_submission());
+        assert_eq!(benchmark.submitted(), 2);
+    }
+
+    #[test]
+    fn bounded_benchmark_requires_submission_before_output_and_records_latency() {
+        let mut benchmark =
+            BoundedEncoderBenchmark::from_config(EncoderBenchmarkConfig::compatibility_720p30())
+                .expect("valid benchmark");
+        assert_eq!(
+            benchmark.record_output(Duration::from_millis(5)),
+            Err(BenchmarkAccumulatorError::OutputWithoutSubmission)
+        );
+        assert!(benchmark.record_submission());
+        benchmark
+            .record_output(Duration::from_millis(5))
+            .expect("matching output");
+        assert_eq!(benchmark.outputs(), 1);
+        assert_eq!(benchmark.samples()[0].encode_ms, 5.0);
+    }
+
+    #[test]
+    fn bounded_benchmark_marks_unreturned_submissions_as_missing() {
+        let mut benchmark = BoundedEncoderBenchmark::from_config(EncoderBenchmarkConfig {
+            sample_frames: 2,
+            ..EncoderBenchmarkConfig::compatibility_720p30()
+        })
+        .expect("valid benchmark");
+        assert!(benchmark.record_submission());
+        assert!(benchmark.record_submission());
+        benchmark
+            .record_output(Duration::from_millis(4))
+            .expect("first output");
+        benchmark
+            .finalize_missing(Duration::from_millis(250))
+            .expect("bounded timeout");
+        assert_eq!(benchmark.samples().len(), 2);
+        assert_eq!(benchmark.outputs(), 1);
+        assert!(!benchmark.samples()[1].produced_output);
+        assert_eq!(benchmark.samples()[1].encode_ms, 250.0);
+    }
+
+    #[test]
+    fn finalized_benchmark_rejects_late_mutation() {
+        let mut benchmark =
+            BoundedEncoderBenchmark::from_config(EncoderBenchmarkConfig::compatibility_720p30())
+                .expect("valid benchmark");
+        assert!(benchmark.record_submission());
+        benchmark
+            .finalize_missing(Duration::from_millis(250))
+            .expect("finalize");
+        assert!(benchmark.is_finalized());
+        assert!(!benchmark.record_submission());
+        assert_eq!(
+            benchmark.record_output(Duration::from_millis(5)),
+            Err(BenchmarkAccumulatorError::Finalized)
+        );
+        assert_eq!(
+            benchmark.finalize_missing(Duration::from_millis(250)),
+            Err(BenchmarkAccumulatorError::Finalized)
+        );
     }
 
     #[test]
