@@ -466,6 +466,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn duplicate_pipe_handle_creates_independently_owned_handle() {
+        use windows_sys::Win32::System::Threading::CreateEventW;
+
+        // SAFETY: null security/name pointers request a private unnamed event.
+        let original = unsafe { CreateEventW(null(), 1, 0, null()) };
+        assert!(!original.is_null());
+
+        let duplicate = duplicate_pipe_handle(original).expect("handle should duplicate");
+        assert!(!duplicate.is_null());
+        assert_ne!(duplicate, original);
+
+        // SAFETY: both handles are independently owned after DuplicateHandle succeeds.
+        assert_ne!(unsafe { CloseHandle(duplicate) }, 0);
+        assert_ne!(unsafe { CloseHandle(original) }, 0);
+    }
+
+    #[test]
     fn pipe_name_is_stable_and_local() {
         let name = worker_pipe_name(0x1234, 7, 9);
         assert_eq!(name, "ClassMesh-00001234-00000007-0000000000000009");
