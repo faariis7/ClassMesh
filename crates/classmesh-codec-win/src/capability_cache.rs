@@ -127,11 +127,11 @@ impl DurableEncoderCapabilityCache {
         }
 
         let persisted: PersistedCache = serde_json::from_slice(&bytes)?;
-        let (key, result) = persisted.into_parts()?;
+        let (key, result) = persisted.into_key_and_result()?;
         if &key != expected {
             return Ok(None);
         }
-        Ok(Some(result))
+        Ok(Some(result.into_result()?))
     }
 
     pub fn save(
@@ -203,16 +203,14 @@ impl PersistedCache {
         }
     }
 
-    fn into_parts(
+    fn into_key_and_result(
         self,
-    ) -> Result<(EncoderCapabilityCacheKey, EncoderBenchmarkResult), EncoderCapabilityCacheError>
-    {
+    ) -> Result<(EncoderCapabilityCacheKey, PersistedResult), EncoderCapabilityCacheError> {
         if self.version != CACHE_VERSION {
             return Err(EncoderCapabilityCacheError::UnsupportedVersion(self.version));
         }
         let key = self.key.into_key()?;
-        let result = self.result.into_result()?;
-        Ok((key, result))
+        Ok((key, self.result))
     }
 }
 
