@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use classmesh_control::authorization::AuthenticatedControlGuard;
 use classmesh_control::diagnostics::{
     command_authorization_diagnostic_code, handshake_diagnostic_code, heartbeat_diagnostic_code,
-    privileged_dispatch_diagnostic_code, transport_diagnostic_code,
+    privileged_dispatch_diagnostic_code, stream_offer_diagnostic_code, transport_diagnostic_code,
 };
 use classmesh_control::dispatch::{PrivilegedControlCommand, dispatch_privileged_command};
 use classmesh_control::handshake::{
@@ -21,7 +21,7 @@ use classmesh_control::handshake::{
 use classmesh_control::quic::{
     ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
 };
-use classmesh_control::stream::stream_profile_to_wire;
+use classmesh_control::stream::{stream_profile_to_wire, validate_interactive_stream_offer};
 use classmesh_control::{DEFAULT_OFFLINE_AFTER, HeartbeatSample, HeartbeatTracker};
 use classmesh_core::adaptation::{
     AdaptationPolicy, FocusedProfileController, HysteresisConfig, QualityTier,
@@ -30,7 +30,8 @@ use classmesh_core::{NetworkMetrics, StreamKind};
 use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver};
 use classmesh_protocol::control_wire::{
     ControlEnvelope, HeartbeatAck, InputEvent, MediaTransport as WireMediaTransport,
-    ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamReconfigure, control_envelope,
+    ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamAnswer, StreamOffer,
+    StreamReconfigure, control_envelope,
 };
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::{AuthorizationStore, Permission};
@@ -675,6 +676,54 @@ async fn run_established_session(
                     return;
                 }
             }
+            Some(control_envelope::Payload::StreamOffer(offer)) => {
+                let now_unix_ms = match unix_time_ms() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"invalid service clock");
+                        return;
+                    }
+                };
+                if let Err(error) = guard.authorize(
+                    authorization,
+                    &envelope,
+                    Permission::ViewInteractive,
+                    now_unix_ms,
+                ) {
+                    eprintln!(
+                        "ClassMesh stream offer rejected: {}",
+                        command_authorization_diagnostic_code(&error)
+                    );
+                    connection.close(0_u32.into(), b"stream offer unauthorized");
+                    return;
+                }
+
+                let answer = stream_offer_answer(offer, &session.negotiated.capabilities);
+                let Some(next_sequence) = outbound_sequence.checked_add(1) else {
+                    eprintln!("ClassMesh control session closed: control.sequence.exhausted");
+                    connection.close(0_u32.into(), b"control sequence exhausted");
+                    return;
+                };
+                outbound_sequence = next_sequence;
+                let response = ControlEnvelope {
+                    control_session_id: session.control_session_id,
+                    sequence: outbound_sequence,
+                    protocol_version: Some(WireProtocolVersion {
+                        major: u32::from(session.negotiated.version.major),
+                        minor: u32::from(session.negotiated.version.minor),
+                    }),
+                    request_id: envelope.request_id,
+                    payload: Some(control_envelope::Payload::StreamAnswer(answer)),
+                };
+                if let Err(error) = channel.send(&response).await {
+                    eprintln!(
+                        "ClassMesh stream answer failed: {}",
+                        transport_diagnostic_code(&error)
+                    );
+                    connection.close(0_u32.into(), b"stream answer failed");
+                    return;
+                }
+            }
             Some(control_envelope::Payload::ReceiverFeedback(feedback)) => {
                 let now_unix_ms = match unix_time_ms() {
                     Ok(value) => value,
@@ -877,6 +926,37 @@ impl InputDispatchState {
     }
 }
 
+fn stream_offer_answer(
+    offer: &StreamOffer,
+    negotiated_capabilities: &BTreeSet<Capability>,
+) -> StreamAnswer {
+    let rejection_reason = match validate_interactive_stream_offer(offer, negotiated_capabilities) {
+        Ok(_) => "control.stream.runtime_not_ready",
+        Err(error) => stream_offer_diagnostic_code(&error),
+    };
+
+    StreamAnswer {
+        stream_id: offer.stream_id,
+        accepted: false,
+        rejection_reason: rejection_reason.to_owned(),
+        supported_transports: negotiated_interactive_transports(negotiated_capabilities),
+    }
+}
+
+fn negotiated_interactive_transports(capabilities: &BTreeSet<Capability>) -> Vec<i32> {
+    let mut transports = Vec::with_capacity(3);
+    if capabilities.contains(&Capability::UdpUnicast) {
+        transports.push(WireMediaTransport::UdpUnicast as i32);
+    }
+    if capabilities.contains(&Capability::QuicDatagram) {
+        transports.push(WireMediaTransport::QuicDatagram as i32);
+    }
+    if capabilities.contains(&Capability::WebRtc) {
+        transports.push(WireMediaTransport::Webrtc as i32);
+    }
+    transports
+}
+
 fn media_health_from_wire(value: i32) -> Option<MediaHealth> {
     match value {
         1 => Some(MediaHealth::Idle),
@@ -952,6 +1032,8 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use classmesh_protocol::control_wire::{VideoCodec, VideoProfile};
+
     use super::*;
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(1);
@@ -987,6 +1069,72 @@ mod tests {
         assert!(ControlRuntimeConfig::load(&path).is_err());
 
         let _ = fs::remove_dir_all(path.parent().expect("test parent"));
+    }
+
+    fn interactive_offer(transport: WireMediaTransport) -> StreamOffer {
+        StreamOffer {
+            stream_id: 7,
+            kind: classmesh_protocol::control_wire::StreamKind::Interactive as i32,
+            transport: transport as i32,
+            profile: Some(VideoProfile {
+                width: 1280,
+                height: 720,
+                fps: 30,
+                bitrate_kbps: 2_500,
+                codec: VideoCodec::H264 as i32,
+            }),
+            transport_parameters: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn stream_offer_preflight_never_accepts_before_runtime_dispatch_exists() {
+        let capabilities = BTreeSet::from([Capability::UdpUnicast]);
+        let answer = stream_offer_answer(
+            &interactive_offer(WireMediaTransport::UdpUnicast),
+            &capabilities,
+        );
+
+        assert!(!answer.accepted);
+        assert_eq!(answer.stream_id, 7);
+        assert_eq!(answer.rejection_reason, "control.stream.runtime_not_ready");
+        assert_eq!(
+            answer.supported_transports,
+            vec![WireMediaTransport::UdpUnicast as i32]
+        );
+    }
+
+    #[test]
+    fn stream_offer_preflight_reports_unnegotiated_transport_explicitly() {
+        let answer = stream_offer_answer(
+            &interactive_offer(WireMediaTransport::UdpUnicast),
+            &BTreeSet::new(),
+        );
+
+        assert!(!answer.accepted);
+        assert_eq!(
+            answer.rejection_reason,
+            "control.stream.transport_not_negotiated"
+        );
+        assert!(answer.supported_transports.is_empty());
+    }
+
+    #[test]
+    fn stream_offer_supported_transport_list_is_deterministic_and_explicit() {
+        let capabilities = BTreeSet::from([
+            Capability::WebRtc,
+            Capability::QuicDatagram,
+            Capability::UdpUnicast,
+            Capability::DxgiCapture,
+        ]);
+        assert_eq!(
+            negotiated_interactive_transports(&capabilities),
+            vec![
+                WireMediaTransport::UdpUnicast as i32,
+                WireMediaTransport::QuicDatagram as i32,
+                WireMediaTransport::Webrtc as i32,
+            ]
+        );
     }
 
     #[test]
