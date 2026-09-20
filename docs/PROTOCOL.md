@@ -165,6 +165,10 @@ Production policy will add hysteresis and historical windows. A single sample cr
 
 Phase 6 focused interactive adaptation uses authenticated `ReceiverFeedback` on the established control session to drive a hysteretic profile decision. A profile-only `StreamReconfigure` sets `transport` to `MEDIA_TRANSPORT_UNSPECIFIED` and leaves `transport_parameters` empty, which means the receiver keeps the stream's current media transport. This deliberately does not select the one-to-one UDP-vs-QUIC-Datagram default while Phase 4 Issue #3 remains physically unqualified.
 
+Interactive stream establishment is explicit rather than inferred. An authenticated peer with `ViewInteractive` may send `StreamOffer`; the Service validates the bounded H.264 profile, stream kind, explicit transport, transport-parameter size, and—critically—that the requested transport capability was negotiated in the established Hello. The Service answers with `StreamAnswer` using the same request correlation. A rejected offer is an ordinary preflight result and does not by itself imply that the authenticated control session is offline.
+
+Until production media dispatch/sender ownership exists, a structurally valid offer still receives `accepted=false` with the stable diagnostic `control.stream.runtime_not_ready`. This prevents negotiation code from claiming a stream exists before the Worker has actually created its media runtime. `supported_transports` is derived only from transports already negotiated for that control session; it never invents UDP, QUIC Datagram, or WebRTC support from capture/codec capabilities.
+
 ## 7. Monitoring vs presentation
 
 The media protocol does not force every workload to use the same codec profile.
