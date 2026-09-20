@@ -74,9 +74,7 @@ pub fn dispatch_privileged_command(
                 Permission::ReadClipboard,
                 now_unix_ms,
             )?;
-            Ok(PrivilegedControlCommand::ClipboardReadRequest(
-                request.clone(),
-            ))
+            Ok(PrivilegedControlCommand::ClipboardReadRequest(*request))
         }
         control_envelope::Payload::ClipboardWrite(write) => {
             validate_text(&write.text_utf8)
