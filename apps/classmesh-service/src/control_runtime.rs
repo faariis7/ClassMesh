@@ -21,16 +21,16 @@ use classmesh_control::handshake::{
 use classmesh_control::quic::{
     ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
 };
+use classmesh_control::stream::stream_profile_to_wire;
 use classmesh_control::{DEFAULT_OFFLINE_AFTER, HeartbeatSample, HeartbeatTracker};
 use classmesh_core::adaptation::{
-    AdaptationPolicy, FocusedProfileController, HysteresisConfig, QualityTier, StreamProfile,
+    AdaptationPolicy, FocusedProfileController, HysteresisConfig, QualityTier,
 };
 use classmesh_core::{NetworkMetrics, StreamKind};
 use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver};
 use classmesh_protocol::control_wire::{
     ControlEnvelope, HeartbeatAck, InputEvent, MediaTransport as WireMediaTransport,
-    ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamReconfigure, VideoCodec,
-    VideoProfile, control_envelope,
+    ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamReconfigure, control_envelope,
 };
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::{AuthorizationStore, Permission};
@@ -184,16 +184,6 @@ fn receiver_feedback_metrics(feedback: &ReceiverFeedback) -> Option<NetworkMetri
         wireless: false,
     };
     metrics.is_valid().then_some(metrics)
-}
-
-fn stream_profile_to_wire(profile: StreamProfile) -> VideoProfile {
-    VideoProfile {
-        width: u32::from(profile.width),
-        height: u32::from(profile.height),
-        fps: u32::from(profile.fps),
-        bitrate_kbps: profile.bitrate_kbps,
-        codec: VideoCodec::H264 as i32,
-    }
 }
 
 #[derive(Debug)]
@@ -941,7 +931,10 @@ mod tests {
         let profile = reconfigure.profile.expect("video profile");
         assert_eq!(reconfigure.stream_id, 7);
         assert_eq!((profile.width, profile.height, profile.fps), (640, 360, 20));
-        assert_eq!(profile.codec, VideoCodec::H264 as i32);
+        assert_eq!(
+            profile.codec,
+            classmesh_protocol::control_wire::VideoCodec::H264 as i32
+        );
         assert_eq!(
             reconfigure.transport,
             WireMediaTransport::Unspecified as i32
