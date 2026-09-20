@@ -86,9 +86,15 @@ pub(crate) struct InputDispatchChannels {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct FocusedMediaReconfigure {
+    pub(crate) control_session_id: u64,
+    pub(crate) reconfigure: StreamReconfigure,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct FocusedMediaDispatchChannels {
-    pub(crate) reconfigure_tx: mpsc::SyncSender<StreamReconfigure>,
-    pub(crate) clear_tx: mpsc::SyncSender<()>,
+    pub(crate) reconfigure_tx: mpsc::SyncSender<FocusedMediaReconfigure>,
+    pub(crate) clear_tx: mpsc::SyncSender<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -444,9 +450,9 @@ async fn run_listener(
                             )
                             .await;
                             if input.release_owner(session.control_session_id) {
-                                match media.clear_tx.try_send(()) {
-                                    Ok(()) | Err(mpsc::TrySendError::Full(())) => {}
-                                    Err(mpsc::TrySendError::Disconnected(())) => {
+                                match media.clear_tx.try_send(session.control_session_id) {
+                                    Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                                    Err(mpsc::TrySendError::Disconnected(_)) => {
                                         eprintln!(
                                             "ClassMesh focused media cleanup skipped: dispatch channel disconnected"
                                         );
@@ -616,7 +622,10 @@ async fn run_established_session(
                     continue;
                 };
 
-                match media.reconfigure_tx.try_send(reconfigure.clone()) {
+                match media.reconfigure_tx.try_send(FocusedMediaReconfigure {
+                    control_session_id: session.control_session_id,
+                    reconfigure: reconfigure.clone(),
+                }) {
                     Ok(()) => {}
                     Err(mpsc::TrySendError::Full(_)) => {
                         eprintln!(
