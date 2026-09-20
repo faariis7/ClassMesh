@@ -431,7 +431,14 @@ mod tests {
         let decision = AdaptationPolicy::default().decide(StreamKind::Interactive, metrics);
         assert_eq!(decision.tier, QualityTier::Emergency);
         assert_eq!(decision.transport, MediaTransport::ReliableFallback);
-        assert_eq!(decision.profile.fps, 10);
+        assert_eq!(decision.profile.fps, 20);
+    }
+
+    #[test]
+    fn teacher_presentation_emergency_profile_stays_conservative() {
+        let profile = profile_for(StreamKind::TeacherPresentation, QualityTier::Emergency);
+        assert_eq!(profile.fps, 10);
+        assert_eq!((profile.width, profile.height), (854, 480));
     }
 
     #[test]
