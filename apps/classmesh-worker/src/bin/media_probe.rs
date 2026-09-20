@@ -12,6 +12,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use classmesh_worker::presentation::PresentationPipeline;
 
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--benchmark-h264") {
+        return run_h264_benchmark(&args);
+    }
     let seconds = parse_seconds(&args)?;
     let output_path = parse_output_path(&args)?;
     let udp_destination = parse_udp_destination(&args)?;
@@ -245,6 +248,185 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         keyframe_coordinator.suppressed_requests(),
         started.elapsed().as_secs_f32()
     );
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_h264_benchmark(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::{Duration, Instant};
+
+    use classmesh_capture_win::CaptureStep;
+    use classmesh_codec_win::{
+        BenchmarkCapabilities, BoundedEncoderBenchmark, EncoderBenchmarkConfig, summarize_benchmark,
+    };
+    use classmesh_video::{Codec, EncoderClass};
+    use classmesh_worker::presentation::{PresentationPipeline, PresentationTarget};
+
+    const MISSING_OUTPUT_LATENCY: Duration = Duration::from_secs(5);
+    const RESET_VERIFY_WINDOW: Duration = Duration::from_secs(2);
+
+    let seconds = parse_seconds(args)?;
+    let config = EncoderBenchmarkConfig::compatibility_720p30();
+    let target = PresentationTarget::try_from(config)?;
+    let mut benchmark = BoundedEncoderBenchmark::from_config(config)
+        .map_err(|error| format!("invalid bounded H.264 benchmark config: {error:?}"))?;
+    let mut capture = start_capture()?;
+    let mut pipeline: Option<PresentationPipeline> = None;
+    let started = Instant::now();
+    let deadline = started
+        .checked_add(Duration::from_secs(seconds))
+        .unwrap_or(started);
+    let mut candidate = None;
+    let mut profile = None;
+    let mut low_latency_accepted = false;
+    let mut keyframe_request_accepted = false;
+    let mut keyframe_observed = false;
+
+    eprintln!(
+        "ClassMesh bounded H.264 benchmark: {}x{} @ {} fps, {} samples, {} kbps",
+        config.width,
+        config.height,
+        config.target_fps,
+        config.sample_frames,
+        config.bitrate_kbps
+    );
+
+    while Instant::now() < deadline && !benchmark.is_submission_complete() {
+        match capture.poll(16) {
+            CaptureStep::Frame { meta, frame } => {
+                if pipeline.is_none() {
+                    let mut created =
+                        PresentationPipeline::from_first_frame_with_target(&frame, target)?;
+                    candidate = Some(created.encoder_candidate().clone());
+                    profile = Some(created.profile());
+                    low_latency_accepted = created.low_latency_accepted();
+                    keyframe_request_accepted = created.request_keyframe().is_ok();
+                    pipeline = Some(created);
+                }
+
+                let active = pipeline.as_mut().expect("benchmark pipeline initialized");
+                let submitted_before = active.stats().submitted_frames;
+                let outputs = active.process_frame_with_metrics(meta, frame)?;
+                let submitted_after = active.stats().submitted_frames;
+                for _ in submitted_before..submitted_after {
+                    let _ = benchmark.record_submission();
+                }
+                for output in outputs {
+                    keyframe_observed |= output.frame.meta.keyframe;
+                    if benchmark.outputs() < benchmark.submitted() {
+                        benchmark
+                            .record_output(output.encode_latency)
+                            .map_err(|error| format!("H.264 benchmark sample error: {error:?}"))?;
+                    }
+                }
+            }
+            CaptureStep::NoFrame => {}
+            CaptureStep::RetryAfter { delay_ms, reason } => {
+                eprintln!(
+                    "H.264 benchmark DXGI retry after {reason:?} in {delay_ms} ms"
+                );
+                if delay_ms > 0 {
+                    std::thread::sleep(Duration::from_millis(delay_ms.min(250)));
+                }
+            }
+            CaptureStep::Suspended(reason) => {
+                return Err(format!("DXGI suspended during H.264 benchmark: {reason:?}").into());
+            }
+            CaptureStep::Failed(reason) => {
+                return Err(format!("DXGI failed during H.264 benchmark: {reason:?}").into());
+            }
+        }
+    }
+
+    let Some(mut active) = pipeline.take() else {
+        return Err("H.264 benchmark captured no usable frames".into());
+    };
+    let tail = active.finish_with_metrics()?;
+    for output in tail {
+        keyframe_observed |= output.frame.meta.keyframe;
+        if benchmark.outputs() < benchmark.submitted() {
+            benchmark
+                .record_output(output.encode_latency)
+                .map_err(|error| format!("H.264 benchmark tail sample error: {error:?}"))?;
+        }
+    }
+    benchmark
+        .finalize_missing(MISSING_OUTPUT_LATENCY)
+        .map_err(|error| format!("H.264 benchmark finalize error: {error:?}"))?;
+    let benchmark_elapsed = started.elapsed().as_secs_f32();
+
+    let reset_deadline = Instant::now()
+        .checked_add(RESET_VERIFY_WINDOW)
+        .unwrap_or_else(Instant::now);
+    let mut reset_ok = false;
+    while Instant::now() < reset_deadline {
+        match capture.poll(16) {
+            CaptureStep::Frame { meta, frame } => {
+                match PresentationPipeline::from_first_frame_with_target(&frame, target) {
+                    Ok(mut recreated) => {
+                        if recreated.process_frame_with_metrics(meta, frame).is_ok()
+                            && recreated.stats().submitted_frames > 0
+                        {
+                            reset_ok = true;
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("H.264 benchmark reset recreation failed: {error}");
+                    }
+                }
+                break;
+            }
+            CaptureStep::NoFrame => {}
+            CaptureStep::RetryAfter { delay_ms, .. } => {
+                if delay_ms > 0 {
+                    std::thread::sleep(Duration::from_millis(delay_ms.min(100)));
+                }
+            }
+            CaptureStep::Suspended(_) | CaptureStep::Failed(_) => break,
+        }
+    }
+
+    let candidate = candidate.ok_or("H.264 benchmark has no encoder candidate")?;
+    let profile = profile.ok_or("H.264 benchmark has no resolved profile")?;
+    let capabilities = BenchmarkCapabilities {
+        gpu_native_input: true,
+        low_latency_accepted,
+        reset_ok,
+        dynamic_bitrate_ok: false,
+        keyframe_request_ok: keyframe_request_accepted && keyframe_observed,
+    };
+    let result = summarize_benchmark(
+        &candidate,
+        Codec::H264,
+        benchmark.samples(),
+        benchmark_elapsed,
+        capabilities,
+    )
+    .map_err(|error| format!("H.264 benchmark summary failed: {error:?}"))?;
+
+    // This slice validates the 720p compatibility profile only. Never promote a 720p result to a
+    // 1080p class even if latency/FPS thresholds would otherwise satisfy the generic classifier.
+    let qualified_class = result.class.min(EncoderClass::Compatibility);
+    eprintln!(
+        "H.264 benchmark evidence: encoder={:?}, profile={}x{}@{}fps, submitted={}, outputs={}, missing={}, sustained_fps={:.2}, p50_ms={:.2}, p95_ms={:.2}, low_latency={}, keyframe_ok={}, reset_ok={}, qualified_class={qualified_class:?}",
+        candidate.name,
+        profile.target_width,
+        profile.target_height,
+        profile.fps,
+        benchmark.submitted(),
+        result.output_frames,
+        result.dropped_or_missing,
+        result.probe.sustained_fps,
+        result.probe.p50_encode_ms,
+        result.probe.p95_encode_ms,
+        result.probe.low_latency_accepted,
+        result.probe.keyframe_request_ok,
+        result.probe.reset_ok,
+    );
+
+    if qualified_class == EncoderClass::Unsupported {
+        return Err("bounded H.264 benchmark did not qualify the compatibility profile".into());
+    }
     Ok(())
 }
 
