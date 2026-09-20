@@ -4,24 +4,22 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use classmesh_control::diagnostics::handshake_diagnostic_code;
-use classmesh_control::handshake::{server_hello_enrolled, ServerHelloConfig};
+use classmesh_control::handshake::{ServerHelloConfig, server_hello_enrolled};
 use classmesh_control::quic::{
-    enrolled_server_config_with_resolver, ControlChannel, DEFAULT_IO_TIMEOUT,
+    ControlChannel, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
 };
-use classmesh_identity_win::{
-    cng_server_cert_resolver, CngMachineKey, MachineIdentityBundle,
-};
+use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver};
 use classmesh_protocol::{Capability, PROTOCOL_VERSION};
 use classmesh_security::AuthorizationStore;
 use quinn::Endpoint;
+use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use rustls::server::WebPkiClientVerifier;
-use rustls::RootCertStore;
 use serde::Deserialize;
 use tokio::sync::oneshot;
 
@@ -353,11 +351,8 @@ mod tests {
     #[test]
     fn config_requires_supported_version_and_nonzero_port() {
         let path = test_path();
-        fs::write(
-            &path,
-            r#"{"version":1,"bind_address":"127.0.0.1:44991"}"#,
-        )
-        .expect("write config");
+        fs::write(&path, r#"{"version":1,"bind_address":"127.0.0.1:44991"}"#)
+            .expect("write config");
         assert_eq!(
             ControlRuntimeConfig::load(&path).expect("valid config"),
             ControlRuntimeConfig {
@@ -369,11 +364,8 @@ mod tests {
             .expect("write invalid port");
         assert!(ControlRuntimeConfig::load(&path).is_err());
 
-        fs::write(
-            &path,
-            r#"{"version":2,"bind_address":"127.0.0.1:44991"}"#,
-        )
-        .expect("write invalid version");
+        fs::write(&path, r#"{"version":2,"bind_address":"127.0.0.1:44991"}"#)
+            .expect("write invalid version");
         assert!(ControlRuntimeConfig::load(&path).is_err());
 
         let _ = fs::remove_dir_all(path.parent().expect("test parent"));
