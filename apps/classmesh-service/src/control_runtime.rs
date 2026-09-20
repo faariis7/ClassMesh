@@ -40,6 +40,12 @@ const CONFIG_VERSION: u32 = 1;
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Debug, Clone)]
+pub(crate) enum InputExecutorCommand {
+    Event(InputEvent),
+    ReleaseAll,
+}
+
 #[derive(Debug)]
 pub(crate) struct ControlRuntimeState {
     pub(crate) identity: MachineIdentityBundle,
@@ -114,7 +120,7 @@ impl ControlRuntime {
     pub(crate) fn start(
         state: ControlRuntimeState,
         config: ControlRuntimeConfig,
-        input_tx: mpsc::SyncSender<InputEvent>,
+        input_tx: mpsc::SyncSender<InputExecutorCommand>,
         input_available: Arc<AtomicBool>,
     ) -> Result<Self, String> {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<SocketAddr, String>>(1);
@@ -203,7 +209,7 @@ async fn run_listener(
     config: ControlRuntimeConfig,
     ready_tx: mpsc::SyncSender<Result<SocketAddr, String>>,
     mut stop_rx: oneshot::Receiver<()>,
-    input_tx: mpsc::SyncSender<InputEvent>,
+    input_tx: mpsc::SyncSender<InputExecutorCommand>,
     input_available: Arc<AtomicBool>,
 ) {
     let endpoint = match build_endpoint(&state, config) {
@@ -229,6 +235,7 @@ async fn run_listener(
 
     let authorization = Arc::new(state.authorization);
     let session_ids = Arc::new(AtomicU64::new(1));
+    let input_owner = Arc::new(AtomicU64::new(0));
 
     loop {
         tokio::select! {
@@ -245,6 +252,7 @@ async fn run_listener(
                 let session_ids = Arc::clone(&session_ids);
                 let input_tx = input_tx.clone();
                 let input_available = Arc::clone(&input_available);
+                let input_owner = Arc::clone(&input_owner);
                 tokio::spawn(async move {
                     let connection = match incoming.await {
                         Ok(connection) => connection,
@@ -294,8 +302,15 @@ async fn run_listener(
                                 authorization.as_ref(),
                                 &input_tx,
                                 input_available.as_ref(),
+                                input_owner.as_ref(),
                             )
                             .await;
+                            release_input_owner(
+                                session.control_session_id,
+                                input_owner.as_ref(),
+                                &input_tx,
+                                input_available.as_ref(),
+                            );
                         }
                         Err(error) => {
                             eprintln!(
@@ -317,8 +332,9 @@ async fn run_established_session(
     session: &EstablishedControlSession,
     peer: EstablishedAuthenticatedPeer,
     authorization: &AuthorizationStore,
-    input_tx: &mpsc::SyncSender<InputEvent>,
+    input_tx: &mpsc::SyncSender<InputExecutorCommand>,
     input_available: &AtomicBool,
+    input_owner: &AtomicU64,
 ) {
     const HELLO_SEQUENCE: u64 = 1;
 
@@ -435,7 +451,14 @@ async fn run_established_session(
                             connection.close(0_u32.into(), b"input executor unavailable");
                             return;
                         }
-                        match input_tx.try_send(input) {
+                        if !try_acquire_input_owner(input_owner, session.control_session_id) {
+                            eprintln!(
+                                "ClassMesh authorized input rejected: control.command.controller_busy"
+                            );
+                            connection.close(0_u32.into(), b"interactive controller busy");
+                            return;
+                        }
+                        match input_tx.try_send(InputExecutorCommand::Event(input)) {
                             Ok(()) => {}
                             Err(mpsc::TrySendError::Full(_)) => {
                                 eprintln!(
@@ -479,6 +502,36 @@ async fn run_established_session(
             }
         }
     }
+}
+
+fn try_acquire_input_owner(owner: &AtomicU64, session_id: u64) -> bool {
+    let current = owner.load(Ordering::Acquire);
+    if current == session_id {
+        return true;
+    }
+    current == 0
+        && owner
+            .compare_exchange(0, session_id, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+}
+
+fn release_input_owner(
+    session_id: u64,
+    owner: &AtomicU64,
+    input_tx: &mpsc::SyncSender<InputExecutorCommand>,
+    input_available: &AtomicBool,
+) {
+    if owner.load(Ordering::Acquire) != session_id {
+        return;
+    }
+
+    if input_available.load(Ordering::Acquire)
+        && input_tx.send(InputExecutorCommand::ReleaseAll).is_err()
+    {
+        eprintln!("ClassMesh input cleanup skipped: executor channel disconnected");
+    }
+
+    let _ = owner.compare_exchange(session_id, 0, Ordering::AcqRel, Ordering::Acquire);
 }
 
 fn media_health_from_wire(value: i32) -> Option<MediaHealth> {
@@ -599,6 +652,22 @@ mod tests {
         assert_eq!(media_health_from_wire(99), None);
         assert_eq!(media_health_from_wire(3), Some(MediaHealth::Streaming));
         assert_eq!(media_health_from_wire(5), Some(MediaHealth::Recovering));
+    }
+
+    #[test]
+    fn input_owner_is_exclusive_and_reusable_after_release() {
+        let owner = AtomicU64::new(0);
+        assert!(try_acquire_input_owner(&owner, 41));
+        assert!(try_acquire_input_owner(&owner, 41));
+        assert!(!try_acquire_input_owner(&owner, 42));
+        assert_eq!(owner.load(Ordering::Acquire), 41);
+
+        let (tx, rx) = mpsc::sync_channel(1);
+        let available = AtomicBool::new(true);
+        release_input_owner(41, &owner, &tx, &available);
+        assert!(matches!(rx.try_recv(), Ok(InputExecutorCommand::ReleaseAll)));
+        assert_eq!(owner.load(Ordering::Acquire), 0);
+        assert!(try_acquire_input_owner(&owner, 42));
     }
 
     #[test]
