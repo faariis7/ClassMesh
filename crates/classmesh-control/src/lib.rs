@@ -13,6 +13,7 @@ pub mod handshake;
 pub mod issuance;
 pub mod peer_identity;
 pub mod quic;
+pub mod stream;
 pub mod x509_issuance;
 
 use std::collections::BTreeSet;
