@@ -46,6 +46,7 @@ mod windows_service_app {
     const INPUT_QUEUE_CAPACITY: usize = 256;
     const INPUT_CLEANUP_QUEUE_CAPACITY: usize = 1;
     const FOCUSED_MEDIA_QUEUE_CAPACITY: usize = 4;
+    const FOCUSED_MEDIA_CLEAR_QUEUE_CAPACITY: usize = 1;
     const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
     const MEDIA_RECONFIGURE_RETRY: Duration = Duration::from_millis(250);
 
@@ -283,6 +284,24 @@ mod windows_service_app {
 
         fn current_process_id(&self) -> Option<u32> {
             self.process.as_ref().map(SessionProcess::process_id)
+        }
+
+        fn clear_focused_profile(&self) -> Result<(), String> {
+            let process = self
+                .process
+                .as_ref()
+                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
+            if !process
+                .is_running()
+                .map_err(|error| format!("Worker media-reset liveness probe failed: {error}"))?
+            {
+                return Err("interactive Worker exited before media reset".to_owned());
+            }
+            let pipe = self
+                .pipe
+                .as_ref()
+                .ok_or_else(|| "Worker IPC pipe is unavailable for media reset".to_owned())?;
+            send_control(pipe, IpcControlCommand::ClearFocusedProfile)
         }
 
         fn send_stream_reconfigure(
@@ -625,8 +644,11 @@ mod windows_service_app {
         };
         let (media_reconfigure_tx, media_reconfigure_rx) =
             mpsc::sync_channel::<StreamReconfigure>(FOCUSED_MEDIA_QUEUE_CAPACITY);
+        let (media_clear_tx, media_clear_rx) =
+            mpsc::sync_channel::<()>(FOCUSED_MEDIA_CLEAR_QUEUE_CAPACITY);
         let media_channels = FocusedMediaDispatchChannels {
             reconfigure_tx: media_reconfigure_tx,
+            clear_tx: media_clear_tx,
         };
         let mut control_runtime = match ControlRuntime::start(
             control_state,
@@ -651,6 +673,7 @@ mod windows_service_app {
         let mut workers = WorkerManager::new();
         let mut desired_focused_reconfigure: Option<StreamReconfigure> = None;
         let mut focused_reconfigure_worker_pid: Option<u32> = None;
+        let mut focused_profile_clear_pending = false;
         let mut next_media_reconfigure_attempt = Instant::now();
         let mut next_worker_poll = Instant::now();
         loop {
@@ -679,10 +702,23 @@ mod windows_service_app {
             }
 
             loop {
+                match media_clear_rx.try_recv() {
+                    Ok(()) => {
+                        desired_focused_reconfigure = None;
+                        focused_reconfigure_worker_pid = None;
+                        focused_profile_clear_pending = true;
+                        next_media_reconfigure_attempt = Instant::now();
+                    }
+                    Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+
+            loop {
                 match media_reconfigure_rx.try_recv() {
                     Ok(reconfigure) => {
                         desired_focused_reconfigure = Some(reconfigure);
                         focused_reconfigure_worker_pid = None;
+                        focused_profile_clear_pending = false;
                         next_media_reconfigure_attempt = Instant::now();
                     }
                     Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
@@ -690,7 +726,29 @@ mod windows_service_app {
             }
 
             let current_worker_pid = workers.current_process_id();
-            if let Some(reconfigure) = desired_focused_reconfigure.as_ref()
+            if focused_profile_clear_pending {
+                if current_worker_pid.is_none() {
+                    focused_profile_clear_pending = false;
+                } else if Instant::now() >= next_media_reconfigure_attempt {
+                    match workers.clear_focused_profile() {
+                        Ok(()) => {
+                            focused_profile_clear_pending = false;
+                            eprintln!("ClassMesh Service cleared focused Worker profile");
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "ClassMesh Service will retry focused media reset: {error}"
+                            );
+                            next_media_reconfigure_attempt = Instant::now()
+                                .checked_add(MEDIA_RECONFIGURE_RETRY)
+                                .unwrap_or_else(Instant::now);
+                        }
+                    }
+                }
+            }
+
+            if !focused_profile_clear_pending
+                && let Some(reconfigure) = desired_focused_reconfigure.as_ref()
                 && current_worker_pid.is_some()
                 && focused_reconfigure_worker_pid != current_worker_pid
                 && Instant::now() >= next_media_reconfigure_attempt
