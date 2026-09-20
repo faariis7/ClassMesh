@@ -18,6 +18,7 @@ pub enum PrivilegedDispatchError {
     UnsupportedPayload,
     MalformedInputEvent,
     InputSequenceMismatch { envelope: u64, input: u64 },
+    ClipboardReadRequestMissingId,
     InvalidClipboardText(ClipboardTextError),
     Authorization(CommandAuthorizationError),
 }
@@ -64,6 +65,9 @@ pub fn dispatch_privileged_command(
             Ok(PrivilegedControlCommand::InputEvent(*input))
         }
         control_envelope::Payload::ClipboardReadRequest(request) => {
+            if envelope.request_id == 0 {
+                return Err(PrivilegedDispatchError::ClipboardReadRequestMissingId);
+            }
             guard.authorize(
                 authorization,
                 envelope,
@@ -241,6 +245,20 @@ mod tests {
         assert_eq!(
             dispatch_privileged_command(&mut guard, &authorization, &envelope, 150),
             Err(PrivilegedDispatchError::UnsupportedPayload)
+        );
+        assert_eq!(guard.last_sequence(), 1);
+    }
+
+    #[test]
+    fn clipboard_read_requires_request_id_before_sequence_consumption() {
+        let authorization = store(BTreeSet::from([Permission::ReadClipboard]));
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+        let mut envelope = clipboard_read_envelope(2);
+        envelope.request_id = 0;
+
+        assert_eq!(
+            dispatch_privileged_command(&mut guard, &authorization, &envelope, 150),
+            Err(PrivilegedDispatchError::ClipboardReadRequestMissingId)
         );
         assert_eq!(guard.last_sequence(), 1);
     }
