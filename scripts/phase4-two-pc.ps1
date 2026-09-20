@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("Help", "TransportServer", "TransportClient", "MediaReceiver", "MediaProxy", "MediaSender")]
+    [ValidateSet("Help", "EncoderBenchmark", "TransportServer", "TransportClient", "MediaReceiver", "MediaProxy", "MediaSender")]
     [string]$Mode,
 
     [ValidateSet("udp", "quic")]
@@ -81,6 +81,9 @@ Examples:
   # Teacher: QUIC client using copied DER certificate
   .\scripts\phase4-two-pc.ps1 -Mode TransportClient -Transport quic -Peer 192.168.1.20:57100 -BinDir .\artifacts -CertPath .\classmesh-quic-cert.der
 
+  # Teacher: bounded local H.264 encoder evidence (run with tools/phase4-latency-source.html fullscreen)
+  .\scripts\phase4-two-pc.ps1 -Mode EncoderBenchmark -BinDir .\artifacts -Seconds 10
+
   # Student: live H.264 hardware decode + D3D11 render + feedback to Teacher
   .\scripts\phase4-two-pc.ps1 -Mode MediaReceiver -Peer 192.168.1.10:57001 -BinDir .\artifacts -Seconds 120
 
@@ -97,6 +100,14 @@ Logs are written under -ResultsDir (default: .\phase4-results).
 switch ($Mode) {
     "Help" {
         Show-Help
+    }
+
+    "EncoderBenchmark" {
+        $arguments = @(
+            "--benchmark-h264",
+            "--seconds", "$Seconds"
+        )
+        Invoke-ClassMeshTool -Executable "classmesh-media-probe.exe" -Arguments $arguments -LogPrefix "h264-encoder-benchmark"
     }
 
     "TransportServer" {
