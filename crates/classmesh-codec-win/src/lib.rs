@@ -361,12 +361,11 @@ mod tests {
 
     #[test]
     fn bounded_benchmark_marks_unreturned_submissions_as_missing() {
-        let mut benchmark =
-            BoundedEncoderBenchmark::from_config(EncoderBenchmarkConfig {
-                sample_frames: 2,
-                ..EncoderBenchmarkConfig::compatibility_720p30()
-            })
-            .expect("valid benchmark");
+        let mut benchmark = BoundedEncoderBenchmark::from_config(EncoderBenchmarkConfig {
+            sample_frames: 2,
+            ..EncoderBenchmarkConfig::compatibility_720p30()
+        })
+        .expect("valid benchmark");
         assert!(benchmark.record_submission());
         assert!(benchmark.record_submission());
         benchmark
