@@ -47,8 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (event_tx, event_rx) = mpsc::channel();
     let reader_pipe = pipe.try_clone()?;
-    let _ipc_thread = spawn_ipc_reader(reader_pipe, event_tx.clone());
-    let _capability_probe = spawn_h264_capability_probe(event_tx.clone());
+    let _ipc_thread = spawn_ipc_reader(reader_pipe, event_tx);
 
     let mut capture_restart = CaptureRestart::default();
     let mut capture = match start_capture() {
@@ -176,27 +175,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Err(error) => {
                     eprintln!("ClassMesh Worker rejected input event: {error}");
-                }
-            },
-            Ok(WorkerEvent::H264HardwareProbe(result)) => match result {
-                Ok(true) if !runtime_capabilities.h264_hardware_encode => {
-                    runtime_capabilities.h264_hardware_encode = true;
-                    publish_worker_capabilities(
-                        &pipe,
-                        std::process::id(),
-                        actual_session,
-                        runtime_capabilities,
-                    )?;
-                    eprintln!("ClassMesh Worker confirmed hardware H.264 encode capability");
-                }
-                Ok(true) => {}
-                Ok(false) => {
-                    eprintln!("ClassMesh Worker found no hardware H.264 encoder");
-                }
-                Err(error) => {
-                    eprintln!(
-                        "ClassMesh Worker H.264 capability probe failed without affecting control: {error}"
-                    );
                 }
             },
             Ok(WorkerEvent::IpcFailure(error)) => {
@@ -347,7 +325,6 @@ enum WorkerEvent {
     Control(classmesh_windows_runtime::ipc::IpcControlCommand),
     Input(classmesh_protocol::control_wire::InputEvent),
     StreamReconfigure(classmesh_protocol::control_wire::StreamReconfigure),
-    H264HardwareProbe(Result<bool, String>),
     IpcFailure(String),
 }
 
@@ -524,30 +501,6 @@ fn publish_worker_capabilities(
 }
 
 #[cfg(windows)]
-fn spawn_h264_capability_probe(
-    event_tx: std::sync::mpsc::Sender<WorkerEvent>,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        let result = probe_h264_hardware_encode();
-        let _ = event_tx.send(WorkerEvent::H264HardwareProbe(result));
-    })
-}
-
-#[cfg(windows)]
-fn probe_h264_hardware_encode() -> Result<bool, String> {
-    let _platform = classmesh_codec_win::mf::MfPlatform::startup()
-        .map_err(|error| format!("Media Foundation startup failed: {error}"))?;
-    let encoders = classmesh_codec_win::mf::enumerate_h264_hardware_encoders()
-        .map_err(|error| format!("hardware encoder enumeration failed: {error}"))?;
-    for encoder in encoders {
-        if encoder.activate_transform().is_ok() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-#[cfg(windows)]
 fn spawn_ipc_reader(
     pipe: classmesh_win32::NamedPipeClient,
     event_tx: std::sync::mpsc::Sender<WorkerEvent>,
@@ -691,20 +644,14 @@ mod focused_profile_tests {
     use super::*;
 
     #[test]
-    fn capability_snapshot_starts_transport_neutral_and_monotonic() {
+    fn capability_snapshot_does_not_claim_h264_before_encode_validation() {
         let mut snapshot = WorkerCapabilitySnapshot::default();
-        assert_eq!(
-            snapshot,
-            WorkerCapabilitySnapshot {
-                dxgi_capture: false,
-                h264_hardware_encode: false,
-            }
-        );
+        assert!(!snapshot.dxgi_capture);
+        assert!(!snapshot.h264_hardware_encode);
 
         snapshot.dxgi_capture = true;
-        snapshot.h264_hardware_encode = true;
         assert!(snapshot.dxgi_capture);
-        assert!(snapshot.h264_hardware_encode);
+        assert!(!snapshot.h264_hardware_encode);
     }
 
     #[test]
