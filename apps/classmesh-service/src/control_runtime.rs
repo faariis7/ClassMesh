@@ -31,7 +31,7 @@ use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_ce
 use classmesh_protocol::control_wire::{
     ControlEnvelope, HeartbeatAck, InputEvent, MediaTransport as WireMediaTransport,
     ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamAnswer, StreamOffer,
-    StreamReconfigure, VideoCodec, VideoProfile, control_envelope,
+    StreamReconfigure, control_envelope,
 };
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::{AuthorizationStore, Permission};
@@ -1014,6 +1014,8 @@ fn next_session_id(counter: &AtomicU64) -> u64 {
 mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use classmesh_protocol::control_wire::{VideoCodec, VideoProfile};
 
     use super::*;
 
