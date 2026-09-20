@@ -1,7 +1,9 @@
 use std::error::Error;
 use std::fmt;
+use std::time::Duration;
 
 use classmesh_capture_win::{CapturedFrameMeta, DxgiFrame};
+use classmesh_codec_win::EncoderCandidate;
 use classmesh_codec_win::gpu::{GpuBgraToNv12Converter, GpuNv12Config};
 use classmesh_codec_win::mf::{MfH264EncoderConfig, MfPlatform, enumerate_h264_hardware_encoders};
 use classmesh_codec_win::mf_async::{MfAsyncH264Encoder, MfEncodedOutput, MfSubmitError};
@@ -88,6 +90,12 @@ pub struct PresentationProfile {
     pub bitrate_bps: u32,
 }
 
+#[derive(Debug)]
+pub struct PresentationEncodedOutput {
+    pub frame: SharedEncodedFrame,
+    pub encode_latency: Duration,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PresentationStats {
     pub captured_frames: u64,
@@ -139,7 +147,7 @@ pub struct PresentationPipeline {
     converter: GpuBgraToNv12Converter,
     pool: SurfacePool<ID3D11Texture2D>,
     encoder: MfAsyncH264Encoder,
-    encoder_name: String,
+    encoder_candidate: EncoderCandidate,
     profile: PresentationProfile,
     stats: PresentationStats,
     next_submit_timestamp_us: Option<u64>,
@@ -152,7 +160,7 @@ pub struct PresentationPipeline {
 impl fmt::Debug for PresentationPipeline {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PresentationPipeline")
-            .field("encoder_name", &self.encoder_name)
+            .field("encoder_candidate", &self.encoder_candidate)
             .field("profile", &self.profile)
             .field("stats", &self.stats)
             .finish_non_exhaustive()
@@ -188,7 +196,7 @@ impl PresentationPipeline {
             .into_iter()
             .next()
             .ok_or(PresentationError::NoHardwareEncoder)?;
-        let encoder_name = activation.candidate().name.clone();
+        let encoder_candidate = activation.candidate().clone();
 
         let gpu_config = GpuNv12Config {
             source_width: profile.source_width,
@@ -220,7 +228,7 @@ impl PresentationPipeline {
             converter,
             pool,
             encoder,
-            encoder_name,
+            encoder_candidate,
             profile,
             stats: PresentationStats::default(),
             next_submit_timestamp_us: None,
@@ -236,7 +244,17 @@ impl PresentationPipeline {
 
     #[must_use]
     pub fn encoder_name(&self) -> &str {
-        &self.encoder_name
+        &self.encoder_candidate.name
+    }
+
+    #[must_use]
+    pub const fn encoder_candidate(&self) -> &EncoderCandidate {
+        &self.encoder_candidate
+    }
+
+    #[must_use]
+    pub const fn low_latency_accepted(&self) -> bool {
+        self.encoder.low_latency_accepted()
     }
 
     #[must_use]
@@ -267,6 +285,20 @@ impl PresentationPipeline {
         meta: CapturedFrameMeta,
         frame: DxgiFrame,
     ) -> Result<Vec<SharedEncodedFrame>, PresentationError> {
+        Ok(self
+            .process_frame_with_metrics(meta, frame)?
+            .into_iter()
+            .map(|output| output.frame)
+            .collect())
+    }
+
+    /// Same as `process_frame` but preserves measured submission-to-output latency for bounded
+    /// encoder capability validation.
+    pub fn process_frame_with_metrics(
+        &mut self,
+        meta: CapturedFrameMeta,
+        frame: DxgiFrame,
+    ) -> Result<Vec<PresentationEncodedOutput>, PresentationError> {
         self.stats.captured_frames = self.stats.captured_frames.saturating_add(1);
 
         let mut encoded = Vec::new();
@@ -310,6 +342,17 @@ impl PresentationPipeline {
 
     /// Drains the encoder at the end of a probe/session and returns its final access units.
     pub fn finish(&mut self) -> Result<Vec<SharedEncodedFrame>, PresentationError> {
+        Ok(self
+            .finish_with_metrics()?
+            .into_iter()
+            .map(|output| output.frame)
+            .collect())
+    }
+
+    /// Drains the encoder while preserving measured submission-to-output latency evidence.
+    pub fn finish_with_metrics(
+        &mut self,
+    ) -> Result<Vec<PresentationEncodedOutput>, PresentationError> {
         let result = self.encoder.finish()?;
         let mut encoded = Vec::new();
         self.consume_outputs(result.outputs, &mut encoded)?;
@@ -332,7 +375,7 @@ impl PresentationPipeline {
     fn consume_outputs(
         &mut self,
         outputs: Vec<MfEncodedOutput>,
-        encoded: &mut Vec<SharedEncodedFrame>,
+        encoded: &mut Vec<PresentationEncodedOutput>,
     ) -> Result<(), PresentationError> {
         for output in outputs {
             self.stats.encoded_frames = self.stats.encoded_frames.saturating_add(1);
@@ -344,7 +387,10 @@ impl PresentationPipeline {
                 self.stats.keyframes = self.stats.keyframes.saturating_add(1);
             }
             self.release_surface(output.recycled_surface)?;
-            encoded.push(output.frame);
+            encoded.push(PresentationEncodedOutput {
+                frame: output.frame,
+                encode_latency: output.encode_latency,
+            });
         }
         Ok(())
     }
