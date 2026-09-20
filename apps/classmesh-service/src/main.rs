@@ -723,17 +723,17 @@ mod windows_service_app {
         match action {
             SupervisorAction::None => {}
             SupervisorAction::LaunchWorker(session) => {
-                InputAvailability::Unavailable.store(input_availability.as_ref());
+                InputAvailability::Starting.store(input_availability);
                 let event = workers.launch(session);
                 handle_worker_event(event, supervisor, input_availability);
             }
             SupervisorAction::StopWorker(session) => {
-                InputAvailability::Unavailable.store(input_availability.as_ref());
+                InputAvailability::Unavailable.store(input_availability);
                 workers.stop(session);
                 supervisor.mark_worker_stopped(session);
             }
             SupervisorAction::SuspendMedia(session) => {
-                InputAvailability::Unavailable.store(input_availability.as_ref());
+                InputAvailability::Suspended.store(input_availability);
                 let _ = workers.send_control(session, IpcControlCommand::SuspendMedia);
             }
             SupervisorAction::ResumeMedia(session) => {
@@ -749,7 +749,7 @@ mod windows_service_app {
                 old_session,
                 new_session,
             } => {
-                InputAvailability::Unavailable.store(input_availability.as_ref());
+                InputAvailability::Starting.store(input_availability);
                 workers.stop(old_session);
                 let event = workers.launch(new_session);
                 handle_worker_event(event, supervisor, input_availability);
@@ -768,11 +768,11 @@ mod windows_service_app {
                 InputAvailability::Ready.store(input_availability);
             }
             WorkerManagerEvent::RestartScheduled(session) => {
-                InputAvailability::Unavailable.store(input_availability.as_ref());
+                InputAvailability::Starting.store(input_availability);
                 let _ = supervisor.worker_crashed(session);
             }
             WorkerManagerEvent::GiveUp(session) => {
-                InputAvailability::Unavailable.store(input_availability.as_ref());
+                InputAvailability::Unavailable.store(input_availability);
                 supervisor.mark_worker_stopped(session);
             }
             WorkerManagerEvent::None => {}
