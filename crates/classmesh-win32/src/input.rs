@@ -106,7 +106,10 @@ impl Display for InputError {
                 write!(formatter, "Worker desktop is not the current input desktop")
             }
             Self::DesktopUnavailable(InputDesktopUnavailable::ProbeFailed) => {
-                write!(formatter, "Worker could not verify the current input desktop")
+                write!(
+                    formatter,
+                    "Worker could not verify the current input desktop"
+                )
             }
             Self::SendInput {
                 requested,
@@ -437,8 +440,7 @@ mod tests {
             "worker.input.desktop_unavailable"
         );
         assert_eq!(
-            InputError::DesktopUnavailable(InputDesktopUnavailable::ProbeFailed)
-                .diagnostic_code(),
+            InputError::DesktopUnavailable(InputDesktopUnavailable::ProbeFailed).diagnostic_code(),
             "worker.input.desktop_probe_failed"
         );
         assert_eq!(
