@@ -91,9 +91,7 @@ pub struct BoundedEncoderBenchmark {
 }
 
 impl BoundedEncoderBenchmark {
-    pub fn from_config(
-        config: EncoderBenchmarkConfig,
-    ) -> Result<Self, BenchmarkAccumulatorError> {
+    pub fn from_config(config: EncoderBenchmarkConfig) -> Result<Self, BenchmarkAccumulatorError> {
         let target_samples = usize::from(config.sample_frames);
         if target_samples == 0 {
             return Err(BenchmarkAccumulatorError::InvalidTarget);
@@ -142,10 +140,7 @@ impl BoundedEncoderBenchmark {
         true
     }
 
-    pub fn record_output(
-        &mut self,
-        latency: Duration,
-    ) -> Result<(), BenchmarkAccumulatorError> {
+    pub fn record_output(&mut self, latency: Duration) -> Result<(), BenchmarkAccumulatorError> {
         if self.finalized {
             return Err(BenchmarkAccumulatorError::Finalized);
         }
@@ -336,12 +331,11 @@ mod tests {
 
     #[test]
     fn bounded_benchmark_never_accepts_more_than_configured_submissions() {
-        let mut benchmark =
-            BoundedEncoderBenchmark::from_config(EncoderBenchmarkConfig {
-                sample_frames: 2,
-                ..EncoderBenchmarkConfig::compatibility_720p30()
-            })
-            .expect("valid benchmark");
+        let mut benchmark = BoundedEncoderBenchmark::from_config(EncoderBenchmarkConfig {
+            sample_frames: 2,
+            ..EncoderBenchmarkConfig::compatibility_720p30()
+        })
+        .expect("valid benchmark");
         assert!(benchmark.record_submission());
         assert!(benchmark.record_submission());
         assert!(!benchmark.record_submission());
