@@ -50,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut capture = Some(start_capture()?);
     let mut capture_due = Instant::now();
+    let mut active_focused_profile: Option<FocusedWorkerProfile> = None;
     let mut captured_frames = 0_u64;
     let mut input_injector = InputInjector::default();
 
@@ -96,6 +97,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
             },
+            Ok(WorkerEvent::StreamReconfigure(reconfigure)) => {
+                match FocusedWorkerProfile::from_reconfigure(&reconfigure) {
+                    Ok(profile) => {
+                        active_focused_profile = Some(profile);
+                        capture_due = Instant::now();
+                        eprintln!(
+                            "ClassMesh Worker focused profile updated: stream={}, {}x{}@{}fps, {} kbps",
+                            profile.stream_id,
+                            profile.width,
+                            profile.height,
+                            profile.fps,
+                            profile.bitrate_kbps
+                        );
+                    }
+                    Err(code) => {
+                        eprintln!("ClassMesh Worker rejected focused profile update: {code}");
+                    }
+                }
+            }
             Ok(WorkerEvent::Input(event)) => match input_action_from_wire(event) {
                 Ok(action) => {
                     if let Err(error) = input_injector.apply(action) {
@@ -143,10 +163,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // The next milestone hands this GPU-native texture directly to the encoder. For now
                 // dropping the frame releases the Desktop Duplication frame without CPU readback.
                 drop(frame);
-                capture_due = Instant::now();
+                capture_due = next_capture_due(active_focused_profile);
             }
             CaptureStep::NoFrame => {
-                capture_due = Instant::now();
+                capture_due = next_capture_due(active_focused_profile);
             }
             CaptureStep::RetryAfter { delay_ms, reason } => {
                 eprintln!("DXGI capture recovery scheduled after {reason:?} in {delay_ms} ms");
@@ -177,7 +197,81 @@ type WorkerCapture = classmesh_capture_win::RecoveringCapture<
 enum WorkerEvent {
     Control(classmesh_windows_runtime::ipc::IpcControlCommand),
     Input(classmesh_protocol::control_wire::InputEvent),
+    StreamReconfigure(classmesh_protocol::control_wire::StreamReconfigure),
     IpcFailure(String),
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FocusedWorkerProfile {
+    stream_id: u64,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_kbps: u32,
+}
+
+#[cfg(windows)]
+impl FocusedWorkerProfile {
+    fn from_reconfigure(
+        reconfigure: &classmesh_protocol::control_wire::StreamReconfigure,
+    ) -> Result<Self, &'static str> {
+        use classmesh_protocol::control_wire::{MediaTransport, VideoCodec};
+
+        if reconfigure.stream_id == 0 {
+            return Err("worker.media.invalid_stream");
+        }
+        if reconfigure.transport != MediaTransport::Unspecified as i32
+            || !reconfigure.transport_parameters.is_empty()
+        {
+            return Err("worker.media.transport_change_not_supported");
+        }
+        let profile = reconfigure
+            .profile
+            .as_ref()
+            .ok_or("worker.media.missing_profile")?;
+        if profile.codec != VideoCodec::H264 as i32 {
+            return Err("worker.media.unsupported_codec");
+        }
+        if profile.width == 0
+            || profile.height == 0
+            || profile.width > 1920
+            || profile.height > 1080
+            || profile.width % 2 != 0
+            || profile.height % 2 != 0
+        {
+            return Err("worker.media.invalid_geometry");
+        }
+        if !(1..=60).contains(&profile.fps) {
+            return Err("worker.media.invalid_fps");
+        }
+        if profile.bitrate_kbps == 0 || profile.bitrate_kbps > 50_000 {
+            return Err("worker.media.invalid_bitrate");
+        }
+
+        Ok(Self {
+            stream_id: reconfigure.stream_id,
+            width: profile.width,
+            height: profile.height,
+            fps: profile.fps,
+            bitrate_kbps: profile.bitrate_kbps,
+        })
+    }
+
+    fn capture_interval(self) -> std::time::Duration {
+        std::time::Duration::from_micros(1_000_000_u64 / u64::from(self.fps))
+    }
+}
+
+#[cfg(windows)]
+fn next_capture_due(profile: Option<FocusedWorkerProfile>) -> std::time::Instant {
+    let interval = profile.map_or_else(
+        || std::time::Duration::from_micros(1_000_000_u64 / 30),
+        FocusedWorkerProfile::capture_interval,
+    );
+    std::time::Instant::now()
+        .checked_add(interval)
+        .unwrap_or_else(std::time::Instant::now)
 }
 
 #[cfg(windows)]
@@ -313,6 +407,14 @@ fn spawn_ipc_reader(
                             return;
                         }
                     }
+                    Ok(IpcMessage::StreamReconfigure(reconfigure)) => {
+                        if event_tx
+                            .send(WorkerEvent::StreamReconfigure(reconfigure))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
                     Ok(unexpected) => {
                         let _ = event_tx.send(WorkerEvent::IpcFailure(format!(
                             "unexpected IPC message after handshake: {unexpected:?}"
@@ -393,4 +495,58 @@ fn parse_pipe_name(args: &[String]) -> Result<String, Box<dyn std::error::Error>
 #[cfg(not(windows))]
 fn main() {
     eprintln!("classmesh-worker is supported only on Windows");
+}
+
+
+#[cfg(all(test, windows))]
+mod focused_profile_tests {
+    use super::*;
+    use classmesh_protocol::control_wire::{
+        MediaTransport, StreamReconfigure, VideoCodec, VideoProfile,
+    };
+
+    fn reconfigure() -> StreamReconfigure {
+        StreamReconfigure {
+            stream_id: 9,
+            profile: Some(VideoProfile {
+                width: 960,
+                height: 540,
+                fps: 30,
+                bitrate_kbps: 1_500,
+                codec: VideoCodec::H264 as i32,
+            }),
+            transport: MediaTransport::Unspecified as i32,
+            transport_parameters: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn focused_profile_accepts_transport_neutral_h264_profile() {
+        let profile =
+            FocusedWorkerProfile::from_reconfigure(&reconfigure()).expect("valid profile");
+        assert_eq!(profile.stream_id, 9);
+        assert_eq!((profile.width, profile.height, profile.fps), (960, 540, 30));
+        assert_eq!(profile.bitrate_kbps, 1_500);
+        assert_eq!(
+            profile.capture_interval(),
+            std::time::Duration::from_micros(33_333)
+        );
+    }
+
+    #[test]
+    fn focused_profile_rejects_transport_change_and_invalid_geometry() {
+        let mut transport_change = reconfigure();
+        transport_change.transport = MediaTransport::QuicDatagram as i32;
+        assert_eq!(
+            FocusedWorkerProfile::from_reconfigure(&transport_change),
+            Err("worker.media.transport_change_not_supported")
+        );
+
+        let mut odd_geometry = reconfigure();
+        odd_geometry.profile.as_mut().expect("profile").width = 959;
+        assert_eq!(
+            FocusedWorkerProfile::from_reconfigure(&odd_geometry),
+            Err("worker.media.invalid_geometry")
+        );
+    }
 }
