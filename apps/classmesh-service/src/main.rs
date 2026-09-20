@@ -46,7 +46,9 @@ mod windows_service_app {
     const INPUT_QUEUE_CAPACITY: usize = 256;
     const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
 
-    use crate::control_runtime::{ControlRuntime, ControlRuntimeConfig, ControlRuntimeState};
+    use crate::control_runtime::{
+        ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, InputExecutorCommand,
+    };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
 
@@ -273,6 +275,24 @@ mod windows_service_app {
                 .as_ref()
                 .ok_or_else(|| "Worker IPC pipe is unavailable for input dispatch".to_owned())?;
             send_input(pipe, event)
+        }
+
+        fn release_input(&self) -> Result<(), String> {
+            let process = self
+                .process
+                .as_ref()
+                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
+            if !process
+                .is_running()
+                .map_err(|error| format!("Worker input-release liveness probe failed: {error}"))?
+            {
+                return Err("interactive Worker exited before input release".to_owned());
+            }
+            let pipe = self
+                .pipe
+                .as_ref()
+                .ok_or_else(|| "Worker IPC pipe is unavailable for input release".to_owned())?;
+            send_control(pipe, IpcControlCommand::ReleaseInput)
         }
 
         fn poll(&mut self) -> WorkerManagerEvent {
@@ -553,7 +573,8 @@ mod windows_service_app {
                 return Ok(());
             }
         };
-        let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(INPUT_QUEUE_CAPACITY);
+        let (input_tx, input_rx) =
+            mpsc::sync_channel::<InputExecutorCommand>(INPUT_QUEUE_CAPACITY);
         let input_available = Arc::new(AtomicBool::new(false));
         let mut control_runtime = match ControlRuntime::start(
             control_state,
@@ -580,10 +601,17 @@ mod windows_service_app {
         loop {
             for _ in 0..MAX_INPUT_EVENTS_PER_TICK {
                 match input_rx.try_recv() {
-                    Ok(event) => {
+                    Ok(InputExecutorCommand::Event(event)) => {
                         if let Err(error) = workers.send_input(&event) {
                             input_available.store(false, Ordering::Release);
                             eprintln!("ClassMesh Service input dispatch failed: {error}");
+                            break;
+                        }
+                    }
+                    Ok(InputExecutorCommand::ReleaseAll) => {
+                        if let Err(error) = workers.release_input() {
+                            input_available.store(false, Ordering::Release);
+                            eprintln!("ClassMesh Service input cleanup failed: {error}");
                             break;
                         }
                     }
