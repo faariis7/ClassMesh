@@ -548,8 +548,7 @@ impl InputDispatchState {
             return;
         }
 
-        if InputAvailability::load(self.channels.availability.as_ref())
-            == InputAvailability::Ready
+        if InputAvailability::load(self.channels.availability.as_ref()) == InputAvailability::Ready
         {
             match self.channels.cleanup_tx.try_send(()) {
                 Ok(()) | Err(mpsc::TrySendError::Full(())) => {}
