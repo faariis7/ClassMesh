@@ -317,11 +317,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map_err(benchmark_summary_error)?;
                     result.class = class_for_actual_target(result.class, benchmark_profile);
                     let submitted = benchmark.submitted();
-                    let cache_key = benchmark_cache_key(
-                        &adapter_identity,
-                        &candidate,
-                        benchmark_profile,
-                    )?;
+                    let cache_key =
+                        benchmark_cache_key(&adapter_identity, &candidate, benchmark_profile)?;
                     pending_reset_benchmark = Some(PendingResetBenchmark {
                         result,
                         candidate,
@@ -675,8 +672,7 @@ fn start_capture() -> Result<
         display.id.output_index
     );
 
-    let adapter_identity =
-        query_adapter_capability_identity(display.id).map_err(capture_error)?;
+    let adapter_identity = query_adapter_capability_identity(display.id).map_err(capture_error)?;
     eprintln!(
         "media probe adapter identity: {} driver={}",
         adapter_identity.adapter_identity(),
