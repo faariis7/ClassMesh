@@ -210,6 +210,7 @@ pub struct EncoderCapabilityCacheKey {
     pub width: u16,
     pub height: u16,
     pub target_fps: u16,
+    pub bitrate_bps: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
