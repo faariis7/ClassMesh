@@ -5,11 +5,13 @@ mod control_runtime;
 mod windows_service_app {
     use std::ffi::OsString;
     use std::path::PathBuf;
-    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity};
+    use classmesh_protocol::control_wire::InputEvent;
     use classmesh_security::persistence::DurableAuthorizationState;
     use classmesh_security::{CredentialFingerprint, PrincipalId};
     use sha2::{Digest, Sha256};
@@ -41,6 +43,8 @@ mod windows_service_app {
     const MACHINE_IDENTITY_FILE: &str = "machine-identity.json";
     const AUTHORIZATION_FILE: &str = "authorization.json";
     const CONTROL_RUNTIME_CONFIG_FILE: &str = "control-runtime.json";
+    const INPUT_QUEUE_CAPACITY: usize = 256;
+    const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
 
     use crate::control_runtime::{ControlRuntime, ControlRuntimeConfig, ControlRuntimeState};
 
@@ -229,7 +233,7 @@ mod windows_service_app {
             }
         }
 
-        fn send_control(&self, session: SessionId, command: IpcControlCommand) {
+        fn send_control(&self, session: SessionId, command: IpcControlCommand) -> bool {
             if !self
                 .process
                 .as_ref()
@@ -239,16 +243,36 @@ mod windows_service_app {
                     "ignoring IPC command for session {}; no matching Worker is running",
                     session.0
                 );
-                return;
+                return false;
             }
 
             let Some(pipe) = self.pipe.as_ref() else {
                 eprintln!("Worker IPC pipe is unavailable for session {}", session.0);
-                return;
+                return false;
             };
             if let Err(error) = send_control(pipe, command) {
                 eprintln!("failed to send Worker IPC command: {error}");
+                return false;
             }
+            true
+        }
+
+        fn send_input(&self, event: &InputEvent) -> Result<(), String> {
+            let process = self
+                .process
+                .as_ref()
+                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
+            if !process
+                .is_running()
+                .map_err(|error| format!("Worker input liveness probe failed: {error}"))?
+            {
+                return Err("interactive Worker exited before input dispatch".to_owned());
+            }
+            let pipe = self
+                .pipe
+                .as_ref()
+                .ok_or_else(|| "Worker IPC pipe is unavailable for input dispatch".to_owned())?;
+            send_input(pipe, event)
         }
 
         fn poll(&mut self) -> WorkerManagerEvent {
@@ -375,6 +399,14 @@ mod windows_service_app {
             .map_err(|error| format!("failed to encode Worker control frame: {error:?}"))?;
         pipe.write_all(&bytes)
             .map_err(|error| format!("Worker IPC write failed: {error}"))
+    }
+
+    fn send_input(pipe: &NamedPipeServer, event: &InputEvent) -> Result<(), String> {
+        let bytes = IpcFrame::input_event(event)
+            .encode()
+            .map_err(|error| format!("failed to encode Worker input frame: {error:?}"))?;
+        pipe.write_all(&bytes)
+            .map_err(|error| format!("Worker input IPC write failed: {error}"))
     }
 
     fn program_data_state_dir() -> Result<PathBuf, String> {
@@ -521,7 +553,14 @@ mod windows_service_app {
                 return Ok(());
             }
         };
-        let mut control_runtime = match ControlRuntime::start(control_state, control_config) {
+        let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(INPUT_QUEUE_CAPACITY);
+        let input_available = Arc::new(AtomicBool::new(false));
+        let mut control_runtime = match ControlRuntime::start(
+            control_state,
+            control_config,
+            input_tx,
+            Arc::clone(&input_available),
+        ) {
             Ok(runtime) => runtime,
             Err(error) => {
                 eprintln!("ClassMesh control runtime failed to start: {error}");
@@ -537,26 +576,51 @@ mod windows_service_app {
 
         let mut supervisor = SessionSupervisor::default();
         let mut workers = WorkerManager::new();
+        let mut next_worker_poll = Instant::now();
         loop {
-            match event_rx.recv_timeout(Duration::from_millis(250)) {
+            for _ in 0..MAX_INPUT_EVENTS_PER_TICK {
+                match input_rx.try_recv() {
+                    Ok(event) => {
+                        if let Err(error) = workers.send_input(&event) {
+                            input_available.store(false, Ordering::Release);
+                            eprintln!("ClassMesh Service input dispatch failed: {error}");
+                            break;
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+
+            match event_rx.recv_timeout(Duration::from_millis(5)) {
                 Ok(RuntimeEvent::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Ok(RuntimeEvent::Session(event)) => {
                     let action = supervisor.on_event(event);
-                    handle_supervisor_action(action, &mut supervisor, &mut workers);
+                    handle_supervisor_action(
+                        action,
+                        &mut supervisor,
+                        &mut workers,
+                        input_available.as_ref(),
+                    );
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if !control_runtime.is_running() {
-                        eprintln!(
-                            "ClassMesh control runtime exited unexpectedly; stopping service"
-                        );
-                        break;
-                    }
-                    let event = workers.poll();
-                    handle_worker_event(event, &mut supervisor);
-                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+
+            if !control_runtime.is_running() {
+                eprintln!("ClassMesh control runtime exited unexpectedly; stopping service");
+                break;
+            }
+
+            if Instant::now() >= next_worker_poll {
+                let event = workers.poll();
+                handle_worker_event(event, &mut supervisor, input_available.as_ref());
+                next_worker_poll = Instant::now()
+                    .checked_add(Duration::from_millis(250))
+                    .unwrap_or_else(Instant::now);
             }
         }
 
+        input_available.store(false, Ordering::Release);
         workers.stop_any();
         control_runtime.stop();
         set_stopped(&status_handle)
@@ -618,41 +682,58 @@ mod windows_service_app {
         action: SupervisorAction,
         supervisor: &mut SessionSupervisor,
         workers: &mut WorkerManager,
+        input_available: &AtomicBool,
     ) {
         match action {
             SupervisorAction::None => {}
             SupervisorAction::LaunchWorker(session) => {
+                input_available.store(false, Ordering::Release);
                 let event = workers.launch(session);
-                handle_worker_event(event, supervisor);
+                handle_worker_event(event, supervisor, input_available);
             }
             SupervisorAction::StopWorker(session) => {
+                input_available.store(false, Ordering::Release);
                 workers.stop(session);
                 supervisor.mark_worker_stopped(session);
             }
             SupervisorAction::SuspendMedia(session) => {
-                workers.send_control(session, IpcControlCommand::SuspendMedia);
+                input_available.store(false, Ordering::Release);
+                let _ = workers.send_control(session, IpcControlCommand::SuspendMedia);
             }
             SupervisorAction::ResumeMedia(session) => {
-                workers.send_control(session, IpcControlCommand::ResumeMedia);
+                let resumed = workers.send_control(session, IpcControlCommand::ResumeMedia);
+                input_available.store(resumed, Ordering::Release);
             }
             SupervisorAction::ReplaceWorker {
                 old_session,
                 new_session,
             } => {
+                input_available.store(false, Ordering::Release);
                 workers.stop(old_session);
                 let event = workers.launch(new_session);
-                handle_worker_event(event, supervisor);
+                handle_worker_event(event, supervisor, input_available);
             }
         }
     }
 
-    fn handle_worker_event(event: WorkerManagerEvent, supervisor: &mut SessionSupervisor) {
+    fn handle_worker_event(
+        event: WorkerManagerEvent,
+        supervisor: &mut SessionSupervisor,
+        input_available: &AtomicBool,
+    ) {
         match event {
-            WorkerManagerEvent::Running(session) => supervisor.mark_worker_running(session),
+            WorkerManagerEvent::Running(session) => {
+                supervisor.mark_worker_running(session);
+                input_available.store(true, Ordering::Release);
+            }
             WorkerManagerEvent::RestartScheduled(session) => {
+                input_available.store(false, Ordering::Release);
                 let _ = supervisor.worker_crashed(session);
             }
-            WorkerManagerEvent::GiveUp(session) => supervisor.mark_worker_stopped(session),
+            WorkerManagerEvent::GiveUp(session) => {
+                input_available.store(false, Ordering::Release);
+                supervisor.mark_worker_stopped(session);
+            }
             WorkerManagerEvent::None => {}
         }
     }
