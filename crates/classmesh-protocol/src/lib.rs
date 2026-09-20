@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod clipboard;
 pub mod feedback;
 pub mod media;
 
@@ -55,6 +56,7 @@ pub enum Capability {
     QuicDatagram,
     WebRtc,
     LocalSfu,
+    ClipboardText,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

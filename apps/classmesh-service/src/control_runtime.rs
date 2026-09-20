@@ -709,6 +709,13 @@ async fn run_established_session(
                             }
                         }
                     }
+                    Ok(_) => {
+                        eprintln!(
+                            "ClassMesh privileged command rejected: control.command.payload_mismatch"
+                        );
+                        connection.close(0_u32.into(), b"privileged payload mismatch");
+                        return;
+                    }
                     Err(error) => {
                         eprintln!(
                             "ClassMesh privileged command rejected: {}",

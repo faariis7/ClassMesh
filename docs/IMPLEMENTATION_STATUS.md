@@ -10,7 +10,7 @@ This file distinguishes **implemented code**, **hosted-CI validation**, **real-h
 
 Phase 4 physical acceptance remains pending. Issue #3 must remain open until two physical Windows PCs pass the documented qualification.
 
-Phase 5 is complete under Issue #32 through PR #107. The production control path now includes enrolled mTLS, stable identity/credential rotation, live per-command authorization/replay checks, durable fail-closed Service state, Service-hosted QUIC control runtime, authenticated post-handshake session handling, centralized privileged input dispatch, bounded Service→Worker forwarding and interactive-session Win32 input execution. Phase 6 interactive remote control is active under Issue #108: 6B lifecycle hardening merged in PR #111, 6C secure-desktop/input-availability diagnostics merged in PR #112, and 6D focused interactive adaptation is active in PR #113.
+Phase 5 is complete under Issue #32 through PR #107. The production control path now includes enrolled mTLS, stable identity/credential rotation, live per-command authorization/replay checks, durable fail-closed Service state, Service-hosted QUIC control runtime, authenticated post-handshake session handling, centralized privileged input dispatch, bounded Service→Worker forwarding and interactive-session Win32 input execution. Phase 6 interactive remote control is active under Issue #108: 6B lifecycle hardening merged in PR #111, 6C secure-desktop/input-availability diagnostics merged in PR #112, and 6D focused interactive adaptation/control plumbing is merged through PR #113–#115. Production focused encoder/media integration remains, while 6E begins with a typed bounded clipboard protocol/security skeleton.
 
 The hosted CI baseline covers Portable Rust / Ubuntu rustfmt, Clippy with warnings denied, full workspace tests and `classmesh-lab`, plus Windows workspace Clippy/tests and release builds for the media qualification executables. Hosted runners do not replace real interactive GPU/driver or two-PC validation.
 
@@ -81,7 +81,7 @@ PR #63 merged the authenticated control-session guard with PR CI #330 green. The
 
 ## Remaining security/control work
 
-- Phase 6 focused-stream Worker/encoder reconfiguration apply, bounded clipboard skeleton and physical interactive-control validation under Issue #108;
+- Phase 6 production focused encoder/media integration, completion of the typed bounded clipboard skeleton, and physical interactive-control validation under Issue #108;
 - encrypted multicast media key distribution/replay/rotation for the later classroom-presentation phase;
 - final privilege-boundary, dependency and update-chain review before the 1.0 gate.
 
@@ -92,7 +92,7 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 ## Next implementation sequence
 
 1. Keep Issue #3 open and perform Phase 4 physical qualification when two Windows PCs are available; do not select the default one-to-one UDP-vs-QUIC-Datagram transport before that evidence exists.
-2. Finish Phase 6D by applying validated profile-only `StreamReconfigure` decisions to the focused Worker/encoder path with bounded/recoverable reconfiguration.
-3. Implement the typed, bounded, policy-controlled clipboard skeleton for 6E.
+2. Finish the remaining Phase 6D production focused encoder/media integration on top of the merged profile plumbing and configurable GPU H.264 target pipeline.
+3. Complete 6E as a text-only, 64 KiB-bounded, capability-negotiated clipboard skeleton with separate read/write authorization; Windows clipboard execution remains a later implementation slice unless explicitly added.
 4. Run Phase 6F physical interactive-control validation, including degraded/lost media while authenticated control remains responsive.
 5. Continue later production security, classroom fan-out, installer/update and UI work in roadmap order.
