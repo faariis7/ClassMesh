@@ -7,8 +7,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ,
-    GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
+    ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CreateWellKnownSid, GetLengthSid,
@@ -24,6 +24,7 @@ use windows_sys::Win32::System::Pipes::{
     GetNamedPipeClientSessionId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
     PIPE_WAIT,
 };
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
@@ -223,6 +224,10 @@ impl NamedPipeServer {
         })
     }
 
+    pub fn try_clone(&self) -> Result<Self, PipeError> {
+        duplicate_pipe_handle(self.handle).map(|handle| Self { handle })
+    }
+
     pub fn read(&self, buffer: &mut [u8]) -> Result<usize, PipeError> {
         read_handle(self.handle, buffer)
     }
@@ -353,6 +358,10 @@ impl NamedPipeClient {
         }
     }
 
+    pub fn try_clone(&self) -> Result<Self, PipeError> {
+        duplicate_pipe_handle(self.handle).map(|handle| Self { handle })
+    }
+
     pub fn read(&self, buffer: &mut [u8]) -> Result<usize, PipeError> {
         read_handle(self.handle, buffer)
     }
@@ -387,6 +396,29 @@ impl Drop for NamedPipeClient {
 #[must_use]
 pub fn worker_pipe_name(service_process_id: u32, session_id: u32, generation: u64) -> String {
     format!("ClassMesh-{service_process_id:08x}-{session_id:08x}-{generation:016x}")
+}
+
+fn duplicate_pipe_handle(handle: HANDLE) -> Result<HANDLE, PipeError> {
+    let process = unsafe { GetCurrentProcess() };
+    let mut duplicate: HANDLE = null_mut();
+    // SAFETY: the source handle is owned by a live pipe wrapper, the target process is this
+    // process, and the output pointer references writable HANDLE storage. The duplicate receives
+    // the same access rights but is independently owned and closed by its wrapper.
+    if unsafe {
+        DuplicateHandle(
+            process,
+            handle,
+            process,
+            &mut duplicate,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    } == 0
+    {
+        return Err(last_error("DuplicateHandle(pipe)"));
+    }
+    Ok(duplicate)
 }
 
 fn normalize_pipe_name(name: &str) -> String {
