@@ -211,6 +211,8 @@ message KeyframeRequest {
 message StreamReconfigure {
   uint64 stream_id = 1;
   VideoProfile profile = 2;
+  // MEDIA_TRANSPORT_UNSPECIFIED retains the stream's current transport and makes
+  // this a profile-only reconfiguration. In that case transport_parameters is empty.
   MediaTransport transport = 3;
   bytes transport_parameters = 4;
 }

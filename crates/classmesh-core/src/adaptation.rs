@@ -146,6 +146,102 @@ impl Default for HysteresisConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FocusedProfileDecision {
+    pub profile: StreamProfile,
+    pub tier: QualityTier,
+    pub changed: bool,
+}
+
+/// Profile-only adaptation for a focused stream.
+///
+/// This deliberately does not choose or change media transport. Phase 4 physical
+/// qualification still owns the UDP-vs-QUIC-Datagram default decision.
+#[derive(Debug)]
+pub struct FocusedProfileController {
+    kind: StreamKind,
+    policy: AdaptationPolicy,
+    hysteresis: HysteresisConfig,
+    current_tier: Option<QualityTier>,
+    pending_tier: Option<QualityTier>,
+    pending_tier_samples: u8,
+}
+
+impl FocusedProfileController {
+    #[must_use]
+    pub const fn new(
+        kind: StreamKind,
+        policy: AdaptationPolicy,
+        hysteresis: HysteresisConfig,
+    ) -> Self {
+        Self {
+            kind,
+            policy,
+            hysteresis,
+            current_tier: None,
+            pending_tier: None,
+            pending_tier_samples: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_initial_tier(
+        kind: StreamKind,
+        policy: AdaptationPolicy,
+        hysteresis: HysteresisConfig,
+        initial_tier: QualityTier,
+    ) -> Self {
+        Self {
+            kind,
+            policy,
+            hysteresis,
+            current_tier: Some(initial_tier),
+            pending_tier: None,
+            pending_tier_samples: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn current(&self) -> Option<FocusedProfileDecision> {
+        match self.current_tier {
+            Some(tier) => Some(FocusedProfileDecision {
+                profile: profile_for(self.kind, tier),
+                tier,
+                changed: false,
+            }),
+            None => None,
+        }
+    }
+
+    pub fn observe(&mut self, metrics: NetworkMetrics) -> FocusedProfileDecision {
+        let candidate = self.policy.quality_tier(metrics);
+        let Some(current) = self.current_tier else {
+            self.current_tier = Some(candidate);
+            return FocusedProfileDecision {
+                profile: profile_for(self.kind, candidate),
+                tier: candidate,
+                changed: true,
+            };
+        };
+
+        let tier = apply_tier_hysteresis(
+            current,
+            candidate,
+            &mut self.pending_tier,
+            &mut self.pending_tier_samples,
+            self.hysteresis,
+        );
+        let changed = tier != current;
+        self.current_tier = Some(tier);
+
+        FocusedProfileDecision {
+            profile: profile_for(self.kind, tier),
+            tier,
+            changed,
+        }
+    }
+}
+
 /// Stateful adaptation controller that prevents bitrate/profile/transport flapping.
 #[derive(Debug)]
 pub struct AdaptiveController {
@@ -208,31 +304,13 @@ impl AdaptiveController {
         current: QualityTier,
         candidate: QualityTier,
     ) -> QualityTier {
-        if candidate == current {
-            self.pending_tier = None;
-            self.pending_tier_samples = 0;
-            return current;
-        }
-
-        if self.pending_tier == Some(candidate) {
-            self.pending_tier_samples = self.pending_tier_samples.saturating_add(1);
-        } else {
-            self.pending_tier = Some(candidate);
-            self.pending_tier_samples = 1;
-        }
-
-        let required = if candidate < current {
-            self.hysteresis.degrade_samples.max(1)
-        } else {
-            self.hysteresis.recover_samples.max(1)
-        };
-        if self.pending_tier_samples >= required {
-            self.pending_tier = None;
-            self.pending_tier_samples = 0;
-            candidate
-        } else {
-            current
-        }
+        apply_tier_hysteresis(
+            current,
+            candidate,
+            &mut self.pending_tier,
+            &mut self.pending_tier_samples,
+            self.hysteresis,
+        )
     }
 
     fn apply_transport_hysteresis(
@@ -271,6 +349,40 @@ impl AdaptiveController {
     }
 }
 
+fn apply_tier_hysteresis(
+    current: QualityTier,
+    candidate: QualityTier,
+    pending_tier: &mut Option<QualityTier>,
+    pending_tier_samples: &mut u8,
+    hysteresis: HysteresisConfig,
+) -> QualityTier {
+    if candidate == current {
+        *pending_tier = None;
+        *pending_tier_samples = 0;
+        return current;
+    }
+
+    if *pending_tier == Some(candidate) {
+        *pending_tier_samples = (*pending_tier_samples).saturating_add(1);
+    } else {
+        *pending_tier = Some(candidate);
+        *pending_tier_samples = 1;
+    }
+
+    let required = if candidate < current {
+        hysteresis.degrade_samples.max(1)
+    } else {
+        hysteresis.recover_samples.max(1)
+    };
+    if *pending_tier_samples >= required {
+        *pending_tier = None;
+        *pending_tier_samples = 0;
+        candidate
+    } else {
+        current
+    }
+}
+
 #[must_use]
 pub const fn profile_for(kind: StreamKind, tier: QualityTier) -> StreamProfile {
     match (kind, tier) {
@@ -278,10 +390,22 @@ pub const fn profile_for(kind: StreamKind, tier: QualityTier) -> StreamProfile {
         (StreamKind::Monitoring, QualityTier::Medium) => StreamProfile::new(480, 270, 4, 450),
         (StreamKind::Monitoring, QualityTier::Low) => StreamProfile::new(320, 180, 3, 250),
         (StreamKind::Monitoring, QualityTier::Emergency) => StreamProfile::new(320, 180, 1, 120),
-        (_, QualityTier::High) => StreamProfile::new(1920, 1080, 30, 5_000),
-        (_, QualityTier::Medium) => StreamProfile::new(1280, 720, 30, 2_500),
-        (_, QualityTier::Low) => StreamProfile::new(1280, 720, 20, 1_500),
-        (_, QualityTier::Emergency) => StreamProfile::new(854, 480, 10, 700),
+        (StreamKind::Interactive, QualityTier::High) => StreamProfile::new(1920, 1080, 30, 5_000),
+        (StreamKind::Interactive, QualityTier::Medium) => StreamProfile::new(1280, 720, 30, 2_500),
+        (StreamKind::Interactive, QualityTier::Low) => StreamProfile::new(960, 540, 30, 1_500),
+        (StreamKind::Interactive, QualityTier::Emergency) => StreamProfile::new(640, 360, 20, 700),
+        (StreamKind::TeacherPresentation, QualityTier::High) => {
+            StreamProfile::new(1920, 1080, 30, 5_000)
+        }
+        (StreamKind::TeacherPresentation, QualityTier::Medium) => {
+            StreamProfile::new(1280, 720, 30, 2_500)
+        }
+        (StreamKind::TeacherPresentation, QualityTier::Low) => {
+            StreamProfile::new(1280, 720, 20, 1_500)
+        }
+        (StreamKind::TeacherPresentation, QualityTier::Emergency) => {
+            StreamProfile::new(854, 480, 10, 700)
+        }
     }
 }
 
@@ -324,7 +448,14 @@ mod tests {
         let decision = AdaptationPolicy::default().decide(StreamKind::Interactive, metrics);
         assert_eq!(decision.tier, QualityTier::Emergency);
         assert_eq!(decision.transport, MediaTransport::ReliableFallback);
-        assert_eq!(decision.profile.fps, 10);
+        assert_eq!(decision.profile.fps, 20);
+    }
+
+    #[test]
+    fn teacher_presentation_emergency_profile_stays_conservative() {
+        let profile = profile_for(StreamKind::TeacherPresentation, QualityTier::Emergency);
+        assert_eq!(profile.fps, 10);
+        assert_eq!((profile.width, profile.height), (854, 480));
     }
 
     #[test]
@@ -370,6 +501,95 @@ mod tests {
             controller.observe(healthy(false, false)).tier,
             QualityTier::High
         );
+    }
+
+    #[test]
+    fn focused_interactive_profile_preserves_motion_before_resolution() {
+        let medium = profile_for(StreamKind::Interactive, QualityTier::Medium);
+        let low = profile_for(StreamKind::Interactive, QualityTier::Low);
+        let emergency = profile_for(StreamKind::Interactive, QualityTier::Emergency);
+
+        assert_eq!(medium.fps, 30);
+        assert_eq!(low.fps, 30);
+        assert_eq!((low.width, low.height), (960, 540));
+        assert_eq!(emergency.fps, 20);
+        assert_eq!((emergency.width, emergency.height), (640, 360));
+    }
+
+    #[test]
+    fn focused_profile_controller_can_start_from_existing_stream_tier() {
+        let mut controller = FocusedProfileController::with_initial_tier(
+            StreamKind::Interactive,
+            AdaptationPolicy::default(),
+            HysteresisConfig {
+                degrade_samples: 2,
+                recover_samples: 3,
+                transport_samples: 1,
+            },
+            QualityTier::High,
+        );
+        let mut bad = healthy(false, false);
+        bad.packet_loss = 0.12;
+
+        let pending = controller.observe(bad);
+        assert_eq!(pending.tier, QualityTier::High);
+        assert!(!pending.changed);
+
+        let degraded = controller.observe(bad);
+        assert_eq!(degraded.tier, QualityTier::Emergency);
+        assert!(degraded.changed);
+        assert_eq!(degraded.profile.fps, 20);
+    }
+
+    #[test]
+    fn focused_profile_controller_does_not_expose_transport_choice() {
+        let mut controller = FocusedProfileController::new(
+            StreamKind::Interactive,
+            AdaptationPolicy::default(),
+            HysteresisConfig {
+                degrade_samples: 2,
+                recover_samples: 3,
+                transport_samples: 1,
+            },
+        );
+
+        let first = controller.observe(healthy(true, false));
+        assert_eq!(first.tier, QualityTier::High);
+        assert!(first.changed);
+
+        let mut bad = healthy(false, true);
+        bad.packet_loss = 0.12;
+        let pending = controller.observe(bad);
+        assert_eq!(pending.tier, QualityTier::High);
+        assert!(!pending.changed);
+
+        let degraded = controller.observe(bad);
+        assert_eq!(degraded.tier, QualityTier::Emergency);
+        assert!(degraded.changed);
+        assert_eq!(degraded.profile.fps, 20);
+    }
+
+    #[test]
+    fn focused_profile_recovery_uses_existing_hysteresis() {
+        let mut controller = FocusedProfileController::new(
+            StreamKind::Interactive,
+            AdaptationPolicy::default(),
+            HysteresisConfig {
+                degrade_samples: 1,
+                recover_samples: 3,
+                transport_samples: 1,
+            },
+        );
+        let mut bad = healthy(false, false);
+        bad.packet_loss = 0.12;
+        assert_eq!(controller.observe(bad).tier, QualityTier::Emergency);
+
+        assert!(!controller.observe(healthy(false, false)).changed);
+        assert!(!controller.observe(healthy(false, false)).changed);
+        let recovered = controller.observe(healthy(false, false));
+        assert!(recovered.changed);
+        assert_eq!(recovered.tier, QualityTier::High);
+        assert_eq!(recovered.profile.fps, 30);
     }
 
     #[test]

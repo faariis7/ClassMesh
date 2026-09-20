@@ -10,7 +10,7 @@ This file distinguishes **implemented code**, **hosted-CI validation**, **real-h
 
 Phase 4 physical acceptance remains pending. Issue #3 must remain open until two physical Windows PCs pass the documented qualification.
 
-Phase 5 is complete under Issue #32 through PR #107. The production control path now includes enrolled mTLS, stable identity/credential rotation, live per-command authorization/replay checks, durable fail-closed Service state, Service-hosted QUIC control runtime, authenticated post-handshake session handling, centralized privileged input dispatch, bounded Service→Worker forwarding and interactive-session Win32 input execution. Phase 6 interactive remote control is active under Issue #108.
+Phase 5 is complete under Issue #32 through PR #107. The production control path now includes enrolled mTLS, stable identity/credential rotation, live per-command authorization/replay checks, durable fail-closed Service state, Service-hosted QUIC control runtime, authenticated post-handshake session handling, centralized privileged input dispatch, bounded Service→Worker forwarding and interactive-session Win32 input execution. Phase 6 interactive remote control is active under Issue #108: 6B lifecycle hardening merged in PR #111, 6C secure-desktop/input-availability diagnostics merged in PR #112, and 6D focused interactive adaptation is active in PR #113.
 
 The hosted CI baseline covers Portable Rust / Ubuntu rustfmt, Clippy with warnings denied, full workspace tests and `classmesh-lab`, plus Windows workspace Clippy/tests and release builds for the media qualification executables. Hosted runners do not replace real interactive GPU/driver or two-PC validation.
 
@@ -73,7 +73,7 @@ PR #73 merged after CI #354 green and adds versioned, bounded durable persistenc
 
 PR #81 merged after CI #367 green and requires each privileged post-handshake command to carry the exact negotiated protocol version before its sequence can be consumed. PR #83 merged as `e36d26b8c606e087a47e408717f409dd8b4ac35f` after CI #372 green and adds bounded full-session reconnect: connection + control stream + Hello are retried only for transport failures, while protocol/authentication/administrative rejections remain terminal. The same configured QUIC endpoint/credential resolver is reused, so reconnect does not require re-enrollment.
 
-PR #86 added the isolated control-frame fuzz harness; PR #88 added stable non-sensitive security diagnostics; PR #91 added malformed established-envelope regression coverage; PR #93/#94 added protected CNG server credentials and durable machine identity; PR #95 added fail-closed Service startup state validation; PR #101 hosted the enrolled QUIC runtime in the Windows Service; PR #103/#104 connected centralized privileged dispatch and the authenticated post-handshake session loop. PR #105–#107 then established the first Phase 6 input slice end-to-end: defined input semantics, stateful Win32 SendInput execution, authenticated bounded Worker IPC, and bounded Service forwarding after live authorization. PR #107 CI #427 was green.
+PR #86 added the isolated control-frame fuzz harness; PR #88 added stable non-sensitive security diagnostics; PR #91 added malformed established-envelope regression coverage; PR #93/#94 added protected CNG server credentials and durable machine identity; PR #95 added fail-closed Service startup state validation; PR #101 hosted the enrolled QUIC runtime in the Windows Service; PR #103/#104 connected centralized privileged dispatch and the authenticated post-handshake session loop. PR #105–#107 then established the first Phase 6 input slice end-to-end: defined input semantics, stateful Win32 SendInput execution, authenticated bounded Worker IPC, and bounded Service forwarding after live authorization. PR #107 CI #427 was green. PR #111 added exclusive-controller ownership and lifecycle/stuck-input cleanup with CI #436 green. PR #112 added explicit secure-desktop/input-availability diagnostics with CI #441 green. PR #113 is the active 6D slice: it adds the motion-preserving Interactive profile ladder and the authenticated ReceiverFeedback → hysteretic focused-profile decision → profile-only StreamReconfigure control-plane loop without selecting a media transport. Worker/encoder application of that reconfiguration is still pending.
 
 ### Phase 5D/5E — authenticated authorization and negotiation complete through PR #63
 
@@ -81,7 +81,7 @@ PR #63 merged the authenticated control-session guard with PR CI #330 green. The
 
 ## Remaining security/control work
 
-- Phase 6 interactive-control lifecycle hardening, secure-desktop diagnostics and focused-stream behavior under Issue #108;
+- Phase 6 focused-stream Worker/encoder reconfiguration apply, bounded clipboard skeleton and physical interactive-control validation under Issue #108;
 - encrypted multicast media key distribution/replay/rotation for the later classroom-presentation phase;
 - final privilege-boundary, dependency and update-chain review before the 1.0 gate.
 
@@ -91,8 +91,8 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 
 ## Next implementation sequence
 
-1. Keep Issue #3 open and perform Phase 4 physical qualification when two Windows PCs are available.
-2. Continue Phase 5F with fuzz targets, broader malformed authenticated-envelope/compatibility coverage and security diagnostics; reconnect/timeout hardening is now merged through PR #83.
-3. Add dependency/advisory/license gates when useful to the active phase.
-4. Continue remaining production security work such as durable enrollment/certificate state and protected multicast media key distribution.
-5. Begin product UI work under `classmesh-design` with runtime/visual verification when Console/Agent UI becomes active.
+1. Keep Issue #3 open and perform Phase 4 physical qualification when two Windows PCs are available; do not select the default one-to-one UDP-vs-QUIC-Datagram transport before that evidence exists.
+2. Finish Phase 6D by applying validated profile-only `StreamReconfigure` decisions to the focused Worker/encoder path with bounded/recoverable reconfiguration.
+3. Implement the typed, bounded, policy-controlled clipboard skeleton for 6E.
+4. Run Phase 6F physical interactive-control validation, including degraded/lost media while authenticated control remains responsive.
+5. Continue later production security, classroom fan-out, installer/update and UI work in roadmap order.
