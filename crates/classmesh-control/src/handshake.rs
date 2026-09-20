@@ -588,7 +588,11 @@ mod tests {
             principal_id: id(5),
             role: ControlRole::StudentDevice,
             version: ProtocolVersion { major: 0, minor: 1 },
-            capabilities: capabilities(&[Capability::H264HardwareDecode, Capability::UdpUnicast]),
+            capabilities: capabilities(&[
+                Capability::H264HardwareDecode,
+                Capability::UdpUnicast,
+                Capability::ClipboardText,
+            ]),
             hostname: "student-05".to_owned(),
             app_version: "0.0.1".to_owned(),
         };
