@@ -2,9 +2,9 @@
 
 This roadmap favors measured, recoverable primitives before UI breadth. It is deliberately Windows-first and treats Session 0 isolation, GPU lifecycle, transport backpressure and observability as architecture—not cleanup work.
 
-## Current execution note — 2026-09-18
+## Current execution note — 2026-09-20
 
-Phase 4 implementation/tooling is complete but its physical two-PC acceptance gate remains open in Issue #3. Phase 5 control-plane work is proceeding in parallel under Issue #32 because it does not require choosing the final UDP vs QUIC Datagram media default. The live execution order and current gates are maintained in `docs/WORK_PLAN.md`.
+Phase 4 implementation/tooling is complete but its physical two-PC acceptance gate remains open in Issue #3. Phase 5 control-plane work is complete under Issue #32 through PR #107. Phase 6 interactive remote control is now active under Issue #108; its first authenticated mouse/keyboard execution slice is already merged through PR #105–#107. The live execution order and current gates are maintained in `docs/WORK_PLAN.md`.
 
 ## Phase 0 — Architecture and repository foundation
 
@@ -135,6 +135,8 @@ Exit criteria:
 - key rotation/revocation paths are defined before production enrollment.
 
 ## Phase 6 — Interactive remote control
+
+Current implementation note: 6A is merged through PR #105–#107. The enrolled QUIC control session performs live `Permission::ControlInput` authorization and replay/session/version checks, forwards accepted events through a bounded Service queue and exact Worker IPC, and executes them with a stateful Win32 `SendInput` backend in the interactive session. Lifecycle hardening and the remaining Phase 6 items are tracked in Issue #108.
 
 Implement:
 
