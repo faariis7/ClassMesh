@@ -62,6 +62,7 @@ struct PendingInput {
     sample_time_100ns: i64,
     frame_id: u64,
     timestamp_us: u64,
+    submitted_at: Instant,
     surface: ID3D11Texture2D,
 }
 
@@ -72,6 +73,7 @@ struct PendingInput {
 pub struct MfEncodedOutput {
     pub frame: SharedEncodedFrame,
     pub recycled_surface: ID3D11Texture2D,
+    pub encode_latency: Duration,
 }
 
 impl fmt::Debug for MfEncodedOutput {
@@ -153,6 +155,7 @@ pub struct MfAsyncH264Encoder {
     wait: MfAsyncWaitConfig,
     provides_output_samples: bool,
     output_size: u32,
+    low_latency_accepted: bool,
     needs_input: bool,
     drained: bool,
     next_sample_index: u64,
@@ -199,10 +202,10 @@ impl MfAsyncH264Encoder {
         validate_wait_config(wait)?;
         let transform = activation.activate_transform()?;
         let attributes = unsafe { transform.GetAttributes()? };
-        unsafe {
+        let low_latency_accepted = unsafe {
             attributes.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)?;
-            let _ = attributes.SetUINT32(&MF_LOW_LATENCY, 1);
-        }
+            attributes.SetUINT32(&MF_LOW_LATENCY, 1).is_ok()
+        };
 
         let events: IMFMediaEventGenerator = transform.cast()?;
         let device_manager = MfDxgiDeviceManager::new(device)?;
@@ -234,6 +237,7 @@ impl MfAsyncH264Encoder {
             wait,
             provides_output_samples,
             output_size,
+            low_latency_accepted,
             needs_input: false,
             drained: false,
             next_sample_index: 0,
@@ -249,6 +253,11 @@ impl MfAsyncH264Encoder {
     #[must_use]
     pub const fn wait_config(&self) -> MfAsyncWaitConfig {
         self.wait
+    }
+
+    #[must_use]
+    pub const fn low_latency_accepted(&self) -> bool {
+        self.low_latency_accepted
     }
 
     /// Requests that the hardware encoder emit the next submitted frame as a keyframe.
@@ -301,6 +310,7 @@ impl MfAsyncH264Encoder {
             sample_time_100ns,
             frame_id,
             timestamp_us,
+            submitted_at: Instant::now(),
             surface,
         });
         self.next_sample_index = self.next_sample_index.saturating_add(1);
@@ -509,6 +519,7 @@ impl MfAsyncH264Encoder {
         Ok(Some(MfEncodedOutput {
             frame,
             recycled_surface: pending.surface,
+            encode_latency: pending.submitted_at.elapsed(),
         }))
     }
 
