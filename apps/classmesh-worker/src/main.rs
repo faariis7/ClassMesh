@@ -46,7 +46,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let (event_tx, event_rx) = mpsc::channel();
-    let _ipc_thread = spawn_ipc_reader(pipe, event_tx);
+    let reader_pipe = pipe.try_clone()?;
+    let _ipc_thread = spawn_ipc_reader(reader_pipe, event_tx);
 
     let mut capture_restart = CaptureRestart::default();
     let mut capture = match start_capture() {
@@ -59,6 +60,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     };
+    let mut runtime_capabilities = WorkerCapabilitySnapshot {
+        dxgi_capture: capture.is_some(),
+        h264_hardware_encode: false,
+    };
+    publish_worker_capabilities(
+        &pipe,
+        std::process::id(),
+        actual_session,
+        runtime_capabilities,
+    )?;
     let mut capture_due = Instant::now();
     let mut active_focused_profile: Option<FocusedWorkerProfile> = None;
     let mut captured_frames = 0_u64;
@@ -95,6 +106,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     capture = match start_capture() {
                         Ok(capture) => {
                             eprintln!("ClassMesh Worker DXGI capture resumed by Service");
+                            if !runtime_capabilities.dxgi_capture {
+                                runtime_capabilities.dxgi_capture = true;
+                                publish_worker_capabilities(
+                                    &pipe,
+                                    std::process::id(),
+                                    actual_session,
+                                    runtime_capabilities,
+                                )?;
+                            }
                             Some(capture)
                         }
                         Err(error) => {
@@ -174,6 +194,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     capture = Some(restarted);
                     capture_restart.clear();
                     capture_due = Instant::now();
+                    if !runtime_capabilities.dxgi_capture {
+                        runtime_capabilities.dxgi_capture = true;
+                        publish_worker_capabilities(
+                            &pipe,
+                            std::process::id(),
+                            actual_session,
+                            runtime_capabilities,
+                        )?;
+                    }
                     eprintln!(
                         "ClassMesh Worker DXGI capture recovered; control session remained active"
                     );
@@ -281,6 +310,13 @@ impl CaptureRestart {
         self.attempts = 0;
         self.next_attempt = None;
     }
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct WorkerCapabilitySnapshot {
+    dxgi_capture: bool,
+    h264_hardware_encode: bool,
 }
 
 #[cfg(windows)]
@@ -445,6 +481,26 @@ fn start_capture() -> Result<WorkerCapture, Box<dyn std::error::Error>> {
 }
 
 #[cfg(windows)]
+fn publish_worker_capabilities(
+    pipe: &classmesh_win32::NamedPipeClient,
+    process_id: u32,
+    session_id: u32,
+    snapshot: WorkerCapabilitySnapshot,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let frame = classmesh_windows_runtime::ipc::IpcFrame::worker_capabilities(
+        classmesh_windows_runtime::ipc::WorkerRuntimeCapabilities::new(
+            process_id,
+            session_id,
+            snapshot.dxgi_capture,
+            snapshot.h264_hardware_encode,
+        ),
+    );
+    let encoded = frame.encode().map_err(ipc_frame_error)?;
+    pipe.write_all(&encoded)?;
+    Ok(())
+}
+
+#[cfg(windows)]
 fn spawn_ipc_reader(
     pipe: classmesh_win32::NamedPipeClient,
     event_tx: std::sync::mpsc::Sender<WorkerEvent>,
@@ -586,6 +642,17 @@ fn main() {
 #[cfg(all(test, windows))]
 mod focused_profile_tests {
     use super::*;
+
+    #[test]
+    fn capability_snapshot_does_not_claim_h264_before_encode_validation() {
+        let mut snapshot = WorkerCapabilitySnapshot::default();
+        assert!(!snapshot.dxgi_capture);
+        assert!(!snapshot.h264_hardware_encode);
+
+        snapshot.dxgi_capture = true;
+        assert!(snapshot.dxgi_capture);
+        assert!(!snapshot.h264_hardware_encode);
+    }
 
     #[test]
     fn capture_restart_budget_is_bounded_without_stopping_worker_control() {
