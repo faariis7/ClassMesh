@@ -383,18 +383,21 @@ fn run_h264_benchmark(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
             CaptureStep::Frame { meta, frame } => {
                 match PresentationPipeline::from_first_frame_with_target(&frame, target) {
                     Ok(mut recreated) => {
-                        let same_encoder = recreated.encoder_candidate().clsid == expected_encoder_clsid;
-                        if same_encoder
-                            && recreated.process_frame_with_metrics(meta, frame).is_ok()
-                            && recreated.stats().submitted_frames > 0
-                        {
-                            reset_ok = true;
-                        } else if !same_encoder {
+                        let same_encoder =
+                            recreated.encoder_candidate().clsid == expected_encoder_clsid;
+                        if !same_encoder {
                             eprintln!(
                                 "H.264 benchmark reset selected a different encoder: expected {}, received {}",
                                 expected_encoder_clsid,
                                 recreated.encoder_candidate().clsid
                             );
+                            break;
+                        }
+
+                        if recreated.process_frame_with_metrics(meta, frame).is_ok()
+                            && recreated.stats().submitted_frames > 0
+                        {
+                            reset_ok = recreated.finish_with_metrics().is_ok();
                         }
                     }
                     Err(error) => {
