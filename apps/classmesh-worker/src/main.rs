@@ -503,7 +503,6 @@ fn main() {
     eprintln!("classmesh-worker is supported only on Windows");
 }
 
-
 #[cfg(all(test, windows))]
 mod focused_profile_tests {
     use super::*;
