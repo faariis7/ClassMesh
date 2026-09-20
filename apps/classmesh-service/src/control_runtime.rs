@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -24,7 +24,8 @@ use classmesh_control::quic::{
 use classmesh_control::{DEFAULT_OFFLINE_AFTER, HeartbeatSample, HeartbeatTracker};
 use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver};
 use classmesh_protocol::control_wire::{
-    ControlEnvelope, HeartbeatAck, ProtocolVersion as WireProtocolVersion, control_envelope,
+    ControlEnvelope, HeartbeatAck, InputEvent, ProtocolVersion as WireProtocolVersion,
+    control_envelope,
 };
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::AuthorizationStore;
@@ -113,6 +114,8 @@ impl ControlRuntime {
     pub(crate) fn start(
         state: ControlRuntimeState,
         config: ControlRuntimeConfig,
+        input_tx: mpsc::SyncSender<InputEvent>,
+        input_available: Arc<AtomicBool>,
     ) -> Result<Self, String> {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<SocketAddr, String>>(1);
         let (stop_tx, stop_rx) = oneshot::channel();
@@ -134,7 +137,14 @@ impl ControlRuntime {
                     }
                 };
 
-                runtime.block_on(run_listener(state, config, ready_tx, stop_rx));
+                runtime.block_on(run_listener(
+                    state,
+                    config,
+                    ready_tx,
+                    stop_rx,
+                    input_tx,
+                    input_available,
+                ));
             })
             .map_err(|error| format!("control runtime thread creation failed: {error}"))?;
 
@@ -193,6 +203,8 @@ async fn run_listener(
     config: ControlRuntimeConfig,
     ready_tx: mpsc::SyncSender<Result<SocketAddr, String>>,
     mut stop_rx: oneshot::Receiver<()>,
+    input_tx: mpsc::SyncSender<InputEvent>,
+    input_available: Arc<AtomicBool>,
 ) {
     let endpoint = match build_endpoint(&state, config) {
         Ok(endpoint) => endpoint,
@@ -231,6 +243,8 @@ async fn run_listener(
                 };
                 let authorization = Arc::clone(&authorization);
                 let session_ids = Arc::clone(&session_ids);
+                let input_tx = input_tx.clone();
+                let input_available = Arc::clone(&input_available);
                 tokio::spawn(async move {
                     let connection = match incoming.await {
                         Ok(connection) => connection,
@@ -278,6 +292,8 @@ async fn run_listener(
                                 &session,
                                 peer,
                                 authorization.as_ref(),
+                                &input_tx,
+                                input_available.as_ref(),
                             )
                             .await;
                         }
@@ -301,6 +317,8 @@ async fn run_established_session(
     session: &EstablishedControlSession,
     peer: EstablishedAuthenticatedPeer,
     authorization: &AuthorizationStore,
+    input_tx: &mpsc::SyncSender<InputEvent>,
+    input_available: &AtomicBool,
 ) {
     const HELLO_SEQUENCE: u64 = 1;
 
@@ -409,12 +427,31 @@ async fn run_established_session(
                 };
                 match dispatch_privileged_command(&mut guard, authorization, &envelope, now_unix_ms)
                 {
-                    Ok(PrivilegedControlCommand::InputEvent(_)) => {
-                        eprintln!(
-                            "ClassMesh authorized input rejected: control.command.executor_unavailable"
-                        );
-                        connection.close(0_u32.into(), b"input executor unavailable");
-                        return;
+                    Ok(PrivilegedControlCommand::InputEvent(input)) => {
+                        if !input_available.load(Ordering::Acquire) {
+                            eprintln!(
+                                "ClassMesh authorized input rejected: control.command.executor_unavailable"
+                            );
+                            connection.close(0_u32.into(), b"input executor unavailable");
+                            return;
+                        }
+                        match input_tx.try_send(input) {
+                            Ok(()) => {}
+                            Err(mpsc::TrySendError::Full(_)) => {
+                                eprintln!(
+                                    "ClassMesh authorized input rejected: control.command.input_backpressure"
+                                );
+                                connection.close(0_u32.into(), b"input backpressure");
+                                return;
+                            }
+                            Err(mpsc::TrySendError::Disconnected(_)) => {
+                                eprintln!(
+                                    "ClassMesh authorized input rejected: control.command.executor_disconnected"
+                                );
+                                connection.close(0_u32.into(), b"input executor disconnected");
+                                return;
+                            }
+                        }
                     }
                     Err(error) => {
                         eprintln!(
