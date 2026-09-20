@@ -761,8 +761,7 @@ mod windows_service_app {
                             } else {
                                 eprintln!(
                                     "ClassMesh Service will retry focused media reset ({}/{}): {error}",
-                                    focused_clear_attempts,
-                                    MAX_MEDIA_RECONFIGURE_ATTEMPTS
+                                    focused_clear_attempts, MAX_MEDIA_RECONFIGURE_ATTEMPTS
                                 );
                                 next_media_reconfigure_attempt = Instant::now()
                                     .checked_add(MEDIA_RECONFIGURE_RETRY)
@@ -799,8 +798,7 @@ mod windows_service_app {
                         } else {
                             eprintln!(
                                 "ClassMesh Service will retry focused media reconfigure ({}/{}): {error}",
-                                focused_reconfigure_attempts,
-                                MAX_MEDIA_RECONFIGURE_ATTEMPTS
+                                focused_reconfigure_attempts, MAX_MEDIA_RECONFIGURE_ATTEMPTS
                             );
                             focused_reconfigure_worker_pid = None;
                             next_media_reconfigure_attempt = Instant::now()
