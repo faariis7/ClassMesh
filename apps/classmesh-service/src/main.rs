@@ -10,6 +10,7 @@ mod windows_service_app {
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    use classmesh_codec_win::DurableEncoderCapabilityCache;
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity};
     use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure};
     use classmesh_security::persistence::DurableAuthorizationState;
@@ -42,6 +43,7 @@ mod windows_service_app {
     const CONFIG_DIRECTORY: &str = "ClassMesh\\config";
     const MACHINE_IDENTITY_FILE: &str = "machine-identity.json";
     const AUTHORIZATION_FILE: &str = "authorization.json";
+    const ENCODER_CAPABILITY_CACHE_FILE: &str = "encoder-capability.json";
     const CONTROL_RUNTIME_CONFIG_FILE: &str = "control-runtime.json";
     const INPUT_QUEUE_CAPACITY: usize = 256;
     const INPUT_CLEANUP_QUEUE_CAPACITY: usize = 1;
@@ -640,6 +642,12 @@ mod windows_service_app {
         Ok(PathBuf::from(program_data).join(STATE_DIRECTORY))
     }
 
+    fn encoder_capability_cache() -> Result<DurableEncoderCapabilityCache, String> {
+        Ok(DurableEncoderCapabilityCache::new(
+            program_data_state_dir()?.join(ENCODER_CAPABILITY_CACHE_FILE),
+        ))
+    }
+
     fn unix_time_ms() -> Result<u64, String> {
         let duration = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -791,6 +799,18 @@ mod windows_service_app {
             reconfigure_tx: media_reconfigure_tx,
             released_session_floor: Arc::clone(&released_media_session_floor),
         };
+        let encoder_capability_cache = match encoder_capability_cache() {
+            Ok(cache) => cache,
+            Err(error) => {
+                eprintln!("ClassMesh encoder capability cache path failed: {error}");
+                return;
+            }
+        };
+        eprintln!(
+            "ClassMesh Service encoder capability cache ready at {}",
+            encoder_capability_cache.path().display()
+        );
+
         let worker_capabilities = Arc::new(WorkerCapabilityState::default());
         let mut control_runtime = match ControlRuntime::start(
             control_state,
