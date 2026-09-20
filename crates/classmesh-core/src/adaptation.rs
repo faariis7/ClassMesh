@@ -346,7 +346,7 @@ fn apply_tier_hysteresis(
     }
 
     if *pending_tier == Some(candidate) {
-        *pending_tier_samples = pending_tier_samples.saturating_add(1);
+        *pending_tier_samples = (*pending_tier_samples).saturating_add(1);
     } else {
         *pending_tier = Some(candidate);
         *pending_tier_samples = 1;
