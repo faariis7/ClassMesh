@@ -521,9 +521,9 @@ impl InputDispatchState {
             }
         }
 
-        let _ =
-            self.owner
-                .compare_exchange(session_id, 0, Ordering::AcqRel, Ordering::Acquire);
+        let _ = self
+            .owner
+            .compare_exchange(session_id, 0, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 
