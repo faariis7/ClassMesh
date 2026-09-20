@@ -147,6 +147,8 @@ Current policy primitives accept:
 
 Production policy will add hysteresis and historical windows. A single sample crossing a threshold must not cause protocol flapping.
 
+Phase 6 focused interactive adaptation uses authenticated `ReceiverFeedback` on the established control session to drive a hysteretic profile decision. A profile-only `StreamReconfigure` sets `transport` to `MEDIA_TRANSPORT_UNSPECIFIED` and leaves `transport_parameters` empty, which means the receiver keeps the stream's current media transport. This deliberately does not select the one-to-one UDP-vs-QUIC-Datagram default while Phase 4 Issue #3 remains physically unqualified.
+
 ## 7. Monitoring vs presentation
 
 The media protocol does not force every workload to use the same codec profile.
