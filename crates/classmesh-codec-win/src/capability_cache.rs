@@ -500,9 +500,11 @@ mod tests {
     #[test]
     fn unsupported_version_fails_closed() {
         let path = test_path("version");
+        let mut persisted = PersistedCache::from_parts(&key("31.0.15.5123"), &result());
+        persisted.version = 99;
         fs::write(
             &path,
-            br#"{"version":99,"key":{},"result":{}}"#,
+            serde_json::to_vec(&persisted).expect("serialize"),
         )
         .expect("write");
         let cache = DurableEncoderCapabilityCache::new(&path);
