@@ -4,7 +4,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::time::{Duration, Instant};
 
     use classmesh_capture_win::CaptureStep;
-    use classmesh_win32::NamedPipeClient;
+    use classmesh_win32::{InputInjector, NamedPipeClient};
     use classmesh_windows_runtime::ipc::{IpcFrame, IpcMessage};
 
     let args: Vec<String> = std::env::args().collect();
@@ -51,6 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut capture = Some(start_capture()?);
     let mut capture_due = Instant::now();
     let mut captured_frames = 0_u64;
+    let mut input_injector = InputInjector::default();
 
     loop {
         let wait = if capture.is_some() {
@@ -77,6 +78,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 classmesh_windows_runtime::ipc::IpcControlCommand::Shutdown => {
                     eprintln!("ClassMesh Worker shutdown requested by Service");
                     return Ok(());
+                }
+            },
+            Ok(WorkerEvent::Input(event)) => match input_action_from_wire(event) {
+                Ok(action) => {
+                    if let Err(error) = input_injector.apply(action) {
+                        eprintln!("ClassMesh Worker input execution failed: {error}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("ClassMesh Worker rejected input event: {error}");
                 }
             },
             Ok(WorkerEvent::IpcFailure(error)) => return Err(error.into()),
@@ -141,7 +152,63 @@ type WorkerCapture = classmesh_capture_win::RecoveringCapture<
 #[derive(Debug)]
 enum WorkerEvent {
     Control(classmesh_windows_runtime::ipc::IpcControlCommand),
+    Input(classmesh_protocol::control_wire::InputEvent),
     IpcFailure(String),
+}
+
+#[cfg(windows)]
+fn input_action_from_wire(
+    event: classmesh_protocol::control_wire::InputEvent,
+) -> Result<classmesh_win32::InputAction, String> {
+    use classmesh_protocol::control_wire::input_event::Event;
+    use classmesh_win32::{InputAction, MouseButton};
+
+    let Some(event) = event.event else {
+        return Err("input event payload is missing".to_owned());
+    };
+
+    match event {
+        Event::MouseMove(mouse) => Ok(InputAction::MouseMove {
+            x: mouse.x,
+            y: mouse.y,
+            absolute: mouse.absolute,
+        }),
+        Event::MouseButton(button) => {
+            let button = match button.button {
+                1 => MouseButton::Left,
+                2 => MouseButton::Right,
+                3 => MouseButton::Middle,
+                4 => MouseButton::X1,
+                5 => MouseButton::X2,
+                value => return Err(format!("unsupported mouse button {value}")),
+            };
+            Ok(InputAction::MouseButton {
+                button,
+                down: button_event_down(event),
+            })
+        }
+        Event::MouseWheel(wheel) => Ok(InputAction::MouseWheel {
+            delta: wheel.delta,
+            horizontal: wheel.horizontal,
+        }),
+        Event::Key(key) => Ok(InputAction::Key {
+            virtual_key: key.virtual_key,
+            scan_code: key.scan_code,
+            down: key.down,
+            extended: key.extended,
+        }),
+        Event::ReleaseAll(_) => Ok(InputAction::ReleaseAll),
+    }
+}
+
+#[cfg(windows)]
+fn button_event_down(
+    event: classmesh_protocol::control_wire::input_event::Event,
+) -> bool {
+    match event {
+        classmesh_protocol::control_wire::input_event::Event::MouseButton(button) => button.down,
+        _ => false,
+    }
 }
 
 #[cfg(windows)]
@@ -216,6 +283,11 @@ fn spawn_ipc_reader(
                 match frame.message() {
                     Ok(IpcMessage::Control(command)) => {
                         if event_tx.send(WorkerEvent::Control(command)).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(IpcMessage::InputEvent(event)) => {
+                        if event_tx.send(WorkerEvent::Input(event)).is_err() {
                             return;
                         }
                     }
