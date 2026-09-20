@@ -715,10 +715,11 @@ mod windows_service_app {
             loop {
                 match media_reconfigure_rx.try_recv() {
                     Ok(dispatch) => {
-                        if dispatch.control_session_id <= focused_media_session_floor
-                            || desired_focused_control_session_id
-                                .is_some_and(|desired| dispatch.control_session_id < desired)
-                        {
+                        if focused_reconfigure_is_stale(
+                            dispatch.control_session_id,
+                            focused_media_session_floor,
+                            desired_focused_control_session_id,
+                        ) {
                             continue;
                         }
                         desired_focused_reconfigure = Some(dispatch.reconfigure);
@@ -812,6 +813,22 @@ mod windows_service_app {
         workers.stop_any();
         control_runtime.stop();
         set_stopped(&status_handle)
+    }
+
+    fn released_session_invalidates_desired(
+        released_floor: u64,
+        desired_session: Option<u64>,
+    ) -> bool {
+        desired_session.is_some_and(|desired| desired <= released_floor)
+    }
+
+    fn focused_reconfigure_is_stale(
+        control_session_id: u64,
+        released_floor: u64,
+        desired_session: Option<u64>,
+    ) -> bool {
+        control_session_id <= released_floor
+            || desired_session.is_some_and(|desired| control_session_id < desired)
     }
 
     fn set_running(handle: &ServiceStatusHandle) -> windows_service::Result<()> {
@@ -928,6 +945,32 @@ mod windows_service_app {
                 supervisor.mark_worker_stopped(session);
             }
             WorkerManagerEvent::None => {}
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn released_session_floor_rejects_stale_profile_updates() {
+            assert!(focused_reconfigure_is_stale(7, 7, None));
+            assert!(focused_reconfigure_is_stale(6, 7, None));
+            assert!(!focused_reconfigure_is_stale(8, 7, None));
+        }
+
+        #[test]
+        fn newer_desired_session_rejects_older_in_flight_profile() {
+            assert!(focused_reconfigure_is_stale(8, 7, Some(9)));
+            assert!(!focused_reconfigure_is_stale(9, 7, Some(8)));
+        }
+
+        #[test]
+        fn release_invalidates_only_same_or_older_desired_session() {
+            assert!(released_session_invalidates_desired(9, Some(9)));
+            assert!(released_session_invalidates_desired(9, Some(8)));
+            assert!(!released_session_invalidates_desired(9, Some(10)));
+            assert!(!released_session_invalidates_desired(9, None));
         }
     }
 }
