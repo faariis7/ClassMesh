@@ -72,6 +72,7 @@ Clipboard support is deliberately narrow and opt-in:
 - capability negotiation uses `CAPABILITY_CLIPBOARD_TEXT`; an unknown or unnegotiated capability never grants permission;
 - the wire contract is text-only UTF-8 using `ClipboardReadRequest`, `ClipboardReadResponse` and `ClipboardWrite`;
 - clipboard text is bounded to **64 KiB of UTF-8 bytes**, well below the 256 KiB control-envelope ceiling;
+- clipboard reads are request/response operations and require a non-zero `request_id` for correlation;
 - read and write are independent privileges: `Permission::ReadClipboard` and `Permission::WriteClipboard`;
 - oversized clipboard writes are rejected before the privileged application sequence is consumed;
 - empty clipboard text is valid and represents an explicit clear;
