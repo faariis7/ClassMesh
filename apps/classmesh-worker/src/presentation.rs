@@ -2,11 +2,11 @@ use std::error::Error;
 use std::fmt;
 
 use classmesh_capture_win::{CapturedFrameMeta, DxgiFrame};
-use classmesh_core::adaptation::StreamProfile as AdaptiveStreamProfile;
 use classmesh_codec_win::gpu::{GpuBgraToNv12Converter, GpuNv12Config};
 use classmesh_codec_win::mf::{MfH264EncoderConfig, MfPlatform, enumerate_h264_hardware_encoders};
 use classmesh_codec_win::mf_async::{MfAsyncH264Encoder, MfEncodedOutput, MfSubmitError};
 use classmesh_codec_win::surface_pool::SurfacePool;
+use classmesh_core::adaptation::StreamProfile as AdaptiveStreamProfile;
 use classmesh_video::distributor::SharedEncodedFrame;
 use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Device, ID3D11Texture2D};
 
@@ -373,8 +373,12 @@ fn profile_for_source(
     target: PresentationTarget,
 ) -> Result<PresentationProfile, PresentationError> {
     target.validate()?;
-    let (target_width, target_height) =
-        bounded_even_size(source_width, source_height, target.max_width, target.max_height);
+    let (target_width, target_height) = bounded_even_size(
+        source_width,
+        source_height,
+        target.max_width,
+        target.max_height,
+    );
     Ok(PresentationProfile {
         source_width,
         source_height,
