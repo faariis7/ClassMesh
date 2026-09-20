@@ -1,6 +1,6 @@
 # ClassMesh Living Work Plan
 
-Last updated: 2026-09-19
+Last updated: 2026-09-20
 
 This is the active execution plan for ClassMesh. It is updated as implementation evidence changes so roadmap intent, code status, hosted-CI evidence, and physical validation are not confused.
 
@@ -16,10 +16,11 @@ This is the active execution plan for ClassMesh. It is updated as implementation
 | Phase 5C3 — enrollment + mTLS | **Core path complete through PR #62** | PR #41–#47 established enrollment/trust/issuance-policy/PKCS#10/bounded rotation; PR #50 merged verified certificate→stable PrincipalId resolution with CI #285 green; PR #51 merged enrolled QUIC mTLS with CI #288 green; PR #55 removed unbounded rotation; PR #58 merged safe credential persistence with CI #307 green; PR #59 merged bounded X.509 issuance with PR CI #309/current-main CI #310 green; PR #60 merged protected CNG→rcgen signing with PR CI #311/current-main CI #312 green; PR #61 merged protected CNG→rustls client signing and negative mTLS coverage with CI #314 green; PR #62 merged live credential re-check with CI #316 green |
 | Phase 5D — authorization + replay controls | **Complete — PR #63 merged** | Verified mTLS PrincipalId is bound to Hello.device_id; exact control_session_id, strictly increasing sequence, live credential state and per-command permission are enforced; PR CI #330 green, merge `221e53bf981f9fdd33526fb5ac359b1282cb655f` |
 | Phase 5E — authenticated capability/session negotiation | **Complete — PR #63 merged** | Capability intersection and negotiated protocol/session are established inside the authenticated enrolled Hello path; spoofed application identity is rejected before the session is accepted |
-| Phase 5F — hardening | **Active** | PR #66/#69/#70 hardened handshake/framing; PR #73 durable authorization state (CI #354); PR #75 per-user SID Worker IPC ACL (CI #357); PR #77 reconnect-policy validation (CI #361); PR #79 I/O-timeout validation (CI #364); PR #81 command-version binding (CI #367); PR #83 dropped-session full reconnect (CI #372); fuzzing and broader malformed authenticated-envelope/security diagnostics remain |
+| Phase 5F — hardening | **Complete — through PR #107** | Fuzzing, malformed-envelope coverage, stable diagnostics, durable authorization/identity state, protected CNG server credentials, fail-closed Service startup, enrolled QUIC runtime, authenticated post-Hello session handling, centralized privileged dispatch, and end-to-end authorized input forwarding are merged; PR #107 CI #427 green |
+| Phase 6 — interactive remote control | **Active — Issue #108** | 6A low-latency authenticated mouse/keyboard path is merged through PR #105–#107; next is 6B lifecycle hardening for disconnect/reconnect, lock/unlock, Worker restart and fast-user switching |
 | AI quality workflow | **Active** | Project skills + official plugins documented in `docs/AI_QUALITY_STACK.md` |
 
-Tracking issue: #32.
+Phase 5 tracking issue #32 is complete. Active Phase 6 tracking issue: #108.
 
 ## Rules while Phase 4 hardware is unavailable
 
@@ -107,7 +108,8 @@ Current control-plane research baseline:
 5. **5C3 Enrollment + mTLS — core path complete** — PR #41–#47 landed enrollment/trust/issuance-policy/PKCS#10/bounded-rotation slices; PR #50 merged verified certificate→stable PrincipalId resolution with CI #285 green; PR #51 merged enrolled QUIC mTLS with CI #288 green; PR #55 removed unbounded rotation; PR #58 merged safe credential persistence with CI #307 green; PR #59 merged bounded X.509 issuance with CI #309 green. PR #60–#62 completed protected signing, enrolled mTLS negative coverage, and live credential re-check.
 6. **5D Authorization/replay integration — complete, PR #63.** Verified identity, session binding, monotonic command sequence and live per-command permission checks are connected.
 7. **5E Authenticated capability/session negotiation — complete, PR #63.** Negotiated protocol/capabilities and session establishment occur inside the enrolled authenticated Hello path.
-8. **5F Hardening — active.** PR #66/#69/#70 hardened Hello/HelloAck consistency and malformed framing; PR #73/#75 added durable authorization metadata and restrictive Worker IPC ACLs; PR #77/#79 hardened reconnect/timeout configuration; PR #81 binds privileged commands to the negotiated version; PR #83 retries the full connect + stream + Hello session after transport drops without re-enrollment. Fuzz targets, broader malformed authenticated-envelope coverage, compatibility/security diagnostics, and production control-runtime integration remain.
+8. **5F Hardening — complete through PR #107.** PR #66/#69/#70 hardened Hello/HelloAck consistency and malformed framing; PR #73/#75 added durable authorization metadata and restrictive Worker IPC ACLs; PR #77/#79 hardened reconnect/timeout configuration; PR #81/#83 completed negotiated-version binding and bounded full-session reconnect; PR #86/#88/#91 added fuzzing, stable security diagnostics and malformed established-envelope coverage; PR #93–#95 added protected server credentials, durable machine identity and fail-closed Service state loading; PR #101/#103/#104 connected the enrolled QUIC runtime, privileged dispatch and post-handshake session loop; PR #105–#107 delivered the first end-to-end authorized input path into the interactive Worker.
+9. **Phase 6 interactive remote control — active under Issue #108.** 6A is complete through PR #105–#107. Next: lifecycle regressions and stuck-input cleanup across disconnect/reconnect, lock/unlock, Worker restart and fast-user switching, followed by secure-desktop diagnostics, focused-stream adaptation and the bounded clipboard skeleton.
 
 Quality-tooling changes should stay in small independent PRs so they do not block or obscure Phase implementation diffs.
 
