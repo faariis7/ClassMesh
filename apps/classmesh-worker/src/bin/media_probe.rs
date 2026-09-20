@@ -10,7 +10,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     use classmesh_capture_win::CaptureStep;
     use classmesh_codec_win::{
-        BenchmarkCapabilities, BoundedEncoderBenchmark, EncoderBenchmarkConfig, summarize_benchmark,
+        BenchmarkCapabilities, BoundedEncoderBenchmark, EncoderBenchmarkConfig,
+        EncoderCapabilityCacheKey, summarize_benchmark,
     };
     use classmesh_core::keyframe::KeyframeRequestCoordinator;
     use classmesh_network::feedback::UdpFeedbackReceiver;
@@ -61,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => None,
     };
 
-    let mut capture = start_capture()?;
+    let (mut capture, adapter_identity) = start_capture()?;
     let mut pipeline: Option<PresentationPipeline> = None;
     let benchmark_config =
         encoder_benchmark_enabled.then(EncoderBenchmarkConfig::compatibility_720p30);
@@ -316,10 +317,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map_err(benchmark_summary_error)?;
                     result.class = class_for_actual_target(result.class, benchmark_profile);
                     let submitted = benchmark.submitted();
+                    let cache_key = benchmark_cache_key(
+                        &adapter_identity,
+                        &candidate,
+                        benchmark_profile,
+                    )?;
                     pending_reset_benchmark = Some(PendingResetBenchmark {
                         result,
                         candidate,
                         profile: benchmark_profile,
+                        cache_key,
                         submitted,
                         reset_submissions: 0,
                         reset_output_observed: false,
@@ -508,6 +515,7 @@ struct PendingResetBenchmark {
     result: classmesh_codec_win::EncoderBenchmarkResult,
     candidate: classmesh_codec_win::EncoderCandidate,
     profile: classmesh_worker::presentation::PresentationProfile,
+    cache_key: classmesh_codec_win::EncoderCapabilityCacheKey,
     submitted: usize,
     reset_submissions: usize,
     reset_output_observed: bool,
@@ -530,7 +538,7 @@ fn report_encoder_benchmark(mut pending: PendingResetBenchmark, reset_ok: bool) 
     pending.result.class =
         class_for_actual_target(pending.result.probe.classify(), pending.profile);
     eprintln!(
-        "encoder benchmark: backend={} class={:?} target={}x{}@{} submitted={} outputs={} missing={} fps={:.2} p50_ms={:.2} p95_ms={:.2} low_latency={} keyframe_request={} reset={} reset_submissions={} dynamic_bitrate=false",
+        "encoder benchmark: backend={} class={:?} target={}x{}@{} submitted={} outputs={} missing={} fps={:.2} p50_ms={:.2} p95_ms={:.2} low_latency={} keyframe_request={} reset={} reset_submissions={} dynamic_bitrate=false cache_adapter={} cache_driver={} cache_encoder={} cache_bitrate_bps={}",
         pending.result.probe.backend,
         pending.result.class,
         pending.profile.target_width,
@@ -546,6 +554,10 @@ fn report_encoder_benchmark(mut pending: PendingResetBenchmark, reset_ok: bool) 
         pending.result.probe.keyframe_request_ok,
         pending.result.probe.reset_ok,
         pending.reset_submissions,
+        pending.cache_key.adapter_identity,
+        pending.cache_key.driver_version,
+        pending.cache_key.encoder_clsid,
+        pending.cache_key.bitrate_bps,
     );
 }
 
@@ -634,8 +646,16 @@ type ProbeCapture = classmesh_capture_win::RecoveringCapture<
 >;
 
 #[cfg(windows)]
-fn start_capture() -> Result<ProbeCapture, Box<dyn std::error::Error>> {
-    use classmesh_capture_win::{RecoveringCapture, enumerate_displays};
+fn start_capture() -> Result<
+    (
+        ProbeCapture,
+        classmesh_capture_win::AdapterCapabilityIdentity,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    use classmesh_capture_win::{
+        RecoveringCapture, enumerate_displays, query_adapter_capability_identity,
+    };
     use classmesh_core::recovery::RecoveryPolicy;
 
     let displays = enumerate_displays().map_err(capture_error)?;
@@ -655,13 +675,21 @@ fn start_capture() -> Result<ProbeCapture, Box<dyn std::error::Error>> {
         display.id.output_index
     );
 
+    let adapter_identity =
+        query_adapter_capability_identity(display.id).map_err(capture_error)?;
+    eprintln!(
+        "media probe adapter identity: {} driver={}",
+        adapter_identity.adapter_identity(),
+        adapter_identity.driver_version
+    );
+
     let mut capture = RecoveringCapture::new(
         display.id,
         classmesh_capture_win::DxgiCaptureFactory,
         RecoveryPolicy::default(),
     );
     capture.start().map_err(capture_error)?;
-    Ok(capture)
+    Ok((capture, adapter_identity))
 }
 
 #[cfg(windows)]
@@ -745,6 +773,23 @@ fn elapsed_us(started: std::time::Instant) -> u64 {
 }
 
 #[cfg(windows)]
+fn benchmark_cache_key(
+    adapter: &classmesh_capture_win::AdapterCapabilityIdentity,
+    candidate: &classmesh_codec_win::EncoderCandidate,
+    profile: classmesh_worker::presentation::PresentationProfile,
+) -> Result<EncoderCapabilityCacheKey, Box<dyn std::error::Error>> {
+    Ok(EncoderCapabilityCacheKey {
+        adapter_identity: adapter.adapter_identity(),
+        driver_version: adapter.driver_version.clone(),
+        encoder_clsid: candidate.clsid.clone(),
+        width: u16::try_from(profile.target_width)?,
+        height: u16::try_from(profile.target_height)?,
+        target_fps: u16::try_from(profile.fps)?,
+        bitrate_bps: profile.bitrate_bps,
+    })
+}
+
+#[cfg(windows)]
 fn class_for_actual_target(
     class: classmesh_video::EncoderClass,
     profile: classmesh_worker::presentation::PresentationProfile,
@@ -802,6 +847,29 @@ mod benchmark_policy_tests {
             fps,
             bitrate_bps: 2_500_000,
         }
+    }
+
+    #[test]
+    fn benchmark_cache_key_binds_adapter_driver_encoder_and_profile() {
+        let adapter = classmesh_capture_win::AdapterCapabilityIdentity {
+            adapter_luid_low: 0x1122_3344,
+            adapter_luid_high: 0x5566_7788,
+            driver_version: "31.0.15.5123".into(),
+        };
+        let candidate = classmesh_codec_win::EncoderCandidate {
+            name: "test".into(),
+            clsid: "{encoder-clsid}".into(),
+            vendor: classmesh_codec_win::EncoderVendor::Nvidia,
+            advertised_hardware: true,
+            advertised_async: true,
+        };
+        let key = benchmark_cache_key(&adapter, &candidate, profile(1280, 720, 30))
+            .expect("synthetic cache key should build");
+        assert_eq!(key.adapter_identity, "55667788:11223344");
+        assert_eq!(key.driver_version, "31.0.15.5123");
+        assert_eq!(key.encoder_clsid, "{encoder-clsid}");
+        assert_eq!((key.width, key.height, key.target_fps), (1280, 720, 30));
+        assert_eq!(key.bitrate_bps, 2_500_000);
     }
 
     #[test]
