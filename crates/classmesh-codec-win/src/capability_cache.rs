@@ -36,7 +36,10 @@ impl fmt::Display for EncoderCapabilityCacheError {
             Self::Io(error) => write!(f, "encoder capability cache I/O failed: {error}"),
             Self::Json(error) => write!(f, "encoder capability cache JSON failed: {error}"),
             Self::CacheTooLarge { bytes, maximum } => {
-                write!(f, "encoder capability cache is {bytes} bytes; maximum is {maximum}")
+                write!(
+                    f,
+                    "encoder capability cache is {bytes} bytes; maximum is {maximum}"
+                )
             }
             Self::UnsupportedVersion(version) => {
                 write!(f, "unsupported encoder capability cache version {version}")
@@ -46,8 +49,12 @@ impl fmt::Display for EncoderCapabilityCacheError {
             }
             Self::InvalidProfile => write!(f, "encoder capability cache contains invalid profile"),
             Self::InvalidProbe => write!(f, "encoder capability cache contains invalid probe data"),
-            Self::InvalidCodec(value) => write!(f, "encoder capability cache contains codec {value}"),
-            Self::InvalidClass(value) => write!(f, "encoder capability cache contains class {value}"),
+            Self::InvalidCodec(value) => {
+                write!(f, "encoder capability cache contains codec {value}")
+            }
+            Self::InvalidClass(value) => {
+                write!(f, "encoder capability cache contains class {value}")
+            }
             Self::InvalidFrameCount => {
                 write!(f, "encoder capability cache contains invalid frame counts")
             }
@@ -207,7 +214,9 @@ impl PersistedCache {
         self,
     ) -> Result<(EncoderCapabilityCacheKey, PersistedResult), EncoderCapabilityCacheError> {
         if self.version != CACHE_VERSION {
-            return Err(EncoderCapabilityCacheError::UnsupportedVersion(self.version));
+            return Err(EncoderCapabilityCacheError::UnsupportedVersion(
+                self.version,
+            ));
         }
         let key = self.key.into_key()?;
         Ok((key, self.result))
@@ -323,13 +332,13 @@ fn validate_key(key: &EncoderCapabilityCacheKey) -> Result<(), EncoderCapability
         &key.adapter_identity,
         MAX_ADAPTER_IDENTITY_LEN,
     )?;
-    validate_string("driver version", &key.driver_version, MAX_DRIVER_VERSION_LEN)?;
+    validate_string(
+        "driver version",
+        &key.driver_version,
+        MAX_DRIVER_VERSION_LEN,
+    )?;
     validate_string("encoder CLSID", &key.encoder_clsid, MAX_ENCODER_CLSID_LEN)?;
-    if key.width == 0
-        || key.height == 0
-        || key.target_fps == 0
-        || key.bitrate_bps == 0
-    {
+    if key.width == 0 || key.height == 0 || key.target_fps == 0 || key.bitrate_bps == 0 {
         return Err(EncoderCapabilityCacheError::InvalidProfile);
     }
     Ok(())
@@ -348,8 +357,8 @@ fn validate_result(result: &EncoderBenchmarkResult) -> Result<(), EncoderCapabil
         return Err(EncoderCapabilityCacheError::InvalidProbe);
     }
 
-    let output_frames =
-        u64::try_from(result.output_frames).map_err(|_| EncoderCapabilityCacheError::InvalidFrameCount)?;
+    let output_frames = u64::try_from(result.output_frames)
+        .map_err(|_| EncoderCapabilityCacheError::InvalidFrameCount)?;
     let missing = u64::try_from(result.dropped_or_missing)
         .map_err(|_| EncoderCapabilityCacheError::InvalidFrameCount)?;
     if output_frames > MAX_FRAME_COUNT
@@ -488,10 +497,7 @@ mod tests {
         let path = test_path("stale");
         let cache = DurableEncoderCapabilityCache::new(&path);
         cache.save(&key("31.0.15.5123"), &result()).expect("save");
-        assert_eq!(
-            cache.load_exact(&key("31.0.15.6000")).expect("load"),
-            None
-        );
+        assert_eq!(cache.load_exact(&key("31.0.15.6000")).expect("load"), None);
         let _ = fs::remove_file(path);
     }
 
@@ -524,11 +530,7 @@ mod tests {
         let path = test_path("version");
         let mut persisted = PersistedCache::from_parts(&key("31.0.15.5123"), &result());
         persisted.version = 99;
-        fs::write(
-            &path,
-            serde_json::to_vec(&persisted).expect("serialize"),
-        )
-        .expect("write");
+        fs::write(&path, serde_json::to_vec(&persisted).expect("serialize")).expect("write");
         let cache = DurableEncoderCapabilityCache::new(&path);
         assert!(matches!(
             cache.load_exact(&key("31.0.15.5123")),
