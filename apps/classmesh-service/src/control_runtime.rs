@@ -287,9 +287,7 @@ impl ControlRuntime {
                     }
                 };
 
-                runtime.block_on(run_listener(
-                    state, config, ready_tx, stop_rx, input, media,
-                ));
+                runtime.block_on(run_listener(state, config, ready_tx, stop_rx, input, media));
             })
             .map_err(|error| format!("control runtime thread creation failed: {error}"))?;
 
