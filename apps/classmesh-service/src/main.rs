@@ -704,9 +704,10 @@ mod windows_service_app {
             let released_floor = released_media_session_floor.load(Ordering::Acquire);
             if released_floor > focused_media_session_floor {
                 focused_media_session_floor = released_floor;
-                if desired_focused_control_session_id
-                    .is_some_and(|desired| desired <= released_floor)
-                {
+                if released_session_invalidates_desired(
+                    released_floor,
+                    desired_focused_control_session_id,
+                ) {
                     desired_focused_reconfigure = None;
                     desired_focused_control_session_id = None;
                     focused_reconfigure_worker_pid = None;
@@ -717,26 +718,21 @@ mod windows_service_app {
                 }
             }
 
-            loop {
-                match media_reconfigure_rx.try_recv() {
-                    Ok(dispatch) => {
-                        if focused_reconfigure_is_stale(
-                            dispatch.control_session_id,
-                            focused_media_session_floor,
-                            desired_focused_control_session_id,
-                        ) {
-                            continue;
-                        }
-                        desired_focused_reconfigure = Some(dispatch.reconfigure);
-                        desired_focused_control_session_id = Some(dispatch.control_session_id);
-                        focused_reconfigure_worker_pid = None;
-                        focused_profile_clear_pending = false;
-                        focused_reconfigure_attempts = 0;
-                        focused_clear_attempts = 0;
-                        next_media_reconfigure_attempt = Instant::now();
-                    }
-                    Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+            while let Ok(dispatch) = media_reconfigure_rx.try_recv() {
+                if focused_reconfigure_is_stale(
+                    dispatch.control_session_id,
+                    focused_media_session_floor,
+                    desired_focused_control_session_id,
+                ) {
+                    continue;
                 }
+                desired_focused_reconfigure = Some(dispatch.reconfigure);
+                desired_focused_control_session_id = Some(dispatch.control_session_id);
+                focused_reconfigure_worker_pid = None;
+                focused_profile_clear_pending = false;
+                focused_reconfigure_attempts = 0;
+                focused_clear_attempts = 0;
+                next_media_reconfigure_attempt = Instant::now();
             }
 
             let current_worker_pid = workers.current_process_id();
