@@ -46,7 +46,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let (event_tx, event_rx) = mpsc::channel();
-    let _ipc_thread = spawn_ipc_reader(pipe, event_tx);
+    let reader_pipe = pipe.try_clone()?;
+    let _ipc_thread = spawn_ipc_reader(reader_pipe, event_tx.clone());
+    let _capability_probe = spawn_h264_capability_probe(event_tx.clone());
 
     let mut capture_restart = CaptureRestart::default();
     let mut capture = match start_capture() {
@@ -59,6 +61,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     };
+    let mut runtime_capabilities = WorkerCapabilitySnapshot {
+        dxgi_capture: capture.is_some(),
+        h264_hardware_encode: false,
+    };
+    publish_worker_capabilities(
+        &pipe,
+        std::process::id(),
+        actual_session,
+        runtime_capabilities,
+    )?;
     let mut capture_due = Instant::now();
     let mut active_focused_profile: Option<FocusedWorkerProfile> = None;
     let mut captured_frames = 0_u64;
@@ -95,6 +107,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     capture = match start_capture() {
                         Ok(capture) => {
                             eprintln!("ClassMesh Worker DXGI capture resumed by Service");
+                            if !runtime_capabilities.dxgi_capture {
+                                runtime_capabilities.dxgi_capture = true;
+                                publish_worker_capabilities(
+                                    &pipe,
+                                    std::process::id(),
+                                    actual_session,
+                                    runtime_capabilities,
+                                )?;
+                            }
                             Some(capture)
                         }
                         Err(error) => {
@@ -157,6 +178,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("ClassMesh Worker rejected input event: {error}");
                 }
             },
+            Ok(WorkerEvent::H264HardwareProbe(result)) => {
+                match result {
+                    Ok(true) if !runtime_capabilities.h264_hardware_encode => {
+                        runtime_capabilities.h264_hardware_encode = true;
+                        publish_worker_capabilities(
+                            &pipe,
+                            std::process::id(),
+                            actual_session,
+                            runtime_capabilities,
+                        )?;
+                        eprintln!("ClassMesh Worker confirmed hardware H.264 encode capability");
+                    }
+                    Ok(true) => {}
+                    Ok(false) => {
+                        eprintln!("ClassMesh Worker found no hardware H.264 encoder");
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "ClassMesh Worker H.264 capability probe failed without affecting control: {error}"
+                        );
+                    }
+                }
+            }
             Ok(WorkerEvent::IpcFailure(error)) => {
                 release_tracked_input(&mut input_injector);
                 return Err(error.into());
@@ -174,6 +218,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     capture = Some(restarted);
                     capture_restart.clear();
                     capture_due = Instant::now();
+                    if !runtime_capabilities.dxgi_capture {
+                        runtime_capabilities.dxgi_capture = true;
+                        publish_worker_capabilities(
+                            &pipe,
+                            std::process::id(),
+                            actual_session,
+                            runtime_capabilities,
+                        )?;
+                    }
                     eprintln!(
                         "ClassMesh Worker DXGI capture recovered; control session remained active"
                     );
@@ -284,11 +337,19 @@ impl CaptureRestart {
 }
 
 #[cfg(windows)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct WorkerCapabilitySnapshot {
+    dxgi_capture: bool,
+    h264_hardware_encode: bool,
+}
+
+#[cfg(windows)]
 #[derive(Debug)]
 enum WorkerEvent {
     Control(classmesh_windows_runtime::ipc::IpcControlCommand),
     Input(classmesh_protocol::control_wire::InputEvent),
     StreamReconfigure(classmesh_protocol::control_wire::StreamReconfigure),
+    H264HardwareProbe(Result<bool, String>),
     IpcFailure(String),
 }
 
@@ -445,6 +506,50 @@ fn start_capture() -> Result<WorkerCapture, Box<dyn std::error::Error>> {
 }
 
 #[cfg(windows)]
+fn publish_worker_capabilities(
+    pipe: &classmesh_win32::NamedPipeClient,
+    process_id: u32,
+    session_id: u32,
+    snapshot: WorkerCapabilitySnapshot,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let frame = classmesh_windows_runtime::ipc::IpcFrame::worker_capabilities(
+        classmesh_windows_runtime::ipc::WorkerRuntimeCapabilities::new(
+            process_id,
+            session_id,
+            snapshot.dxgi_capture,
+            snapshot.h264_hardware_encode,
+        ),
+    );
+    let encoded = frame.encode().map_err(ipc_frame_error)?;
+    pipe.write_all(&encoded)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn spawn_h264_capability_probe(
+    event_tx: std::sync::mpsc::Sender<WorkerEvent>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let result = probe_h264_hardware_encode();
+        let _ = event_tx.send(WorkerEvent::H264HardwareProbe(result));
+    })
+}
+
+#[cfg(windows)]
+fn probe_h264_hardware_encode() -> Result<bool, String> {
+    let _platform = classmesh_codec_win::mf::MfPlatform::startup()
+        .map_err(|error| format!("Media Foundation startup failed: {error}"))?;
+    let encoders = classmesh_codec_win::mf::enumerate_h264_hardware_encoders()
+        .map_err(|error| format!("hardware encoder enumeration failed: {error}"))?;
+    for encoder in encoders {
+        if encoder.activate_transform().is_ok() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(windows)]
 fn spawn_ipc_reader(
     pipe: classmesh_win32::NamedPipeClient,
     event_tx: std::sync::mpsc::Sender<WorkerEvent>,
@@ -586,6 +691,23 @@ fn main() {
 #[cfg(all(test, windows))]
 mod focused_profile_tests {
     use super::*;
+
+    #[test]
+    fn capability_snapshot_starts_transport_neutral_and_monotonic() {
+        let mut snapshot = WorkerCapabilitySnapshot::default();
+        assert_eq!(
+            snapshot,
+            WorkerCapabilitySnapshot {
+                dxgi_capture: false,
+                h264_hardware_encode: false,
+            }
+        );
+
+        snapshot.dxgi_capture = true;
+        snapshot.h264_hardware_encode = true;
+        assert!(snapshot.dxgi_capture);
+        assert!(snapshot.h264_hardware_encode);
+    }
 
     #[test]
     fn capture_restart_budget_is_bounded_without_stopping_worker_control() {
