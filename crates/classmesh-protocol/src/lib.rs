@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod clipboard;
 pub mod feedback;
 pub mod media;
 
