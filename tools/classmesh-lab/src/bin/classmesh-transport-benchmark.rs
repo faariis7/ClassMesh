@@ -557,7 +557,12 @@ fn quic_transport_config() -> TransportConfig {
 fn benchmark_ticker(packets_per_second: u64) -> tokio::time::Interval {
     let nanos = (1_000_000_000_u64 / packets_per_second.max(1)).max(1);
     let mut ticker = tokio::time::interval(Duration::from_nanos(nanos));
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // Windows timer scheduling can wake a 2 ms qualification ticker late. Skipping missed ticks
+    // silently turns the requested 500 packets/s workload into a much lower, host-dependent rate.
+    // Burst preserves the requested aggregate workload by immediately catching up the small number
+    // of ticks missed between scheduler wakeups. The benchmark's accepted/send-error counters still
+    // expose a transport that cannot absorb that rate.
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Burst);
     ticker
 }
 
