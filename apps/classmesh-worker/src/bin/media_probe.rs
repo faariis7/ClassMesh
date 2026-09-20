@@ -128,8 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(pending) = pending_reset_benchmark.as_ref() {
                         let same_candidate = created.encoder_candidate() == &pending.candidate;
                         let recreated_profile = created.profile();
-                        let same_target =
-                            same_benchmark_target(recreated_profile, pending.profile);
+                        let same_target = same_benchmark_target(recreated_profile, pending.profile);
                         if !same_candidate || !same_target {
                             let pending = pending_reset_benchmark
                                 .take()
@@ -528,10 +527,8 @@ fn same_benchmark_target(
 #[cfg(windows)]
 fn report_encoder_benchmark(mut pending: PendingResetBenchmark, reset_ok: bool) {
     pending.result.probe.reset_ok = reset_ok;
-    pending.result.class = class_for_actual_target(
-        pending.result.probe.classify(),
-        pending.profile,
-    );
+    pending.result.class =
+        class_for_actual_target(pending.result.probe.classify(), pending.profile);
     eprintln!(
         "encoder benchmark: backend={} class={:?} target={}x{}@{} submitted={} outputs={} missing={} fps={:.2} p50_ms={:.2} p95_ms={:.2} low_latency={} keyframe_request={} reset={} reset_submissions={} dynamic_bitrate=false",
         pending.result.probe.backend,
@@ -822,10 +819,7 @@ mod benchmark_policy_tests {
     fn recreated_lower_geometry_stays_capped_after_reset() {
         let profile = profile(1280, 720, 30);
         assert_eq!(
-            class_for_actual_target(
-                classmesh_video::EncoderClass::Presentation1080p60,
-                profile,
-            ),
+            class_for_actual_target(classmesh_video::EncoderClass::Presentation1080p60, profile,),
             classmesh_video::EncoderClass::Compatibility
         );
     }
