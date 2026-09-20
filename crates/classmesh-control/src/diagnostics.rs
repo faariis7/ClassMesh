@@ -1,4 +1,6 @@
+use crate::HeartbeatError;
 use crate::authorization::CommandAuthorizationError;
+use crate::dispatch::PrivilegedDispatchError;
 use crate::handshake::HandshakeError;
 use crate::quic::ControlTransportError;
 
@@ -63,6 +65,28 @@ pub const fn command_authorization_diagnostic_code(
     }
 }
 
+#[must_use]
+pub const fn heartbeat_diagnostic_code(error: &HeartbeatError) -> &'static str {
+    match error {
+        HeartbeatError::SessionMismatch { .. } => "control.heartbeat.wrong_session",
+        HeartbeatError::NonIncreasingSequence { .. } => "control.heartbeat.replayed_sequence",
+    }
+}
+
+#[must_use]
+pub const fn privileged_dispatch_diagnostic_code(error: &PrivilegedDispatchError) -> &'static str {
+    match error {
+        PrivilegedDispatchError::UnsupportedPayload => "control.command.unsupported_payload",
+        PrivilegedDispatchError::MalformedInputEvent => "control.command.malformed_input",
+        PrivilegedDispatchError::InputSequenceMismatch { .. } => {
+            "control.command.input_sequence_mismatch"
+        }
+        PrivilegedDispatchError::Authorization(error) => {
+            command_authorization_diagnostic_code(error)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use classmesh_protocol::ProtocolVersion;
@@ -99,6 +123,39 @@ mod tests {
         assert_eq!(
             command_authorization_diagnostic_code(&unauthorized),
             "control.command.unauthorized"
+        );
+    }
+
+    #[test]
+    fn heartbeat_codes_do_not_embed_session_or_sequence_values() {
+        assert_eq!(
+            heartbeat_diagnostic_code(&HeartbeatError::SessionMismatch {
+                expected: 7,
+                received: 999,
+            }),
+            "control.heartbeat.wrong_session"
+        );
+        assert_eq!(
+            heartbeat_diagnostic_code(&HeartbeatError::NonIncreasingSequence {
+                previous: 55,
+                received: 55,
+            }),
+            "control.heartbeat.replayed_sequence"
+        );
+    }
+
+    #[test]
+    fn privileged_dispatch_codes_remain_value_free() {
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(&PrivilegedDispatchError::InputSequenceMismatch {
+                envelope: 7,
+                input: 999,
+            },),
+            "control.command.input_sequence_mismatch"
+        );
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(&PrivilegedDispatchError::MalformedInputEvent),
+            "control.command.malformed_input"
         );
     }
 

@@ -61,17 +61,13 @@ impl AuthenticatedControlGuard {
         self.last_sequence
     }
 
-    /// Validates the authenticated session envelope and current permission.
+    /// Validates and consumes one post-handshake envelope for this authenticated session.
     ///
-    /// A structurally valid in-session sequence is consumed even when authorization
-    /// fails. This prevents a previously denied command from being replayed later if
-    /// the principal is granted the permission after the original denial.
-    pub fn authorize(
+    /// Sequence monotonicity is global to the peer's control stream, not per payload type.
+    /// Structurally malformed envelopes fail before consuming the sequence.
+    pub fn validate_envelope(
         &mut self,
-        authorization: &AuthorizationStore,
         envelope: &ControlEnvelope,
-        permission: Permission,
-        now_unix_ms: u64,
     ) -> Result<(), CommandAuthorizationError> {
         let payload = envelope
             .payload
@@ -114,6 +110,22 @@ impl AuthenticatedControlGuard {
         }
 
         self.last_sequence = envelope.sequence;
+        Ok(())
+    }
+
+    /// Validates the authenticated session envelope and current permission.
+    ///
+    /// A structurally valid in-session sequence is consumed even when authorization
+    /// fails. This prevents a previously denied command from being replayed later if
+    /// the principal is granted the permission after the original denial.
+    pub fn authorize(
+        &mut self,
+        authorization: &AuthorizationStore,
+        envelope: &ControlEnvelope,
+        permission: Permission,
+        now_unix_ms: u64,
+    ) -> Result<(), CommandAuthorizationError> {
+        self.validate_envelope(envelope)?;
 
         if !self.peer.authorize(authorization, permission, now_unix_ms) {
             return Err(CommandAuthorizationError::Unauthorized { permission });
@@ -304,6 +316,38 @@ mod tests {
             Err(CommandAuthorizationError::NonIncreasingSequence {
                 previous: 2,
                 received: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn non_privileged_envelopes_share_the_same_session_sequence() {
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+        let mut heartbeat = envelope(77, 2);
+        heartbeat.payload = Some(control_envelope::Payload::Heartbeat(
+            classmesh_protocol::control_wire::Heartbeat {
+                monotonic_time_us: 100,
+                control_session_id: 77,
+                media: 1,
+            },
+        ));
+
+        guard
+            .validate_envelope(&heartbeat)
+            .expect("heartbeat should consume the global session sequence");
+        assert_eq!(guard.last_sequence(), 2);
+
+        let authorization = store(BTreeSet::from([Permission::ControlInput]));
+        assert_eq!(
+            guard.authorize(
+                &authorization,
+                &envelope(77, 2),
+                Permission::ControlInput,
+                150,
+            ),
+            Err(CommandAuthorizationError::NonIncreasingSequence {
+                previous: 2,
+                received: 2,
             })
         );
     }
