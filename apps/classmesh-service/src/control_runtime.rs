@@ -21,8 +21,7 @@ use classmesh_control::handshake::{
 use classmesh_control::quic::{
     ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
 };
-use classmesh_control::stream::stream_profile_to_wire;
-use classmesh_control::stream::validate_interactive_stream_offer;
+use classmesh_control::stream::{stream_profile_to_wire, validate_interactive_stream_offer};
 use classmesh_control::{DEFAULT_OFFLINE_AFTER, HeartbeatSample, HeartbeatTracker};
 use classmesh_core::adaptation::{
     AdaptationPolicy, FocusedProfileController, HysteresisConfig, QualityTier,
@@ -31,7 +30,8 @@ use classmesh_core::{NetworkMetrics, StreamKind};
 use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver};
 use classmesh_protocol::control_wire::{
     ControlEnvelope, HeartbeatAck, InputEvent, MediaTransport as WireMediaTransport,
-    ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamReconfigure, control_envelope,
+    ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamAnswer, StreamOffer,
+    StreamReconfigure, VideoCodec, VideoProfile, control_envelope,
 };
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::{AuthorizationStore, Permission};
@@ -1086,7 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_offer_preflight_reports_unnegotiated_transport_without_closing_session() {
+    fn stream_offer_preflight_reports_unnegotiated_transport_explicitly() {
         let answer = stream_offer_answer(
             &interactive_offer(WireMediaTransport::UdpUnicast),
             &BTreeSet::new(),
