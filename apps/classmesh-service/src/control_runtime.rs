@@ -33,7 +33,7 @@ use classmesh_protocol::control_wire::{
     VideoProfile, control_envelope,
 };
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
-use classmesh_security::AuthorizationStore;
+use classmesh_security::{AuthorizationStore, Permission};
 use quinn::Endpoint;
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
@@ -83,6 +83,11 @@ pub(crate) struct InputDispatchChannels {
     pub(crate) event_tx: mpsc::SyncSender<InputEvent>,
     pub(crate) cleanup_tx: mpsc::SyncSender<()>,
     pub(crate) availability: Arc<AtomicU8>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FocusedMediaDispatchChannels {
+    pub(crate) reconfigure_tx: mpsc::SyncSender<StreamReconfigure>,
 }
 
 #[derive(Debug, Clone)]
@@ -259,6 +264,7 @@ impl ControlRuntime {
         state: ControlRuntimeState,
         config: ControlRuntimeConfig,
         input: InputDispatchChannels,
+        media: FocusedMediaDispatchChannels,
     ) -> Result<Self, String> {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<SocketAddr, String>>(1);
         let (stop_tx, stop_rx) = oneshot::channel();
@@ -280,7 +286,9 @@ impl ControlRuntime {
                     }
                 };
 
-                runtime.block_on(run_listener(state, config, ready_tx, stop_rx, input));
+                runtime.block_on(run_listener(
+                    state, config, ready_tx, stop_rx, input, media,
+                ));
             })
             .map_err(|error| format!("control runtime thread creation failed: {error}"))?;
 
@@ -340,6 +348,7 @@ async fn run_listener(
     ready_tx: mpsc::SyncSender<Result<SocketAddr, String>>,
     mut stop_rx: oneshot::Receiver<()>,
     input: InputDispatchChannels,
+    media: FocusedMediaDispatchChannels,
 ) {
     let endpoint = match build_endpoint(&state, config) {
         Ok(endpoint) => endpoint,
@@ -383,6 +392,7 @@ async fn run_listener(
                 let authorization = Arc::clone(&authorization);
                 let session_ids = Arc::clone(&session_ids);
                 let input = input.clone();
+                let media = media.clone();
                 tokio::spawn(async move {
                     let connection = match incoming.await {
                         Ok(connection) => connection,
@@ -431,6 +441,7 @@ async fn run_listener(
                                 peer,
                                 authorization.as_ref(),
                                 &input,
+                                &media,
                             )
                             .await;
                             input.release_owner(session.control_session_id);
@@ -456,6 +467,7 @@ async fn run_established_session(
     peer: EstablishedAuthenticatedPeer,
     authorization: &AuthorizationStore,
     input: &InputDispatchState,
+    media: &FocusedMediaDispatchChannels,
 ) {
     const HELLO_SEQUENCE: u64 = 1;
 
@@ -556,12 +568,31 @@ async fn run_established_session(
                 }
             }
             Some(control_envelope::Payload::ReceiverFeedback(feedback)) => {
-                if let Err(error) = guard.validate_envelope(&envelope) {
+                let now_unix_ms = match unix_time_ms() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"invalid service clock");
+                        return;
+                    }
+                };
+                if let Err(error) = guard.authorize(
+                    authorization,
+                    &envelope,
+                    Permission::ControlInput,
+                    now_unix_ms,
+                ) {
                     eprintln!(
-                        "ClassMesh control envelope rejected: {}",
+                        "ClassMesh receiver feedback rejected: {}",
                         command_authorization_diagnostic_code(&error)
                     );
-                    connection.close(0_u32.into(), b"invalid control envelope");
+                    connection.close(0_u32.into(), b"receiver feedback unauthorized");
+                    return;
+                }
+                if !input.try_acquire_owner(session.control_session_id) {
+                    eprintln!(
+                        "ClassMesh receiver feedback rejected: control.command.controller_busy"
+                    );
+                    connection.close(0_u32.into(), b"interactive controller busy");
                     return;
                 }
 
@@ -576,6 +607,24 @@ async fn run_established_session(
                 let Some(reconfigure) = reconfigure else {
                     continue;
                 };
+
+                match media.reconfigure_tx.try_send(reconfigure.clone()) {
+                    Ok(()) => {}
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        eprintln!(
+                            "ClassMesh focused media rejected: control.media.reconfigure_backpressure"
+                        );
+                        connection.close(0_u32.into(), b"media reconfigure backpressure");
+                        return;
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        eprintln!(
+                            "ClassMesh focused media rejected: control.media.reconfigure_disconnected"
+                        );
+                        connection.close(0_u32.into(), b"media reconfigure disconnected");
+                        return;
+                    }
+                }
 
                 let Some(next_sequence) = outbound_sequence.checked_add(1) else {
                     eprintln!("ClassMesh control session closed: control.sequence.exhausted");
