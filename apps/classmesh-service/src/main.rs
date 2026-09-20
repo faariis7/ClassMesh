@@ -578,8 +578,7 @@ mod windows_service_app {
         let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(INPUT_QUEUE_CAPACITY);
         let (input_cleanup_tx, input_cleanup_rx) =
             mpsc::sync_channel::<()>(INPUT_CLEANUP_QUEUE_CAPACITY);
-        let input_availability =
-            Arc::new(AtomicU8::new(InputAvailability::Unavailable as u8));
+        let input_availability = Arc::new(AtomicU8::new(InputAvailability::Unavailable as u8));
         let input_channels = InputDispatchChannels {
             event_tx: input_tx,
             cleanup_tx: input_cleanup_tx,
