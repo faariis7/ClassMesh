@@ -4,7 +4,7 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -95,6 +95,87 @@ pub(crate) struct FocusedMediaReconfigure {
 pub(crate) struct FocusedMediaDispatchChannels {
     pub(crate) reconfigure_tx: mpsc::SyncSender<FocusedMediaReconfigure>,
     pub(crate) released_session_floor: Arc<AtomicU64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct WorkerCapabilitySnapshot {
+    generation: u64,
+    process_id: u32,
+    session_id: u32,
+    flags: u8,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct WorkerCapabilityState {
+    snapshot: Mutex<WorkerCapabilitySnapshot>,
+}
+
+const WORKER_CAP_DXGI_CAPTURE: u8 = 1 << 0;
+const WORKER_CAP_H264_HARDWARE_ENCODE: u8 = 1 << 1;
+
+impl WorkerCapabilityState {
+    pub(crate) fn activate(&self, generation: u64, process_id: u32, session_id: u32) {
+        let mut snapshot = self.lock_snapshot();
+        *snapshot = WorkerCapabilitySnapshot {
+            generation,
+            process_id,
+            session_id,
+            flags: 0,
+        };
+    }
+
+    pub(crate) fn clear(&self) {
+        *self.lock_snapshot() = WorkerCapabilitySnapshot::default();
+    }
+
+    pub(crate) fn apply_report(
+        &self,
+        generation: u64,
+        process_id: u32,
+        session_id: u32,
+        dxgi_capture: bool,
+        h264_hardware_encode: bool,
+    ) -> bool {
+        let mut snapshot = self.lock_snapshot();
+        if generation == 0
+            || snapshot.generation != generation
+            || snapshot.process_id != process_id
+            || snapshot.session_id != session_id
+        {
+            return false;
+        }
+
+        let mut flags = 0_u8;
+        if dxgi_capture {
+            flags |= WORKER_CAP_DXGI_CAPTURE;
+        }
+        if h264_hardware_encode {
+            flags |= WORKER_CAP_H264_HARDWARE_ENCODE;
+        }
+        snapshot.flags = flags;
+        true
+    }
+
+    fn hello_capabilities(&self) -> BTreeSet<Capability> {
+        let snapshot = *self.lock_snapshot();
+        let mut capabilities = BTreeSet::from([Capability::ServiceSessionWorker]);
+        if snapshot.generation == 0 || snapshot.process_id == 0 || snapshot.session_id == 0 {
+            return capabilities;
+        }
+        if snapshot.flags & WORKER_CAP_DXGI_CAPTURE != 0 {
+            capabilities.insert(Capability::DxgiCapture);
+        }
+        if snapshot.flags & WORKER_CAP_H264_HARDWARE_ENCODE != 0 {
+            capabilities.insert(Capability::H264HardwareEncode);
+        }
+        capabilities
+    }
+
+    fn lock_snapshot(&self) -> std::sync::MutexGuard<'_, WorkerCapabilitySnapshot> {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +343,7 @@ impl ControlRuntime {
         config: ControlRuntimeConfig,
         input: InputDispatchChannels,
         media: FocusedMediaDispatchChannels,
+        worker_capabilities: Arc<WorkerCapabilityState>,
     ) -> Result<Self, String> {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<SocketAddr, String>>(1);
         let (stop_tx, stop_rx) = oneshot::channel();
@@ -283,7 +365,15 @@ impl ControlRuntime {
                     }
                 };
 
-                runtime.block_on(run_listener(state, config, ready_tx, stop_rx, input, media));
+                runtime.block_on(run_listener(
+                    state,
+                    config,
+                    ready_tx,
+                    stop_rx,
+                    input,
+                    media,
+                    worker_capabilities,
+                ));
             })
             .map_err(|error| format!("control runtime thread creation failed: {error}"))?;
 
@@ -344,6 +434,7 @@ async fn run_listener(
     mut stop_rx: oneshot::Receiver<()>,
     input: InputDispatchChannels,
     media: FocusedMediaDispatchChannels,
+    worker_capabilities: Arc<WorkerCapabilityState>,
 ) {
     let endpoint = match build_endpoint(&state, config) {
         Ok(endpoint) => endpoint,
@@ -388,6 +479,7 @@ async fn run_listener(
                 let session_ids = Arc::clone(&session_ids);
                 let input = input.clone();
                 let media = media.clone();
+                let worker_capabilities = Arc::clone(&worker_capabilities);
                 tokio::spawn(async move {
                     let connection = match incoming.await {
                         Ok(connection) => connection,
@@ -404,7 +496,7 @@ async fn run_listener(
                     let session_id = next_session_id(&session_ids);
                     let hello_config = ServerHelloConfig {
                         local_version: PROTOCOL_VERSION,
-                        local_capabilities: BTreeSet::from([Capability::ServiceSessionWorker]),
+                        local_capabilities: worker_capabilities.hello_capabilities(),
                         control_session_id: session_id,
                     };
                     let now_unix_ms = match unix_time_ms() {
@@ -956,6 +1048,58 @@ mod tests {
         assert_eq!(
             adaptation.observe(&invalid_metrics),
             Err("control.feedback.invalid_metrics")
+        );
+    }
+
+    #[test]
+    fn worker_capabilities_are_generation_bound_and_transport_neutral() {
+        let state = WorkerCapabilityState::default();
+        assert_eq!(
+            state.hello_capabilities(),
+            BTreeSet::from([Capability::ServiceSessionWorker])
+        );
+
+        state.activate(3, 42, 7);
+        assert!(!state.apply_report(2, 42, 7, true, true));
+        assert_eq!(
+            state.hello_capabilities(),
+            BTreeSet::from([Capability::ServiceSessionWorker])
+        );
+
+        assert!(state.apply_report(3, 42, 7, true, true));
+        assert_eq!(
+            state.hello_capabilities(),
+            BTreeSet::from([
+                Capability::DxgiCapture,
+                Capability::H264HardwareEncode,
+                Capability::ServiceSessionWorker,
+            ])
+        );
+        assert!(!state.hello_capabilities().contains(&Capability::UdpUnicast));
+        assert!(
+            !state
+                .hello_capabilities()
+                .contains(&Capability::QuicDatagram)
+        );
+
+        state.clear();
+        assert_eq!(
+            state.hello_capabilities(),
+            BTreeSet::from([Capability::ServiceSessionWorker])
+        );
+    }
+
+    #[test]
+    fn stale_worker_identity_cannot_publish_capabilities() {
+        let state = WorkerCapabilityState::default();
+        state.activate(9, 100, 5);
+
+        assert!(!state.apply_report(9, 101, 5, true, false));
+        assert!(!state.apply_report(9, 100, 6, true, false));
+        assert!(!state.apply_report(10, 100, 5, true, false));
+        assert_eq!(
+            state.hello_capabilities(),
+            BTreeSet::from([Capability::ServiceSessionWorker])
         );
     }
 

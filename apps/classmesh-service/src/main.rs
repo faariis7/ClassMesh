@@ -52,7 +52,7 @@ mod windows_service_app {
 
     use crate::control_runtime::{
         ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, FocusedMediaDispatchChannels,
-        FocusedMediaReconfigure, InputAvailability, InputDispatchChannels,
+        FocusedMediaReconfigure, InputAvailability, InputDispatchChannels, WorkerCapabilityState,
     };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -76,6 +76,7 @@ mod windows_service_app {
         executable: Option<PathBuf>,
         process: Option<SessionProcess>,
         pipe: Option<NamedPipeServer>,
+        capabilities: Arc<WorkerCapabilityState>,
         watchdog: WorkerWatchdog,
         pending_restart: Option<(SessionId, Instant)>,
         generation: u64,
@@ -83,7 +84,7 @@ mod windows_service_app {
     }
 
     impl WorkerManager {
-        fn new() -> Self {
+        fn new(capabilities: Arc<WorkerCapabilityState>) -> Self {
             let executable = std::env::current_exe().ok().map(|service| {
                 service.parent().map_or_else(
                     || PathBuf::from("classmesh-worker.exe"),
@@ -94,6 +95,7 @@ mod windows_service_app {
                 executable,
                 process: None,
                 pipe: None,
+                capabilities,
                 watchdog: WorkerWatchdog::new(WorkerRestartPolicy::default()),
                 pending_restart: None,
                 generation: 0,
@@ -109,8 +111,9 @@ mod windows_service_app {
                 return self.apply_restart_decision(decision);
             };
 
-            let pipe_name = worker_pipe_name(std::process::id(), session.0, self.generation);
-            self.generation = self.generation.wrapping_add(1);
+            let worker_generation = self.generation.saturating_add(1);
+            self.generation = worker_generation;
+            let pipe_name = worker_pipe_name(std::process::id(), session.0, worker_generation);
             let user_sid = match session_user_sid(session.0) {
                 Ok(sid) => sid,
                 Err(error) => {
@@ -167,6 +170,8 @@ mod windows_service_app {
                         process_id,
                         launched_at_us: now_us,
                     });
+                    self.capabilities
+                        .activate(worker_generation, process_id, session.0);
                     self.pipe = Some(pipe);
                     self.process = Some(process);
                     self.pending_restart = None;
@@ -225,6 +230,7 @@ mod windows_service_app {
                 }
             }
 
+            self.capabilities.clear();
             self.pipe = None;
             self.process = None;
         }
@@ -359,6 +365,7 @@ mod windows_service_app {
                     "ClassMesh Worker {process_id} exited from session {}",
                     session.0
                 );
+                self.capabilities.clear();
                 self.pipe = None;
                 self.process = None;
                 let decision =
@@ -646,11 +653,14 @@ mod windows_service_app {
             reconfigure_tx: media_reconfigure_tx,
             released_session_floor: Arc::clone(&released_media_session_floor),
         };
+        let worker_capabilities = Arc::new(WorkerCapabilityState::default());
+        debug_assert!(!worker_capabilities.apply_report(0, 0, 0, false, false));
         let mut control_runtime = match ControlRuntime::start(
             control_state,
             control_config,
             input_channels,
             media_channels,
+            Arc::clone(&worker_capabilities),
         ) {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -666,7 +676,7 @@ mod windows_service_app {
         set_running(&status_handle)?;
 
         let mut supervisor = SessionSupervisor::default();
-        let mut workers = WorkerManager::new();
+        let mut workers = WorkerManager::new(Arc::clone(&worker_capabilities));
         let mut desired_focused_reconfigure: Option<StreamReconfigure> = None;
         let mut desired_focused_control_session_id: Option<u64> = None;
         let mut focused_reconfigure_worker_pid: Option<u32> = None;
