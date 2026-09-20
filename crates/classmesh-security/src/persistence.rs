@@ -484,6 +484,8 @@ mod tests {
         let mut permissions = BTreeSet::new();
         permissions.insert(Permission::ViewMonitoring);
         permissions.insert(Permission::ControlInput);
+        permissions.insert(Permission::ReadClipboard);
+        permissions.insert(Permission::WriteClipboard);
 
         let mut credentials = BTreeMap::new();
         let mut old_record = CredentialRecord::active(old, 10);
@@ -533,8 +535,24 @@ mod tests {
         );
         assert_eq!(loaded.principal_for_credential(fingerprint(10), 40), None);
         assert!(loaded.authorize_credential(fingerprint(11), Permission::ControlInput, 40));
+        assert!(loaded.authorize_credential(fingerprint(11), Permission::ReadClipboard, 40));
+        assert!(loaded.authorize_credential(fingerprint(11), Permission::WriteClipboard, 40));
 
         let _ = fs::remove_dir_all(path.parent().expect("test parent"));
+    }
+
+    #[test]
+    fn clipboard_permission_ids_are_append_only_and_round_trip() {
+        assert_eq!(permission_to_u8(Permission::ReadClipboard), 13);
+        assert_eq!(permission_to_u8(Permission::WriteClipboard), 14);
+        assert_eq!(
+            permission_from_u8(13).expect("read clipboard permission"),
+            Permission::ReadClipboard
+        );
+        assert_eq!(
+            permission_from_u8(14).expect("write clipboard permission"),
+            Permission::WriteClipboard
+        );
     }
 
     #[test]
