@@ -433,7 +433,7 @@ async fn run_established_session(
                 };
                 match dispatch_privileged_command(&mut guard, authorization, &envelope, now_unix_ms)
                 {
-                    Ok(PrivilegedControlCommand::InputEvent(input)) => {
+                    Ok(PrivilegedControlCommand::InputEvent(event)) => {
                         if !input.channels.available.load(Ordering::Acquire) {
                             eprintln!(
                                 "ClassMesh authorized input rejected: control.command.executor_unavailable"
@@ -448,7 +448,7 @@ async fn run_established_session(
                             connection.close(0_u32.into(), b"interactive controller busy");
                             return;
                         }
-                        match input.channels.event_tx.try_send(input) {
+                        match input.channels.event_tx.try_send(event) {
                             Ok(()) => {}
                             Err(mpsc::TrySendError::Full(_)) => {
                                 eprintln!(
