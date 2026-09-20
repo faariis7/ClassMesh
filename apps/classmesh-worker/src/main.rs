@@ -228,9 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or_else(Instant::now);
             }
             CaptureStep::Suspended(reason) => {
-                eprintln!(
-                    "DXGI capture suspended by backend; control remains active: {reason:?}"
-                );
+                eprintln!("DXGI capture suspended by backend; control remains active: {reason:?}");
                 capture = None;
                 capture_restart.clear();
             }
@@ -284,7 +282,6 @@ impl CaptureRestart {
         self.next_attempt = None;
     }
 }
-
 
 #[cfg(windows)]
 #[derive(Debug)]
