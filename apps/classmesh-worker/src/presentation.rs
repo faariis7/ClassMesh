@@ -3,7 +3,7 @@ use std::fmt;
 use std::time::Duration;
 
 use classmesh_capture_win::{CapturedFrameMeta, DxgiFrame};
-use classmesh_codec_win::EncoderCandidate;
+use classmesh_codec_win::{EncoderBenchmarkConfig, EncoderCandidate};
 use classmesh_codec_win::gpu::{GpuBgraToNv12Converter, GpuNv12Config};
 use classmesh_codec_win::mf::{MfH264EncoderConfig, MfPlatform, enumerate_h264_hardware_encoders};
 use classmesh_codec_win::mf_async::{MfAsyncH264Encoder, MfEncodedOutput, MfSubmitError};
@@ -57,6 +57,25 @@ impl TryFrom<AdaptiveStreamProfile> for PresentationTarget {
             max_width: u32::from(profile.width),
             max_height: u32::from(profile.height),
             fps: u32::from(profile.fps),
+            bitrate_bps,
+        };
+        target.validate()?;
+        Ok(target)
+    }
+}
+
+impl TryFrom<EncoderBenchmarkConfig> for PresentationTarget {
+    type Error = PresentationError;
+
+    fn try_from(config: EncoderBenchmarkConfig) -> Result<Self, Self::Error> {
+        let bitrate_bps = config
+            .bitrate_kbps
+            .checked_mul(1_000)
+            .ok_or(PresentationError::InvalidTargetProfile)?;
+        let target = Self {
+            max_width: u32::from(config.width),
+            max_height: u32::from(config.height),
+            fps: u32::from(config.target_fps),
             bitrate_bps,
         };
         target.validate()?;
@@ -486,6 +505,22 @@ mod tests {
         assert_eq!(target.max_height, 540);
         assert_eq!(target.fps, 30);
         assert_eq!(target.bitrate_bps, 1_500_000);
+    }
+
+    #[test]
+    fn benchmark_config_converts_to_the_same_bounded_presentation_target() {
+        let target =
+            PresentationTarget::try_from(EncoderBenchmarkConfig::compatibility_720p30())
+                .expect("benchmark target");
+        assert_eq!(
+            target,
+            PresentationTarget {
+                max_width: 1280,
+                max_height: 720,
+                fps: 30,
+                bitrate_bps: 2_500_000,
+            }
+        );
     }
 
     #[test]
