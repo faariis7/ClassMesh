@@ -1,6 +1,7 @@
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     const BENCHMARK_KEYFRAME_AFTER_SUBMISSIONS: usize = 30;
+    const BENCHMARK_RESET_MAX_SUBMISSIONS: usize = 30;
 
     use std::fs::File;
     use std::io::{BufWriter, Write};
@@ -74,6 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut benchmark_keyframe_request_pending = false;
     let mut benchmark_keyframe_request_frame: Option<u64> = None;
     let mut benchmark_keyframe_observed = false;
+    let mut pending_reset_benchmark: Option<PendingResetBenchmark> = None;
     let mut benchmark_completed = !encoder_benchmark_enabled;
     let started = Instant::now();
     let deadline = started
@@ -123,6 +125,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if !benchmark_completed && benchmark_started.is_none() {
                         benchmark_started = Some(Instant::now());
                     }
+                    if let Some(pending) = pending_reset_benchmark.as_ref() {
+                        let same_candidate = created.encoder_candidate() == &pending.candidate;
+                        let recreated_profile = created.profile();
+                        let same_target = same_benchmark_target(recreated_profile, pending.profile);
+                        if !same_candidate || !same_target {
+                            let pending = pending_reset_benchmark
+                                .take()
+                                .expect("pending reset benchmark exists");
+                            report_encoder_benchmark(pending, false);
+                            benchmark_completed = true;
+                            eprintln!(
+                                "encoder benchmark reset/recreate mismatch: same_candidate={} same_target={}",
+                                same_candidate, same_target
+                            );
+                            pipeline = Some(created);
+                            continue;
+                        }
+                    }
                     pipeline = Some(created);
                 }
 
@@ -169,6 +189,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                if let Some(pending) = pending_reset_benchmark.as_mut() {
+                    let accepted = submitted_after.saturating_sub(submitted_before);
+                    pending.reset_submissions = pending
+                        .reset_submissions
+                        .saturating_add(usize::try_from(accepted).unwrap_or(usize::MAX));
+                }
 
                 let mut frames = Vec::with_capacity(encoded.len());
                 for encoded_output in encoded {
@@ -176,6 +202,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         benchmark
                             .record_output(encoded_output.encode_latency)
                             .map_err(benchmark_accumulator_error)?;
+                    }
+                    if let Some(pending) = pending_reset_benchmark.as_mut() {
+                        pending.reset_output_observed = true;
                     }
                     benchmark_non_keyframe_observed |= !encoded_output.frame.meta.keyframe;
                     benchmark_keyframe_observed |=
@@ -193,6 +222,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut total_encoded_frames,
                     &mut total_encoded_bytes,
                 )?;
+
+                let reset_probe_done = pending_reset_benchmark.as_ref().is_some_and(|pending| {
+                    pending.reset_output_observed
+                        || pending.reset_submissions >= BENCHMARK_RESET_MAX_SUBMISSIONS
+                });
+                if reset_probe_done {
+                    let tail = active.finish_with_metrics()?;
+                    let mut tail_frames = Vec::with_capacity(tail.len());
+                    for encoded_output in tail {
+                        if let Some(pending) = pending_reset_benchmark.as_mut() {
+                            pending.reset_output_observed = true;
+                        }
+                        tail_frames.push(encoded_output.frame);
+                    }
+                    handle_encoded_frames(
+                        &tail_frames,
+                        output.as_mut(),
+                        udp_sender.as_mut(),
+                        elapsed_us(started),
+                        &mut total_encoded_frames,
+                        &mut total_encoded_bytes,
+                    )?;
+                    let pending = pending_reset_benchmark
+                        .take()
+                        .expect("completed reset probe must exist");
+                    let reset_ok = pending.reset_output_observed;
+                    report_encoder_benchmark(pending, reset_ok);
+                    benchmark_completed = true;
+                    pipeline = None;
+                    continue;
+                }
 
                 if encoder_benchmark
                     .as_ref()
@@ -255,25 +315,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .map_err(benchmark_summary_error)?;
                     result.class = class_for_actual_target(result.class, benchmark_profile);
-                    eprintln!(
-                        "encoder benchmark: backend={} class={:?} target={}x{}@{} submitted={} outputs={} missing={} fps={:.2} p50_ms={:.2} p95_ms={:.2} low_latency={} keyframe_request={} reset=false dynamic_bitrate=false",
-                        result.probe.backend,
-                        result.class,
-                        benchmark_profile.target_width,
-                        benchmark_profile.target_height,
-                        benchmark_profile.fps,
-                        benchmark.submitted(),
-                        result.output_frames,
-                        result.dropped_or_missing,
-                        result.probe.sustained_fps,
-                        result.probe.p50_encode_ms,
-                        result.probe.p95_encode_ms,
-                        result.probe.low_latency_accepted,
-                        result.probe.keyframe_request_ok,
-                    );
-                    benchmark_completed = true;
+                    let submitted = benchmark.submitted();
+                    pending_reset_benchmark = Some(PendingResetBenchmark {
+                        result,
+                        candidate,
+                        profile: benchmark_profile,
+                        submitted,
+                        reset_submissions: 0,
+                        reset_output_observed: false,
+                    });
                     encoder_benchmark = None;
                     pipeline = None;
+                    eprintln!(
+                        "encoder benchmark baseline complete; recreating the same GPU encode pipeline for bounded reset evidence"
+                    );
                     continue;
                 }
             }
@@ -284,7 +339,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 pipeline = None;
                 pending_keyframe_request = true;
-                if !benchmark_completed {
+                if let Some(pending) = pending_reset_benchmark.take() {
+                    report_encoder_benchmark(pending, false);
+                    benchmark_completed = true;
+                    eprintln!(
+                        "encoder benchmark reset/recreate evidence failed during DXGI recovery"
+                    );
+                } else if !benchmark_completed {
                     encoder_benchmark = benchmark_config
                         .map(BoundedEncoderBenchmark::from_config)
                         .transpose()
@@ -360,15 +421,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(active) = pipeline.as_mut() {
-        let tail = active.finish()?;
-        handle_encoded_frames(
-            &tail,
-            output.as_mut(),
-            udp_sender.as_mut(),
-            elapsed_us(started),
-            &mut total_encoded_frames,
-            &mut total_encoded_bytes,
-        )?;
+        if pending_reset_benchmark.is_some() {
+            let tail = active.finish_with_metrics()?;
+            let mut tail_frames = Vec::with_capacity(tail.len());
+            for encoded_output in tail {
+                if let Some(pending) = pending_reset_benchmark.as_mut() {
+                    pending.reset_output_observed = true;
+                }
+                tail_frames.push(encoded_output.frame);
+            }
+            handle_encoded_frames(
+                &tail_frames,
+                output.as_mut(),
+                udp_sender.as_mut(),
+                elapsed_us(started),
+                &mut total_encoded_frames,
+                &mut total_encoded_bytes,
+            )?;
+            let pending = pending_reset_benchmark
+                .take()
+                .expect("pending reset benchmark exists");
+            let reset_ok = pending.reset_output_observed;
+            report_encoder_benchmark(pending, reset_ok);
+            benchmark_completed = true;
+        } else {
+            let tail = active.finish()?;
+            handle_encoded_frames(
+                &tail,
+                output.as_mut(),
+                udp_sender.as_mut(),
+                elapsed_us(started),
+                &mut total_encoded_frames,
+                &mut total_encoded_bytes,
+            )?;
+        }
         let stats = active.stats();
         eprintln!(
             "final pipeline stats: captured={} submitted={} encoded={} keyframes={} keyframe_requests={} rate_drop={} pool_drop={} in_flight={} bytes={}",
@@ -414,6 +500,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("encoder benchmark did not complete its configured sample target".into());
     }
     Ok(())
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct PendingResetBenchmark {
+    result: classmesh_codec_win::EncoderBenchmarkResult,
+    candidate: classmesh_codec_win::EncoderCandidate,
+    profile: classmesh_worker::presentation::PresentationProfile,
+    submitted: usize,
+    reset_submissions: usize,
+    reset_output_observed: bool,
+}
+
+#[cfg(windows)]
+fn same_benchmark_target(
+    left: classmesh_worker::presentation::PresentationProfile,
+    right: classmesh_worker::presentation::PresentationProfile,
+) -> bool {
+    left.target_width == right.target_width
+        && left.target_height == right.target_height
+        && left.fps == right.fps
+        && left.bitrate_bps == right.bitrate_bps
+}
+
+#[cfg(windows)]
+fn report_encoder_benchmark(mut pending: PendingResetBenchmark, reset_ok: bool) {
+    pending.result.probe.reset_ok = reset_ok;
+    pending.result.class =
+        class_for_actual_target(pending.result.probe.classify(), pending.profile);
+    eprintln!(
+        "encoder benchmark: backend={} class={:?} target={}x{}@{} submitted={} outputs={} missing={} fps={:.2} p50_ms={:.2} p95_ms={:.2} low_latency={} keyframe_request={} reset={} reset_submissions={} dynamic_bitrate=false",
+        pending.result.probe.backend,
+        pending.result.class,
+        pending.profile.target_width,
+        pending.profile.target_height,
+        pending.profile.fps,
+        pending.submitted,
+        pending.result.output_frames,
+        pending.result.dropped_or_missing,
+        pending.result.probe.sustained_fps,
+        pending.result.probe.p50_encode_ms,
+        pending.result.probe.p95_encode_ms,
+        pending.result.probe.low_latency_accepted,
+        pending.result.probe.keyframe_request_ok,
+        pending.result.probe.reset_ok,
+        pending.reset_submissions,
+    );
 }
 
 #[cfg(windows)]
@@ -678,6 +811,15 @@ mod benchmark_policy_tests {
                 classmesh_video::EncoderClass::Presentation1080p30,
                 profile(1280, 720, 30),
             ),
+            classmesh_video::EncoderClass::Compatibility
+        );
+    }
+
+    #[test]
+    fn recreated_lower_geometry_stays_capped_after_reset() {
+        let profile = profile(1280, 720, 30);
+        assert_eq!(
+            class_for_actual_target(classmesh_video::EncoderClass::Presentation1080p60, profile,),
             classmesh_video::EncoderClass::Compatibility
         );
     }
