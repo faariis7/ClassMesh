@@ -19,6 +19,7 @@ enum Capability {
   CAPABILITY_QUIC_DATAGRAM = 8;
   CAPABILITY_WEBRTC = 9;
   CAPABILITY_LOCAL_SFU = 10;
+  CAPABILITY_CLIPBOARD_TEXT = 11;
 }
 
 enum PrincipalRole {
@@ -263,6 +264,17 @@ message InputEvent {
   }
 }
 
+message ClipboardReadRequest {}
+
+message ClipboardReadResponse {
+  bool available = 1;
+  string text_utf8 = 2;
+}
+
+message ClipboardWrite {
+  string text_utf8 = 1;
+}
+
 message SessionWorkerStatus {
   uint32 windows_session_id = 1;
   enum State {
@@ -302,6 +314,9 @@ message ControlEnvelope {
 
     InputEvent input_event = 30;
     SessionWorkerStatus session_worker_status = 31;
+    ClipboardReadRequest clipboard_read_request = 32;
+    ClipboardReadResponse clipboard_read_response = 33;
+    ClipboardWrite clipboard_write = 34;
 
     EnrollmentRequest enrollment_request = 40;
     EnrollmentReceipt enrollment_receipt = 41;
