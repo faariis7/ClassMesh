@@ -10,8 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     use classmesh_capture_win::CaptureStep;
     use classmesh_codec_win::{
-        BenchmarkCapabilities, BoundedEncoderBenchmark, EncoderBenchmarkConfig,
-        EncoderCapabilityCacheKey, summarize_benchmark,
+        BenchmarkCapabilities, BoundedEncoderBenchmark, EncoderBenchmarkConfig, summarize_benchmark,
     };
     use classmesh_core::keyframe::KeyframeRequestCoordinator;
     use classmesh_network::feedback::UdpFeedbackReceiver;
@@ -773,8 +772,8 @@ fn benchmark_cache_key(
     adapter: &classmesh_capture_win::AdapterCapabilityIdentity,
     candidate: &classmesh_codec_win::EncoderCandidate,
     profile: classmesh_worker::presentation::PresentationProfile,
-) -> Result<EncoderCapabilityCacheKey, Box<dyn std::error::Error>> {
-    Ok(EncoderCapabilityCacheKey {
+) -> Result<classmesh_codec_win::EncoderCapabilityCacheKey, Box<dyn std::error::Error>> {
+    Ok(classmesh_codec_win::EncoderCapabilityCacheKey {
         adapter_identity: adapter.adapter_identity(),
         driver_version: adapter.driver_version.clone(),
         encoder_clsid: candidate.clsid.clone(),
