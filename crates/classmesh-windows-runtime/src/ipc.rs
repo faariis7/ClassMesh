@@ -433,8 +433,7 @@ mod tests {
                 bitrate_kbps: 1_500,
                 codec: classmesh_protocol::control_wire::VideoCodec::H264 as i32,
             }),
-            transport:
-                classmesh_protocol::control_wire::MediaTransport::Unspecified as i32,
+            transport: classmesh_protocol::control_wire::MediaTransport::Unspecified as i32,
             transport_parameters: Vec::new(),
         };
         let encoded = IpcFrame::stream_reconfigure(&reconfigure)
