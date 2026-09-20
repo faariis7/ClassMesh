@@ -355,11 +355,19 @@ fn run_h264_benchmark(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         }
     }
     drop(active);
+    if !benchmark.is_submission_complete() {
+        return Err(format!(
+            "bounded H.264 benchmark timed out before the configured sample window completed: submitted {} of {} frames",
+            benchmark.submitted(),
+            config.sample_frames
+        )
+        .into());
+    }
     benchmark
         .finalize_missing(MISSING_OUTPUT_LATENCY)
         .map_err(|error| format!("H.264 benchmark finalize error: {error:?}"))?;
     let benchmark_started_at =
-        benchmark_started_at.ok_or("H.264 benchmark submitted no frames")?;
+        benchmark_started_at.ok_or("H.264 benchmark submitted no frames")?
     let benchmark_elapsed = benchmark_started_at.elapsed().as_secs_f32();
 
     let expected_encoder_clsid = candidate
