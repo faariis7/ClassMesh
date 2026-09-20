@@ -362,6 +362,10 @@ fn run_h264_benchmark(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         benchmark_started_at.ok_or("H.264 benchmark submitted no frames")?;
     let benchmark_elapsed = benchmark_started_at.elapsed().as_secs_f32();
 
+    let expected_encoder_clsid = candidate
+        .as_ref()
+        .map(|value| value.clsid.clone())
+        .ok_or("H.264 benchmark has no encoder candidate before reset")?;
     let reset_deadline = Instant::now()
         .checked_add(RESET_VERIFY_WINDOW)
         .unwrap_or_else(Instant::now);
@@ -371,10 +375,18 @@ fn run_h264_benchmark(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
             CaptureStep::Frame { meta, frame } => {
                 match PresentationPipeline::from_first_frame_with_target(&frame, target) {
                     Ok(mut recreated) => {
-                        if recreated.process_frame_with_metrics(meta, frame).is_ok()
+                        let same_encoder = recreated.encoder_candidate().clsid == expected_encoder_clsid;
+                        if same_encoder
+                            && recreated.process_frame_with_metrics(meta, frame).is_ok()
                             && recreated.stats().submitted_frames > 0
                         {
                             reset_ok = true;
+                        } else if !same_encoder {
+                            eprintln!(
+                                "H.264 benchmark reset selected a different encoder: expected {}, received {}",
+                                expected_encoder_clsid,
+                                recreated.encoder_candidate().clsid
+                            );
                         }
                     }
                     Err(error) => {
