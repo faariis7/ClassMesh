@@ -450,12 +450,35 @@ mod windows_service_app {
 
             loop {
                 let read = match pipe.read(&mut buffer) {
-                    Ok(0) | Err(_) => return,
+                    Ok(0) => {
+                        let _ = capabilities.clear_report_if_current(
+                            generation,
+                            expected_process_id,
+                            expected_session_id,
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = capabilities.clear_report_if_current(
+                            generation,
+                            expected_process_id,
+                            expected_session_id,
+                        );
+                        eprintln!(
+                            "Worker capability IPC read failed for pid {expected_process_id}: {error}"
+                        );
+                        return;
+                    }
                     Ok(read) => read,
                 };
                 let frames = match decoder.push_bytes(&buffer[..read]) {
                     Ok(frames) => frames,
                     Err(error) => {
+                        let _ = capabilities.clear_report_if_current(
+                            generation,
+                            expected_process_id,
+                            expected_session_id,
+                        );
                         eprintln!(
                             "Worker capability IPC frame rejected for pid {expected_process_id}: {error:?}"
                         );
@@ -492,6 +515,11 @@ mod windows_service_app {
                             }
                         }
                         Ok(IpcMessage::WorkerCapabilities(report)) => {
+                            let _ = capabilities.clear_report_if_current(
+                                generation,
+                                expected_process_id,
+                                expected_session_id,
+                            );
                             eprintln!(
                                 "Worker capability identity mismatch: expected pid {} session {}, received pid {} session {}",
                                 expected_process_id,
@@ -502,12 +530,22 @@ mod windows_service_app {
                             return;
                         }
                         Ok(unexpected) => {
+                            let _ = capabilities.clear_report_if_current(
+                                generation,
+                                expected_process_id,
+                                expected_session_id,
+                            );
                             eprintln!(
                                 "Unexpected Worker→Service IPC message after handshake: {unexpected:?}"
                             );
                             return;
                         }
                         Err(error) => {
+                            let _ = capabilities.clear_report_if_current(
+                                generation,
+                                expected_process_id,
+                                expected_session_id,
+                            );
                             eprintln!(
                                 "Invalid Worker→Service IPC message after handshake: {error:?}"
                             );
