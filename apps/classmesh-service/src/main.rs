@@ -11,7 +11,7 @@ mod windows_service_app {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity};
-    use classmesh_protocol::control_wire::InputEvent;
+    use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure};
     use classmesh_security::persistence::DurableAuthorizationState;
     use classmesh_security::{CredentialFingerprint, PrincipalId};
     use sha2::{Digest, Sha256};
@@ -45,11 +45,13 @@ mod windows_service_app {
     const CONTROL_RUNTIME_CONFIG_FILE: &str = "control-runtime.json";
     const INPUT_QUEUE_CAPACITY: usize = 256;
     const INPUT_CLEANUP_QUEUE_CAPACITY: usize = 1;
+    const FOCUSED_MEDIA_QUEUE_CAPACITY: usize = 4;
     const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
+    const MEDIA_RECONFIGURE_RETRY: Duration = Duration::from_millis(250);
 
     use crate::control_runtime::{
-        ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, InputAvailability,
-        InputDispatchChannels,
+        ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, FocusedMediaDispatchChannels,
+        InputAvailability, InputDispatchChannels,
     };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -279,6 +281,28 @@ mod windows_service_app {
             send_input(pipe, event)
         }
 
+        fn send_stream_reconfigure(
+            &self,
+            reconfigure: &StreamReconfigure,
+        ) -> Result<u32, String> {
+            let process = self
+                .process
+                .as_ref()
+                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
+            if !process
+                .is_running()
+                .map_err(|error| format!("Worker media liveness probe failed: {error}"))?
+            {
+                return Err("interactive Worker exited before media reconfigure".to_owned());
+            }
+            let pipe = self
+                .pipe
+                .as_ref()
+                .ok_or_else(|| "Worker IPC pipe is unavailable for media reconfigure".to_owned())?;
+            send_stream_reconfigure(pipe, reconfigure)?;
+            Ok(process.process_id())
+        }
+
         fn release_input(&self) -> Result<(), String> {
             let process = self
                 .process
@@ -429,6 +453,17 @@ mod windows_service_app {
             .map_err(|error| format!("failed to encode Worker input frame: {error:?}"))?;
         pipe.write_all(&bytes)
             .map_err(|error| format!("Worker input IPC write failed: {error}"))
+    }
+
+    fn send_stream_reconfigure(
+        pipe: &NamedPipeServer,
+        reconfigure: &StreamReconfigure,
+    ) -> Result<(), String> {
+        let bytes = IpcFrame::stream_reconfigure(reconfigure)
+            .encode()
+            .map_err(|error| format!("failed to encode Worker media frame: {error:?}"))?;
+        pipe.write_all(&bytes)
+            .map_err(|error| format!("Worker media IPC write failed: {error}"))
     }
 
     fn program_data_state_dir() -> Result<PathBuf, String> {
@@ -584,8 +619,17 @@ mod windows_service_app {
             cleanup_tx: input_cleanup_tx,
             availability: Arc::clone(&input_availability),
         };
-        let mut control_runtime =
-            match ControlRuntime::start(control_state, control_config, input_channels) {
+        let (media_reconfigure_tx, media_reconfigure_rx) =
+            mpsc::sync_channel::<StreamReconfigure>(FOCUSED_MEDIA_QUEUE_CAPACITY);
+        let media_channels = FocusedMediaDispatchChannels {
+            reconfigure_tx: media_reconfigure_tx,
+        };
+        let mut control_runtime = match ControlRuntime::start(
+            control_state,
+            control_config,
+            input_channels,
+            media_channels,
+        ) {
                 Ok(runtime) => runtime,
                 Err(error) => {
                     eprintln!("ClassMesh control runtime failed to start: {error}");
@@ -601,6 +645,9 @@ mod windows_service_app {
 
         let mut supervisor = SessionSupervisor::default();
         let mut workers = WorkerManager::new();
+        let mut desired_focused_reconfigure: Option<StreamReconfigure> = None;
+        let mut focused_reconfigure_worker_pid: Option<u32> = None;
+        let mut next_media_reconfigure_attempt = Instant::now();
         let mut next_worker_poll = Instant::now();
         loop {
             match input_cleanup_rx.try_recv() {
@@ -627,6 +674,43 @@ mod windows_service_app {
                 }
             }
 
+            loop {
+                match media_reconfigure_rx.try_recv() {
+                    Ok(reconfigure) => {
+                        desired_focused_reconfigure = Some(reconfigure);
+                        focused_reconfigure_worker_pid = None;
+                        next_media_reconfigure_attempt = Instant::now();
+                    }
+                    Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+
+            if let Some(reconfigure) = desired_focused_reconfigure.as_ref()
+                && Instant::now() >= next_media_reconfigure_attempt
+            {
+                match workers.send_stream_reconfigure(reconfigure) {
+                    Ok(process_id) => {
+                        if focused_reconfigure_worker_pid != Some(process_id) {
+                            eprintln!(
+                                "ClassMesh Service applied focused profile to Worker {process_id}"
+                            );
+                        }
+                        focused_reconfigure_worker_pid = Some(process_id);
+                    }
+                    Err(error) => {
+                        if focused_reconfigure_worker_pid.is_some() {
+                            eprintln!(
+                                "ClassMesh Service will retry focused media reconfigure: {error}"
+                            );
+                        }
+                        focused_reconfigure_worker_pid = None;
+                        next_media_reconfigure_attempt = Instant::now()
+                            .checked_add(MEDIA_RECONFIGURE_RETRY)
+                            .unwrap_or_else(Instant::now);
+                    }
+                }
+            }
+
             match event_rx.recv_timeout(Duration::from_millis(5)) {
                 Ok(RuntimeEvent::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Ok(RuntimeEvent::Session(event)) => {
@@ -648,6 +732,10 @@ mod windows_service_app {
 
             if Instant::now() >= next_worker_poll {
                 let event = workers.poll();
+                if matches!(event, WorkerManagerEvent::Running(_)) {
+                    focused_reconfigure_worker_pid = None;
+                    next_media_reconfigure_attempt = Instant::now();
+                }
                 handle_worker_event(event, &mut supervisor, input_availability.as_ref());
                 next_worker_poll = Instant::now()
                     .checked_add(Duration::from_millis(250))
