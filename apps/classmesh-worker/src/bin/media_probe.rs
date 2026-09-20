@@ -1,5 +1,7 @@
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    const BENCHMARK_KEYFRAME_AFTER_SUBMISSIONS: usize = 30;
+
     use std::fs::File;
     use std::io::{BufWriter, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -68,7 +70,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()
         .map_err(benchmark_accumulator_error)?;
     let mut benchmark_started: Option<Instant> = None;
-    let mut benchmark_keyframe_requested = false;
+    let mut benchmark_non_keyframe_observed = false;
+    let mut benchmark_keyframe_request_attempted = false;
+    let mut benchmark_keyframe_request_pending = false;
+    let mut benchmark_keyframe_request_frame: Option<u64> = None;
     let mut benchmark_keyframe_observed = false;
     let mut benchmark_completed = !encoder_benchmark_enabled;
     let started = Instant::now();
@@ -118,7 +123,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     if !benchmark_completed && benchmark_started.is_none() {
                         benchmark_started = Some(Instant::now());
-                        benchmark_keyframe_requested = created.request_keyframe().is_ok();
                     }
                     pipeline = Some(created);
                 }
@@ -141,9 +145,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
+                let benchmark_frame_id = meta.frame_id;
+                if encoder_benchmark.as_ref().is_some_and(|benchmark| {
+                    benchmark.submitted() >= BENCHMARK_KEYFRAME_AFTER_SUBMISSIONS
+                }) && benchmark_non_keyframe_observed
+                    && !benchmark_keyframe_request_attempted
+                {
+                    benchmark_keyframe_request_attempted = true;
+                    benchmark_keyframe_request_pending = active.request_keyframe().is_ok();
+                }
+
                 let submitted_before = active.stats().submitted_frames;
                 let encoded = active.process_frame_with_metrics(meta, frame)?;
                 let submitted_after = active.stats().submitted_frames;
+                if benchmark_keyframe_request_pending && submitted_after > submitted_before {
+                    benchmark_keyframe_request_frame = Some(benchmark_frame_id);
+                    benchmark_keyframe_request_pending = false;
+                }
 
                 if let Some(benchmark) = encoder_benchmark.as_mut() {
                     for _ in submitted_before..submitted_after {
@@ -160,7 +178,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .record_output(encoded_output.encode_latency)
                             .map_err(benchmark_accumulator_error)?;
                     }
-                    benchmark_keyframe_observed |= encoded_output.frame.meta.keyframe;
+                    benchmark_non_keyframe_observed |= !encoded_output.frame.meta.keyframe;
+                    benchmark_keyframe_observed |= benchmark_keyframe_request_frame
+                        .is_some_and(|frame_id| {
+                            frame_id == encoded_output.frame.meta.frame_id
+                                && encoded_output.frame.meta.keyframe
+                        });
                     frames.push(encoded_output.frame);
                 }
                 handle_encoded_frames(
@@ -187,7 +210,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .record_output(encoded_output.encode_latency)
                                 .map_err(benchmark_accumulator_error)?;
                         }
-                        benchmark_keyframe_observed |= encoded_output.frame.meta.keyframe;
+                        benchmark_non_keyframe_observed |= !encoded_output.frame.meta.keyframe;
+                        benchmark_keyframe_observed |= benchmark_keyframe_request_frame
+                            .is_some_and(|frame_id| {
+                                frame_id == encoded_output.frame.meta.frame_id
+                                    && encoded_output.frame.meta.keyframe
+                            });
                         tail_frames.push(encoded_output.frame);
                     }
                     handle_encoded_frames(
@@ -222,7 +250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             low_latency_accepted,
                             reset_ok: false,
                             dynamic_bitrate_ok: false,
-                            keyframe_request_ok: benchmark_keyframe_requested
+                            keyframe_request_ok: benchmark_keyframe_request_frame.is_some()
                                 && benchmark_keyframe_observed,
                         },
                     )
@@ -262,7 +290,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .transpose()
                         .map_err(benchmark_accumulator_error)?;
                     benchmark_started = None;
-                    benchmark_keyframe_requested = false;
+                    benchmark_non_keyframe_observed = false;
+                    benchmark_keyframe_request_attempted = false;
+                    benchmark_keyframe_request_pending = false;
+                    benchmark_keyframe_request_frame = None;
                     benchmark_keyframe_observed = false;
                     eprintln!("encoder benchmark restarted after DXGI recovery");
                 }
