@@ -150,8 +150,6 @@ impl PresentationPipeline {
         frame: &DxgiFrame,
         target: PresentationTarget,
     ) -> Result<Self, PresentationError> {
-        target.validate()?;
-
         let device: ID3D11Device = unsafe { frame.texture().GetDevice()? };
         let mut source_desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { frame.texture().GetDesc(&mut source_desc) };
