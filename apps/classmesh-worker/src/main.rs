@@ -541,7 +541,12 @@ fn probe_h264_hardware_encode() -> Result<bool, String> {
         .map_err(|error| format!("Media Foundation startup failed: {error}"))?;
     let encoders = classmesh_codec_win::mf::enumerate_h264_hardware_encoders()
         .map_err(|error| format!("hardware encoder enumeration failed: {error}"))?;
-    Ok(!encoders.is_empty())
+    for encoder in encoders {
+        if encoder.activate_transform().is_ok() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(windows)]
