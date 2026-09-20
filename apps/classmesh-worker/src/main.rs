@@ -48,17 +48,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (event_tx, event_rx) = mpsc::channel();
     let _ipc_thread = spawn_ipc_reader(pipe, event_tx);
 
-    let mut capture = Some(start_capture()?);
+    let mut capture_restart = CaptureRestart::default();
+    let mut capture = match start_capture() {
+        Ok(capture) => Some(capture),
+        Err(error) => {
+            capture_restart.record_failure(Instant::now());
+            eprintln!(
+                "ClassMesh Worker media unavailable at startup; control remains active: {error}"
+            );
+            None
+        }
+    };
     let mut capture_due = Instant::now();
     let mut active_focused_profile: Option<FocusedWorkerProfile> = None;
     let mut captured_frames = 0_u64;
     let mut input_injector = InputInjector::default();
 
     loop {
+        let now = Instant::now();
         let wait = if capture.is_some() {
             capture_due
-                .saturating_duration_since(Instant::now())
+                .saturating_duration_since(now)
                 .min(Duration::from_millis(50))
+        } else if let Some(retry_at) = capture_restart.next_attempt {
+            retry_at
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(250))
         } else {
             Duration::from_millis(250)
         };
@@ -68,6 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 classmesh_windows_runtime::ipc::IpcControlCommand::SuspendMedia => {
                     release_tracked_input(&mut input_injector);
                     capture = None;
+                    capture_restart.clear();
                     eprintln!("ClassMesh Worker DXGI capture suspended by Service");
                     continue;
                 }
@@ -75,15 +91,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // A release attempted during lock/secure-desktop may have been blocked.
                     // Retry once the interactive desktop is active again before accepting input.
                     release_tracked_input(&mut input_injector);
+                    capture_restart.clear();
                     capture = match start_capture() {
-                        Ok(capture) => Some(capture),
+                        Ok(capture) => {
+                            eprintln!("ClassMesh Worker DXGI capture resumed by Service");
+                            Some(capture)
+                        }
                         Err(error) => {
-                            release_tracked_input(&mut input_injector);
-                            return Err(error);
+                            capture_restart.record_failure(Instant::now());
+                            eprintln!(
+                                "ClassMesh Worker media resume failed; control remains active: {error}"
+                            );
+                            None
                         }
                     };
                     capture_due = Instant::now();
-                    eprintln!("ClassMesh Worker DXGI capture resumed by Service");
                     continue;
                 }
                 classmesh_windows_runtime::ipc::IpcControlCommand::Shutdown => {
@@ -146,6 +168,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
 
+        if capture.is_none() && capture_restart.is_due(Instant::now()) {
+            match start_capture() {
+                Ok(restarted) => {
+                    capture = Some(restarted);
+                    capture_restart.clear();
+                    capture_due = Instant::now();
+                    eprintln!(
+                        "ClassMesh Worker DXGI capture recovered; control session remained active"
+                    );
+                }
+                Err(error) => {
+                    let will_retry = capture_restart.record_failure(Instant::now());
+                    if will_retry {
+                        eprintln!(
+                            "ClassMesh Worker media restart failed; control remains active and media will retry: {error}"
+                        );
+                    } else {
+                        eprintln!(
+                            "ClassMesh Worker media restart budget exhausted; control remains active until a future ResumeMedia: {error}"
+                        );
+                    }
+                }
+            }
+        }
+
         let Some(active_capture) = capture.as_mut() else {
             continue;
         };
@@ -181,12 +228,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or_else(Instant::now);
             }
             CaptureStep::Suspended(reason) => {
-                eprintln!("DXGI capture suspended by backend: {reason:?}");
+                eprintln!("DXGI capture suspended by backend; control remains active: {reason:?}");
                 capture = None;
+                capture_restart.clear();
             }
             CaptureStep::Failed(reason) => {
-                release_tracked_input(&mut input_injector);
-                return Err(capture_error(reason).into());
+                eprintln!(
+                    "DXGI capture failed after backend recovery; control remains active: {reason:?}"
+                );
+                capture = None;
+                capture_restart.record_failure(Instant::now());
             }
         }
     }
@@ -197,6 +248,40 @@ type WorkerCapture = classmesh_capture_win::RecoveringCapture<
     classmesh_capture_win::DxgiCaptureBackend,
     classmesh_capture_win::DxgiCaptureFactory,
 >;
+
+#[cfg(windows)]
+const CAPTURE_RESTART_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+#[cfg(windows)]
+const MAX_CAPTURE_RESTART_ATTEMPTS: u8 = 4;
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CaptureRestart {
+    attempts: u8,
+    next_attempt: Option<std::time::Instant>,
+}
+
+#[cfg(windows)]
+impl CaptureRestart {
+    fn record_failure(&mut self, now: std::time::Instant) -> bool {
+        self.attempts = self.attempts.saturating_add(1);
+        if self.attempts >= MAX_CAPTURE_RESTART_ATTEMPTS {
+            self.next_attempt = None;
+            return false;
+        }
+        self.next_attempt = now.checked_add(CAPTURE_RESTART_DELAY);
+        self.next_attempt.is_some()
+    }
+
+    fn is_due(self, now: std::time::Instant) -> bool {
+        self.next_attempt.is_some_and(|deadline| now >= deadline)
+    }
+
+    fn clear(&mut self) {
+        self.attempts = 0;
+        self.next_attempt = None;
+    }
+}
 
 #[cfg(windows)]
 #[derive(Debug)]
@@ -501,6 +586,30 @@ fn main() {
 #[cfg(all(test, windows))]
 mod focused_profile_tests {
     use super::*;
+
+    #[test]
+    fn capture_restart_budget_is_bounded_without_stopping_worker_control() {
+        let started = std::time::Instant::now();
+        let mut retry = CaptureRestart::default();
+
+        assert!(retry.record_failure(started));
+        assert_eq!(retry.attempts, 1);
+        let first_due = retry.next_attempt.expect("retry deadline");
+        assert!(!retry.is_due(started));
+        assert!(retry.is_due(first_due));
+
+        assert!(retry.record_failure(first_due));
+        let second_due = retry.next_attempt.expect("second retry deadline");
+        assert!(retry.record_failure(second_due));
+        let third_due = retry.next_attempt.expect("third retry deadline");
+        assert!(!retry.record_failure(third_due));
+        assert_eq!(retry.attempts, MAX_CAPTURE_RESTART_ATTEMPTS);
+        assert!(retry.next_attempt.is_none());
+
+        retry.clear();
+        assert_eq!(retry, CaptureRestart::default());
+    }
+
     use classmesh_protocol::control_wire::{
         MediaTransport, StreamReconfigure, VideoCodec, VideoProfile,
     };
