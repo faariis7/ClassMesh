@@ -52,7 +52,7 @@ mod windows_service_app {
 
     use crate::control_runtime::{
         ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, FocusedMediaDispatchChannels,
-        InputAvailability, InputDispatchChannels,
+        FocusedMediaReconfigure, InputAvailability, InputDispatchChannels,
     };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -640,9 +640,9 @@ mod windows_service_app {
             availability: Arc::clone(&input_availability),
         };
         let (media_reconfigure_tx, media_reconfigure_rx) =
-            mpsc::sync_channel::<StreamReconfigure>(FOCUSED_MEDIA_QUEUE_CAPACITY);
+            mpsc::sync_channel::<FocusedMediaReconfigure>(FOCUSED_MEDIA_QUEUE_CAPACITY);
         let (media_clear_tx, media_clear_rx) =
-            mpsc::sync_channel::<()>(FOCUSED_MEDIA_CLEAR_QUEUE_CAPACITY);
+            mpsc::sync_channel::<u64>(FOCUSED_MEDIA_CLEAR_QUEUE_CAPACITY);
         let media_channels = FocusedMediaDispatchChannels {
             reconfigure_tx: media_reconfigure_tx,
             clear_tx: media_clear_tx,
@@ -669,8 +669,10 @@ mod windows_service_app {
         let mut supervisor = SessionSupervisor::default();
         let mut workers = WorkerManager::new();
         let mut desired_focused_reconfigure: Option<StreamReconfigure> = None;
+        let mut desired_focused_control_session_id: Option<u64> = None;
         let mut focused_reconfigure_worker_pid: Option<u32> = None;
         let mut focused_profile_clear_pending = false;
+        let mut focused_media_session_floor = 0_u64;
         let mut next_media_reconfigure_attempt = Instant::now();
         let mut next_worker_poll = Instant::now();
         loop {
@@ -700,11 +702,18 @@ mod windows_service_app {
 
             loop {
                 match media_clear_rx.try_recv() {
-                    Ok(()) => {
-                        desired_focused_reconfigure = None;
-                        focused_reconfigure_worker_pid = None;
-                        focused_profile_clear_pending = true;
-                        next_media_reconfigure_attempt = Instant::now();
+                    Ok(control_session_id) => {
+                        focused_media_session_floor =
+                            focused_media_session_floor.max(control_session_id);
+                        if desired_focused_control_session_id
+                            .is_some_and(|desired| desired <= control_session_id)
+                        {
+                            desired_focused_reconfigure = None;
+                            desired_focused_control_session_id = None;
+                            focused_reconfigure_worker_pid = None;
+                            focused_profile_clear_pending = true;
+                            next_media_reconfigure_attempt = Instant::now();
+                        }
                     }
                     Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
                 }
@@ -712,8 +721,15 @@ mod windows_service_app {
 
             loop {
                 match media_reconfigure_rx.try_recv() {
-                    Ok(reconfigure) => {
-                        desired_focused_reconfigure = Some(reconfigure);
+                    Ok(dispatch) => {
+                        if dispatch.control_session_id <= focused_media_session_floor
+                            || desired_focused_control_session_id
+                                .is_some_and(|desired| dispatch.control_session_id < desired)
+                        {
+                            continue;
+                        }
+                        desired_focused_reconfigure = Some(dispatch.reconfigure);
+                        desired_focused_control_session_id = Some(dispatch.control_session_id);
                         focused_reconfigure_worker_pid = None;
                         focused_profile_clear_pending = false;
                         next_media_reconfigure_attempt = Instant::now();
