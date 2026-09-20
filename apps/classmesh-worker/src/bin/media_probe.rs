@@ -354,6 +354,7 @@ fn run_h264_benchmark(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 .map_err(|error| format!("H.264 benchmark tail sample error: {error:?}"))?;
         }
     }
+    drop(active);
     benchmark
         .finalize_missing(MISSING_OUTPUT_LATENCY)
         .map_err(|error| format!("H.264 benchmark finalize error: {error:?}"))?;
