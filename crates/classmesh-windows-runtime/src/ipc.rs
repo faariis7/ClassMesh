@@ -7,13 +7,19 @@ pub const IPC_MAGIC: u32 = 0x434D_4950; // "CMIP"
 pub const IPC_HEADER_LEN: usize = 12;
 pub const MAX_IPC_MESSAGE: usize = 1_048_576;
 pub const IPC_VERSION_MAJOR: u8 = 0;
-pub const IPC_VERSION_MINOR: u8 = 1;
+pub const IPC_VERSION_MINOR: u8 = 2;
 
 const MESSAGE_WORKER_HELLO: u16 = 1;
 const MESSAGE_SERVICE_READY: u16 = 2;
 const MESSAGE_CONTROL: u16 = 10;
 const MESSAGE_INPUT_EVENT: u16 = 11;
 const MESSAGE_STREAM_RECONFIGURE: u16 = 12;
+const MESSAGE_WORKER_CAPABILITIES: u16 = 13;
+
+const WORKER_CAP_DXGI_CAPTURE: u32 = 1 << 0;
+const WORKER_CAP_H264_HARDWARE_ENCODE: u32 = 1 << 1;
+const KNOWN_WORKER_CAPABILITIES: u32 =
+    WORKER_CAP_DXGI_CAPTURE | WORKER_CAP_H264_HARDWARE_ENCODE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpcRole {
@@ -120,6 +126,51 @@ impl IpcControlCommand {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerRuntimeCapabilities {
+    pub process_id: u32,
+    pub session_id: u32,
+    flags: u32,
+}
+
+impl WorkerRuntimeCapabilities {
+    #[must_use]
+    pub const fn new(
+        process_id: u32,
+        session_id: u32,
+        dxgi_capture: bool,
+        h264_hardware_encode: bool,
+    ) -> Self {
+        let mut flags = 0_u32;
+        if dxgi_capture {
+            flags |= WORKER_CAP_DXGI_CAPTURE;
+        }
+        if h264_hardware_encode {
+            flags |= WORKER_CAP_H264_HARDWARE_ENCODE;
+        }
+        Self {
+            process_id,
+            session_id,
+            flags,
+        }
+    }
+
+    #[must_use]
+    pub const fn dxgi_capture(self) -> bool {
+        self.flags & WORKER_CAP_DXGI_CAPTURE != 0
+    }
+
+    #[must_use]
+    pub const fn h264_hardware_encode(self) -> bool {
+        self.flags & WORKER_CAP_H264_HARDWARE_ENCODE != 0
+    }
+
+    #[must_use]
+    pub const fn known_flags(self) -> u32 {
+        self.flags & KNOWN_WORKER_CAPABILITIES
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum IpcMessage {
     WorkerHello { process_id: u32, session_id: u32 },
@@ -127,6 +178,7 @@ pub enum IpcMessage {
     Control(IpcControlCommand),
     InputEvent(InputEvent),
     StreamReconfigure(StreamReconfigure),
+    WorkerCapabilities(WorkerRuntimeCapabilities),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +269,15 @@ impl IpcFrame {
         Self::new(MESSAGE_STREAM_RECONFIGURE, reconfigure.encode_to_vec())
     }
 
+    #[must_use]
+    pub fn worker_capabilities(capabilities: WorkerRuntimeCapabilities) -> Self {
+        let mut payload = Vec::with_capacity(12);
+        payload.extend_from_slice(&capabilities.process_id.to_be_bytes());
+        payload.extend_from_slice(&capabilities.session_id.to_be_bytes());
+        payload.extend_from_slice(&capabilities.known_flags().to_be_bytes());
+        Self::new(MESSAGE_WORKER_CAPABILITIES, payload)
+    }
+
     pub fn message(&self) -> Result<IpcMessage, IpcMessageError> {
         if self.header.version_major != IPC_VERSION_MAJOR {
             return Err(IpcMessageError::UnsupportedVersion);
@@ -268,6 +329,34 @@ impl IpcFrame {
                 let reconfigure = StreamReconfigure::decode(self.payload.as_slice())
                     .map_err(|_| IpcMessageError::InvalidPayload)?;
                 Ok(IpcMessage::StreamReconfigure(reconfigure))
+            }
+            MESSAGE_WORKER_CAPABILITIES => {
+                if self.payload.len() != 12 {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let process_id = u32::from_be_bytes([
+                    self.payload[0],
+                    self.payload[1],
+                    self.payload[2],
+                    self.payload[3],
+                ]);
+                let session_id = u32::from_be_bytes([
+                    self.payload[4],
+                    self.payload[5],
+                    self.payload[6],
+                    self.payload[7],
+                ]);
+                let flags = u32::from_be_bytes([
+                    self.payload[8],
+                    self.payload[9],
+                    self.payload[10],
+                    self.payload[11],
+                ]);
+                Ok(IpcMessage::WorkerCapabilities(WorkerRuntimeCapabilities {
+                    process_id,
+                    session_id,
+                    flags: flags & KNOWN_WORKER_CAPABILITIES,
+                }))
             }
             _ => Err(IpcMessageError::UnknownMessageType),
         }
@@ -396,6 +485,36 @@ mod tests {
                 IpcMessage::Control(command)
             );
         }
+    }
+
+    #[test]
+    fn worker_capabilities_round_trip_and_ignore_unknown_flags() {
+        let capabilities = WorkerRuntimeCapabilities::new(42, 7, true, false);
+        let encoded = IpcFrame::worker_capabilities(capabilities)
+            .encode()
+            .expect("capability frame should encode");
+        let mut decoder = IpcFrameDecoder::default();
+        let frames = decoder
+            .push_bytes(&encoded)
+            .expect("capability frame should decode");
+
+        assert_eq!(
+            frames[0].message().expect("typed capability message"),
+            IpcMessage::WorkerCapabilities(capabilities)
+        );
+
+        let mut frame = IpcFrame::worker_capabilities(capabilities);
+        frame.payload[8..12].copy_from_slice(&(capabilities.known_flags() | (1 << 31)).to_be_bytes());
+        assert_eq!(
+            frame.message().expect("unknown future flag should be ignored"),
+            IpcMessage::WorkerCapabilities(capabilities)
+        );
+    }
+
+    #[test]
+    fn malformed_worker_capability_payload_is_rejected() {
+        let frame = IpcFrame::new(MESSAGE_WORKER_CAPABILITIES, vec![0; 11]);
+        assert_eq!(frame.message(), Err(IpcMessageError::InvalidPayload));
     }
 
     #[test]
