@@ -151,7 +151,10 @@ mod windows_service_app {
                         return self.apply_restart_decision(decision);
                     }
 
+                    self.capabilities
+                        .activate(worker_generation, process_id, session.0);
                     if let Err(error) = authenticate_worker(&pipe, process_id, session) {
+                        self.capabilities.clear();
                         eprintln!(
                             "Worker IPC handshake failed for pid {process_id}, session {}: {error}",
                             session.0
@@ -159,6 +162,23 @@ mod windows_service_app {
                         let _ = process.terminate(1);
                         let decision = self.watchdog.launch_failed(session);
                         return self.apply_restart_decision(decision);
+                    }
+
+                    match pipe.try_clone() {
+                        Ok(reader) => {
+                            let _capability_reader = spawn_worker_capability_reader(
+                                reader,
+                                Arc::clone(&self.capabilities),
+                                worker_generation,
+                                process_id,
+                                session.0,
+                            );
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "Worker capability IPC reader unavailable; control remains active: {error}"
+                            );
+                        }
                     }
 
                     eprintln!(
@@ -170,8 +190,6 @@ mod windows_service_app {
                         process_id,
                         launched_at_us: now_us,
                     });
-                    self.capabilities
-                        .activate(worker_generation, process_id, session.0);
                     self.pipe = Some(pipe);
                     self.process = Some(process);
                     self.pending_restart = None;
@@ -419,6 +437,88 @@ mod windows_service_app {
         }
     }
 
+    fn spawn_worker_capability_reader(
+        pipe: NamedPipeServer,
+        capabilities: Arc<WorkerCapabilityState>,
+        generation: u64,
+        expected_process_id: u32,
+        expected_session_id: u32,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let mut decoder = IpcFrameDecoder::default();
+            let mut buffer = [0_u8; 4096];
+
+            loop {
+                let read = match pipe.read(&mut buffer) {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => read,
+                };
+                let frames = match decoder.push_bytes(&buffer[..read]) {
+                    Ok(frames) => frames,
+                    Err(error) => {
+                        eprintln!(
+                            "Worker capability IPC frame rejected for pid {expected_process_id}: {error:?}"
+                        );
+                        return;
+                    }
+                };
+
+                for frame in frames {
+                    match frame.message() {
+                        Ok(IpcMessage::WorkerCapabilities(report))
+                            if report.process_id == expected_process_id
+                                && report.session_id == expected_session_id =>
+                        {
+                            if capabilities.apply_report(
+                                generation,
+                                report.process_id,
+                                report.session_id,
+                                report.dxgi_capture(),
+                                report.h264_hardware_encode(),
+                            ) {
+                                eprintln!(
+                                    "ClassMesh Worker capabilities updated: pid={}, session={}, dxgi={}, h264_hw={}",
+                                    report.process_id,
+                                    report.session_id,
+                                    report.dxgi_capture(),
+                                    report.h264_hardware_encode()
+                                );
+                            } else {
+                                eprintln!(
+                                    "Stale Worker capability report ignored for pid {} session {}",
+                                    report.process_id, report.session_id
+                                );
+                                return;
+                            }
+                        }
+                        Ok(IpcMessage::WorkerCapabilities(report)) => {
+                            eprintln!(
+                                "Worker capability identity mismatch: expected pid {} session {}, received pid {} session {}",
+                                expected_process_id,
+                                expected_session_id,
+                                report.process_id,
+                                report.session_id
+                            );
+                            return;
+                        }
+                        Ok(unexpected) => {
+                            eprintln!(
+                                "Unexpected Worker→Service IPC message after handshake: {unexpected:?}"
+                            );
+                            return;
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "Invalid Worker→Service IPC message after handshake: {error:?}"
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     fn authenticate_worker(
         pipe: &NamedPipeServer,
         expected_process_id: u32,
@@ -654,7 +754,6 @@ mod windows_service_app {
             released_session_floor: Arc::clone(&released_media_session_floor),
         };
         let worker_capabilities = Arc::new(WorkerCapabilityState::default());
-        debug_assert!(!worker_capabilities.apply_report(0, 0, 0, false, false));
         let mut control_runtime = match ControlRuntime::start(
             control_state,
             control_config,
