@@ -242,6 +242,77 @@ mod tests {
     }
 
     #[test]
+    fn lock_unlock_cycle_preserves_active_session_and_worker_identity() {
+        let mut supervisor = SessionSupervisor::default();
+        let session = SessionId(11);
+
+        assert_eq!(
+            supervisor.on_event(SessionEvent::Logon(session)),
+            SupervisorAction::LaunchWorker(session)
+        );
+        supervisor.mark_worker_running(session);
+        assert_eq!(supervisor.active_session(), Some(session));
+
+        assert_eq!(
+            supervisor.on_event(SessionEvent::Lock(session)),
+            SupervisorAction::SuspendMedia(session)
+        );
+        assert_eq!(supervisor.worker_state(), WorkerState::Suspended(session));
+        assert_eq!(supervisor.active_session(), Some(session));
+
+        assert_eq!(
+            supervisor.on_event(SessionEvent::Unlock(session)),
+            SupervisorAction::ResumeMedia(session)
+        );
+        assert_eq!(supervisor.worker_state(), WorkerState::Running(session));
+        assert_eq!(supervisor.active_session(), Some(session));
+    }
+
+    #[test]
+    fn fast_user_switch_from_suspended_session_replaces_worker() {
+        let mut supervisor = SessionSupervisor::default();
+        let first = SessionId(21);
+        let second = SessionId(22);
+
+        let _ = supervisor.on_event(SessionEvent::Logon(first));
+        supervisor.mark_worker_running(first);
+        assert_eq!(
+            supervisor.on_event(SessionEvent::Lock(first)),
+            SupervisorAction::SuspendMedia(first)
+        );
+
+        assert_eq!(
+            supervisor.on_event(SessionEvent::Logon(second)),
+            SupervisorAction::ReplaceWorker {
+                old_session: first,
+                new_session: second,
+            }
+        );
+        assert_eq!(supervisor.active_session(), Some(second));
+        assert_eq!(supervisor.worker_state(), WorkerState::Starting(second));
+    }
+
+    #[test]
+    fn active_worker_crash_relaunches_and_can_return_to_running() {
+        let mut supervisor = SessionSupervisor::default();
+        let session = SessionId(31);
+
+        let _ = supervisor.on_event(SessionEvent::Logon(session));
+        supervisor.mark_worker_running(session);
+
+        assert_eq!(
+            supervisor.worker_crashed(session),
+            SupervisorAction::LaunchWorker(session)
+        );
+        assert_eq!(supervisor.worker_state(), WorkerState::Starting(session));
+        assert_eq!(supervisor.active_session(), Some(session));
+
+        supervisor.mark_worker_running(session);
+        assert_eq!(supervisor.worker_state(), WorkerState::Running(session));
+        assert_eq!(supervisor.active_session(), Some(session));
+    }
+
+    #[test]
     fn worker_crash_restarts_worker_not_service() {
         let mut supervisor = SessionSupervisor::default();
         let _ = supervisor.on_event(SessionEvent::Logon(SessionId(7)));
