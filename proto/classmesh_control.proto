@@ -216,28 +216,37 @@ message StreamReconfigure {
 }
 
 message MouseMove {
+  // When absolute=false, x/y are signed relative pixel deltas.
+  // When absolute=true, x/y are Windows normalized virtual-desktop coordinates
+  // in the inclusive range 0..65535.
   sint32 x = 1;
   sint32 y = 2;
   bool absolute = 3;
 }
 
 message MouseButton {
+  // Stable ClassMesh mapping: 1=left, 2=right, 3=middle, 4=X1, 5=X2.
   uint32 button = 1;
   bool down = 2;
 }
 
 message MouseWheel {
+  // Raw Windows wheel delta. A conventional wheel notch is +/-120.
   sint32 delta = 1;
   bool horizontal = 2;
 }
 
 message KeyEvent {
+  // scan_code is preferred when non-zero. Otherwise virtual_key is used.
+  // extended maps to KEYEVENTF_EXTENDEDKEY.
   uint32 virtual_key = 1;
   uint32 scan_code = 2;
   bool down = 3;
   bool extended = 4;
 }
 
+// Releases only keyboard/mouse buttons tracked as pressed by the ClassMesh
+// input executor. It does not attempt to reset unrelated local user input.
 message ReleaseAllInput {}
 
 message InputEvent {
