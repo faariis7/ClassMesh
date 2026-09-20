@@ -498,6 +498,30 @@ mod tests {
     }
 
     #[test]
+    fn bitrate_change_is_cache_miss() {
+        let path = test_path("bitrate-stale");
+        let cache = DurableEncoderCapabilityCache::new(&path);
+        let stored = key("31.0.15.5123");
+        cache.save(&stored, &result()).expect("save");
+        let mut expected = stored;
+        expected.bitrate_bps = 1_500_000;
+        assert_eq!(cache.load_exact(&expected).expect("load"), None);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn malformed_json_fails_closed() {
+        let path = test_path("malformed");
+        fs::write(&path, b"{not-json").expect("write");
+        let cache = DurableEncoderCapabilityCache::new(&path);
+        assert!(matches!(
+            cache.load_exact(&key("31.0.15.5123")),
+            Err(EncoderCapabilityCacheError::Json(_))
+        ));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn unsupported_version_fails_closed() {
         let path = test_path("version");
         let mut persisted = PersistedCache::from_parts(&key("31.0.15.5123"), &result());
