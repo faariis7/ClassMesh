@@ -129,11 +129,9 @@ mod tests {
             Err(StreamOfferError::TransportCapabilityNotNegotiated)
         );
 
-        let validated = validate_interactive_stream_offer(
-            &offer,
-            &BTreeSet::from([Capability::UdpUnicast]),
-        )
-        .expect("negotiated UDP unicast should validate");
+        let validated =
+            validate_interactive_stream_offer(&offer, &BTreeSet::from([Capability::UdpUnicast]))
+                .expect("negotiated UDP unicast should validate");
         assert_eq!(validated.stream_id, 7);
         assert_eq!(validated.profile, StreamProfile::new(1280, 720, 30, 2_500));
         assert_eq!(validated.transport, WireMediaTransport::UdpUnicast);
@@ -170,10 +168,7 @@ mod tests {
         let mut large = offer(WireMediaTransport::QuicDatagram);
         large.transport_parameters = vec![0; MAX_STREAM_TRANSPORT_PARAMETERS + 1];
         assert_eq!(
-            validate_interactive_stream_offer(
-                &large,
-                &BTreeSet::from([Capability::QuicDatagram]),
-            ),
+            validate_interactive_stream_offer(&large, &BTreeSet::from([Capability::QuicDatagram]),),
             Err(StreamOfferError::TransportParametersTooLarge)
         );
     }
