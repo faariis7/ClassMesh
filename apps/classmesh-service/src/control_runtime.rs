@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -40,11 +40,44 @@ const CONFIG_VERSION: u32 = 1;
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputAvailability {
+    Unavailable = 0,
+    Ready = 1,
+    Suspended = 2,
+    Starting = 3,
+}
+
+impl InputAvailability {
+    pub(crate) fn load(value: &AtomicU8) -> Self {
+        match value.load(Ordering::Acquire) {
+            1 => Self::Ready,
+            2 => Self::Suspended,
+            3 => Self::Starting,
+            _ => Self::Unavailable,
+        }
+    }
+
+    pub(crate) fn store(self, value: &AtomicU8) {
+        value.store(self as u8, Ordering::Release);
+    }
+
+    const fn rejection_code(self) -> &'static str {
+        match self {
+            Self::Ready => "control.command.input_ready",
+            Self::Suspended => "control.command.session_suspended",
+            Self::Starting => "control.command.executor_starting",
+            Self::Unavailable => "control.command.executor_unavailable",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct InputDispatchChannels {
     pub(crate) event_tx: mpsc::SyncSender<InputEvent>,
     pub(crate) cleanup_tx: mpsc::SyncSender<()>,
-    pub(crate) available: Arc<AtomicBool>,
+    pub(crate) availability: Arc<AtomicU8>,
 }
 
 #[derive(Debug, Clone)]
@@ -434,9 +467,12 @@ async fn run_established_session(
                 match dispatch_privileged_command(&mut guard, authorization, &envelope, now_unix_ms)
                 {
                     Ok(PrivilegedControlCommand::InputEvent(event)) => {
-                        if !input.channels.available.load(Ordering::Acquire) {
+                        let availability =
+                            InputAvailability::load(input.channels.availability.as_ref());
+                        if availability != InputAvailability::Ready {
                             eprintln!(
-                                "ClassMesh authorized input rejected: control.command.executor_unavailable"
+                                "ClassMesh authorized input rejected: {}",
+                                availability.rejection_code()
                             );
                             connection.close(0_u32.into(), b"input executor unavailable");
                             return;
@@ -512,7 +548,9 @@ impl InputDispatchState {
             return;
         }
 
-        if self.channels.available.load(Ordering::Acquire) {
+        if InputAvailability::load(self.channels.availability.as_ref())
+            == InputAvailability::Ready
+        {
             match self.channels.cleanup_tx.try_send(()) {
                 Ok(()) | Err(mpsc::TrySendError::Full(())) => {}
                 Err(mpsc::TrySendError::Disconnected(())) => {
@@ -648,6 +686,22 @@ mod tests {
     }
 
     #[test]
+    fn input_availability_codes_are_stable() {
+        assert_eq!(
+            InputAvailability::Suspended.rejection_code(),
+            "control.command.session_suspended"
+        );
+        assert_eq!(
+            InputAvailability::Starting.rejection_code(),
+            "control.command.executor_starting"
+        );
+        assert_eq!(
+            InputAvailability::Unavailable.rejection_code(),
+            "control.command.executor_unavailable"
+        );
+    }
+
+    #[test]
     fn input_owner_is_exclusive_and_reusable_after_release() {
         let (event_tx, _event_rx) = mpsc::sync_channel(1);
         let (cleanup_tx, cleanup_rx) = mpsc::sync_channel(1);
@@ -655,7 +709,7 @@ mod tests {
             channels: InputDispatchChannels {
                 event_tx,
                 cleanup_tx,
-                available: Arc::new(AtomicBool::new(true)),
+                availability: Arc::new(AtomicU8::new(InputAvailability::Ready as u8)),
             },
             owner: Arc::new(AtomicU64::new(0)),
         };
