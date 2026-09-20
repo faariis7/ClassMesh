@@ -96,6 +96,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("ClassMesh Worker released tracked remote input");
                     continue;
                 }
+                classmesh_windows_runtime::ipc::IpcControlCommand::ClearFocusedProfile => {
+                    active_focused_profile = None;
+                    capture_due = Instant::now();
+                    eprintln!("ClassMesh Worker cleared focused media profile");
+                    continue;
+                }
             },
             Ok(WorkerEvent::StreamReconfigure(reconfigure)) => {
                 match FocusedWorkerProfile::from_reconfigure(&reconfigure) {
