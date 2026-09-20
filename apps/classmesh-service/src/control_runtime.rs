@@ -19,8 +19,7 @@ use classmesh_control::handshake::{
     server_hello_enrolled,
 };
 use classmesh_control::quic::{
-    ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT,
-    enrolled_server_config_with_resolver,
+    ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
 };
 use classmesh_control::{DEFAULT_OFFLINE_AFTER, HeartbeatSample, HeartbeatTracker};
 use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver};
@@ -408,12 +407,8 @@ async fn run_established_session(
                         return;
                     }
                 };
-                match dispatch_privileged_command(
-                    &mut guard,
-                    authorization,
-                    &envelope,
-                    now_unix_ms,
-                ) {
+                match dispatch_privileged_command(&mut guard, authorization, &envelope, now_unix_ms)
+                {
                     Ok(PrivilegedControlCommand::InputEvent(_)) => {
                         eprintln!(
                             "ClassMesh authorized input rejected: control.command.executor_unavailable"
