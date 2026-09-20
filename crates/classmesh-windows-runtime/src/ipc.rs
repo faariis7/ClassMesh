@@ -377,9 +377,11 @@ mod tests {
         let event = InputEvent {
             sequence: 9,
             timestamp_us: 123,
-            event: Some(classmesh_protocol::control_wire::input_event::Event::ReleaseAll(
-                classmesh_protocol::control_wire::ReleaseAllInput {},
-            )),
+            event: Some(
+                classmesh_protocol::control_wire::input_event::Event::ReleaseAll(
+                    classmesh_protocol::control_wire::ReleaseAllInput {},
+                ),
+            ),
         };
         let encoded = IpcFrame::input_event(&event)
             .encode()
