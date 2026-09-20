@@ -70,7 +70,9 @@ pub fn dispatch_privileged_command(
                 Permission::ReadClipboard,
                 now_unix_ms,
             )?;
-            Ok(PrivilegedControlCommand::ClipboardReadRequest(request.clone()))
+            Ok(PrivilegedControlCommand::ClipboardReadRequest(
+                request.clone(),
+            ))
         }
         control_envelope::Payload::ClipboardWrite(write) => {
             validate_text(&write.text_utf8)
@@ -293,8 +295,7 @@ mod tests {
     fn oversized_clipboard_write_is_rejected_before_sequence_consumption() {
         let authorization = store(BTreeSet::from([Permission::WriteClipboard]));
         let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
-        let envelope =
-            clipboard_write_envelope(2, "a".repeat(MAX_CLIPBOARD_TEXT_BYTES + 1));
+        let envelope = clipboard_write_envelope(2, "a".repeat(MAX_CLIPBOARD_TEXT_BYTES + 1));
 
         assert!(matches!(
             dispatch_privileged_command(&mut guard, &authorization, &envelope, 150),
