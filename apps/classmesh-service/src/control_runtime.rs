@@ -22,10 +22,15 @@ use classmesh_control::quic::{
     ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
 };
 use classmesh_control::{DEFAULT_OFFLINE_AFTER, HeartbeatSample, HeartbeatTracker};
+use classmesh_core::adaptation::{
+    AdaptationPolicy, FocusedProfileController, HysteresisConfig, QualityTier, StreamProfile,
+};
+use classmesh_core::{NetworkMetrics, StreamKind};
 use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver};
 use classmesh_protocol::control_wire::{
-    ControlEnvelope, HeartbeatAck, InputEvent, ProtocolVersion as WireProtocolVersion,
-    control_envelope,
+    ControlEnvelope, HeartbeatAck, InputEvent, MediaTransport as WireMediaTransport,
+    ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamReconfigure, VideoCodec,
+    VideoProfile, control_envelope,
 };
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::AuthorizationStore;
@@ -84,6 +89,99 @@ pub(crate) struct InputDispatchChannels {
 struct InputDispatchState {
     channels: InputDispatchChannels,
     owner: Arc<AtomicU64>,
+}
+
+#[derive(Debug)]
+struct FocusedAdaptationState {
+    stream_id: Option<u64>,
+    controller: FocusedProfileController,
+}
+
+impl FocusedAdaptationState {
+    fn new() -> Self {
+        Self {
+            stream_id: None,
+            controller: focused_profile_controller(),
+        }
+    }
+
+    fn observe(
+        &mut self,
+        feedback: &ReceiverFeedback,
+    ) -> Result<Option<StreamReconfigure>, &'static str> {
+        if feedback.stream_id == 0 {
+            return Err("control.feedback.invalid_stream");
+        }
+        let metrics =
+            receiver_feedback_metrics(feedback).ok_or("control.feedback.invalid_metrics")?;
+
+        if self.stream_id != Some(feedback.stream_id) {
+            self.stream_id = Some(feedback.stream_id);
+            self.controller = focused_profile_controller();
+        }
+
+        let decision = self.controller.observe(metrics);
+        if !decision.changed {
+            return Ok(None);
+        }
+
+        Ok(Some(StreamReconfigure {
+            stream_id: feedback.stream_id,
+            profile: Some(stream_profile_to_wire(decision.profile)),
+            transport: WireMediaTransport::Unspecified as i32,
+            transport_parameters: Vec::new(),
+        }))
+    }
+}
+
+fn focused_profile_controller() -> FocusedProfileController {
+    FocusedProfileController::with_initial_tier(
+        StreamKind::Interactive,
+        AdaptationPolicy::default(),
+        HysteresisConfig::default(),
+        QualityTier::High,
+    )
+}
+
+fn receiver_feedback_metrics(feedback: &ReceiverFeedback) -> Option<NetworkMetrics> {
+    let finite_nonnegative = [
+        feedback.rtt_ms,
+        feedback.packet_loss,
+        feedback.jitter_ms,
+        feedback.decode_fps,
+        feedback.decode_latency_ms,
+        feedback.render_latency_ms,
+        feedback.queue_delay_ms,
+    ]
+    .into_iter()
+    .all(|value| value.is_finite() && value >= 0.0);
+    if !finite_nonnegative || !(0.0..=1.0).contains(&feedback.packet_loss) {
+        return None;
+    }
+
+    let metrics = NetworkMetrics {
+        rtt_ms: feedback.rtt_ms,
+        packet_loss: feedback.packet_loss,
+        jitter_ms: feedback.jitter_ms,
+        decode_fps: feedback.decode_fps,
+        queue_delay_ms: feedback.queue_delay_ms,
+        estimated_mbps: feedback.received_bitrate_bps as f32 / 1_000_000.0,
+        // ReceiverFeedback does not declare topology. Focused 6D adaptation is profile-only,
+        // so these fields are deliberately neutral and never used to select a transport here.
+        multicast_viable: false,
+        wireless: false,
+    };
+    metrics.is_valid().then_some(metrics)
+}
+
+fn stream_profile_to_wire(profile: StreamProfile) -> VideoProfile {
+    VideoProfile {
+        width: u32::from(profile.width),
+        height: u32::from(profile.height),
+        fps: u32::from(profile.fps),
+        bitrate_kbps: profile.bitrate_kbps,
+        codec: VideoCodec::H264 as i32,
+    }
 }
 
 #[derive(Debug)]
@@ -371,6 +469,7 @@ async fn run_established_session(
     let session_clock = Instant::now();
     let mut last_inbound_at = Instant::now();
     let mut outbound_sequence = HELLO_SEQUENCE;
+    let mut focused_adaptation = FocusedAdaptationState::new();
 
     loop {
         let envelope = match channel.receive().await {
@@ -453,6 +552,53 @@ async fn run_established_session(
                         transport_diagnostic_code(&error)
                     );
                     connection.close(0_u32.into(), b"heartbeat ack failed");
+                    return;
+                }
+            }
+            Some(control_envelope::Payload::ReceiverFeedback(feedback)) => {
+                if let Err(error) = guard.validate_envelope(&envelope) {
+                    eprintln!(
+                        "ClassMesh control envelope rejected: {}",
+                        command_authorization_diagnostic_code(&error)
+                    );
+                    connection.close(0_u32.into(), b"invalid control envelope");
+                    return;
+                }
+
+                let reconfigure = match focused_adaptation.observe(feedback) {
+                    Ok(reconfigure) => reconfigure,
+                    Err(code) => {
+                        eprintln!("ClassMesh receiver feedback rejected: {code}");
+                        connection.close(0_u32.into(), b"invalid receiver feedback");
+                        return;
+                    }
+                };
+                let Some(reconfigure) = reconfigure else {
+                    continue;
+                };
+
+                let Some(next_sequence) = outbound_sequence.checked_add(1) else {
+                    eprintln!("ClassMesh control session closed: control.sequence.exhausted");
+                    connection.close(0_u32.into(), b"control sequence exhausted");
+                    return;
+                };
+                outbound_sequence = next_sequence;
+                let response = ControlEnvelope {
+                    control_session_id: session.control_session_id,
+                    sequence: outbound_sequence,
+                    protocol_version: Some(WireProtocolVersion {
+                        major: u32::from(session.negotiated.version.major),
+                        minor: u32::from(session.negotiated.version.minor),
+                    }),
+                    request_id: envelope.request_id,
+                    payload: Some(control_envelope::Payload::StreamReconfigure(reconfigure)),
+                };
+                if let Err(error) = channel.send(&response).await {
+                    eprintln!(
+                        "ClassMesh stream reconfigure failed: {}",
+                        transport_diagnostic_code(&error)
+                    );
+                    connection.close(0_u32.into(), b"stream reconfigure failed");
                     return;
                 }
             }
@@ -682,6 +828,71 @@ mod tests {
         assert_eq!(media_health_from_wire(99), None);
         assert_eq!(media_health_from_wire(3), Some(MediaHealth::Streaming));
         assert_eq!(media_health_from_wire(5), Some(MediaHealth::Recovering));
+    }
+
+    fn healthy_receiver_feedback(stream_id: u64) -> ReceiverFeedback {
+        ReceiverFeedback {
+            stream_id,
+            rtt_ms: 8.0,
+            packet_loss: 0.001,
+            jitter_ms: 1.0,
+            decode_fps: 30.0,
+            decode_latency_ms: 4.0,
+            render_latency_ms: 4.0,
+            queue_delay_ms: 4.0,
+            dropped_frames: 0,
+            reordered_packets: 0,
+            received_bitrate_bps: 5_000_000,
+        }
+    }
+
+    #[test]
+    fn focused_feedback_emits_profile_only_reconfigure_after_hysteresis() {
+        let mut adaptation = FocusedAdaptationState::new();
+        let healthy = healthy_receiver_feedback(7);
+        assert!(
+            adaptation
+                .observe(&healthy)
+                .expect("healthy feedback")
+                .is_none()
+        );
+
+        let mut degraded = healthy;
+        degraded.packet_loss = 0.12;
+        assert!(
+            adaptation
+                .observe(&degraded)
+                .expect("first degraded sample")
+                .is_none()
+        );
+
+        let reconfigure = adaptation
+            .observe(&degraded)
+            .expect("second degraded sample")
+            .expect("profile should change after hysteresis");
+        let profile = reconfigure.profile.expect("video profile");
+        assert_eq!(reconfigure.stream_id, 7);
+        assert_eq!((profile.width, profile.height, profile.fps), (640, 360, 20));
+        assert_eq!(profile.codec, VideoCodec::H264 as i32);
+        assert_eq!(reconfigure.transport, WireMediaTransport::Unspecified as i32);
+        assert!(reconfigure.transport_parameters.is_empty());
+    }
+
+    #[test]
+    fn focused_feedback_rejects_invalid_stream_and_metrics() {
+        let mut adaptation = FocusedAdaptationState::new();
+        let invalid_stream = healthy_receiver_feedback(0);
+        assert_eq!(
+            adaptation.observe(&invalid_stream),
+            Err("control.feedback.invalid_stream")
+        );
+
+        let mut invalid_metrics = healthy_receiver_feedback(8);
+        invalid_metrics.packet_loss = f32::NAN;
+        assert_eq!(
+            adaptation.observe(&invalid_metrics),
+            Err("control.feedback.invalid_metrics")
+        );
     }
 
     #[test]
