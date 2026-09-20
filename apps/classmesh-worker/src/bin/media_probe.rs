@@ -177,6 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .is_some_and(BoundedEncoderBenchmark::is_submission_complete)
                 {
                     let candidate = active.encoder_candidate().clone();
+                    let benchmark_profile = active.profile();
                     let low_latency_accepted = active.low_latency_accepted();
                     let tail = active.finish_with_metrics()?;
                     let mut tail_frames = Vec::with_capacity(tail.len());
@@ -227,9 +228,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .map_err(benchmark_summary_error)?;
                     eprintln!(
-                        "encoder benchmark: backend={} class={:?} submitted={} outputs={} missing={} fps={:.2} p50_ms={:.2} p95_ms={:.2} low_latency={} keyframe_request={} reset=false dynamic_bitrate=false",
+                        "encoder benchmark: backend={} class={:?} target={}x{}@{} submitted={} outputs={} missing={} fps={:.2} p50_ms={:.2} p95_ms={:.2} low_latency={} keyframe_request={} reset=false dynamic_bitrate=false",
                         result.probe.backend,
                         result.class,
+                        benchmark_profile.target_width,
+                        benchmark_profile.target_height,
+                        benchmark_profile.fps,
                         benchmark.submitted(),
                         result.output_frames,
                         result.dropped_or_missing,
