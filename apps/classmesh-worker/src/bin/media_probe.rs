@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use classmesh_core::keyframe::KeyframeRequestCoordinator;
     use classmesh_network::feedback::UdpFeedbackReceiver;
     use classmesh_network::transport::{UdpFrameSender, UdpSenderConfig};
-    use classmesh_video::Codec;
+    use classmesh_video::{Codec, EncoderClass};
     use classmesh_worker::presentation::{PresentationPipeline, PresentationTarget};
 
     let args: Vec<String> = std::env::args().collect();
@@ -239,7 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .expect("benchmark start is set with its pipeline")
                         .elapsed()
                         .as_secs_f32();
-                    let result = summarize_benchmark(
+                    let mut result = summarize_benchmark(
                         &candidate,
                         Codec::H264,
                         benchmark.samples(),
@@ -254,6 +254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         },
                     )
                     .map_err(benchmark_summary_error)?;
+                    result.class = class_for_actual_target(result.class, benchmark_profile);
                     eprintln!(
                         "encoder benchmark: backend={} class={:?} target={}x{}@{} submitted={} outputs={} missing={} fps={:.2} p50_ms={:.2} p95_ms={:.2} low_latency={} keyframe_request={} reset=false dynamic_bitrate=false",
                         result.probe.backend,
@@ -611,6 +612,20 @@ fn elapsed_us(started: std::time::Instant) -> u64 {
 }
 
 #[cfg(windows)]
+fn class_for_actual_target(
+    class: classmesh_video::EncoderClass,
+    profile: classmesh_worker::presentation::PresentationProfile,
+) -> classmesh_video::EncoderClass {
+    if profile.target_width < 1920 || profile.target_height < 1080 || profile.fps < 30 {
+        return class.min(classmesh_video::EncoderClass::Compatibility);
+    }
+    if profile.fps < 60 {
+        return class.min(classmesh_video::EncoderClass::Presentation1080p30);
+    }
+    class
+}
+
+#[cfg(windows)]
 fn benchmark_accumulator_error(
     error: classmesh_codec_win::BenchmarkAccumulatorError,
 ) -> std::io::Error {
@@ -635,6 +650,44 @@ fn network_error(error: classmesh_network::transport::UdpSendError) -> std::io::
 #[cfg(windows)]
 fn feedback_error(error: classmesh_network::feedback::FeedbackTransportError) -> std::io::Error {
     std::io::Error::other(format!("media feedback error: {error}"))
+}
+
+#[cfg(all(test, windows))]
+mod benchmark_policy_tests {
+    use super::*;
+
+    fn profile(width: u32, height: u32, fps: u32) -> classmesh_worker::presentation::PresentationProfile {
+        classmesh_worker::presentation::PresentationProfile {
+            source_width: width,
+            source_height: height,
+            target_width: width,
+            target_height: height,
+            fps,
+            bitrate_bps: 2_500_000,
+        }
+    }
+
+    #[test]
+    fn lower_geometry_cannot_be_labeled_as_1080p() {
+        assert_eq!(
+            class_for_actual_target(
+                classmesh_video::EncoderClass::Presentation1080p30,
+                profile(1280, 720, 30),
+            ),
+            classmesh_video::EncoderClass::Compatibility
+        );
+    }
+
+    #[test]
+    fn thirty_fps_target_cannot_be_labeled_as_1080p60() {
+        assert_eq!(
+            class_for_actual_target(
+                classmesh_video::EncoderClass::Presentation1080p60,
+                profile(1920, 1080, 30),
+            ),
+            classmesh_video::EncoderClass::Presentation1080p30
+        );
+    }
 }
 
 #[cfg(not(windows))]
