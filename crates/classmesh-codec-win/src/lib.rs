@@ -1,5 +1,7 @@
 #![deny(unsafe_code)]
 
+pub mod capability_cache;
+
 use std::time::Duration;
 
 use classmesh_video::{Codec, EncoderClass, EncoderProbeResult};
