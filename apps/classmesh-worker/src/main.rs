@@ -172,7 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 capture_due = next_capture_due(active_focused_profile);
             }
             CaptureStep::NoFrame => {
-                capture_due = next_capture_due(active_focused_profile);
+                capture_due = Instant::now();
             }
             CaptureStep::RetryAfter { delay_ms, reason } => {
                 eprintln!("DXGI capture recovery scheduled after {reason:?} in {delay_ms} ms");
@@ -271,13 +271,11 @@ impl FocusedWorkerProfile {
 
 #[cfg(windows)]
 fn next_capture_due(profile: Option<FocusedWorkerProfile>) -> std::time::Instant {
-    let interval = profile.map_or_else(
-        || std::time::Duration::from_micros(1_000_000_u64 / 30),
-        FocusedWorkerProfile::capture_interval,
-    );
-    std::time::Instant::now()
-        .checked_add(interval)
-        .unwrap_or_else(std::time::Instant::now)
+    let now = std::time::Instant::now();
+    let Some(profile) = profile else {
+        return now;
+    };
+    now.checked_add(profile.capture_interval()).unwrap_or(now)
 }
 
 #[cfg(windows)]
