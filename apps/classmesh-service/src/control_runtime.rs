@@ -164,10 +164,10 @@ impl ControlRuntime {
         if let Some(stop_tx) = self.stop_tx.take() {
             let _ = stop_tx.send(());
         }
-        if let Some(thread) = self.thread.take()
-            && thread.join().is_err()
-        {
-            eprintln!("ClassMesh control runtime thread panicked during shutdown");
+        if let Some(thread) = self.thread.take() {
+            if thread.join().is_err() {
+                eprintln!("ClassMesh control runtime thread panicked during shutdown");
+            }
         }
     }
 }
