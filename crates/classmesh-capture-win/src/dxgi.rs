@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn formats_umd_driver_version_parts() {
-        let high = (31_u64 << 16) | 0;
+        let high = 31_u64 << 16;
         let low = (15_u64 << 16) | 5123;
         let raw = ((high << 32) | low) as i64;
         assert_eq!(format_umd_driver_version(raw), "31.0.15.5123");
