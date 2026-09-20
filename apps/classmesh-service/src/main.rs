@@ -10,7 +10,7 @@ mod windows_service_app {
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    use classmesh_codec_win::DurableEncoderCapabilityCache;
+    use classmesh_codec_win::capability_cache::DurableEncoderCapabilityCache;
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity};
     use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure};
     use classmesh_security::persistence::DurableAuthorizationState;
