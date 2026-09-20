@@ -186,10 +186,10 @@ mod windows_service_app {
                 return;
             }
 
-            if let Some(pipe) = self.pipe.as_ref()
-                && let Err(error) = send_control(pipe, IpcControlCommand::Shutdown)
-            {
-                eprintln!("failed to request graceful Worker shutdown: {error}");
+            if let Some(pipe) = self.pipe.as_ref() {
+                if let Err(error) = send_control(pipe, IpcControlCommand::Shutdown) {
+                    eprintln!("failed to request graceful Worker shutdown: {error}");
+                }
             }
 
             if let Some(process) = self.process.as_mut() {
@@ -203,14 +203,14 @@ mod windows_service_app {
                         }
                     }
                 }
-                if process.is_running().unwrap_or(true)
-                    && let Err(error) = process.terminate(0)
-                {
-                    eprintln!(
-                        "failed to terminate Worker {} for session {}: {error}",
-                        process.process_id(),
-                        session.0
-                    );
+                if process.is_running().unwrap_or(true) {
+                    if let Err(error) = process.terminate(0) {
+                        eprintln!(
+                            "failed to terminate Worker {} for session {}: {error}",
+                            process.process_id(),
+                            session.0
+                        );
+                    }
                 }
             }
 
@@ -277,11 +277,11 @@ mod windows_service_app {
                 return self.apply_restart_decision(decision);
             }
 
-            if let Some((session, due)) = self.pending_restart
-                && Instant::now() >= due
-            {
-                self.pending_restart = None;
-                return self.launch(session);
+            if let Some((session, due)) = self.pending_restart {
+                if Instant::now() >= due {
+                    self.pending_restart = None;
+                    return self.launch(session);
+                }
             }
 
             WorkerManagerEvent::None
