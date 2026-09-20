@@ -803,7 +803,8 @@ mod windows_service_app {
             Ok(cache) => cache,
             Err(error) => {
                 eprintln!("ClassMesh encoder capability cache path failed: {error}");
-                return;
+                set_stopped_with_exit(&status_handle, 3)?;
+                return Ok(());
             }
         };
         eprintln!(
