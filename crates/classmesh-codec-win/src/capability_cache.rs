@@ -385,10 +385,7 @@ fn validate_result_for_key(
     Ok(())
 }
 
-fn class_for_key(
-    class: EncoderClass,
-    key: &EncoderCapabilityCacheKey,
-) -> EncoderClass {
+fn class_for_key(class: EncoderClass, key: &EncoderCapabilityCacheKey) -> EncoderClass {
     if key.width < 1920 || key.height < 1080 || key.target_fps < 30 {
         return class.min(EncoderClass::Compatibility);
     }
