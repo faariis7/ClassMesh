@@ -5,7 +5,7 @@ mod control_runtime;
 mod windows_service_app {
     use std::ffi::OsString;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, mpsc};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -48,7 +48,8 @@ mod windows_service_app {
     const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
 
     use crate::control_runtime::{
-        ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, InputDispatchChannels,
+        ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, InputAvailability,
+        InputDispatchChannels,
     };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -577,11 +578,12 @@ mod windows_service_app {
         let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(INPUT_QUEUE_CAPACITY);
         let (input_cleanup_tx, input_cleanup_rx) =
             mpsc::sync_channel::<()>(INPUT_CLEANUP_QUEUE_CAPACITY);
-        let input_available = Arc::new(AtomicBool::new(false));
+        let input_availability =
+            Arc::new(AtomicU8::new(InputAvailability::Unavailable as u8));
         let input_channels = InputDispatchChannels {
             event_tx: input_tx,
             cleanup_tx: input_cleanup_tx,
-            available: Arc::clone(&input_available),
+            availability: Arc::clone(&input_availability),
         };
         let mut control_runtime =
             match ControlRuntime::start(control_state, control_config, input_channels) {
@@ -605,7 +607,7 @@ mod windows_service_app {
             match input_cleanup_rx.try_recv() {
                 Ok(()) => {
                     if let Err(error) = workers.release_input() {
-                        input_available.store(false, Ordering::Release);
+                        InputAvailability::Unavailable.store(input_availability.as_ref());
                         eprintln!("ClassMesh Service input cleanup failed: {error}");
                     }
                 }
@@ -616,7 +618,7 @@ mod windows_service_app {
                 match input_rx.try_recv() {
                     Ok(event) => {
                         if let Err(error) = workers.send_input(&event) {
-                            input_available.store(false, Ordering::Release);
+                            InputAvailability::Unavailable.store(input_availability.as_ref());
                             eprintln!("ClassMesh Service input dispatch failed: {error}");
                             break;
                         }
@@ -634,7 +636,7 @@ mod windows_service_app {
                         action,
                         &mut supervisor,
                         &mut workers,
-                        input_available.as_ref(),
+                        input_availability.as_ref(),
                     );
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -647,14 +649,14 @@ mod windows_service_app {
 
             if Instant::now() >= next_worker_poll {
                 let event = workers.poll();
-                handle_worker_event(event, &mut supervisor, input_available.as_ref());
+                handle_worker_event(event, &mut supervisor, input_availability.as_ref());
                 next_worker_poll = Instant::now()
                     .checked_add(Duration::from_millis(250))
                     .unwrap_or_else(Instant::now);
             }
         }
 
-        input_available.store(false, Ordering::Release);
+        InputAvailability::Unavailable.store(input_availability.as_ref());
         workers.stop_any();
         control_runtime.stop();
         set_stopped(&status_handle)
@@ -716,36 +718,41 @@ mod windows_service_app {
         action: SupervisorAction,
         supervisor: &mut SessionSupervisor,
         workers: &mut WorkerManager,
-        input_available: &AtomicBool,
+        input_availability: &AtomicU8,
     ) {
         match action {
             SupervisorAction::None => {}
             SupervisorAction::LaunchWorker(session) => {
-                input_available.store(false, Ordering::Release);
+                InputAvailability::Unavailable.store(input_availability.as_ref());
                 let event = workers.launch(session);
-                handle_worker_event(event, supervisor, input_available);
+                handle_worker_event(event, supervisor, input_availability);
             }
             SupervisorAction::StopWorker(session) => {
-                input_available.store(false, Ordering::Release);
+                InputAvailability::Unavailable.store(input_availability.as_ref());
                 workers.stop(session);
                 supervisor.mark_worker_stopped(session);
             }
             SupervisorAction::SuspendMedia(session) => {
-                input_available.store(false, Ordering::Release);
+                InputAvailability::Unavailable.store(input_availability.as_ref());
                 let _ = workers.send_control(session, IpcControlCommand::SuspendMedia);
             }
             SupervisorAction::ResumeMedia(session) => {
                 let resumed = workers.send_control(session, IpcControlCommand::ResumeMedia);
-                input_available.store(resumed, Ordering::Release);
+                let availability = if resumed {
+                    InputAvailability::Ready
+                } else {
+                    InputAvailability::Unavailable
+                };
+                availability.store(input_availability);
             }
             SupervisorAction::ReplaceWorker {
                 old_session,
                 new_session,
             } => {
-                input_available.store(false, Ordering::Release);
+                InputAvailability::Unavailable.store(input_availability.as_ref());
                 workers.stop(old_session);
                 let event = workers.launch(new_session);
-                handle_worker_event(event, supervisor, input_available);
+                handle_worker_event(event, supervisor, input_availability);
             }
         }
     }
@@ -753,19 +760,19 @@ mod windows_service_app {
     fn handle_worker_event(
         event: WorkerManagerEvent,
         supervisor: &mut SessionSupervisor,
-        input_available: &AtomicBool,
+        input_availability: &AtomicU8,
     ) {
         match event {
             WorkerManagerEvent::Running(session) => {
                 supervisor.mark_worker_running(session);
-                input_available.store(true, Ordering::Release);
+                InputAvailability::Ready.store(input_availability);
             }
             WorkerManagerEvent::RestartScheduled(session) => {
-                input_available.store(false, Ordering::Release);
+                InputAvailability::Unavailable.store(input_availability.as_ref());
                 let _ = supervisor.worker_crashed(session);
             }
             WorkerManagerEvent::GiveUp(session) => {
-                input_available.store(false, Ordering::Release);
+                InputAvailability::Unavailable.store(input_availability.as_ref());
                 supervisor.mark_worker_stopped(session);
             }
             WorkerManagerEvent::None => {}
