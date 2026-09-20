@@ -25,6 +25,22 @@ Place the `.exe` files in one directory on each test PC, for example `C:\ClassMe
 
 The repository script `scripts/phase4-two-pc.ps1` wraps the executables and saves combined stdout/stderr logs under `phase4-results`.
 
+## 0. Bounded H.264 encoder evidence
+
+Before the two-PC run, collect a short hardware-encoder evidence sample on the Teacher PC. This is an encoder diagnostic only; it does **not** close Issue #3, prove the 1080p two-PC gate, or select UDP versus QUIC Datagram.
+
+Open `tools/phase4-latency-source.html` on the Teacher PC and make it fullscreen. The moving sweep, checkerboard and frame counter provide representative continuous desktop motion; do not run this benchmark against an intentionally static desktop and interpret a low frame rate as an encoder failure.
+
+Then run:
+
+```powershell
+C:\ClassMesh\phase4\artifacts\classmesh-media-probe.exe --benchmark-h264 --seconds 10
+```
+
+The benchmark is bounded to the existing 720p30 compatibility profile and fixed sample count. It records real Media Foundation submission-to-output latency, output/missing counts, whether `MF_LOW_LATENCY` was accepted, keyframe request/observation, and whether the same encoder CLSID can be recreated and accept input after drain. A 720p result is never promoted to a 1080p capability class.
+
+Save the final `H.264 benchmark evidence` line with the other qualification logs. A successful result is prerequisite evidence for later runtime capability wiring only; the runtime must not advertise `H264HardwareEncode` merely because this standalone diagnostic exists.
+
 ## Network preparation
 
 Use a private/wired LAN for the baseline. Record both IPv4 addresses before testing.
