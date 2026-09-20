@@ -281,6 +281,7 @@ fn run_h264_benchmark(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let mut low_latency_accepted = false;
     let mut keyframe_request_accepted = false;
     let mut keyframe_observed = false;
+    let mut benchmark_started_at: Option<Instant> = None;
 
     eprintln!(
         "ClassMesh bounded H.264 benchmark: {}x{} @ {} fps, {} samples, {} kbps",
@@ -309,7 +310,9 @@ fn run_h264_benchmark(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 let outputs = active.process_frame_with_metrics(meta, frame)?;
                 let submitted_after = active.stats().submitted_frames;
                 for _ in submitted_before..submitted_after {
-                    let _ = benchmark.record_submission();
+                    if benchmark.record_submission() && benchmark_started_at.is_none() {
+                        benchmark_started_at = Some(Instant::now());
+                    }
                 }
                 for output in outputs {
                     keyframe_observed |= output.frame.meta.keyframe;
@@ -353,7 +356,9 @@ fn run_h264_benchmark(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     benchmark
         .finalize_missing(MISSING_OUTPUT_LATENCY)
         .map_err(|error| format!("H.264 benchmark finalize error: {error:?}"))?;
-    let benchmark_elapsed = started.elapsed().as_secs_f32();
+    let benchmark_started_at =
+        benchmark_started_at.ok_or("H.264 benchmark submitted no frames")?;
+    let benchmark_elapsed = benchmark_started_at.elapsed().as_secs_f32();
 
     let reset_deadline = Instant::now()
         .checked_add(RESET_VERIFY_WINDOW)
