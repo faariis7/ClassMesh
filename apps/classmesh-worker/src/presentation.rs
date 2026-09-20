@@ -6,17 +6,20 @@ use classmesh_codec_win::gpu::{GpuBgraToNv12Converter, GpuNv12Config};
 use classmesh_codec_win::mf::{MfH264EncoderConfig, MfPlatform, enumerate_h264_hardware_encoders};
 use classmesh_codec_win::mf_async::{MfAsyncH264Encoder, MfEncodedOutput, MfSubmitError};
 use classmesh_codec_win::surface_pool::SurfacePool;
-use classmesh_core::adaptation::StreamProfile as AdaptiveStreamProfile;
+use classmesh_core::adaptation::{
+    MAX_STREAM_BITRATE_KBPS, MAX_STREAM_FPS, MAX_STREAM_HEIGHT, MAX_STREAM_WIDTH,
+    StreamProfile as AdaptiveStreamProfile,
+};
 use classmesh_video::distributor::SharedEncodedFrame;
 use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Device, ID3D11Texture2D};
 
 const DEFAULT_POOL_SIZE: usize = 4;
 const DEFAULT_TARGET_FPS: u32 = 30;
 const DEFAULT_TARGET_BITRATE_BPS: u32 = 5_000_000;
-const MAX_TARGET_WIDTH: u32 = 1920;
-const MAX_TARGET_HEIGHT: u32 = 1080;
-const MAX_TARGET_FPS: u32 = 60;
-const MAX_TARGET_BITRATE_BPS: u32 = 50_000_000;
+const MAX_TARGET_WIDTH: u32 = MAX_STREAM_WIDTH as u32;
+const MAX_TARGET_HEIGHT: u32 = MAX_STREAM_HEIGHT as u32;
+const MAX_TARGET_FPS: u32 = MAX_STREAM_FPS as u32;
+const MAX_TARGET_BITRATE_BPS: u32 = MAX_STREAM_BITRATE_KBPS * 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PresentationTarget {
@@ -41,6 +44,9 @@ impl TryFrom<AdaptiveStreamProfile> for PresentationTarget {
     type Error = PresentationError;
 
     fn try_from(profile: AdaptiveStreamProfile) -> Result<Self, Self::Error> {
+        let profile = profile
+            .validate()
+            .map_err(|_| PresentationError::InvalidTargetProfile)?;
         let bitrate_bps = profile
             .bitrate_kbps
             .checked_mul(1_000)
