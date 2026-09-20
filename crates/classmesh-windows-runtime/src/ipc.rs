@@ -92,6 +92,7 @@ pub enum IpcControlCommand {
     SuspendMedia,
     ResumeMedia,
     Shutdown,
+    ReleaseInput,
 }
 
 impl IpcControlCommand {
@@ -100,6 +101,7 @@ impl IpcControlCommand {
             Self::SuspendMedia => 1,
             Self::ResumeMedia => 2,
             Self::Shutdown => 3,
+            Self::ReleaseInput => 4,
         }
     }
 
@@ -108,6 +110,7 @@ impl IpcControlCommand {
             1 => Some(Self::SuspendMedia),
             2 => Some(Self::ResumeMedia),
             3 => Some(Self::Shutdown),
+            4 => Some(Self::ReleaseInput),
             _ => None,
         }
     }
