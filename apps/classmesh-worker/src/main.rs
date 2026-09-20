@@ -70,12 +70,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 classmesh_windows_runtime::ipc::IpcControlCommand::ResumeMedia => {
-                    capture = Some(start_capture()?);
+                    capture = match start_capture() {
+                        Ok(capture) => Some(capture),
+                        Err(error) => {
+                            release_tracked_input(&mut input_injector);
+                            return Err(error);
+                        }
+                    };
                     capture_due = Instant::now();
                     eprintln!("ClassMesh Worker DXGI capture resumed by Service");
                     continue;
                 }
                 classmesh_windows_runtime::ipc::IpcControlCommand::Shutdown => {
+                    release_tracked_input(&mut input_injector);
                     eprintln!("ClassMesh Worker shutdown requested by Service");
                     return Ok(());
                 }
@@ -90,8 +97,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("ClassMesh Worker rejected input event: {error}");
                 }
             },
-            Ok(WorkerEvent::IpcFailure(error)) => return Err(error.into()),
+            Ok(WorkerEvent::IpcFailure(error)) => {
+                release_tracked_input(&mut input_injector);
+                return Err(error.into());
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
+                release_tracked_input(&mut input_injector);
                 return Err("ClassMesh Worker IPC reader stopped unexpectedly".into());
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -136,6 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 capture = None;
             }
             CaptureStep::Failed(reason) => {
+                release_tracked_input(&mut input_injector);
                 return Err(capture_error(reason).into());
             }
         }
@@ -154,6 +166,13 @@ enum WorkerEvent {
     Control(classmesh_windows_runtime::ipc::IpcControlCommand),
     Input(classmesh_protocol::control_wire::InputEvent),
     IpcFailure(String),
+}
+
+#[cfg(windows)]
+fn release_tracked_input(injector: &mut classmesh_win32::InputInjector) {
+    if let Err(error) = injector.release_all() {
+        eprintln!("ClassMesh Worker failed to release tracked input during teardown: {error}");
+    }
 }
 
 #[cfg(windows)]
