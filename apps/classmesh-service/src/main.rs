@@ -48,6 +48,7 @@ mod windows_service_app {
     const FOCUSED_MEDIA_QUEUE_CAPACITY: usize = 4;
     const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
     const MEDIA_RECONFIGURE_RETRY: Duration = Duration::from_millis(250);
+    const MAX_MEDIA_RECONFIGURE_ATTEMPTS: u8 = 4;
 
     use crate::control_runtime::{
         ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, FocusedMediaDispatchChannels,
@@ -671,6 +672,8 @@ mod windows_service_app {
         let mut focused_reconfigure_worker_pid: Option<u32> = None;
         let mut focused_profile_clear_pending = false;
         let mut focused_media_session_floor = 0_u64;
+        let mut focused_reconfigure_attempts = 0_u8;
+        let mut focused_clear_attempts = 0_u8;
         let mut next_media_reconfigure_attempt = Instant::now();
         let mut next_worker_poll = Instant::now();
         loop {
@@ -708,6 +711,8 @@ mod windows_service_app {
                     desired_focused_control_session_id = None;
                     focused_reconfigure_worker_pid = None;
                     focused_profile_clear_pending = true;
+                    focused_clear_attempts = 0;
+                    focused_reconfigure_attempts = 0;
                     next_media_reconfigure_attempt = Instant::now();
                 }
             }
@@ -726,6 +731,8 @@ mod windows_service_app {
                         desired_focused_control_session_id = Some(dispatch.control_session_id);
                         focused_reconfigure_worker_pid = None;
                         focused_profile_clear_pending = false;
+                        focused_reconfigure_attempts = 0;
+                        focused_clear_attempts = 0;
                         next_media_reconfigure_attempt = Instant::now();
                     }
                     Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
@@ -740,13 +747,27 @@ mod windows_service_app {
                     match workers.clear_focused_profile() {
                         Ok(()) => {
                             focused_profile_clear_pending = false;
+                            focused_clear_attempts = 0;
                             eprintln!("ClassMesh Service cleared focused Worker profile");
                         }
                         Err(error) => {
-                            eprintln!("ClassMesh Service will retry focused media reset: {error}");
-                            next_media_reconfigure_attempt = Instant::now()
-                                .checked_add(MEDIA_RECONFIGURE_RETRY)
-                                .unwrap_or_else(Instant::now);
+                            focused_clear_attempts = focused_clear_attempts.saturating_add(1);
+                            if focused_clear_attempts >= MAX_MEDIA_RECONFIGURE_ATTEMPTS {
+                                focused_profile_clear_pending = false;
+                                eprintln!(
+                                    "ClassMesh Service focused media reset abandoned after {} attempts: {error}",
+                                    focused_clear_attempts
+                                );
+                            } else {
+                                eprintln!(
+                                    "ClassMesh Service will retry focused media reset ({}/{}): {error}",
+                                    focused_clear_attempts,
+                                    MAX_MEDIA_RECONFIGURE_ATTEMPTS
+                                );
+                                next_media_reconfigure_attempt = Instant::now()
+                                    .checked_add(MEDIA_RECONFIGURE_RETRY)
+                                    .unwrap_or_else(Instant::now);
+                            }
                         }
                     }
                 }
@@ -764,15 +785,28 @@ mod windows_service_app {
                             "ClassMesh Service applied focused profile to Worker {process_id}"
                         );
                         focused_reconfigure_worker_pid = Some(process_id);
+                        focused_reconfigure_attempts = 0;
                     }
                     Err(error) => {
-                        eprintln!(
-                            "ClassMesh Service will retry focused media reconfigure: {error}"
-                        );
-                        focused_reconfigure_worker_pid = None;
-                        next_media_reconfigure_attempt = Instant::now()
-                            .checked_add(MEDIA_RECONFIGURE_RETRY)
-                            .unwrap_or_else(Instant::now);
+                        focused_reconfigure_attempts =
+                            focused_reconfigure_attempts.saturating_add(1);
+                        if focused_reconfigure_attempts >= MAX_MEDIA_RECONFIGURE_ATTEMPTS {
+                            focused_reconfigure_worker_pid = current_worker_pid;
+                            eprintln!(
+                                "ClassMesh Service focused media reconfigure abandoned after {} attempts: {error}",
+                                focused_reconfigure_attempts
+                            );
+                        } else {
+                            eprintln!(
+                                "ClassMesh Service will retry focused media reconfigure ({}/{}): {error}",
+                                focused_reconfigure_attempts,
+                                MAX_MEDIA_RECONFIGURE_ATTEMPTS
+                            );
+                            focused_reconfigure_worker_pid = None;
+                            next_media_reconfigure_attempt = Instant::now()
+                                .checked_add(MEDIA_RECONFIGURE_RETRY)
+                                .unwrap_or_else(Instant::now);
+                        }
                     }
                 }
             }
@@ -800,6 +834,8 @@ mod windows_service_app {
                 let event = workers.poll();
                 if matches!(event, WorkerManagerEvent::Running(_)) {
                     focused_reconfigure_worker_pid = None;
+                    focused_reconfigure_attempts = 0;
+                    focused_clear_attempts = 0;
                     next_media_reconfigure_attempt = Instant::now();
                 }
                 handle_worker_event(event, &mut supervisor, input_availability.as_ref());
