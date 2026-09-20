@@ -178,29 +178,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("ClassMesh Worker rejected input event: {error}");
                 }
             },
-            Ok(WorkerEvent::H264HardwareProbe(result)) => {
-                match result {
-                    Ok(true) if !runtime_capabilities.h264_hardware_encode => {
-                        runtime_capabilities.h264_hardware_encode = true;
-                        publish_worker_capabilities(
-                            &pipe,
-                            std::process::id(),
-                            actual_session,
-                            runtime_capabilities,
-                        )?;
-                        eprintln!("ClassMesh Worker confirmed hardware H.264 encode capability");
-                    }
-                    Ok(true) => {}
-                    Ok(false) => {
-                        eprintln!("ClassMesh Worker found no hardware H.264 encoder");
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "ClassMesh Worker H.264 capability probe failed without affecting control: {error}"
-                        );
-                    }
+            Ok(WorkerEvent::H264HardwareProbe(result)) => match result {
+                Ok(true) if !runtime_capabilities.h264_hardware_encode => {
+                    runtime_capabilities.h264_hardware_encode = true;
+                    publish_worker_capabilities(
+                        &pipe,
+                        std::process::id(),
+                        actual_session,
+                        runtime_capabilities,
+                    )?;
+                    eprintln!("ClassMesh Worker confirmed hardware H.264 encode capability");
                 }
-            }
+                Ok(true) => {}
+                Ok(false) => {
+                    eprintln!("ClassMesh Worker found no hardware H.264 encoder");
+                }
+                Err(error) => {
+                    eprintln!(
+                        "ClassMesh Worker H.264 capability probe failed without affecting control: {error}"
+                    );
+                }
+            },
             Ok(WorkerEvent::IpcFailure(error)) => {
                 release_tracked_input(&mut input_injector);
                 return Err(error.into());
