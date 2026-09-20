@@ -1,8 +1,8 @@
+use crate::HeartbeatError;
 use crate::authorization::CommandAuthorizationError;
 use crate::dispatch::PrivilegedDispatchError;
 use crate::handshake::HandshakeError;
 use crate::quic::ControlTransportError;
-use crate::HeartbeatError;
 
 /// Stable, non-sensitive diagnostic code for logs/telemetry.
 ///
@@ -69,16 +69,12 @@ pub const fn command_authorization_diagnostic_code(
 pub const fn heartbeat_diagnostic_code(error: &HeartbeatError) -> &'static str {
     match error {
         HeartbeatError::SessionMismatch { .. } => "control.heartbeat.wrong_session",
-        HeartbeatError::NonIncreasingSequence { .. } => {
-            "control.heartbeat.replayed_sequence"
-        }
+        HeartbeatError::NonIncreasingSequence { .. } => "control.heartbeat.replayed_sequence",
     }
 }
 
 #[must_use]
-pub const fn privileged_dispatch_diagnostic_code(
-    error: &PrivilegedDispatchError,
-) -> &'static str {
+pub const fn privileged_dispatch_diagnostic_code(error: &PrivilegedDispatchError) -> &'static str {
     match error {
         PrivilegedDispatchError::UnsupportedPayload => "control.command.unsupported_payload",
         PrivilegedDispatchError::MalformedInputEvent => "control.command.malformed_input",
@@ -151,12 +147,10 @@ mod tests {
     #[test]
     fn privileged_dispatch_codes_remain_value_free() {
         assert_eq!(
-            privileged_dispatch_diagnostic_code(
-                &PrivilegedDispatchError::InputSequenceMismatch {
-                    envelope: 7,
-                    input: 999,
-                },
-            ),
+            privileged_dispatch_diagnostic_code(&PrivilegedDispatchError::InputSequenceMismatch {
+                envelope: 7,
+                input: 999,
+            },),
             "control.command.input_sequence_mismatch"
         );
         assert_eq!(
