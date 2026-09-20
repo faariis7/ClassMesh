@@ -412,6 +412,8 @@ fn permission_to_u8(permission: Permission) -> u8 {
         Permission::ShutdownDevice => 10,
         Permission::ManageEnrollment => 11,
         Permission::ManagePolicy => 12,
+        Permission::ReadClipboard => 13,
+        Permission::WriteClipboard => 14,
     }
 }
 
@@ -429,6 +431,8 @@ fn permission_from_u8(value: u8) -> Result<Permission, PersistenceError> {
         10 => Ok(Permission::ShutdownDevice),
         11 => Ok(Permission::ManageEnrollment),
         12 => Ok(Permission::ManagePolicy),
+        13 => Ok(Permission::ReadClipboard),
+        14 => Ok(Permission::WriteClipboard),
         _ => Err(PersistenceError::InvalidPermission(value)),
     }
 }
