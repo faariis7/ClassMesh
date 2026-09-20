@@ -87,6 +87,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("ClassMesh Worker shutdown requested by Service");
                     return Ok(());
                 }
+                classmesh_windows_runtime::ipc::IpcControlCommand::ReleaseInput => {
+                    release_tracked_input(&mut input_injector);
+                    eprintln!("ClassMesh Worker released tracked remote input");
+                    continue;
+                }
             },
             Ok(WorkerEvent::Input(event)) => match input_action_from_wire(event) {
                 Ok(action) => {

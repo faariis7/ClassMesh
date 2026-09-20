@@ -44,9 +44,12 @@ mod windows_service_app {
     const AUTHORIZATION_FILE: &str = "authorization.json";
     const CONTROL_RUNTIME_CONFIG_FILE: &str = "control-runtime.json";
     const INPUT_QUEUE_CAPACITY: usize = 256;
+    const INPUT_CLEANUP_QUEUE_CAPACITY: usize = 1;
     const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
 
-    use crate::control_runtime::{ControlRuntime, ControlRuntimeConfig, ControlRuntimeState};
+    use crate::control_runtime::{
+        ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, InputDispatchChannels,
+    };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
 
@@ -273,6 +276,24 @@ mod windows_service_app {
                 .as_ref()
                 .ok_or_else(|| "Worker IPC pipe is unavailable for input dispatch".to_owned())?;
             send_input(pipe, event)
+        }
+
+        fn release_input(&self) -> Result<(), String> {
+            let process = self
+                .process
+                .as_ref()
+                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
+            if !process
+                .is_running()
+                .map_err(|error| format!("Worker input-release liveness probe failed: {error}"))?
+            {
+                return Err("interactive Worker exited before input release".to_owned());
+            }
+            let pipe = self
+                .pipe
+                .as_ref()
+                .ok_or_else(|| "Worker IPC pipe is unavailable for input release".to_owned())?;
+            send_control(pipe, IpcControlCommand::ReleaseInput)
         }
 
         fn poll(&mut self) -> WorkerManagerEvent {
@@ -554,20 +575,23 @@ mod windows_service_app {
             }
         };
         let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(INPUT_QUEUE_CAPACITY);
+        let (input_cleanup_tx, input_cleanup_rx) =
+            mpsc::sync_channel::<()>(INPUT_CLEANUP_QUEUE_CAPACITY);
         let input_available = Arc::new(AtomicBool::new(false));
-        let mut control_runtime = match ControlRuntime::start(
-            control_state,
-            control_config,
-            input_tx,
-            Arc::clone(&input_available),
-        ) {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                eprintln!("ClassMesh control runtime failed to start: {error}");
-                set_stopped_with_exit(&status_handle, 3)?;
-                return Ok(());
-            }
+        let input_channels = InputDispatchChannels {
+            event_tx: input_tx,
+            cleanup_tx: input_cleanup_tx,
+            available: Arc::clone(&input_available),
         };
+        let mut control_runtime =
+            match ControlRuntime::start(control_state, control_config, input_channels) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("ClassMesh control runtime failed to start: {error}");
+                    set_stopped_with_exit(&status_handle, 3)?;
+                    return Ok(());
+                }
+            };
         eprintln!(
             "ClassMesh enrolled control listener ready on {}",
             control_runtime.local_address()
@@ -578,6 +602,16 @@ mod windows_service_app {
         let mut workers = WorkerManager::new();
         let mut next_worker_poll = Instant::now();
         loop {
+            match input_cleanup_rx.try_recv() {
+                Ok(()) => {
+                    if let Err(error) = workers.release_input() {
+                        input_available.store(false, Ordering::Release);
+                        eprintln!("ClassMesh Service input cleanup failed: {error}");
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {}
+            }
+
             for _ in 0..MAX_INPUT_EVENTS_PER_TICK {
                 match input_rx.try_recv() {
                     Ok(event) => {
