@@ -438,15 +438,18 @@ fn run_h264_benchmark(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     // 1080p class even if latency/FPS thresholds would otherwise satisfy the generic classifier.
     let qualified_class = result.class.min(EncoderClass::Compatibility);
     eprintln!(
-        "H.264 benchmark evidence: encoder={:?}, clsid={}, vendor={:?}, advertised_hw={}, advertised_async={}, profile={}x{}@{}fps, submitted={}, outputs={}, missing={}, sustained_fps={:.2}, p50_ms={:.2}, p95_ms={:.2}, low_latency={}, gpu_native={}, keyframe_ok={}, reset_ok={}, qualified_class={qualified_class:?}",
+        "H.264 benchmark evidence: encoder={:?}, clsid={}, vendor={:?}, advertised_hw={}, advertised_async={}, source={}x{} BGRA, encoder_input={}x{} NV12, output=H264, fps={}, bitrate_kbps={}, submitted={}, outputs={}, missing={}, sustained_fps={:.2}, p50_ms={:.2}, p95_ms={:.2}, low_latency={}, gpu_native={}, keyframe_ok={}, reset_ok={}, qualified_class={qualified_class:?}",
         candidate.name,
         candidate.clsid,
         candidate.vendor,
         candidate.advertised_hardware,
         candidate.advertised_async,
+        profile.source_width,
+        profile.source_height,
         profile.target_width,
         profile.target_height,
         profile.fps,
+        profile.bitrate_bps / 1_000,
         benchmark.submitted(),
         result.output_frames,
         result.dropped_or_missing,
