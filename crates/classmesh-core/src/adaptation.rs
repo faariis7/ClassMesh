@@ -1,5 +1,17 @@
 use crate::{MediaTransport, NetworkMetrics, StreamKind};
 
+pub const MAX_STREAM_WIDTH: u16 = 1920;
+pub const MAX_STREAM_HEIGHT: u16 = 1080;
+pub const MAX_STREAM_FPS: u8 = 60;
+pub const MAX_STREAM_BITRATE_KBPS: u32 = 50_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamProfileError {
+    InvalidGeometry,
+    InvalidFps,
+    InvalidBitrate,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamProfile {
     pub width: u16,
@@ -17,6 +29,25 @@ impl StreamProfile {
             fps,
             bitrate_kbps,
         }
+    }
+
+    pub const fn validate(self) -> Result<Self, StreamProfileError> {
+        if self.width < 2
+            || self.height < 2
+            || self.width > MAX_STREAM_WIDTH
+            || self.height > MAX_STREAM_HEIGHT
+            || self.width % 2 != 0
+            || self.height % 2 != 0
+        {
+            return Err(StreamProfileError::InvalidGeometry);
+        }
+        if self.fps == 0 || self.fps > MAX_STREAM_FPS {
+            return Err(StreamProfileError::InvalidFps);
+        }
+        if self.bitrate_kbps == 0 || self.bitrate_kbps > MAX_STREAM_BITRATE_KBPS {
+            return Err(StreamProfileError::InvalidBitrate);
+        }
+        Ok(self)
     }
 }
 
@@ -423,6 +454,44 @@ mod tests {
             estimated_mbps: 100.0,
             multicast_viable,
             wireless,
+        }
+    }
+
+    #[test]
+    fn stream_profile_contract_rejects_invalid_bounds() {
+        assert_eq!(
+            StreamProfile::new(1920, 1080, 60, 50_000).validate(),
+            Ok(StreamProfile::new(1920, 1080, 60, 50_000))
+        );
+        assert_eq!(
+            StreamProfile::new(1919, 1080, 30, 5_000).validate(),
+            Err(StreamProfileError::InvalidGeometry)
+        );
+        assert_eq!(
+            StreamProfile::new(1920, 1080, 0, 5_000).validate(),
+            Err(StreamProfileError::InvalidFps)
+        );
+        assert_eq!(
+            StreamProfile::new(1920, 1080, 30, 50_001).validate(),
+            Err(StreamProfileError::InvalidBitrate)
+        );
+    }
+
+    #[test]
+    fn every_builtin_adaptation_profile_satisfies_stream_contract() {
+        for kind in [
+            StreamKind::Monitoring,
+            StreamKind::Interactive,
+            StreamKind::TeacherPresentation,
+        ] {
+            for tier in [
+                QualityTier::Emergency,
+                QualityTier::Low,
+                QualityTier::Medium,
+                QualityTier::High,
+            ] {
+                assert!(profile_for(kind, tier).validate().is_ok());
+            }
         }
     }
 
