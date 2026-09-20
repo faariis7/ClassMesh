@@ -374,6 +374,12 @@ fn run_h264_benchmark(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         .as_ref()
         .map(|value| value.clsid.clone())
         .ok_or("H.264 benchmark has no encoder candidate before reset")?;
+    if expected_encoder_clsid == "unknown" {
+        return Err(
+            "H.264 benchmark cannot verify reset identity because the encoder CLSID is unavailable"
+                .into(),
+        );
+    }
     let reset_deadline = Instant::now()
         .checked_add(RESET_VERIFY_WINDOW)
         .unwrap_or_else(Instant::now);
