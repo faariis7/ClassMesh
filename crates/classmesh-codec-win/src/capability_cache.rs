@@ -360,6 +360,14 @@ fn validate_result(result: &EncoderBenchmarkResult) -> Result<(), EncoderCapabil
     {
         return Err(EncoderCapabilityCacheError::InvalidFrameCount);
     }
+
+    let measured_class = result.probe.classify();
+    if result.class > measured_class
+        || (result.class != EncoderClass::Unsupported
+            && (result.probe.codec != Codec::H264 || !result.probe.advertised_hardware))
+    {
+        return Err(EncoderCapabilityCacheError::InvalidProbe);
+    }
     Ok(())
 }
 
@@ -501,6 +509,32 @@ mod tests {
         assert!(matches!(
             cache.load_exact(&key("31.0.15.5123")),
             Err(EncoderCapabilityCacheError::UnsupportedVersion(99))
+        ));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn persisted_class_cannot_exceed_measured_probe() {
+        let path = test_path("class-escalation");
+        let cache = DurableEncoderCapabilityCache::new(&path);
+        let mut invalid = result();
+        invalid.probe.sustained_fps = 10.0;
+        assert!(matches!(
+            cache.save(&key("31.0.15.5123"), &invalid),
+            Err(EncoderCapabilityCacheError::InvalidProbe)
+        ));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn positive_cached_capability_requires_advertised_hardware() {
+        let path = test_path("software-positive");
+        let cache = DurableEncoderCapabilityCache::new(&path);
+        let mut invalid = result();
+        invalid.probe.advertised_hardware = false;
+        assert!(matches!(
+            cache.save(&key("31.0.15.5123"), &invalid),
+            Err(EncoderCapabilityCacheError::InvalidProbe)
         ));
         let _ = fs::remove_file(path);
     }
