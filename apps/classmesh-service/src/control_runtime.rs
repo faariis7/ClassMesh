@@ -1090,6 +1090,29 @@ mod tests {
     }
 
     #[test]
+    fn old_generation_cannot_restore_flags_after_worker_replacement() {
+        let state = WorkerCapabilityState::default();
+        state.activate(4, 40, 8);
+        assert!(state.apply_report(4, 40, 8, true, true));
+
+        state.activate(5, 50, 9);
+        assert!(!state.apply_report(4, 40, 8, true, true));
+        assert_eq!(
+            state.hello_capabilities(),
+            BTreeSet::from([Capability::ServiceSessionWorker])
+        );
+
+        assert!(state.apply_report(5, 50, 9, true, false));
+        assert_eq!(
+            state.hello_capabilities(),
+            BTreeSet::from([
+                Capability::DxgiCapture,
+                Capability::ServiceSessionWorker,
+            ])
+        );
+    }
+
+    #[test]
     fn stale_worker_identity_cannot_publish_capabilities() {
         let state = WorkerCapabilityState::default();
         state.activate(9, 100, 5);
