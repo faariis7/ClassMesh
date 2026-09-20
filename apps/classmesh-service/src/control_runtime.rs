@@ -24,7 +24,7 @@ use classmesh_control::quic::{
 use classmesh_control::stream::stream_profile_to_wire;
 use classmesh_control::{DEFAULT_OFFLINE_AFTER, HeartbeatSample, HeartbeatTracker};
 use classmesh_core::adaptation::{
-    AdaptationPolicy, FocusedProfileController, HysteresisConfig, QualityTier, StreamProfile,
+    AdaptationPolicy, FocusedProfileController, HysteresisConfig, QualityTier,
 };
 use classmesh_core::{NetworkMetrics, StreamKind};
 use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver};
@@ -931,7 +931,10 @@ mod tests {
         let profile = reconfigure.profile.expect("video profile");
         assert_eq!(reconfigure.stream_id, 7);
         assert_eq!((profile.width, profile.height, profile.fps), (640, 360, 20));
-        assert_eq!(profile.codec, VideoCodec::H264 as i32);
+        assert_eq!(
+            profile.codec,
+            classmesh_protocol::control_wire::VideoCodec::H264 as i32
+        );
         assert_eq!(
             reconfigure.transport,
             WireMediaTransport::Unspecified as i32
