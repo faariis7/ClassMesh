@@ -3,8 +3,8 @@ use std::fs::File;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -97,12 +97,17 @@ pub(crate) struct FocusedMediaDispatchChannels {
     pub(crate) released_session_floor: Arc<AtomicU64>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct WorkerCapabilitySnapshot {
+    generation: u64,
+    process_id: u32,
+    session_id: u32,
+    flags: u8,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct WorkerCapabilityState {
-    generation: AtomicU64,
-    process_id: AtomicU32,
-    session_id: AtomicU32,
-    flags: AtomicU8,
+    snapshot: Mutex<WorkerCapabilitySnapshot>,
 }
 
 const WORKER_CAP_DXGI_CAPTURE: u8 = 1 << 0;
@@ -110,17 +115,17 @@ const WORKER_CAP_H264_HARDWARE_ENCODE: u8 = 1 << 1;
 
 impl WorkerCapabilityState {
     pub(crate) fn activate(&self, generation: u64, process_id: u32, session_id: u32) {
-        self.flags.store(0, Ordering::Release);
-        self.session_id.store(session_id, Ordering::Release);
-        self.process_id.store(process_id, Ordering::Release);
-        self.generation.store(generation, Ordering::Release);
+        let mut snapshot = self.lock_snapshot();
+        *snapshot = WorkerCapabilitySnapshot {
+            generation,
+            process_id,
+            session_id,
+            flags: 0,
+        };
     }
 
     pub(crate) fn clear(&self) {
-        self.generation.store(0, Ordering::Release);
-        self.process_id.store(0, Ordering::Release);
-        self.session_id.store(0, Ordering::Release);
-        self.flags.store(0, Ordering::Release);
+        *self.lock_snapshot() = WorkerCapabilitySnapshot::default();
     }
 
     pub(crate) fn apply_report(
@@ -131,10 +136,11 @@ impl WorkerCapabilityState {
         dxgi_capture: bool,
         h264_hardware_encode: bool,
     ) -> bool {
+        let mut snapshot = self.lock_snapshot();
         if generation == 0
-            || self.generation.load(Ordering::Acquire) != generation
-            || self.process_id.load(Ordering::Acquire) != process_id
-            || self.session_id.load(Ordering::Acquire) != session_id
+            || snapshot.generation != generation
+            || snapshot.process_id != process_id
+            || snapshot.session_id != session_id
         {
             return false;
         }
@@ -146,26 +152,29 @@ impl WorkerCapabilityState {
         if h264_hardware_encode {
             flags |= WORKER_CAP_H264_HARDWARE_ENCODE;
         }
-        self.flags.store(flags, Ordering::Release);
+        snapshot.flags = flags;
         true
     }
 
     fn hello_capabilities(&self) -> BTreeSet<Capability> {
+        let snapshot = *self.lock_snapshot();
         let mut capabilities = BTreeSet::from([Capability::ServiceSessionWorker]);
-        if self.generation.load(Ordering::Acquire) == 0
-            || self.process_id.load(Ordering::Acquire) == 0
-            || self.session_id.load(Ordering::Acquire) == 0
-        {
+        if snapshot.generation == 0 || snapshot.process_id == 0 || snapshot.session_id == 0 {
             return capabilities;
         }
-        let flags = self.flags.load(Ordering::Acquire);
-        if flags & WORKER_CAP_DXGI_CAPTURE != 0 {
+        if snapshot.flags & WORKER_CAP_DXGI_CAPTURE != 0 {
             capabilities.insert(Capability::DxgiCapture);
         }
-        if flags & WORKER_CAP_H264_HARDWARE_ENCODE != 0 {
+        if snapshot.flags & WORKER_CAP_H264_HARDWARE_ENCODE != 0 {
             capabilities.insert(Capability::H264HardwareEncode);
         }
         capabilities
+    }
+
+    fn lock_snapshot(&self) -> std::sync::MutexGuard<'_, WorkerCapabilitySnapshot> {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
