@@ -5,7 +5,7 @@ mod control_runtime;
 mod windows_service_app {
     use std::ffi::OsString;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicU8;
+    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
     use std::sync::{Arc, mpsc};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -46,7 +46,6 @@ mod windows_service_app {
     const INPUT_QUEUE_CAPACITY: usize = 256;
     const INPUT_CLEANUP_QUEUE_CAPACITY: usize = 1;
     const FOCUSED_MEDIA_QUEUE_CAPACITY: usize = 4;
-    const FOCUSED_MEDIA_CLEAR_QUEUE_CAPACITY: usize = 1;
     const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
     const MEDIA_RECONFIGURE_RETRY: Duration = Duration::from_millis(250);
 
@@ -641,11 +640,10 @@ mod windows_service_app {
         };
         let (media_reconfigure_tx, media_reconfigure_rx) =
             mpsc::sync_channel::<FocusedMediaReconfigure>(FOCUSED_MEDIA_QUEUE_CAPACITY);
-        let (media_clear_tx, media_clear_rx) =
-            mpsc::sync_channel::<u64>(FOCUSED_MEDIA_CLEAR_QUEUE_CAPACITY);
+        let released_media_session_floor = Arc::new(AtomicU64::new(0));
         let media_channels = FocusedMediaDispatchChannels {
             reconfigure_tx: media_reconfigure_tx,
-            clear_tx: media_clear_tx,
+            released_session_floor: Arc::clone(&released_media_session_floor),
         };
         let mut control_runtime = match ControlRuntime::start(
             control_state,
@@ -700,22 +698,17 @@ mod windows_service_app {
                 }
             }
 
-            loop {
-                match media_clear_rx.try_recv() {
-                    Ok(control_session_id) => {
-                        focused_media_session_floor =
-                            focused_media_session_floor.max(control_session_id);
-                        if desired_focused_control_session_id
-                            .is_some_and(|desired| desired <= control_session_id)
-                        {
-                            desired_focused_reconfigure = None;
-                            desired_focused_control_session_id = None;
-                            focused_reconfigure_worker_pid = None;
-                            focused_profile_clear_pending = true;
-                            next_media_reconfigure_attempt = Instant::now();
-                        }
-                    }
-                    Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+            let released_floor = released_media_session_floor.load(Ordering::Acquire);
+            if released_floor > focused_media_session_floor {
+                focused_media_session_floor = released_floor;
+                if desired_focused_control_session_id
+                    .is_some_and(|desired| desired <= released_floor)
+                {
+                    desired_focused_reconfigure = None;
+                    desired_focused_control_session_id = None;
+                    focused_reconfigure_worker_pid = None;
+                    focused_profile_clear_pending = true;
+                    next_media_reconfigure_attempt = Instant::now();
                 }
             }
 
