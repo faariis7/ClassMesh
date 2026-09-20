@@ -12,13 +12,14 @@ use windows::Win32::Graphics::Dxgi::Common::{
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET,
-    DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter1,
-    IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+    DXGI_ERROR_NOT_FOUND, DXGI_ERROR_UNSUPPORTED, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
+    IDXGIAdapter1, IDXGIDevice, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
 };
 use windows::core::Interface;
 
 use crate::{
-    CaptureBackend, CaptureFactory, CaptureFailure, CapturedFrameMeta, DisplayDescriptor, DisplayId,
+    AdapterCapabilityIdentity, CaptureBackend, CaptureFactory, CaptureFailure, CapturedFrameMeta,
+    DisplayDescriptor, DisplayId,
 };
 
 pub struct DxgiFrame {
@@ -165,6 +166,32 @@ impl CaptureBackend for DxgiCaptureBackend {
             },
         ))
     }
+}
+
+pub fn query_adapter_capability_identity(
+    target: DisplayId,
+) -> Result<AdapterCapabilityIdentity, CaptureFailure> {
+    let (adapter, _, _) = find_output(target)?;
+    let driver_version =
+        unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }.map_err(map_windows_error)?;
+    Ok(AdapterCapabilityIdentity {
+        adapter_luid_low: target.adapter_luid_low,
+        adapter_luid_high: target.adapter_luid_high,
+        driver_version: format_umd_driver_version(driver_version),
+    })
+}
+
+fn format_umd_driver_version(raw: i64) -> String {
+    let raw = raw as u64;
+    let low = raw as u32;
+    let high = (raw >> 32) as u32;
+    format!(
+        "{}.{}.{}.{}",
+        (high >> 16) & 0xffff,
+        high & 0xffff,
+        (low >> 16) & 0xffff,
+        low & 0xffff
+    )
 }
 
 pub fn enumerate_displays() -> Result<Vec<DisplayDescriptor>, CaptureFailure> {
@@ -331,9 +358,24 @@ fn map_windows_error(error: windows::core::Error) -> CaptureFailure {
         CaptureFailure::DeviceRemoved
     } else if code == DXGI_ERROR_DEVICE_RESET {
         CaptureFailure::DeviceReset
+    } else if code == DXGI_ERROR_UNSUPPORTED {
+        CaptureFailure::Unsupported
     } else if code.0 == i32::from_le_bytes([0x05, 0x00, 0x07, 0x80]) {
         CaptureFailure::AccessDenied
     } else {
         CaptureFailure::Fatal
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_umd_driver_version_parts() {
+        let high = 31_u64 << 16;
+        let low = (15_u64 << 16) | 5123;
+        let raw = ((high << 32) | low) as i64;
+        assert_eq!(format_umd_driver_version(raw), "31.0.15.5123");
     }
 }

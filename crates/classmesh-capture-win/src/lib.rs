@@ -5,7 +5,27 @@ use classmesh_core::recovery::{RecoveryController, RecoveryPolicy, RecoveryReaso
 #[cfg(windows)]
 mod dxgi;
 #[cfg(windows)]
-pub use dxgi::{DxgiCaptureBackend, DxgiCaptureFactory, DxgiFrame, enumerate_displays};
+pub use dxgi::{
+    DxgiCaptureBackend, DxgiCaptureFactory, DxgiFrame, enumerate_displays,
+    query_adapter_capability_identity,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterCapabilityIdentity {
+    pub adapter_luid_low: u32,
+    pub adapter_luid_high: i32,
+    pub driver_version: String,
+}
+
+impl AdapterCapabilityIdentity {
+    #[must_use]
+    pub fn adapter_identity(&self) -> String {
+        format!(
+            "{:08x}:{:08x}",
+            self.adapter_luid_high as u32, self.adapter_luid_low
+        )
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DisplayId {
