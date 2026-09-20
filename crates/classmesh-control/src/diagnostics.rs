@@ -81,6 +81,9 @@ pub const fn privileged_dispatch_diagnostic_code(error: &PrivilegedDispatchError
         PrivilegedDispatchError::InputSequenceMismatch { .. } => {
             "control.command.input_sequence_mismatch"
         }
+        PrivilegedDispatchError::InvalidClipboardText(_) => {
+            "control.command.clipboard_text_too_large"
+        }
         PrivilegedDispatchError::Authorization(error) => {
             command_authorization_diagnostic_code(error)
         }
@@ -123,6 +126,20 @@ mod tests {
         assert_eq!(
             command_authorization_diagnostic_code(&unauthorized),
             "control.command.unauthorized"
+        );
+    }
+
+    #[test]
+    fn clipboard_bound_code_does_not_embed_payload_size() {
+        let error = PrivilegedDispatchError::InvalidClipboardText(
+            classmesh_protocol::clipboard::ClipboardTextError::TooLarge {
+                bytes: usize::MAX,
+                maximum: 64 * 1024,
+            },
+        );
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(&error),
+            "control.command.clipboard_text_too_large"
         );
     }
 
