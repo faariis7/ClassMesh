@@ -88,6 +88,7 @@ pub(crate) struct InputDispatchChannels {
 #[derive(Debug, Clone)]
 pub(crate) struct FocusedMediaDispatchChannels {
     pub(crate) reconfigure_tx: mpsc::SyncSender<StreamReconfigure>,
+    pub(crate) clear_tx: mpsc::SyncSender<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -444,7 +445,16 @@ async fn run_listener(
                                 &media,
                             )
                             .await;
-                            input.release_owner(session.control_session_id);
+                            if input.release_owner(session.control_session_id) {
+                                match media.clear_tx.try_send(()) {
+                                    Ok(()) | Err(mpsc::TrySendError::Full(())) => {}
+                                    Err(mpsc::TrySendError::Disconnected(())) => {
+                                        eprintln!(
+                                            "ClassMesh focused media cleanup skipped: dispatch channel disconnected"
+                                        );
+                                    }
+                                }
+                            }
                         }
                         Err(error) => {
                             eprintln!(
@@ -738,9 +748,9 @@ impl InputDispatchState {
                 .is_ok()
     }
 
-    fn release_owner(&self, session_id: u64) {
+    fn release_owner(&self, session_id: u64) -> bool {
         if self.owner.load(Ordering::Acquire) != session_id {
-            return;
+            return false;
         }
 
         if InputAvailability::load(self.channels.availability.as_ref()) == InputAvailability::Ready
@@ -753,9 +763,9 @@ impl InputDispatchState {
             }
         }
 
-        let _ = self
-            .owner
-            .compare_exchange(session_id, 0, Ordering::AcqRel, Ordering::Acquire);
+        self.owner
+            .compare_exchange(session_id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 }
 
@@ -981,7 +991,7 @@ mod tests {
         assert!(!input.try_acquire_owner(42));
         assert_eq!(input.owner.load(Ordering::Acquire), 41);
 
-        input.release_owner(41);
+        assert!(input.release_owner(41));
         assert_eq!(cleanup_rx.try_recv(), Ok(()));
         assert_eq!(input.owner.load(Ordering::Acquire), 0);
         assert!(input.try_acquire_owner(42));
