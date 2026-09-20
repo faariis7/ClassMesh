@@ -103,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match capture.poll(16) {
             CaptureStep::Frame { meta, frame } => {
                 if pipeline.is_none() {
-                    let mut created = match benchmark_config.filter(|_| !benchmark_completed) {
+                    let created = match benchmark_config.filter(|_| !benchmark_completed) {
                         Some(config) => PresentationPipeline::from_first_frame_with_target(
                             &frame,
                             PresentationTarget::try_from(config)?,
