@@ -1,4 +1,7 @@
-use classmesh_protocol::control_wire::{ControlEnvelope, InputEvent, control_envelope};
+use classmesh_protocol::clipboard::{ClipboardTextError, validate_text};
+use classmesh_protocol::control_wire::{
+    ClipboardReadRequest, ClipboardWrite, ControlEnvelope, InputEvent, control_envelope,
+};
 use classmesh_security::{AuthorizationStore, Permission};
 
 use crate::authorization::{AuthenticatedControlGuard, CommandAuthorizationError};
@@ -6,6 +9,8 @@ use crate::authorization::{AuthenticatedControlGuard, CommandAuthorizationError}
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrivilegedControlCommand {
     InputEvent(InputEvent),
+    ClipboardReadRequest(ClipboardReadRequest),
+    ClipboardWrite(ClipboardWrite),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +18,7 @@ pub enum PrivilegedDispatchError {
     UnsupportedPayload,
     MalformedInputEvent,
     InputSequenceMismatch { envelope: u64, input: u64 },
+    InvalidClipboardText(ClipboardTextError),
     Authorization(CommandAuthorizationError),
 }
 
@@ -56,6 +62,26 @@ pub fn dispatch_privileged_command(
                 now_unix_ms,
             )?;
             Ok(PrivilegedControlCommand::InputEvent(*input))
+        }
+        control_envelope::Payload::ClipboardReadRequest(request) => {
+            guard.authorize(
+                authorization,
+                envelope,
+                Permission::ReadClipboard,
+                now_unix_ms,
+            )?;
+            Ok(PrivilegedControlCommand::ClipboardReadRequest(request.clone()))
+        }
+        control_envelope::Payload::ClipboardWrite(write) => {
+            validate_text(&write.text_utf8)
+                .map_err(PrivilegedDispatchError::InvalidClipboardText)?;
+            guard.authorize(
+                authorization,
+                envelope,
+                Permission::WriteClipboard,
+                now_unix_ms,
+            )?;
+            Ok(PrivilegedControlCommand::ClipboardWrite(write.clone()))
         }
         _ => Err(PrivilegedDispatchError::UnsupportedPayload),
     }
