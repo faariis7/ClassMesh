@@ -65,6 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match event_rx.recv_timeout(wait) {
             Ok(WorkerEvent::Control(command)) => match command {
                 classmesh_windows_runtime::ipc::IpcControlCommand::SuspendMedia => {
+                    release_tracked_input(&mut input_injector);
                     capture = None;
                     eprintln!("ClassMesh Worker DXGI capture suspended by Service");
                     continue;
