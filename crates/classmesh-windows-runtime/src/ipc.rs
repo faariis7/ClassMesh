@@ -1,5 +1,8 @@
 use std::collections::VecDeque;
 
+use classmesh_protocol::control_wire::InputEvent;
+use prost::Message;
+
 pub const IPC_MAGIC: u32 = 0x434D_4950; // "CMIP"
 pub const IPC_HEADER_LEN: usize = 12;
 pub const MAX_IPC_MESSAGE: usize = 1_048_576;
@@ -9,6 +12,7 @@ pub const IPC_VERSION_MINOR: u8 = 1;
 const MESSAGE_WORKER_HELLO: u16 = 1;
 const MESSAGE_SERVICE_READY: u16 = 2;
 const MESSAGE_CONTROL: u16 = 10;
+const MESSAGE_INPUT_EVENT: u16 = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpcRole {
@@ -109,11 +113,12 @@ impl IpcControlCommand {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum IpcMessage {
     WorkerHello { process_id: u32, session_id: u32 },
     ServiceReady,
     Control(IpcControlCommand),
+    InputEvent(InputEvent),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +199,11 @@ impl IpcFrame {
         Self::new(MESSAGE_CONTROL, vec![command.as_byte()])
     }
 
+    #[must_use]
+    pub fn input_event(event: &InputEvent) -> Self {
+        Self::new(MESSAGE_INPUT_EVENT, event.encode_to_vec())
+    }
+
     pub fn message(&self) -> Result<IpcMessage, IpcMessageError> {
         if self.header.version_major != IPC_VERSION_MAJOR {
             return Err(IpcMessageError::UnsupportedVersion);
@@ -235,6 +245,11 @@ impl IpcFrame {
                 let command =
                     IpcControlCommand::from_byte(*raw).ok_or(IpcMessageError::InvalidPayload)?;
                 Ok(IpcMessage::Control(command))
+            }
+            MESSAGE_INPUT_EVENT => {
+                let event = InputEvent::decode(self.payload.as_slice())
+                    .map_err(|_| IpcMessageError::InvalidPayload)?;
+                Ok(IpcMessage::InputEvent(event))
             }
             _ => Err(IpcMessageError::UnknownMessageType),
         }
@@ -354,6 +369,30 @@ mod tests {
         assert_eq!(
             frames[0].message().expect("typed message should decode"),
             IpcMessage::Control(IpcControlCommand::SuspendMedia)
+        );
+    }
+
+    #[test]
+    fn input_event_round_trips_through_bounded_ipc_frame() {
+        let event = InputEvent {
+            sequence: 9,
+            timestamp_us: 123,
+            event: Some(
+                classmesh_protocol::control_wire::input_event::Event::ReleaseAll(
+                    classmesh_protocol::control_wire::ReleaseAllInput {},
+                ),
+            ),
+        };
+        let encoded = IpcFrame::input_event(&event)
+            .encode()
+            .expect("input event should encode");
+        let mut decoder = IpcFrameDecoder::default();
+        let frames = decoder
+            .push_bytes(&encoded)
+            .expect("input event should decode");
+        assert_eq!(
+            frames[0].message().expect("typed message should decode"),
+            IpcMessage::InputEvent(event)
         );
     }
 

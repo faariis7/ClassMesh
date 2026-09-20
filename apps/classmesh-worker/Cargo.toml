@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 classmesh-network = { path = "../../crates/classmesh-network" }
+classmesh-protocol = { path = "../../crates/classmesh-protocol" }
 classmesh-windows-runtime = { path = "../../crates/classmesh-windows-runtime" }
 
 [target.'cfg(windows)'.dependencies]
