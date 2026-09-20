@@ -324,6 +324,17 @@ mod tests {
     }
 
     #[test]
+    fn bounded_benchmark_rejects_zero_sample_target() {
+        assert_eq!(
+            BoundedEncoderBenchmark::from_config(EncoderBenchmarkConfig {
+                sample_frames: 0,
+                ..EncoderBenchmarkConfig::compatibility_720p30()
+            }),
+            Err(BenchmarkAccumulatorError::InvalidTarget)
+        );
+    }
+
+    #[test]
     fn bounded_benchmark_never_accepts_more_than_configured_submissions() {
         let mut benchmark =
             BoundedEncoderBenchmark::from_config(EncoderBenchmarkConfig {
