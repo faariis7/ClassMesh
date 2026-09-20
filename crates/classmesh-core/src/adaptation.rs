@@ -278,10 +278,30 @@ pub const fn profile_for(kind: StreamKind, tier: QualityTier) -> StreamProfile {
         (StreamKind::Monitoring, QualityTier::Medium) => StreamProfile::new(480, 270, 4, 450),
         (StreamKind::Monitoring, QualityTier::Low) => StreamProfile::new(320, 180, 3, 250),
         (StreamKind::Monitoring, QualityTier::Emergency) => StreamProfile::new(320, 180, 1, 120),
-        (_, QualityTier::High) => StreamProfile::new(1920, 1080, 30, 5_000),
-        (_, QualityTier::Medium) => StreamProfile::new(1280, 720, 30, 2_500),
-        (_, QualityTier::Low) => StreamProfile::new(1280, 720, 20, 1_500),
-        (_, QualityTier::Emergency) => StreamProfile::new(854, 480, 10, 700),
+        (StreamKind::Interactive, QualityTier::High) => {
+            StreamProfile::new(1920, 1080, 30, 5_000)
+        }
+        (StreamKind::Interactive, QualityTier::Medium) => {
+            StreamProfile::new(1280, 720, 30, 2_500)
+        }
+        (StreamKind::Interactive, QualityTier::Low) => {
+            StreamProfile::new(960, 540, 30, 1_500)
+        }
+        (StreamKind::Interactive, QualityTier::Emergency) => {
+            StreamProfile::new(640, 360, 20, 700)
+        }
+        (StreamKind::TeacherPresentation, QualityTier::High) => {
+            StreamProfile::new(1920, 1080, 30, 5_000)
+        }
+        (StreamKind::TeacherPresentation, QualityTier::Medium) => {
+            StreamProfile::new(1280, 720, 30, 2_500)
+        }
+        (StreamKind::TeacherPresentation, QualityTier::Low) => {
+            StreamProfile::new(1280, 720, 20, 1_500)
+        }
+        (StreamKind::TeacherPresentation, QualityTier::Emergency) => {
+            StreamProfile::new(854, 480, 10, 700)
+        }
     }
 }
 
@@ -370,6 +390,33 @@ mod tests {
             controller.observe(healthy(false, false)).tier,
             QualityTier::High
         );
+    }
+
+    #[test]
+    fn interactive_profile_ladder_preserves_motion_before_resolution() {
+        let medium = profile_for(StreamKind::Interactive, QualityTier::Medium);
+        let low = profile_for(StreamKind::Interactive, QualityTier::Low);
+        let emergency = profile_for(StreamKind::Interactive, QualityTier::Emergency);
+
+        assert_eq!(medium.fps, 30);
+        assert_eq!(low.fps, 30);
+        assert_eq!(low.width, 960);
+        assert_eq!(low.height, 540);
+        assert_eq!(emergency.fps, 20);
+        assert_eq!(emergency.width, 640);
+        assert_eq!(emergency.height, 360);
+    }
+
+    #[test]
+    fn presentation_profile_can_trade_frame_rate_before_interactive() {
+        let presentation_low =
+            profile_for(StreamKind::TeacherPresentation, QualityTier::Low);
+        let interactive_low = profile_for(StreamKind::Interactive, QualityTier::Low);
+
+        assert_eq!(presentation_low.fps, 20);
+        assert_eq!(interactive_low.fps, 30);
+        assert!(interactive_low.width < presentation_low.width);
+        assert_eq!(interactive_low.bitrate_kbps, presentation_low.bitrate_kbps);
     }
 
     #[test]
