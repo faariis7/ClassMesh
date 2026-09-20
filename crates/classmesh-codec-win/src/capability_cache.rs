@@ -138,7 +138,7 @@ impl DurableEncoderCapabilityCache {
         if &key != expected {
             return Ok(None);
         }
-        Ok(Some(result.into_result()?))
+        Ok(Some(result.into_result(&key)?))
     }
 
     pub fn save(
@@ -147,7 +147,7 @@ impl DurableEncoderCapabilityCache {
         result: &EncoderBenchmarkResult,
     ) -> Result<(), EncoderCapabilityCacheError> {
         validate_key(key)?;
-        validate_result(result)?;
+        validate_result_for_key(key, result)?;
 
         let persisted = PersistedCache::from_parts(key, result);
         let bytes = serde_json::to_vec_pretty(&persisted)?;
@@ -300,7 +300,10 @@ impl PersistedResult {
         }
     }
 
-    fn into_result(self) -> Result<EncoderBenchmarkResult, EncoderCapabilityCacheError> {
+    fn into_result(
+        self,
+        key: &EncoderCapabilityCacheKey,
+    ) -> Result<EncoderBenchmarkResult, EncoderCapabilityCacheError> {
         let result = EncoderBenchmarkResult {
             probe: EncoderProbeResult {
                 backend: self.backend,
@@ -321,7 +324,7 @@ impl PersistedResult {
             dropped_or_missing: usize::try_from(self.dropped_or_missing)
                 .map_err(|_| EncoderCapabilityCacheError::InvalidFrameCount)?,
         };
-        validate_result(&result)?;
+        validate_result_for_key(key, &result)?;
         Ok(result)
     }
 }
@@ -344,7 +347,10 @@ fn validate_key(key: &EncoderCapabilityCacheKey) -> Result<(), EncoderCapability
     Ok(())
 }
 
-fn validate_result(result: &EncoderBenchmarkResult) -> Result<(), EncoderCapabilityCacheError> {
+fn validate_result_for_key(
+    key: &EncoderCapabilityCacheKey,
+    result: &EncoderBenchmarkResult,
+) -> Result<(), EncoderCapabilityCacheError> {
     validate_string("backend", &result.probe.backend, MAX_BACKEND_NAME_LEN)?;
     let finite_non_negative = |value: f32| value.is_finite() && value >= 0.0;
     if !finite_non_negative(result.probe.sustained_fps)
@@ -369,13 +375,27 @@ fn validate_result(result: &EncoderBenchmarkResult) -> Result<(), EncoderCapabil
     }
 
     let measured_class = result.probe.classify();
-    if result.class > measured_class
+    let workload_class = class_for_key(measured_class, key);
+    if result.class > workload_class
         || (result.class != EncoderClass::Unsupported
             && (result.probe.codec != Codec::H264 || !result.probe.advertised_hardware))
     {
         return Err(EncoderCapabilityCacheError::InvalidProbe);
     }
     Ok(())
+}
+
+fn class_for_key(
+    class: EncoderClass,
+    key: &EncoderCapabilityCacheKey,
+) -> EncoderClass {
+    if key.width < 1920 || key.height < 1080 || key.target_fps < 30 {
+        return class.min(EncoderClass::Compatibility);
+    }
+    if key.target_fps < 60 {
+        return class.min(EncoderClass::Presentation1080p30);
+    }
+    class
 }
 
 fn validate_string(
@@ -547,6 +567,40 @@ mod tests {
         invalid.probe.sustained_fps = 10.0;
         assert!(matches!(
             cache.save(&key("31.0.15.5123"), &invalid),
+            Err(EncoderCapabilityCacheError::InvalidProbe)
+        ));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn cached_class_is_capped_by_exact_profile_geometry() {
+        let path = test_path("geometry-class");
+        let cache = DurableEncoderCapabilityCache::new(&path);
+        let mut invalid = result();
+        invalid.class = EncoderClass::Presentation1080p30;
+        assert!(matches!(
+            cache.save(&key("31.0.15.5123"), &invalid),
+            Err(EncoderCapabilityCacheError::InvalidProbe)
+        ));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn cached_class_is_capped_by_exact_profile_fps() {
+        let path = test_path("fps-class");
+        let cache = DurableEncoderCapabilityCache::new(&path);
+        let mut expected = key("31.0.15.5123");
+        expected.width = 1920;
+        expected.height = 1080;
+        expected.target_fps = 30;
+        expected.bitrate_bps = 5_000_000;
+        let mut invalid = result();
+        invalid.probe.sustained_fps = 60.0;
+        invalid.probe.p50_encode_ms = 4.0;
+        invalid.probe.p95_encode_ms = 8.0;
+        invalid.class = EncoderClass::Presentation1080p60;
+        assert!(matches!(
+            cache.save(&expected, &invalid),
             Err(EncoderCapabilityCacheError::InvalidProbe)
         ));
         let _ = fs::remove_file(path);
