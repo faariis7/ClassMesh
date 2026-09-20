@@ -454,68 +454,61 @@ mod windows_service_app {
 
         let key = CngMachineKey::open(identity.cng_key_name.clone())
             .map_err(|error| format!("protected CNG machine key is unavailable: {error}"))?;
-        if key
-            .export_policy()
-            .map_err(|error| format!("failed to verify CNG export policy: {error}"))?
-            != 0
-        {
-            return Err(
-                "CNG machine key is exportable; refusing control runtime startup".to_owned(),
-            );
+        if key.key_name() != identity.cng_key_name {
+            return Err("opened CNG key name does not match durable identity state".to_owned());
         }
 
         Ok(ControlRuntimeState {
-            identity,
-            authorization,
-            key,
+            principal_id: expected_principal,
+            certificate_chain_der: identity.certificate_chain_der,
+            cng_key_name: identity.cng_key_name,
+            trust_roots_der: identity.trust_roots_der,
         })
     }
 
-    pub fn run() -> windows_service::Result<()> {
-        service_dispatcher::start(SERVICE_NAME, ffi_service_main)
+    fn load_control_config() -> Result<ControlRuntimeConfig, String> {
+        let config_path = program_data_root()
+            .map_err(|error| format!("ProgramData is unavailable: {error}"))?
+            .join(CONFIG_DIRECTORY)
+            .join(CONTROL_RUNTIME_CONFIG_FILE);
+        ControlRuntimeConfig::load(&config_path)
+            .map_err(|error| format!("control runtime config rejected: {error}"))
     }
 
     fn service_main(_arguments: Vec<OsString>) {
         if let Err(error) = run_service() {
-            // Event Log integration comes later. Avoid panicking inside the SCM callback thread.
-            eprintln!("ClassMesh service failed: {error}");
+            eprintln!("ClassMesh service stopped with error: {error}");
         }
     }
 
     fn run_service() -> windows_service::Result<()> {
-        let (event_tx, event_rx) = mpsc::channel::<RuntimeEvent>();
-        let handler_tx = event_tx.clone();
-
-        let event_handler = move |control_event| -> ServiceControlHandlerResult {
-            match control_event {
+        let (event_tx, event_rx) = mpsc::channel();
+        let status_handle = service_control_handler::register(SERVICE_NAME, move |control| {
+            match control {
                 ServiceControl::Stop | ServiceControl::Shutdown => {
-                    let _ = handler_tx.send(RuntimeEvent::Stop);
+                    let _ = event_tx.send(RuntimeEvent::Stop);
                     ServiceControlHandlerResult::NoError
                 }
                 ServiceControl::SessionChange(change) => {
                     if let Some(event) = map_session_change(change) {
-                        let _ = handler_tx.send(RuntimeEvent::Session(event));
+                        let _ = event_tx.send(RuntimeEvent::Session(event));
                     }
                     ServiceControlHandlerResult::NoError
                 }
                 ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
                 _ => ServiceControlHandlerResult::NotImplemented,
             }
-        };
+        })?;
 
-        let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
         let control_state = match load_control_state() {
             Ok(state) => state,
             Err(error) => {
-                eprintln!("ClassMesh control state validation failed: {error}");
+                eprintln!("ClassMesh control identity state failed closed: {error}");
                 set_stopped_with_exit(&status_handle, 1)?;
                 return Ok(());
             }
         };
-        let config_path = program_data_root()?
-            .join(CONFIG_DIRECTORY)
-            .join(CONTROL_RUNTIME_CONFIG_FILE);
-        let control_config = match ControlRuntimeConfig::load(&config_path) {
+        let control_config = match load_control_config() {
             Ok(config) => config,
             Err(error) => {
                 eprintln!("ClassMesh control runtime configuration failed: {error}");
