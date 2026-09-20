@@ -304,10 +304,7 @@ mod windows_service_app {
             send_control(pipe, IpcControlCommand::ClearFocusedProfile)
         }
 
-        fn send_stream_reconfigure(
-            &self,
-            reconfigure: &StreamReconfigure,
-        ) -> Result<u32, String> {
+        fn send_stream_reconfigure(&self, reconfigure: &StreamReconfigure) -> Result<u32, String> {
             let process = self
                 .process
                 .as_ref()
@@ -656,13 +653,13 @@ mod windows_service_app {
             input_channels,
             media_channels,
         ) {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    eprintln!("ClassMesh control runtime failed to start: {error}");
-                    set_stopped_with_exit(&status_handle, 3)?;
-                    return Ok(());
-                }
-            };
+            Ok(runtime) => runtime,
+            Err(error) => {
+                eprintln!("ClassMesh control runtime failed to start: {error}");
+                set_stopped_with_exit(&status_handle, 3)?;
+                return Ok(());
+            }
+        };
         eprintln!(
             "ClassMesh enrolled control listener ready on {}",
             control_runtime.local_address()
@@ -736,9 +733,7 @@ mod windows_service_app {
                             eprintln!("ClassMesh Service cleared focused Worker profile");
                         }
                         Err(error) => {
-                            eprintln!(
-                                "ClassMesh Service will retry focused media reset: {error}"
-                            );
+                            eprintln!("ClassMesh Service will retry focused media reset: {error}");
                             next_media_reconfigure_attempt = Instant::now()
                                 .checked_add(MEDIA_RECONFIGURE_RETRY)
                                 .unwrap_or_else(Instant::now);
@@ -761,7 +756,9 @@ mod windows_service_app {
                         focused_reconfigure_worker_pid = Some(process_id);
                     }
                     Err(error) => {
-                        eprintln!("ClassMesh Service will retry focused media reconfigure: {error}");
+                        eprintln!(
+                            "ClassMesh Service will retry focused media reconfigure: {error}"
+                        );
                         focused_reconfigure_worker_pid = None;
                         next_media_reconfigure_attempt = Instant::now()
                             .checked_add(MEDIA_RECONFIGURE_RETRY)
