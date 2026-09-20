@@ -874,7 +874,10 @@ mod tests {
         assert_eq!(reconfigure.stream_id, 7);
         assert_eq!((profile.width, profile.height, profile.fps), (640, 360, 20));
         assert_eq!(profile.codec, VideoCodec::H264 as i32);
-        assert_eq!(reconfigure.transport, WireMediaTransport::Unspecified as i32);
+        assert_eq!(
+            reconfigure.transport,
+            WireMediaTransport::Unspecified as i32
+        );
         assert!(reconfigure.transport_parameters.is_empty());
     }
 
