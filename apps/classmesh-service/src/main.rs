@@ -281,6 +281,10 @@ mod windows_service_app {
             send_input(pipe, event)
         }
 
+        fn current_process_id(&self) -> Option<u32> {
+            self.process.as_ref().map(SessionProcess::process_id)
+        }
+
         fn send_stream_reconfigure(
             &self,
             reconfigure: &StreamReconfigure,
@@ -685,24 +689,21 @@ mod windows_service_app {
                 }
             }
 
+            let current_worker_pid = workers.current_process_id();
             if let Some(reconfigure) = desired_focused_reconfigure.as_ref()
+                && current_worker_pid.is_some()
+                && focused_reconfigure_worker_pid != current_worker_pid
                 && Instant::now() >= next_media_reconfigure_attempt
             {
                 match workers.send_stream_reconfigure(reconfigure) {
                     Ok(process_id) => {
-                        if focused_reconfigure_worker_pid != Some(process_id) {
-                            eprintln!(
-                                "ClassMesh Service applied focused profile to Worker {process_id}"
-                            );
-                        }
+                        eprintln!(
+                            "ClassMesh Service applied focused profile to Worker {process_id}"
+                        );
                         focused_reconfigure_worker_pid = Some(process_id);
                     }
                     Err(error) => {
-                        if focused_reconfigure_worker_pid.is_some() {
-                            eprintln!(
-                                "ClassMesh Service will retry focused media reconfigure: {error}"
-                            );
-                        }
+                        eprintln!("ClassMesh Service will retry focused media reconfigure: {error}");
                         focused_reconfigure_worker_pid = None;
                         next_media_reconfigure_attempt = Instant::now()
                             .checked_add(MEDIA_RECONFIGURE_RETRY)
