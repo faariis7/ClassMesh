@@ -307,11 +307,12 @@ fn run_h264_benchmark(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
                 let active = pipeline.as_mut().expect("benchmark pipeline initialized");
                 let submitted_before = active.stats().submitted_frames;
+                let process_started_at = Instant::now();
                 let outputs = active.process_frame_with_metrics(meta, frame)?;
                 let submitted_after = active.stats().submitted_frames;
                 for _ in submitted_before..submitted_after {
                     if benchmark.record_submission() && benchmark_started_at.is_none() {
-                        benchmark_started_at = Some(Instant::now());
+                        benchmark_started_at = Some(process_started_at);
                     }
                 }
                 for output in outputs {
