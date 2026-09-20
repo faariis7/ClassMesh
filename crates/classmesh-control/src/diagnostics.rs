@@ -1,4 +1,5 @@
 use crate::authorization::CommandAuthorizationError;
+use crate::dispatch::PrivilegedDispatchError;
 use crate::handshake::HandshakeError;
 use crate::quic::ControlTransportError;
 
@@ -63,6 +64,22 @@ pub const fn command_authorization_diagnostic_code(
     }
 }
 
+#[must_use]
+pub const fn privileged_dispatch_diagnostic_code(
+    error: &PrivilegedDispatchError,
+) -> &'static str {
+    match error {
+        PrivilegedDispatchError::UnsupportedPayload => "control.command.unsupported_payload",
+        PrivilegedDispatchError::MalformedInputEvent => "control.command.malformed_input",
+        PrivilegedDispatchError::InputSequenceMismatch { .. } => {
+            "control.command.input_sequence_mismatch"
+        }
+        PrivilegedDispatchError::Authorization(error) => {
+            command_authorization_diagnostic_code(error)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use classmesh_protocol::ProtocolVersion;
@@ -99,6 +116,23 @@ mod tests {
         assert_eq!(
             command_authorization_diagnostic_code(&unauthorized),
             "control.command.unauthorized"
+        );
+    }
+
+    #[test]
+    fn privileged_dispatch_codes_remain_value_free() {
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(
+                &PrivilegedDispatchError::InputSequenceMismatch {
+                    envelope: 7,
+                    input: 999,
+                },
+            ),
+            "control.command.input_sequence_mismatch"
+        );
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(&PrivilegedDispatchError::MalformedInputEvent),
+            "control.command.malformed_input"
         );
     }
 
