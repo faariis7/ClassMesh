@@ -94,6 +94,7 @@ pub enum IpcControlCommand {
     ResumeMedia,
     Shutdown,
     ReleaseInput,
+    ClearFocusedProfile,
 }
 
 impl IpcControlCommand {
@@ -103,6 +104,7 @@ impl IpcControlCommand {
             Self::ResumeMedia => 2,
             Self::Shutdown => 3,
             Self::ReleaseInput => 4,
+            Self::ClearFocusedProfile => 5,
         }
     }
 
@@ -112,6 +114,7 @@ impl IpcControlCommand {
             2 => Some(Self::ResumeMedia),
             3 => Some(Self::Shutdown),
             4 => Some(Self::ReleaseInput),
+            5 => Some(Self::ClearFocusedProfile),
             _ => None,
         }
     }
@@ -375,16 +378,24 @@ mod tests {
 
     #[test]
     fn typed_control_message_round_trips() {
-        let frame = IpcFrame::control(IpcControlCommand::SuspendMedia);
-        let encoded = frame.encode().expect("control frame should encode");
-        let mut decoder = IpcFrameDecoder::default();
-        let frames = decoder
-            .push_bytes(&encoded)
-            .expect("control frame should decode");
-        assert_eq!(
-            frames[0].message().expect("typed message should decode"),
-            IpcMessage::Control(IpcControlCommand::SuspendMedia)
-        );
+        for command in [
+            IpcControlCommand::SuspendMedia,
+            IpcControlCommand::ResumeMedia,
+            IpcControlCommand::Shutdown,
+            IpcControlCommand::ReleaseInput,
+            IpcControlCommand::ClearFocusedProfile,
+        ] {
+            let frame = IpcFrame::control(command);
+            let encoded = frame.encode().expect("control frame should encode");
+            let mut decoder = IpcFrameDecoder::default();
+            let frames = decoder
+                .push_bytes(&encoded)
+                .expect("control frame should decode");
+            assert_eq!(
+                frames[0].message().expect("typed message should decode"),
+                IpcMessage::Control(command)
+            );
+        }
     }
 
     #[test]
