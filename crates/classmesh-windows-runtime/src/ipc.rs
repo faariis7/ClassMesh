@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use classmesh_protocol::control_wire::InputEvent;
+use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure};
 use prost::Message;
 
 pub const IPC_MAGIC: u32 = 0x434D_4950; // "CMIP"
@@ -13,6 +13,7 @@ const MESSAGE_WORKER_HELLO: u16 = 1;
 const MESSAGE_SERVICE_READY: u16 = 2;
 const MESSAGE_CONTROL: u16 = 10;
 const MESSAGE_INPUT_EVENT: u16 = 11;
+const MESSAGE_STREAM_RECONFIGURE: u16 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpcRole {
@@ -122,6 +123,7 @@ pub enum IpcMessage {
     ServiceReady,
     Control(IpcControlCommand),
     InputEvent(InputEvent),
+    StreamReconfigure(StreamReconfigure),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +209,11 @@ impl IpcFrame {
         Self::new(MESSAGE_INPUT_EVENT, event.encode_to_vec())
     }
 
+    #[must_use]
+    pub fn stream_reconfigure(reconfigure: &StreamReconfigure) -> Self {
+        Self::new(MESSAGE_STREAM_RECONFIGURE, reconfigure.encode_to_vec())
+    }
+
     pub fn message(&self) -> Result<IpcMessage, IpcMessageError> {
         if self.header.version_major != IPC_VERSION_MAJOR {
             return Err(IpcMessageError::UnsupportedVersion);
@@ -253,6 +260,11 @@ impl IpcFrame {
                 let event = InputEvent::decode(self.payload.as_slice())
                     .map_err(|_| IpcMessageError::InvalidPayload)?;
                 Ok(IpcMessage::InputEvent(event))
+            }
+            MESSAGE_STREAM_RECONFIGURE => {
+                let reconfigure = StreamReconfigure::decode(self.payload.as_slice())
+                    .map_err(|_| IpcMessageError::InvalidPayload)?;
+                Ok(IpcMessage::StreamReconfigure(reconfigure))
             }
             _ => Err(IpcMessageError::UnknownMessageType),
         }
@@ -396,6 +408,34 @@ mod tests {
         assert_eq!(
             frames[0].message().expect("typed message should decode"),
             IpcMessage::InputEvent(event)
+        );
+    }
+
+    #[test]
+    fn stream_reconfigure_round_trips_through_bounded_ipc_frame() {
+        let reconfigure = StreamReconfigure {
+            stream_id: 17,
+            profile: Some(classmesh_protocol::control_wire::VideoProfile {
+                width: 960,
+                height: 540,
+                fps: 30,
+                bitrate_kbps: 1_500,
+                codec: classmesh_protocol::control_wire::VideoCodec::H264 as i32,
+            }),
+            transport:
+                classmesh_protocol::control_wire::MediaTransport::Unspecified as i32,
+            transport_parameters: Vec::new(),
+        };
+        let encoded = IpcFrame::stream_reconfigure(&reconfigure)
+            .encode()
+            .expect("stream reconfigure should encode");
+        let mut decoder = IpcFrameDecoder::default();
+        let frames = decoder
+            .push_bytes(&encoded)
+            .expect("stream reconfigure should decode");
+        assert_eq!(
+            frames[0].message().expect("typed message should decode"),
+            IpcMessage::StreamReconfigure(reconfigure)
         );
     }
 
