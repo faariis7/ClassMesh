@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use classmesh_core::keyframe::KeyframeRequestCoordinator;
     use classmesh_network::feedback::UdpFeedbackReceiver;
     use classmesh_network::transport::{UdpFrameSender, UdpSenderConfig};
-    use classmesh_video::{Codec, EncoderClass};
+    use classmesh_video::Codec;
     use classmesh_worker::presentation::{PresentationPipeline, PresentationTarget};
 
     let args: Vec<String> = std::env::args().collect();
@@ -656,7 +656,11 @@ fn feedback_error(error: classmesh_network::feedback::FeedbackTransportError) ->
 mod benchmark_policy_tests {
     use super::*;
 
-    fn profile(width: u32, height: u32, fps: u32) -> classmesh_worker::presentation::PresentationProfile {
+    fn profile(
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> classmesh_worker::presentation::PresentationProfile {
         classmesh_worker::presentation::PresentationProfile {
             source_width: width,
             source_height: height,
