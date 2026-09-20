@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 classmesh-core = { path = "../classmesh-core" }
+classmesh-protocol = { path = "../classmesh-protocol" }
+prost = "0.14.4"
 
 [lints]
 workspace = true
