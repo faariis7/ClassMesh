@@ -549,6 +549,7 @@ fn capability_to_wire(capability: Capability) -> i32 {
         Capability::QuicDatagram => 8,
         Capability::WebRtc => 9,
         Capability::LocalSfu => 10,
+        Capability::ClipboardText => 11,
     }
 }
 
@@ -564,6 +565,7 @@ fn capability_from_wire(value: i32) -> Option<Capability> {
         8 => Some(Capability::QuicDatagram),
         9 => Some(Capability::WebRtc),
         10 => Some(Capability::LocalSfu),
+        11 => Some(Capability::ClipboardText),
         _ => None,
     }
 }
