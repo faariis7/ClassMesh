@@ -239,28 +239,25 @@ impl FocusedWorkerProfile {
         if profile.codec != VideoCodec::H264 as i32 {
             return Err("worker.media.unsupported_codec");
         }
-        if profile.width == 0
-            || profile.height == 0
-            || profile.width > 1920
-            || profile.height > 1080
-            || profile.width % 2 != 0
-            || profile.height % 2 != 0
-        {
-            return Err("worker.media.invalid_geometry");
-        }
-        if !(1..=60).contains(&profile.fps) {
-            return Err("worker.media.invalid_fps");
-        }
-        if profile.bitrate_kbps == 0 || profile.bitrate_kbps > 50_000 {
-            return Err("worker.media.invalid_bitrate");
-        }
+        use classmesh_core::adaptation::{StreamProfile, StreamProfileError};
+
+        let width = u16::try_from(profile.width).map_err(|_| "worker.media.invalid_geometry")?;
+        let height = u16::try_from(profile.height).map_err(|_| "worker.media.invalid_geometry")?;
+        let fps = u8::try_from(profile.fps).map_err(|_| "worker.media.invalid_fps")?;
+        let validated = StreamProfile::new(width, height, fps, profile.bitrate_kbps)
+            .validate()
+            .map_err(|error| match error {
+                StreamProfileError::InvalidGeometry => "worker.media.invalid_geometry",
+                StreamProfileError::InvalidFps => "worker.media.invalid_fps",
+                StreamProfileError::InvalidBitrate => "worker.media.invalid_bitrate",
+            })?;
 
         Ok(Self {
             stream_id: reconfigure.stream_id,
-            width: profile.width,
-            height: profile.height,
-            fps: profile.fps,
-            bitrate_kbps: profile.bitrate_kbps,
+            width: u32::from(validated.width),
+            height: u32::from(validated.height),
+            fps: u32::from(validated.fps),
+            bitrate_kbps: validated.bitrate_kbps,
         })
     }
 
