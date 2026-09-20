@@ -9,8 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     use classmesh_capture_win::CaptureStep;
     use classmesh_codec_win::{
-        BenchmarkCapabilities, BoundedEncoderBenchmark, EncoderBenchmarkConfig,
-        summarize_benchmark,
+        BenchmarkCapabilities, BoundedEncoderBenchmark, EncoderBenchmarkConfig, summarize_benchmark,
     };
     use classmesh_core::keyframe::KeyframeRequestCoordinator;
     use classmesh_network::feedback::UdpFeedbackReceiver;
@@ -63,8 +62,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut capture = start_capture()?;
     let mut pipeline: Option<PresentationPipeline> = None;
-    let benchmark_config = encoder_benchmark_enabled
-        .then(EncoderBenchmarkConfig::compatibility_720p30);
+    let benchmark_config =
+        encoder_benchmark_enabled.then(EncoderBenchmarkConfig::compatibility_720p30);
     let mut encoder_benchmark = benchmark_config
         .map(BoundedEncoderBenchmark::from_config)
         .transpose()
@@ -179,8 +178,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .map_err(benchmark_accumulator_error)?;
                     }
                     benchmark_non_keyframe_observed |= !encoded_output.frame.meta.keyframe;
-                    benchmark_keyframe_observed |= benchmark_keyframe_request_frame
-                        .is_some_and(|frame_id| {
+                    benchmark_keyframe_observed |=
+                        benchmark_keyframe_request_frame.is_some_and(|frame_id| {
                             frame_id == encoded_output.frame.meta.frame_id
                                 && encoded_output.frame.meta.keyframe
                         });
