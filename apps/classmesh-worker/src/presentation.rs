@@ -10,10 +10,47 @@ use classmesh_video::distributor::SharedEncodedFrame;
 use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Device, ID3D11Texture2D};
 
 const DEFAULT_POOL_SIZE: usize = 4;
-const TARGET_FPS: u32 = 30;
-const TARGET_BITRATE_BPS: u32 = 5_000_000;
-const MAX_WIDTH: u32 = 1920;
-const MAX_HEIGHT: u32 = 1080;
+const DEFAULT_TARGET_FPS: u32 = 30;
+const DEFAULT_TARGET_BITRATE_BPS: u32 = 5_000_000;
+const MAX_TARGET_WIDTH: u32 = 1920;
+const MAX_TARGET_HEIGHT: u32 = 1080;
+const MAX_TARGET_FPS: u32 = 60;
+const MAX_TARGET_BITRATE_BPS: u32 = 50_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationTarget {
+    pub max_width: u32,
+    pub max_height: u32,
+    pub fps: u32,
+    pub bitrate_bps: u32,
+}
+
+impl Default for PresentationTarget {
+    fn default() -> Self {
+        Self {
+            max_width: MAX_TARGET_WIDTH,
+            max_height: MAX_TARGET_HEIGHT,
+            fps: DEFAULT_TARGET_FPS,
+            bitrate_bps: DEFAULT_TARGET_BITRATE_BPS,
+        }
+    }
+}
+
+impl PresentationTarget {
+    fn validate(self) -> Result<(), PresentationError> {
+        if self.max_width < 2
+            || self.max_height < 2
+            || self.max_width > MAX_TARGET_WIDTH
+            || self.max_height > MAX_TARGET_HEIGHT
+            || !(1..=MAX_TARGET_FPS).contains(&self.fps)
+            || self.bitrate_bps == 0
+            || self.bitrate_bps > MAX_TARGET_BITRATE_BPS
+        {
+            return Err(PresentationError::InvalidTargetProfile);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PresentationProfile {
@@ -42,6 +79,7 @@ pub struct PresentationStats {
 pub enum PresentationError {
     Windows(windows::core::Error),
     NoHardwareEncoder,
+    InvalidTargetProfile,
     SurfacePoolInvariant,
 }
 
@@ -52,6 +90,7 @@ impl fmt::Display for PresentationError {
             Self::NoHardwareEncoder => {
                 write!(f, "no hardware H.264 Media Foundation encoder found")
             }
+            Self::InvalidTargetProfile => write!(f, "invalid bounded H.264 target profile"),
             Self::SurfacePoolInvariant => write!(f, "bounded NV12 surface pool invariant failed"),
         }
     }
@@ -100,20 +139,24 @@ impl PresentationPipeline {
     /// The actual Desktop Duplication texture dimensions are used instead of assuming that desktop
     /// coordinates and resource dimensions are identical; this matters for rotated displays.
     pub fn from_first_frame(frame: &DxgiFrame) -> Result<Self, PresentationError> {
+        Self::from_first_frame_with_target(frame, PresentationTarget::default())
+    }
+
+    /// Creates the GPU-native H.264 pipeline for a bounded target profile.
+    ///
+    /// The requested dimensions are treated as maximum bounds. Source aspect ratio is preserved and
+    /// smaller captures are never upscaled.
+    pub fn from_first_frame_with_target(
+        frame: &DxgiFrame,
+        target: PresentationTarget,
+    ) -> Result<Self, PresentationError> {
+        target.validate()?;
+
         let device: ID3D11Device = unsafe { frame.texture().GetDevice()? };
         let mut source_desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { frame.texture().GetDesc(&mut source_desc) };
 
-        let (target_width, target_height) =
-            bounded_even_size(source_desc.Width, source_desc.Height, MAX_WIDTH, MAX_HEIGHT);
-        let profile = PresentationProfile {
-            source_width: source_desc.Width,
-            source_height: source_desc.Height,
-            target_width,
-            target_height,
-            fps: TARGET_FPS,
-            bitrate_bps: TARGET_BITRATE_BPS,
-        };
+        let profile = profile_for_source(source_desc.Width, source_desc.Height, target)?;
 
         let platform = MfPlatform::startup()?;
         let activations = enumerate_h264_hardware_encoders()?;
@@ -306,6 +349,24 @@ impl PresentationPipeline {
     }
 }
 
+fn profile_for_source(
+    source_width: u32,
+    source_height: u32,
+    target: PresentationTarget,
+) -> Result<PresentationProfile, PresentationError> {
+    target.validate()?;
+    let (target_width, target_height) =
+        bounded_even_size(source_width, source_height, target.max_width, target.max_height);
+    Ok(PresentationProfile {
+        source_width,
+        source_height,
+        target_width,
+        target_height,
+        fps: target.fps,
+        bitrate_bps: target.bitrate_bps,
+    })
+}
+
 fn bounded_even_size(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
     let width = width.max(2);
     let height = height.max(2);
@@ -333,6 +394,67 @@ const fn even_floor(value: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_target_matches_existing_presentation_profile() {
+        let target = PresentationTarget::default();
+        assert_eq!(target.max_width, 1920);
+        assert_eq!(target.max_height, 1080);
+        assert_eq!(target.fps, 30);
+        assert_eq!(target.bitrate_bps, 5_000_000);
+    }
+
+    #[test]
+    fn focused_target_resolves_without_upscale_or_aspect_distortion() {
+        let target = PresentationTarget {
+            max_width: 960,
+            max_height: 540,
+            fps: 30,
+            bitrate_bps: 1_500_000,
+        };
+        let profile = profile_for_source(1920, 1200, target).expect("valid target");
+        assert_eq!((profile.target_width, profile.target_height), (864, 540));
+        assert_eq!(profile.fps, 30);
+        assert_eq!(profile.bitrate_bps, 1_500_000);
+
+        let smaller = profile_for_source(640, 360, target).expect("valid target");
+        assert_eq!((smaller.target_width, smaller.target_height), (640, 360));
+    }
+
+    #[test]
+    fn target_profile_rejects_unbounded_or_zero_values() {
+        for target in [
+            PresentationTarget {
+                max_width: 0,
+                ..PresentationTarget::default()
+            },
+            PresentationTarget {
+                max_width: 3840,
+                ..PresentationTarget::default()
+            },
+            PresentationTarget {
+                fps: 0,
+                ..PresentationTarget::default()
+            },
+            PresentationTarget {
+                fps: 61,
+                ..PresentationTarget::default()
+            },
+            PresentationTarget {
+                bitrate_bps: 0,
+                ..PresentationTarget::default()
+            },
+            PresentationTarget {
+                bitrate_bps: 50_000_001,
+                ..PresentationTarget::default()
+            },
+        ] {
+            assert!(matches!(
+                profile_for_source(1920, 1080, target),
+                Err(PresentationError::InvalidTargetProfile)
+            ));
+        }
+    }
 
     #[test]
     fn profile_caps_1440p_at_1080p_without_aspect_distortion() {
