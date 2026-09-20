@@ -185,6 +185,23 @@ impl FocusedProfileController {
     }
 
     #[must_use]
+    pub const fn with_initial_tier(
+        kind: StreamKind,
+        policy: AdaptationPolicy,
+        hysteresis: HysteresisConfig,
+        initial_tier: QualityTier,
+    ) -> Self {
+        Self {
+            kind,
+            policy,
+            hysteresis,
+            current_tier: Some(initial_tier),
+            pending_tier: None,
+            pending_tier_samples: 0,
+        }
+    }
+
+    #[must_use]
     pub const fn current(&self) -> Option<FocusedProfileDecision> {
         match self.current_tier {
             Some(tier) => Some(FocusedProfileDecision {
@@ -497,6 +514,31 @@ mod tests {
         assert_eq!((low.width, low.height), (960, 540));
         assert_eq!(emergency.fps, 20);
         assert_eq!((emergency.width, emergency.height), (640, 360));
+    }
+
+    #[test]
+    fn focused_profile_controller_can_start_from_existing_stream_tier() {
+        let mut controller = FocusedProfileController::with_initial_tier(
+            StreamKind::Interactive,
+            AdaptationPolicy::default(),
+            HysteresisConfig {
+                degrade_samples: 2,
+                recover_samples: 3,
+                transport_samples: 1,
+            },
+            QualityTier::High,
+        );
+        let mut bad = healthy(false, false);
+        bad.packet_loss = 0.12;
+
+        let pending = controller.observe(bad);
+        assert_eq!(pending.tier, QualityTier::High);
+        assert!(!pending.changed);
+
+        let degraded = controller.observe(bad);
+        assert_eq!(degraded.tier, QualityTier::Emergency);
+        assert!(degraded.changed);
+        assert_eq!(degraded.profile.fps, 20);
     }
 
     #[test]
