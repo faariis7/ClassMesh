@@ -5,7 +5,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     use classmesh_capture_win::CaptureStep;
     use classmesh_win32::{InputInjector, NamedPipeClient};
-    use classmesh_windows_runtime::ipc::{IpcFrame, IpcMessage, WorkerRuntimeCapabilities};
+    use classmesh_windows_runtime::ipc::{IpcFrame, IpcMessage};
 
     let args: Vec<String> = std::env::args().collect();
     let expected_session = parse_session(&args)?;
