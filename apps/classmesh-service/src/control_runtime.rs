@@ -41,9 +41,16 @@ const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
-pub(crate) enum InputExecutorCommand {
-    Event(InputEvent),
-    ReleaseAll,
+pub(crate) struct InputDispatchChannels {
+    pub(crate) event_tx: mpsc::SyncSender<InputEvent>,
+    pub(crate) cleanup_tx: mpsc::SyncSender<()>,
+    pub(crate) available: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone)]
+struct InputDispatchState {
+    channels: InputDispatchChannels,
+    owner: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -120,8 +127,7 @@ impl ControlRuntime {
     pub(crate) fn start(
         state: ControlRuntimeState,
         config: ControlRuntimeConfig,
-        input_tx: mpsc::SyncSender<InputExecutorCommand>,
-        input_available: Arc<AtomicBool>,
+        input: InputDispatchChannels,
     ) -> Result<Self, String> {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<SocketAddr, String>>(1);
         let (stop_tx, stop_rx) = oneshot::channel();
@@ -143,14 +149,7 @@ impl ControlRuntime {
                     }
                 };
 
-                runtime.block_on(run_listener(
-                    state,
-                    config,
-                    ready_tx,
-                    stop_rx,
-                    input_tx,
-                    input_available,
-                ));
+                runtime.block_on(run_listener(state, config, ready_tx, stop_rx, input));
             })
             .map_err(|error| format!("control runtime thread creation failed: {error}"))?;
 
@@ -209,8 +208,7 @@ async fn run_listener(
     config: ControlRuntimeConfig,
     ready_tx: mpsc::SyncSender<Result<SocketAddr, String>>,
     mut stop_rx: oneshot::Receiver<()>,
-    input_tx: mpsc::SyncSender<InputExecutorCommand>,
-    input_available: Arc<AtomicBool>,
+    input: InputDispatchChannels,
 ) {
     let endpoint = match build_endpoint(&state, config) {
         Ok(endpoint) => endpoint,
@@ -235,7 +233,10 @@ async fn run_listener(
 
     let authorization = Arc::new(state.authorization);
     let session_ids = Arc::new(AtomicU64::new(1));
-    let input_owner = Arc::new(AtomicU64::new(0));
+    let input = InputDispatchState {
+        channels: input,
+        owner: Arc::new(AtomicU64::new(0)),
+    };
 
     loop {
         tokio::select! {
@@ -250,9 +251,7 @@ async fn run_listener(
                 };
                 let authorization = Arc::clone(&authorization);
                 let session_ids = Arc::clone(&session_ids);
-                let input_tx = input_tx.clone();
-                let input_available = Arc::clone(&input_available);
-                let input_owner = Arc::clone(&input_owner);
+                let input = input.clone();
                 tokio::spawn(async move {
                     let connection = match incoming.await {
                         Ok(connection) => connection,
@@ -300,17 +299,10 @@ async fn run_listener(
                                 &session,
                                 peer,
                                 authorization.as_ref(),
-                                &input_tx,
-                                input_available.as_ref(),
-                                input_owner.as_ref(),
+                                &input,
                             )
                             .await;
-                            release_input_owner(
-                                session.control_session_id,
-                                input_owner.as_ref(),
-                                &input_tx,
-                                input_available.as_ref(),
-                            );
+                            input.release_owner(session.control_session_id);
                         }
                         Err(error) => {
                             eprintln!(
@@ -332,9 +324,7 @@ async fn run_established_session(
     session: &EstablishedControlSession,
     peer: EstablishedAuthenticatedPeer,
     authorization: &AuthorizationStore,
-    input_tx: &mpsc::SyncSender<InputExecutorCommand>,
-    input_available: &AtomicBool,
-    input_owner: &AtomicU64,
+    input: &InputDispatchState,
 ) {
     const HELLO_SEQUENCE: u64 = 1;
 
@@ -444,21 +434,21 @@ async fn run_established_session(
                 match dispatch_privileged_command(&mut guard, authorization, &envelope, now_unix_ms)
                 {
                     Ok(PrivilegedControlCommand::InputEvent(input)) => {
-                        if !input_available.load(Ordering::Acquire) {
+                        if !input.channels.available.load(Ordering::Acquire) {
                             eprintln!(
                                 "ClassMesh authorized input rejected: control.command.executor_unavailable"
                             );
                             connection.close(0_u32.into(), b"input executor unavailable");
                             return;
                         }
-                        if !try_acquire_input_owner(input_owner, session.control_session_id) {
+                        if !input.try_acquire_owner(session.control_session_id) {
                             eprintln!(
                                 "ClassMesh authorized input rejected: control.command.controller_busy"
                             );
                             connection.close(0_u32.into(), b"interactive controller busy");
                             return;
                         }
-                        match input_tx.try_send(InputExecutorCommand::Event(input)) {
+                        match input.channels.event_tx.try_send(input) {
                             Ok(()) => {}
                             Err(mpsc::TrySendError::Full(_)) => {
                                 eprintln!(
@@ -504,34 +494,37 @@ async fn run_established_session(
     }
 }
 
-fn try_acquire_input_owner(owner: &AtomicU64, session_id: u64) -> bool {
-    let current = owner.load(Ordering::Acquire);
-    if current == session_id {
-        return true;
-    }
-    current == 0
-        && owner
-            .compare_exchange(0, session_id, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-}
-
-fn release_input_owner(
-    session_id: u64,
-    owner: &AtomicU64,
-    input_tx: &mpsc::SyncSender<InputExecutorCommand>,
-    input_available: &AtomicBool,
-) {
-    if owner.load(Ordering::Acquire) != session_id {
-        return;
+impl InputDispatchState {
+    fn try_acquire_owner(&self, session_id: u64) -> bool {
+        let current = self.owner.load(Ordering::Acquire);
+        if current == session_id {
+            return true;
+        }
+        current == 0
+            && self
+                .owner
+                .compare_exchange(0, session_id, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
     }
 
-    if input_available.load(Ordering::Acquire)
-        && input_tx.send(InputExecutorCommand::ReleaseAll).is_err()
-    {
-        eprintln!("ClassMesh input cleanup skipped: executor channel disconnected");
-    }
+    fn release_owner(&self, session_id: u64) {
+        if self.owner.load(Ordering::Acquire) != session_id {
+            return;
+        }
 
-    let _ = owner.compare_exchange(session_id, 0, Ordering::AcqRel, Ordering::Acquire);
+        if self.channels.available.load(Ordering::Acquire) {
+            match self.channels.cleanup_tx.try_send(()) {
+                Ok(()) | Err(mpsc::TrySendError::Full(())) => {}
+                Err(mpsc::TrySendError::Disconnected(())) => {
+                    eprintln!("ClassMesh input cleanup skipped: executor channel disconnected");
+                }
+            }
+        }
+
+        let _ =
+            self.owner
+                .compare_exchange(session_id, 0, Ordering::AcqRel, Ordering::Acquire);
+    }
 }
 
 fn media_health_from_wire(value: i32) -> Option<MediaHealth> {
@@ -656,18 +649,26 @@ mod tests {
 
     #[test]
     fn input_owner_is_exclusive_and_reusable_after_release() {
-        let owner = AtomicU64::new(0);
-        assert!(try_acquire_input_owner(&owner, 41));
-        assert!(try_acquire_input_owner(&owner, 41));
-        assert!(!try_acquire_input_owner(&owner, 42));
-        assert_eq!(owner.load(Ordering::Acquire), 41);
+        let (event_tx, _event_rx) = mpsc::sync_channel(1);
+        let (cleanup_tx, cleanup_rx) = mpsc::sync_channel(1);
+        let input = InputDispatchState {
+            channels: InputDispatchChannels {
+                event_tx,
+                cleanup_tx,
+                available: Arc::new(AtomicBool::new(true)),
+            },
+            owner: Arc::new(AtomicU64::new(0)),
+        };
 
-        let (tx, rx) = mpsc::sync_channel(1);
-        let available = AtomicBool::new(true);
-        release_input_owner(41, &owner, &tx, &available);
-        assert!(matches!(rx.try_recv(), Ok(InputExecutorCommand::ReleaseAll)));
-        assert_eq!(owner.load(Ordering::Acquire), 0);
-        assert!(try_acquire_input_owner(&owner, 42));
+        assert!(input.try_acquire_owner(41));
+        assert!(input.try_acquire_owner(41));
+        assert!(!input.try_acquire_owner(42));
+        assert_eq!(input.owner.load(Ordering::Acquire), 41);
+
+        input.release_owner(41);
+        assert_eq!(cleanup_rx.try_recv(), Ok(()));
+        assert_eq!(input.owner.load(Ordering::Acquire), 0);
+        assert!(input.try_acquire_owner(42));
     }
 
     #[test]
