@@ -18,8 +18,7 @@ const MESSAGE_WORKER_CAPABILITIES: u16 = 13;
 
 const WORKER_CAP_DXGI_CAPTURE: u32 = 1 << 0;
 const WORKER_CAP_H264_HARDWARE_ENCODE: u32 = 1 << 1;
-const KNOWN_WORKER_CAPABILITIES: u32 =
-    WORKER_CAP_DXGI_CAPTURE | WORKER_CAP_H264_HARDWARE_ENCODE;
+const KNOWN_WORKER_CAPABILITIES: u32 = WORKER_CAP_DXGI_CAPTURE | WORKER_CAP_H264_HARDWARE_ENCODE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpcRole {
@@ -504,9 +503,12 @@ mod tests {
         );
 
         let mut frame = IpcFrame::worker_capabilities(capabilities);
-        frame.payload[8..12].copy_from_slice(&(capabilities.known_flags() | (1 << 31)).to_be_bytes());
+        frame.payload[8..12]
+            .copy_from_slice(&(capabilities.known_flags() | (1 << 31)).to_be_bytes());
         assert_eq!(
-            frame.message().expect("unknown future flag should be ignored"),
+            frame
+                .message()
+                .expect("unknown future flag should be ignored"),
             IpcMessage::WorkerCapabilities(capabilities)
         );
     }
