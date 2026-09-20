@@ -367,7 +367,6 @@ fn map_windows_error(error: windows::core::Error) -> CaptureFailure {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
