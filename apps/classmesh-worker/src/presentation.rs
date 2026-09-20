@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt;
 
 use classmesh_capture_win::{CapturedFrameMeta, DxgiFrame};
+use classmesh_core::adaptation::StreamProfile as AdaptiveStreamProfile;
 use classmesh_codec_win::gpu::{GpuBgraToNv12Converter, GpuNv12Config};
 use classmesh_codec_win::mf::{MfH264EncoderConfig, MfPlatform, enumerate_h264_hardware_encoders};
 use classmesh_codec_win::mf_async::{MfAsyncH264Encoder, MfEncodedOutput, MfSubmitError};
@@ -33,6 +34,25 @@ impl Default for PresentationTarget {
             fps: DEFAULT_TARGET_FPS,
             bitrate_bps: DEFAULT_TARGET_BITRATE_BPS,
         }
+    }
+}
+
+impl TryFrom<AdaptiveStreamProfile> for PresentationTarget {
+    type Error = PresentationError;
+
+    fn try_from(profile: AdaptiveStreamProfile) -> Result<Self, Self::Error> {
+        let bitrate_bps = profile
+            .bitrate_kbps
+            .checked_mul(1_000)
+            .ok_or(PresentationError::InvalidTargetProfile)?;
+        let target = Self {
+            max_width: u32::from(profile.width),
+            max_height: u32::from(profile.height),
+            fps: u32::from(profile.fps),
+            bitrate_bps,
+        };
+        target.validate()?;
+        Ok(target)
     }
 }
 
@@ -400,6 +420,16 @@ mod tests {
         assert_eq!(target.max_height, 1080);
         assert_eq!(target.fps, 30);
         assert_eq!(target.bitrate_bps, 5_000_000);
+    }
+
+    #[test]
+    fn adaptive_stream_profile_converts_kbps_to_encoder_bps() {
+        let target = PresentationTarget::try_from(AdaptiveStreamProfile::new(960, 540, 30, 1_500))
+            .expect("focused profile should convert");
+        assert_eq!(target.max_width, 960);
+        assert_eq!(target.max_height, 540);
+        assert_eq!(target.fps, 30);
+        assert_eq!(target.bitrate_bps, 1_500_000);
     }
 
     #[test]
