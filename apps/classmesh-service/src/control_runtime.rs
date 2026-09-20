@@ -22,7 +22,7 @@ use classmesh_control::quic::{
     ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
 };
 use classmesh_control::stream::stream_profile_to_wire;
-use classmesh_control::stream::{StreamOfferError, validate_interactive_stream_offer};
+use classmesh_control::stream::validate_interactive_stream_offer;
 use classmesh_control::{DEFAULT_OFFLINE_AFTER, HeartbeatSample, HeartbeatTracker};
 use classmesh_core::adaptation::{
     AdaptationPolicy, FocusedProfileController, HysteresisConfig, QualityTier,
@@ -915,7 +915,7 @@ fn stream_offer_answer(
 ) -> StreamAnswer {
     let rejection_reason = match validate_interactive_stream_offer(offer, negotiated_capabilities) {
         Ok(_) => "control.stream.runtime_not_ready",
-        Err(error) => stream_offer_rejection_code(error),
+        Err(error) => error.diagnostic_code(),
     };
 
     StreamAnswer {
@@ -923,25 +923,6 @@ fn stream_offer_answer(
         accepted: false,
         rejection_reason: rejection_reason.to_owned(),
         supported_transports: negotiated_interactive_transports(negotiated_capabilities),
-    }
-}
-
-const fn stream_offer_rejection_code(error: StreamOfferError) -> &'static str {
-    match error {
-        StreamOfferError::InvalidStreamId => "control.stream.invalid_stream",
-        StreamOfferError::UnsupportedKind => "control.stream.unsupported_kind",
-        StreamOfferError::MissingProfile => "control.stream.missing_profile",
-        StreamOfferError::UnsupportedCodec => "control.stream.unsupported_codec",
-        StreamOfferError::ProfileValueOutOfRange | StreamOfferError::InvalidProfile(_) => {
-            "control.stream.invalid_profile"
-        }
-        StreamOfferError::UnsupportedTransport => "control.stream.unsupported_transport",
-        StreamOfferError::TransportCapabilityNotNegotiated => {
-            "control.stream.transport_not_negotiated"
-        }
-        StreamOfferError::TransportParametersTooLarge => {
-            "control.stream.transport_parameters_too_large"
-        }
     }
 }
 
