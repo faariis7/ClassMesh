@@ -18,6 +18,7 @@ Carries:
 - stream offer/answer/reconfiguration;
 - network/decoder feedback;
 - input events;
+- negotiated text clipboard messages;
 - NACK/keyframe requests;
 - file transfer and future administrative messages.
 
@@ -63,6 +64,20 @@ A `Hello` / `HelloAck` exchange explicitly negotiates the protocol minor version
 After establishment, privileged control messages must use the exact established `control_session_id` and a strictly increasing application sequence on the ordered QUIC control stream. Permission checks re-validate the current credential/principal state for each privileged command; revoked, expired, future-issued, or disabled identities therefore stop authorizing even on an already-established transport.
 
 Application heartbeat tracks device/control liveness independently from `MediaHealth`. The initial policy is a 2-second heartbeat interval, suspect after 6 seconds, and offline after 10 seconds. Peer monotonic timestamps are diagnostic only and are never directly compared across machines.
+
+### Phase 6E clipboard skeleton
+
+Clipboard support is deliberately narrow and opt-in:
+
+- capability negotiation uses `CAPABILITY_CLIPBOARD_TEXT`; an unknown or unnegotiated capability never grants permission;
+- the wire contract is text-only UTF-8 using `ClipboardReadRequest`, `ClipboardReadResponse` and `ClipboardWrite`;
+- clipboard text is bounded to **64 KiB of UTF-8 bytes**, well below the 256 KiB control-envelope ceiling;
+- read and write are independent privileges: `Permission::ReadClipboard` and `Permission::WriteClipboard`;
+- oversized clipboard writes are rejected before the privileged application sequence is consumed;
+- empty clipboard text is valid and represents an explicit clear;
+- binary clipboard objects, files, shell commands and arbitrary serialized objects are not part of this skeleton.
+
+The schema/security skeleton does not by itself advertise production clipboard execution. A runtime must advertise the negotiated capability only when its interactive-session clipboard implementation exists and must preserve these authorization and size checks.
 
 ### Media plane
 
