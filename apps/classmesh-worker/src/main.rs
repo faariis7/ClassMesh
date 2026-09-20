@@ -174,6 +174,7 @@ fn input_action_from_wire(
             absolute: mouse.absolute,
         }),
         Event::MouseButton(button) => {
+            let down = button.down;
             let button = match button.button {
                 1 => MouseButton::Left,
                 2 => MouseButton::Right,
@@ -182,10 +183,7 @@ fn input_action_from_wire(
                 5 => MouseButton::X2,
                 value => return Err(format!("unsupported mouse button {value}")),
             };
-            Ok(InputAction::MouseButton {
-                button,
-                down: button_event_down(event),
-            })
+            Ok(InputAction::MouseButton { button, down })
         }
         Event::MouseWheel(wheel) => Ok(InputAction::MouseWheel {
             delta: wheel.delta,
@@ -198,16 +196,6 @@ fn input_action_from_wire(
             extended: key.extended,
         }),
         Event::ReleaseAll(_) => Ok(InputAction::ReleaseAll),
-    }
-}
-
-#[cfg(windows)]
-fn button_event_down(
-    event: classmesh_protocol::control_wire::input_event::Event,
-) -> bool {
-    match event {
-        classmesh_protocol::control_wire::input_event::Event::MouseButton(button) => button.down,
-        _ => false,
     }
 }
 
