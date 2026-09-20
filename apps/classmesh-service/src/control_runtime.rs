@@ -1105,10 +1105,7 @@ mod tests {
         assert!(state.apply_report(5, 50, 9, true, false));
         assert_eq!(
             state.hello_capabilities(),
-            BTreeSet::from([
-                Capability::DxgiCapture,
-                Capability::ServiceSessionWorker,
-            ])
+            BTreeSet::from([Capability::DxgiCapture, Capability::ServiceSessionWorker,])
         );
     }
 
