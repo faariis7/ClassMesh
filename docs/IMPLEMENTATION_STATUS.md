@@ -1,6 +1,6 @@
 # ClassMesh Implementation Status
 
-Last updated: 2026-09-19
+Last updated: 2026-09-20
 
 This file distinguishes **implemented code**, **hosted-CI validation**, **real-hardware validation still required**, and **future product work**. Architecture documents must not be read as claims that every planned feature is already production-ready.
 
@@ -10,7 +10,7 @@ This file distinguishes **implemented code**, **hosted-CI validation**, **real-h
 
 Phase 4 physical acceptance remains pending. Issue #3 must remain open until two physical Windows PCs pass the documented qualification.
 
-Phase 5 is tracked in Issue #32. Phase 5B is merged with CI #232 green; Phase 5C1 is merged in PR #39 with CI #239 green; Phase 5C2 is merged in PR #40 with CI #243 green; and PR #41 merged the protocol v0.2 PKCS#10 enrollment CSR/receipt/status/result contract. Phase 5C3 continued through merged PR #42 with bounded, status-dependent validation of terminal enrollment certificate results, then merged PR #43 added explicit pinned bootstrap trust bound to stable PrincipalId and a fresh client nonce. CI #260 passed on Synology Portable and Windows for PR #43.
+Phase 5 is complete under Issue #32 through PR #107. The production control path now includes enrolled mTLS, stable identity/credential rotation, live per-command authorization/replay checks, durable fail-closed Service state, Service-hosted QUIC control runtime, authenticated post-handshake session handling, centralized privileged input dispatch, bounded Service→Worker forwarding and interactive-session Win32 input execution. Phase 6 interactive remote control is active under Issue #108.
 
 The hosted CI baseline covers Portable Rust / Ubuntu rustfmt, Clippy with warnings denied, full workspace tests and `classmesh-lab`, plus Windows workspace Clippy/tests and release builds for the media qualification executables. Hosted runners do not replace real interactive GPU/driver or two-PC validation.
 
@@ -65,7 +65,7 @@ PR #62 merged live authenticated-credential re-check with CI #316 green. The est
 
 PR #63 merged authenticated Hello identity/session/replay authorization with PR CI #330 green, completing Phase 5D/5E on the authenticated control path.
 
-### Phase 5F — hardening active
+### Phase 5F — hardening complete
 
 PR #66 merged after CI #338 green and rejects missing or internally inconsistent Hello protocol versions before negotiation/session establishment. PR #69 merged after CI #343 green and adds explicit malformed-Protobuf control-frame regression coverage. PR #70 merged after CI #345 green and validates HelloAck envelope session/request/sequence/version consistency before the client accepts the negotiated control session.
 
@@ -73,7 +73,7 @@ PR #73 merged after CI #354 green and adds versioned, bounded durable persistenc
 
 PR #81 merged after CI #367 green and requires each privileged post-handshake command to carry the exact negotiated protocol version before its sequence can be consumed. PR #83 merged as `e36d26b8c606e087a47e408717f409dd8b4ac35f` after CI #372 green and adds bounded full-session reconnect: connection + control stream + Hello are retried only for transport failures, while protocol/authentication/administrative rejections remain terminal. The same configured QUIC endpoint/credential resolver is reused, so reconnect does not require re-enrollment.
 
-Remaining Phase 5F work is now concentrated on fuzz targets, broader malformed authenticated-envelope/compatibility coverage, security diagnostics, and wiring the completed control/security primitives into the production Windows Service control runtime.
+PR #86 added the isolated control-frame fuzz harness; PR #88 added stable non-sensitive security diagnostics; PR #91 added malformed established-envelope regression coverage; PR #93/#94 added protected CNG server credentials and durable machine identity; PR #95 added fail-closed Service startup state validation; PR #101 hosted the enrolled QUIC runtime in the Windows Service; PR #103/#104 connected centralized privileged dispatch and the authenticated post-handshake session loop. PR #105–#107 then established the first Phase 6 input slice end-to-end: defined input semantics, stateful Win32 SendInput execution, authenticated bounded Worker IPC, and bounded Service forwarding after live authorization. PR #107 CI #427 was green.
 
 ### Phase 5D/5E — authenticated authorization and negotiation complete through PR #63
 
@@ -81,9 +81,9 @@ PR #63 merged the authenticated control-session guard with PR CI #330 green. The
 
 ## Remaining security/control work
 
-- production Windows Service integration for the durable authorization/enrollment state and control runtime;
-- broader malformed authenticated-envelope/compatibility coverage, fuzz targets and security diagnostics;
-- encrypted multicast media key distribution/replay/rotation.
+- Phase 6 interactive-control lifecycle hardening, secure-desktop diagnostics and focused-stream behavior under Issue #108;
+- encrypted multicast media key distribution/replay/rotation for the later classroom-presentation phase;
+- final privilege-boundary, dependency and update-chain review before the 1.0 gate.
 
 ## Other production work still required
 
