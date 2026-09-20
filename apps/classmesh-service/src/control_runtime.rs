@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use classmesh_control::authorization::AuthenticatedControlGuard;
 use classmesh_control::diagnostics::{
     command_authorization_diagnostic_code, handshake_diagnostic_code, heartbeat_diagnostic_code,
-    privileged_dispatch_diagnostic_code, transport_diagnostic_code,
+    privileged_dispatch_diagnostic_code, stream_offer_diagnostic_code, transport_diagnostic_code,
 };
 use classmesh_control::dispatch::{PrivilegedControlCommand, dispatch_privileged_command};
 use classmesh_control::handshake::{
@@ -915,7 +915,7 @@ fn stream_offer_answer(
 ) -> StreamAnswer {
     let rejection_reason = match validate_interactive_stream_offer(offer, negotiated_capabilities) {
         Ok(_) => "control.stream.runtime_not_ready",
-        Err(error) => error.diagnostic_code(),
+        Err(error) => stream_offer_diagnostic_code(&error),
     };
 
     StreamAnswer {
