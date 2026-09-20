@@ -81,6 +81,9 @@ pub const fn privileged_dispatch_diagnostic_code(error: &PrivilegedDispatchError
         PrivilegedDispatchError::InputSequenceMismatch { .. } => {
             "control.command.input_sequence_mismatch"
         }
+        PrivilegedDispatchError::ClipboardReadRequestMissingId => {
+            "control.command.clipboard_missing_request_id"
+        }
         PrivilegedDispatchError::InvalidClipboardText(_) => {
             "control.command.clipboard_text_too_large"
         }
@@ -126,6 +129,16 @@ mod tests {
         assert_eq!(
             command_authorization_diagnostic_code(&unauthorized),
             "control.command.unauthorized"
+        );
+    }
+
+    #[test]
+    fn clipboard_request_id_code_is_stable() {
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(
+                &PrivilegedDispatchError::ClipboardReadRequestMissingId
+            ),
+            "control.command.clipboard_missing_request_id"
         );
     }
 
