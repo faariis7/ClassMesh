@@ -94,7 +94,7 @@ pub(crate) struct FocusedMediaReconfigure {
 #[derive(Debug, Clone)]
 pub(crate) struct FocusedMediaDispatchChannels {
     pub(crate) reconfigure_tx: mpsc::SyncSender<FocusedMediaReconfigure>,
-    pub(crate) clear_tx: mpsc::SyncSender<u64>,
+    pub(crate) released_session_floor: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone)]
@@ -450,14 +450,9 @@ async fn run_listener(
                             )
                             .await;
                             if input.release_owner(session.control_session_id) {
-                                match media.clear_tx.try_send(session.control_session_id) {
-                                    Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
-                                    Err(mpsc::TrySendError::Disconnected(_)) => {
-                                        eprintln!(
-                                            "ClassMesh focused media cleanup skipped: dispatch channel disconnected"
-                                        );
-                                    }
-                                }
+                                media
+                                    .released_session_floor
+                                    .fetch_max(session.control_session_id, Ordering::AcqRel);
                             }
                         }
                         Err(error) => {
