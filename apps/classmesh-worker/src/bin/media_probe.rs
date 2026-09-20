@@ -529,7 +529,10 @@ fn same_benchmark_target(
 #[cfg(windows)]
 fn report_encoder_benchmark(mut pending: PendingResetBenchmark, reset_ok: bool) {
     pending.result.probe.reset_ok = reset_ok;
-    pending.result.class = pending.result.probe.classify();
+    pending.result.class = class_for_actual_target(
+        pending.result.probe.classify(),
+        pending.profile,
+    );
     eprintln!(
         "encoder benchmark: backend={} class={:?} target={}x{}@{} submitted={} outputs={} missing={} fps={:.2} p50_ms={:.2} p95_ms={:.2} low_latency={} keyframe_request={} reset={} reset_submissions={} dynamic_bitrate=false",
         pending.result.probe.backend,
@@ -743,6 +746,20 @@ fn parse_socket_option(
 #[cfg(windows)]
 fn elapsed_us(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+#[cfg(windows)]
+fn class_for_actual_target(
+    class: classmesh_video::EncoderClass,
+    profile: classmesh_worker::presentation::PresentationProfile,
+) -> classmesh_video::EncoderClass {
+    if profile.target_width < 1920 || profile.target_height < 1080 || profile.fps < 30 {
+        return class.min(classmesh_video::EncoderClass::Compatibility);
+    }
+    if profile.fps < 60 {
+        return class.min(classmesh_video::EncoderClass::Presentation1080p30);
+    }
+    class
 }
 
 #[cfg(windows)]
