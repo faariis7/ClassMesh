@@ -264,6 +264,9 @@ message InputEvent {
   }
 }
 
+// Phase 6E clipboard is deliberately text-only. Binary/file clipboard payloads,
+ // shell commands and arbitrary object serialization are out of scope.
+ // Text is UTF-8 and bounded to 64 KiB by classmesh-protocol validators.
 message ClipboardReadRequest {}
 
 message ClipboardReadResponse {
@@ -272,6 +275,7 @@ message ClipboardReadResponse {
 }
 
 message ClipboardWrite {
+  // Empty text is valid and represents an explicit clipboard clear.
   string text_utf8 = 1;
 }
 
