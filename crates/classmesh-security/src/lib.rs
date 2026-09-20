@@ -33,6 +33,8 @@ pub enum Permission {
     ShutdownDevice,
     ManageEnrollment,
     ManagePolicy,
+    ReadClipboard,
+    WriteClipboard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
