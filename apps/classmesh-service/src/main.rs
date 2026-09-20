@@ -5,13 +5,13 @@ mod control_runtime;
 mod windows_service_app {
     use std::ffi::OsString;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicU8;
+    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
     use std::sync::{Arc, mpsc};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity};
-    use classmesh_protocol::control_wire::InputEvent;
+    use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure};
     use classmesh_security::persistence::DurableAuthorizationState;
     use classmesh_security::{CredentialFingerprint, PrincipalId};
     use sha2::{Digest, Sha256};
@@ -45,11 +45,14 @@ mod windows_service_app {
     const CONTROL_RUNTIME_CONFIG_FILE: &str = "control-runtime.json";
     const INPUT_QUEUE_CAPACITY: usize = 256;
     const INPUT_CLEANUP_QUEUE_CAPACITY: usize = 1;
+    const FOCUSED_MEDIA_QUEUE_CAPACITY: usize = 4;
     const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
+    const MEDIA_RECONFIGURE_RETRY: Duration = Duration::from_millis(250);
+    const MAX_MEDIA_RECONFIGURE_ATTEMPTS: u8 = 4;
 
     use crate::control_runtime::{
-        ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, InputAvailability,
-        InputDispatchChannels,
+        ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, FocusedMediaDispatchChannels,
+        FocusedMediaReconfigure, InputAvailability, InputDispatchChannels,
     };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -279,6 +282,47 @@ mod windows_service_app {
             send_input(pipe, event)
         }
 
+        fn current_process_id(&self) -> Option<u32> {
+            self.process.as_ref().map(SessionProcess::process_id)
+        }
+
+        fn clear_focused_profile(&self) -> Result<(), String> {
+            let process = self
+                .process
+                .as_ref()
+                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
+            if !process
+                .is_running()
+                .map_err(|error| format!("Worker media-reset liveness probe failed: {error}"))?
+            {
+                return Err("interactive Worker exited before media reset".to_owned());
+            }
+            let pipe = self
+                .pipe
+                .as_ref()
+                .ok_or_else(|| "Worker IPC pipe is unavailable for media reset".to_owned())?;
+            send_control(pipe, IpcControlCommand::ClearFocusedProfile)
+        }
+
+        fn send_stream_reconfigure(&self, reconfigure: &StreamReconfigure) -> Result<u32, String> {
+            let process = self
+                .process
+                .as_ref()
+                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
+            if !process
+                .is_running()
+                .map_err(|error| format!("Worker media liveness probe failed: {error}"))?
+            {
+                return Err("interactive Worker exited before media reconfigure".to_owned());
+            }
+            let pipe = self
+                .pipe
+                .as_ref()
+                .ok_or_else(|| "Worker IPC pipe is unavailable for media reconfigure".to_owned())?;
+            send_stream_reconfigure(pipe, reconfigure)?;
+            Ok(process.process_id())
+        }
+
         fn release_input(&self) -> Result<(), String> {
             let process = self
                 .process
@@ -429,6 +473,17 @@ mod windows_service_app {
             .map_err(|error| format!("failed to encode Worker input frame: {error:?}"))?;
         pipe.write_all(&bytes)
             .map_err(|error| format!("Worker input IPC write failed: {error}"))
+    }
+
+    fn send_stream_reconfigure(
+        pipe: &NamedPipeServer,
+        reconfigure: &StreamReconfigure,
+    ) -> Result<(), String> {
+        let bytes = IpcFrame::stream_reconfigure(reconfigure)
+            .encode()
+            .map_err(|error| format!("failed to encode Worker media frame: {error:?}"))?;
+        pipe.write_all(&bytes)
+            .map_err(|error| format!("Worker media IPC write failed: {error}"))
     }
 
     fn program_data_state_dir() -> Result<PathBuf, String> {
@@ -584,15 +639,26 @@ mod windows_service_app {
             cleanup_tx: input_cleanup_tx,
             availability: Arc::clone(&input_availability),
         };
-        let mut control_runtime =
-            match ControlRuntime::start(control_state, control_config, input_channels) {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    eprintln!("ClassMesh control runtime failed to start: {error}");
-                    set_stopped_with_exit(&status_handle, 3)?;
-                    return Ok(());
-                }
-            };
+        let (media_reconfigure_tx, media_reconfigure_rx) =
+            mpsc::sync_channel::<FocusedMediaReconfigure>(FOCUSED_MEDIA_QUEUE_CAPACITY);
+        let released_media_session_floor = Arc::new(AtomicU64::new(0));
+        let media_channels = FocusedMediaDispatchChannels {
+            reconfigure_tx: media_reconfigure_tx,
+            released_session_floor: Arc::clone(&released_media_session_floor),
+        };
+        let mut control_runtime = match ControlRuntime::start(
+            control_state,
+            control_config,
+            input_channels,
+            media_channels,
+        ) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                eprintln!("ClassMesh control runtime failed to start: {error}");
+                set_stopped_with_exit(&status_handle, 3)?;
+                return Ok(());
+            }
+        };
         eprintln!(
             "ClassMesh enrolled control listener ready on {}",
             control_runtime.local_address()
@@ -601,6 +667,14 @@ mod windows_service_app {
 
         let mut supervisor = SessionSupervisor::default();
         let mut workers = WorkerManager::new();
+        let mut desired_focused_reconfigure: Option<StreamReconfigure> = None;
+        let mut desired_focused_control_session_id: Option<u64> = None;
+        let mut focused_reconfigure_worker_pid: Option<u32> = None;
+        let mut focused_profile_clear_pending = false;
+        let mut focused_media_session_floor = 0_u64;
+        let mut focused_reconfigure_attempts = 0_u8;
+        let mut focused_clear_attempts = 0_u8;
+        let mut next_media_reconfigure_attempt = Instant::now();
         let mut next_worker_poll = Instant::now();
         loop {
             match input_cleanup_rx.try_recv() {
@@ -627,6 +701,110 @@ mod windows_service_app {
                 }
             }
 
+            let released_floor = released_media_session_floor.load(Ordering::Acquire);
+            if released_floor > focused_media_session_floor {
+                focused_media_session_floor = released_floor;
+                if released_session_invalidates_desired(
+                    released_floor,
+                    desired_focused_control_session_id,
+                ) {
+                    desired_focused_reconfigure = None;
+                    desired_focused_control_session_id = None;
+                    focused_reconfigure_worker_pid = None;
+                    focused_profile_clear_pending = true;
+                    focused_clear_attempts = 0;
+                    focused_reconfigure_attempts = 0;
+                    next_media_reconfigure_attempt = Instant::now();
+                }
+            }
+
+            while let Ok(dispatch) = media_reconfigure_rx.try_recv() {
+                if focused_reconfigure_is_stale(
+                    dispatch.control_session_id,
+                    focused_media_session_floor,
+                    desired_focused_control_session_id,
+                ) {
+                    continue;
+                }
+                desired_focused_reconfigure = Some(dispatch.reconfigure);
+                desired_focused_control_session_id = Some(dispatch.control_session_id);
+                focused_reconfigure_worker_pid = None;
+                focused_profile_clear_pending = false;
+                focused_reconfigure_attempts = 0;
+                focused_clear_attempts = 0;
+                next_media_reconfigure_attempt = Instant::now();
+            }
+
+            let current_worker_pid = workers.current_process_id();
+            if focused_profile_clear_pending {
+                if current_worker_pid.is_none() {
+                    focused_profile_clear_pending = false;
+                } else if Instant::now() >= next_media_reconfigure_attempt {
+                    match workers.clear_focused_profile() {
+                        Ok(()) => {
+                            focused_profile_clear_pending = false;
+                            focused_clear_attempts = 0;
+                            eprintln!("ClassMesh Service cleared focused Worker profile");
+                        }
+                        Err(error) => {
+                            focused_clear_attempts = focused_clear_attempts.saturating_add(1);
+                            if focused_clear_attempts >= MAX_MEDIA_RECONFIGURE_ATTEMPTS {
+                                focused_profile_clear_pending = false;
+                                eprintln!(
+                                    "ClassMesh Service focused media reset abandoned after {} attempts: {error}",
+                                    focused_clear_attempts
+                                );
+                            } else {
+                                eprintln!(
+                                    "ClassMesh Service will retry focused media reset ({}/{}): {error}",
+                                    focused_clear_attempts, MAX_MEDIA_RECONFIGURE_ATTEMPTS
+                                );
+                                next_media_reconfigure_attempt = Instant::now()
+                                    .checked_add(MEDIA_RECONFIGURE_RETRY)
+                                    .unwrap_or_else(Instant::now);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !focused_profile_clear_pending
+                && let Some(reconfigure) = desired_focused_reconfigure.as_ref()
+                && current_worker_pid.is_some()
+                && focused_reconfigure_worker_pid != current_worker_pid
+                && Instant::now() >= next_media_reconfigure_attempt
+            {
+                match workers.send_stream_reconfigure(reconfigure) {
+                    Ok(process_id) => {
+                        eprintln!(
+                            "ClassMesh Service applied focused profile to Worker {process_id}"
+                        );
+                        focused_reconfigure_worker_pid = Some(process_id);
+                        focused_reconfigure_attempts = 0;
+                    }
+                    Err(error) => {
+                        focused_reconfigure_attempts =
+                            focused_reconfigure_attempts.saturating_add(1);
+                        if focused_reconfigure_attempts >= MAX_MEDIA_RECONFIGURE_ATTEMPTS {
+                            focused_reconfigure_worker_pid = current_worker_pid;
+                            eprintln!(
+                                "ClassMesh Service focused media reconfigure abandoned after {} attempts: {error}",
+                                focused_reconfigure_attempts
+                            );
+                        } else {
+                            eprintln!(
+                                "ClassMesh Service will retry focused media reconfigure ({}/{}): {error}",
+                                focused_reconfigure_attempts, MAX_MEDIA_RECONFIGURE_ATTEMPTS
+                            );
+                            focused_reconfigure_worker_pid = None;
+                            next_media_reconfigure_attempt = Instant::now()
+                                .checked_add(MEDIA_RECONFIGURE_RETRY)
+                                .unwrap_or_else(Instant::now);
+                        }
+                    }
+                }
+            }
+
             match event_rx.recv_timeout(Duration::from_millis(5)) {
                 Ok(RuntimeEvent::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Ok(RuntimeEvent::Session(event)) => {
@@ -648,6 +826,12 @@ mod windows_service_app {
 
             if Instant::now() >= next_worker_poll {
                 let event = workers.poll();
+                if matches!(event, WorkerManagerEvent::Running(_)) {
+                    focused_reconfigure_worker_pid = None;
+                    focused_reconfigure_attempts = 0;
+                    focused_clear_attempts = 0;
+                    next_media_reconfigure_attempt = Instant::now();
+                }
                 handle_worker_event(event, &mut supervisor, input_availability.as_ref());
                 next_worker_poll = Instant::now()
                     .checked_add(Duration::from_millis(250))
@@ -659,6 +843,22 @@ mod windows_service_app {
         workers.stop_any();
         control_runtime.stop();
         set_stopped(&status_handle)
+    }
+
+    fn released_session_invalidates_desired(
+        released_floor: u64,
+        desired_session: Option<u64>,
+    ) -> bool {
+        desired_session.is_some_and(|desired| desired <= released_floor)
+    }
+
+    fn focused_reconfigure_is_stale(
+        control_session_id: u64,
+        released_floor: u64,
+        desired_session: Option<u64>,
+    ) -> bool {
+        control_session_id <= released_floor
+            || desired_session.is_some_and(|desired| control_session_id < desired)
     }
 
     fn set_running(handle: &ServiceStatusHandle) -> windows_service::Result<()> {
@@ -775,6 +975,32 @@ mod windows_service_app {
                 supervisor.mark_worker_stopped(session);
             }
             WorkerManagerEvent::None => {}
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn released_session_floor_rejects_stale_profile_updates() {
+            assert!(focused_reconfigure_is_stale(7, 7, None));
+            assert!(focused_reconfigure_is_stale(6, 7, None));
+            assert!(!focused_reconfigure_is_stale(8, 7, None));
+        }
+
+        #[test]
+        fn newer_desired_session_rejects_older_in_flight_profile() {
+            assert!(focused_reconfigure_is_stale(8, 7, Some(9)));
+            assert!(!focused_reconfigure_is_stale(9, 7, Some(8)));
+        }
+
+        #[test]
+        fn release_invalidates_only_same_or_older_desired_session() {
+            assert!(released_session_invalidates_desired(9, Some(9)));
+            assert!(released_session_invalidates_desired(9, Some(8)));
+            assert!(!released_session_invalidates_desired(9, Some(10)));
+            assert!(!released_session_invalidates_desired(9, None));
         }
     }
 }
