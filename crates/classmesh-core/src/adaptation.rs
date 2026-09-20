@@ -373,18 +373,10 @@ pub const fn profile_for(kind: StreamKind, tier: QualityTier) -> StreamProfile {
         (StreamKind::Monitoring, QualityTier::Medium) => StreamProfile::new(480, 270, 4, 450),
         (StreamKind::Monitoring, QualityTier::Low) => StreamProfile::new(320, 180, 3, 250),
         (StreamKind::Monitoring, QualityTier::Emergency) => StreamProfile::new(320, 180, 1, 120),
-        (StreamKind::Interactive, QualityTier::High) => {
-            StreamProfile::new(1920, 1080, 30, 5_000)
-        }
-        (StreamKind::Interactive, QualityTier::Medium) => {
-            StreamProfile::new(1280, 720, 30, 2_500)
-        }
-        (StreamKind::Interactive, QualityTier::Low) => {
-            StreamProfile::new(960, 540, 30, 1_500)
-        }
-        (StreamKind::Interactive, QualityTier::Emergency) => {
-            StreamProfile::new(640, 360, 20, 700)
-        }
+        (StreamKind::Interactive, QualityTier::High) => StreamProfile::new(1920, 1080, 30, 5_000),
+        (StreamKind::Interactive, QualityTier::Medium) => StreamProfile::new(1280, 720, 30, 2_500),
+        (StreamKind::Interactive, QualityTier::Low) => StreamProfile::new(960, 540, 30, 1_500),
+        (StreamKind::Interactive, QualityTier::Emergency) => StreamProfile::new(640, 360, 20, 700),
         (StreamKind::TeacherPresentation, QualityTier::High) => {
             StreamProfile::new(1920, 1080, 30, 5_000)
         }
