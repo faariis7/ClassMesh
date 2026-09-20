@@ -172,8 +172,8 @@ pub fn query_adapter_capability_identity(
     target: DisplayId,
 ) -> Result<AdapterCapabilityIdentity, CaptureFailure> {
     let (adapter, _, _) = find_output(target)?;
-    let driver_version = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }
-        .map_err(map_windows_error)?;
+    let driver_version =
+        unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }.map_err(map_windows_error)?;
     Ok(AdapterCapabilityIdentity {
         adapter_luid_low: target.adapter_luid_low,
         adapter_luid_high: target.adapter_luid_high,
