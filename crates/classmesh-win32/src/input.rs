@@ -55,8 +55,14 @@ pub enum InputAction {
 
 #[derive(Debug)]
 pub enum InputError {
-    AbsoluteCoordinateOutOfRange { x: i32, y: i32 },
-    KeyCodeOutOfRange { virtual_key: u32, scan_code: u32 },
+    AbsoluteCoordinateOutOfRange {
+        x: i32,
+        y: i32,
+    },
+    KeyCodeOutOfRange {
+        virtual_key: u32,
+        scan_code: u32,
+    },
     MissingKeyCode,
     SendInput {
         requested: u32,
@@ -80,7 +86,10 @@ impl Display for InputError {
                 "input key codes exceed u16 range: virtual_key={virtual_key}, scan_code={scan_code}"
             ),
             Self::MissingKeyCode => {
-                write!(formatter, "input key requires a scan code or virtual-key code")
+                write!(
+                    formatter,
+                    "input key requires a scan code or virtual-key code"
+                )
             }
             Self::SendInput {
                 requested,
@@ -155,9 +164,13 @@ impl InputInjector {
             return Ok(());
         }
 
-        let mut inputs =
-            Vec::with_capacity(self.pressed_keys.len() + self.pressed_buttons.len());
-        inputs.extend(self.pressed_keys.iter().copied().map(|key| key_input(key, false)));
+        let mut inputs = Vec::with_capacity(self.pressed_keys.len() + self.pressed_buttons.len());
+        inputs.extend(
+            self.pressed_keys
+                .iter()
+                .copied()
+                .map(|key| key_input(key, false)),
+        );
         inputs.extend(
             self.pressed_buttons
                 .iter()
@@ -181,17 +194,12 @@ impl InputInjector {
     }
 }
 
-fn validate_key(
-    virtual_key: u32,
-    scan_code: u32,
-    extended: bool,
-) -> Result<InputKey, InputError> {
+fn validate_key(virtual_key: u32, scan_code: u32, extended: bool) -> Result<InputKey, InputError> {
     let original_virtual_key = virtual_key;
-    let virtual_key =
-        u16::try_from(virtual_key).map_err(|_| InputError::KeyCodeOutOfRange {
-            virtual_key,
-            scan_code,
-        })?;
+    let virtual_key = u16::try_from(virtual_key).map_err(|_| InputError::KeyCodeOutOfRange {
+        virtual_key,
+        scan_code,
+    })?;
     let scan_code = u16::try_from(scan_code).map_err(|_| InputError::KeyCodeOutOfRange {
         virtual_key: original_virtual_key,
         scan_code,
