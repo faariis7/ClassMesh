@@ -128,6 +128,23 @@ impl WorkerCapabilityState {
         *self.lock_snapshot() = WorkerCapabilitySnapshot::default();
     }
 
+    pub(crate) fn clear_report_if_current(
+        &self,
+        generation: u64,
+        process_id: u32,
+        session_id: u32,
+    ) -> bool {
+        let mut snapshot = self.lock_snapshot();
+        if snapshot.generation != generation
+            || snapshot.process_id != process_id
+            || snapshot.session_id != session_id
+        {
+            return false;
+        }
+        snapshot.flags = 0;
+        true
+    }
+
     pub(crate) fn apply_report(
         &self,
         generation: u64,
@@ -1106,6 +1123,27 @@ mod tests {
         assert_eq!(
             state.hello_capabilities(),
             BTreeSet::from([Capability::DxgiCapture, Capability::ServiceSessionWorker,])
+        );
+    }
+
+    #[test]
+    fn stale_capability_reader_cannot_clear_replacement_worker_flags() {
+        let state = WorkerCapabilityState::default();
+        state.activate(10, 100, 4);
+        assert!(state.apply_report(10, 100, 4, true, false));
+
+        state.activate(11, 101, 5);
+        assert!(state.apply_report(11, 101, 5, true, false));
+        assert!(!state.clear_report_if_current(10, 100, 4));
+        assert_eq!(
+            state.hello_capabilities(),
+            BTreeSet::from([Capability::DxgiCapture, Capability::ServiceSessionWorker,])
+        );
+
+        assert!(state.clear_report_if_current(11, 101, 5));
+        assert_eq!(
+            state.hello_capabilities(),
+            BTreeSet::from([Capability::ServiceSessionWorker])
         );
     }
 
