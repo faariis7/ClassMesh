@@ -381,10 +381,12 @@ mod windows_service_app {
         std::env::var_os("ProgramData")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .ok_or_else(|| windows_service::Error::Winapi(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "ProgramData is unavailable",
-            )))
+            .ok_or_else(|| {
+                windows_service::Error::Winapi(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "ProgramData is unavailable",
+                ))
+            })
     }
 
     fn program_data_state_dir() -> Result<PathBuf, String> {
