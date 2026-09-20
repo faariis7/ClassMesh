@@ -6,15 +6,28 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use classmesh_control::diagnostics::handshake_diagnostic_code;
-use classmesh_control::handshake::{ServerHelloConfig, server_hello_enrolled};
-use classmesh_control::quic::{
-    ControlChannel, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
+use classmesh_control::authorization::AuthenticatedControlGuard;
+use classmesh_control::diagnostics::{
+    command_authorization_diagnostic_code, handshake_diagnostic_code, heartbeat_diagnostic_code,
+    privileged_dispatch_diagnostic_code, transport_diagnostic_code,
 };
+use classmesh_control::dispatch::{PrivilegedControlCommand, dispatch_privileged_command};
+use classmesh_control::handshake::{
+    EstablishedAuthenticatedPeer, EstablishedControlSession, ServerHelloConfig,
+    server_hello_enrolled,
+};
+use classmesh_control::quic::{
+    ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT,
+    enrolled_server_config_with_resolver,
+};
+use classmesh_control::{DEFAULT_OFFLINE_AFTER, HeartbeatSample, HeartbeatTracker};
 use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver};
-use classmesh_protocol::{Capability, PROTOCOL_VERSION};
+use classmesh_protocol::control_wire::{
+    ControlEnvelope, HeartbeatAck, ProtocolVersion as WireProtocolVersion, control_envelope,
+};
+use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::AuthorizationStore;
 use quinn::Endpoint;
 use rustls::RootCertStore;
@@ -255,12 +268,19 @@ async fn run_listener(
                     )
                     .await
                     {
-                        Ok((_session, peer)) => {
+                        Ok((session, peer)) => {
                             eprintln!(
                                 "ClassMesh enrolled control session {} established",
                                 peer.control_session_id
                             );
-                            let _ = connection.closed().await;
+                            run_established_session(
+                                &connection,
+                                &mut channel,
+                                &session,
+                                peer,
+                                authorization.as_ref(),
+                            )
+                            .await;
                         }
                         Err(error) => {
                             eprintln!(
@@ -274,6 +294,176 @@ async fn run_listener(
             }
         }
     }
+}
+
+async fn run_established_session(
+    connection: &quinn::Connection,
+    channel: &mut ControlChannel,
+    session: &EstablishedControlSession,
+    peer: EstablishedAuthenticatedPeer,
+    authorization: &AuthorizationStore,
+) {
+    const HELLO_SEQUENCE: u64 = 1;
+
+    let mut guard = AuthenticatedControlGuard::new(
+        peer.identity,
+        session.control_session_id,
+        session.negotiated.version,
+        HELLO_SEQUENCE,
+    );
+    let mut heartbeat = HeartbeatTracker::new(session.control_session_id, MediaHealth::Idle);
+    let session_clock = Instant::now();
+    let mut last_inbound_at = Instant::now();
+    let mut outbound_sequence = HELLO_SEQUENCE;
+
+    loop {
+        let envelope = match channel.receive().await {
+            Ok(envelope) => envelope,
+            Err(ControlTransportError::Timeout { .. }) => {
+                if last_inbound_at.elapsed() >= DEFAULT_OFFLINE_AFTER {
+                    eprintln!("ClassMesh control session closed: control.heartbeat.offline");
+                    connection.close(0_u32.into(), b"control peer offline");
+                    return;
+                }
+                continue;
+            }
+            Err(error) => {
+                eprintln!(
+                    "ClassMesh control session transport failed: {}",
+                    transport_diagnostic_code(&error)
+                );
+                connection.close(0_u32.into(), b"control transport failed");
+                return;
+            }
+        };
+        last_inbound_at = Instant::now();
+
+        match envelope.payload.as_ref() {
+            Some(control_envelope::Payload::Heartbeat(sample)) => {
+                if let Err(error) = guard.validate_envelope(&envelope) {
+                    eprintln!(
+                        "ClassMesh control envelope rejected: {}",
+                        command_authorization_diagnostic_code(&error)
+                    );
+                    connection.close(0_u32.into(), b"invalid control envelope");
+                    return;
+                }
+
+                let Some(media_health) = media_health_from_wire(sample.media) else {
+                    eprintln!(
+                        "ClassMesh heartbeat rejected: control.heartbeat.invalid_media_health"
+                    );
+                    connection.close(0_u32.into(), b"invalid heartbeat");
+                    return;
+                };
+                if let Err(error) = heartbeat.observe(
+                    session_clock.elapsed(),
+                    HeartbeatSample {
+                        control_session_id: sample.control_session_id,
+                        sequence: envelope.sequence,
+                        media_health,
+                    },
+                ) {
+                    eprintln!(
+                        "ClassMesh heartbeat rejected: {}",
+                        heartbeat_diagnostic_code(&error)
+                    );
+                    connection.close(0_u32.into(), b"invalid heartbeat");
+                    return;
+                }
+
+                let Some(next_sequence) = outbound_sequence.checked_add(1) else {
+                    eprintln!("ClassMesh control session closed: control.sequence.exhausted");
+                    connection.close(0_u32.into(), b"control sequence exhausted");
+                    return;
+                };
+                outbound_sequence = next_sequence;
+                let ack = ControlEnvelope {
+                    control_session_id: session.control_session_id,
+                    sequence: outbound_sequence,
+                    protocol_version: Some(WireProtocolVersion {
+                        major: u32::from(session.negotiated.version.major),
+                        minor: u32::from(session.negotiated.version.minor),
+                    }),
+                    request_id: envelope.request_id,
+                    payload: Some(control_envelope::Payload::HeartbeatAck(HeartbeatAck {
+                        heartbeat_sequence: envelope.sequence,
+                        monotonic_time_us: duration_micros_u64(session_clock.elapsed()),
+                    })),
+                };
+                if let Err(error) = channel.send(&ack).await {
+                    eprintln!(
+                        "ClassMesh heartbeat ack failed: {}",
+                        transport_diagnostic_code(&error)
+                    );
+                    connection.close(0_u32.into(), b"heartbeat ack failed");
+                    return;
+                }
+            }
+            Some(control_envelope::Payload::InputEvent(_)) => {
+                let now_unix_ms = match unix_time_ms() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"invalid service clock");
+                        return;
+                    }
+                };
+                match dispatch_privileged_command(
+                    &mut guard,
+                    authorization,
+                    &envelope,
+                    now_unix_ms,
+                ) {
+                    Ok(PrivilegedControlCommand::InputEvent(_)) => {
+                        eprintln!(
+                            "ClassMesh authorized input rejected: control.command.executor_unavailable"
+                        );
+                        connection.close(0_u32.into(), b"input executor unavailable");
+                        return;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "ClassMesh privileged command rejected: {}",
+                            privileged_dispatch_diagnostic_code(&error)
+                        );
+                        connection.close(0_u32.into(), b"privileged command rejected");
+                        return;
+                    }
+                }
+            }
+            _ => {
+                if let Err(error) = guard.validate_envelope(&envelope) {
+                    eprintln!(
+                        "ClassMesh control envelope rejected: {}",
+                        command_authorization_diagnostic_code(&error)
+                    );
+                } else {
+                    eprintln!(
+                        "ClassMesh control payload rejected: control.command.unsupported_payload"
+                    );
+                }
+                connection.close(0_u32.into(), b"unsupported control payload");
+                return;
+            }
+        }
+    }
+}
+
+fn media_health_from_wire(value: i32) -> Option<MediaHealth> {
+    match value {
+        1 => Some(MediaHealth::Idle),
+        2 => Some(MediaHealth::Starting),
+        3 => Some(MediaHealth::Streaming),
+        4 => Some(MediaHealth::Degraded),
+        5 => Some(MediaHealth::Recovering),
+        6 => Some(MediaHealth::Suspended),
+        7 => Some(MediaHealth::Failed),
+        _ => None,
+    }
+}
+
+fn duration_micros_u64(value: Duration) -> u64 {
+    u64::try_from(value.as_micros()).unwrap_or(u64::MAX)
 }
 
 fn build_endpoint(
@@ -369,6 +559,14 @@ mod tests {
         assert!(ControlRuntimeConfig::load(&path).is_err());
 
         let _ = fs::remove_dir_all(path.parent().expect("test parent"));
+    }
+
+    #[test]
+    fn wire_media_health_rejects_unspecified_and_unknown_values() {
+        assert_eq!(media_health_from_wire(0), None);
+        assert_eq!(media_health_from_wire(99), None);
+        assert_eq!(media_health_from_wire(3), Some(MediaHealth::Streaming));
+        assert_eq!(media_health_from_wire(5), Some(MediaHealth::Recovering));
     }
 
     #[test]
