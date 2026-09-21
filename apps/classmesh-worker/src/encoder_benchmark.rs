@@ -143,7 +143,10 @@ impl RuntimeEncoderBenchmark {
             self.pipeline = Some(created);
         }
 
-        let active = self.pipeline.as_mut().expect("benchmark pipeline initialized");
+        let active = self
+            .pipeline
+            .as_mut()
+            .expect("benchmark pipeline initialized");
 
         if self.pending_reset.is_none()
             && self
@@ -341,8 +344,8 @@ mod tests {
             advertised_hardware: true,
             advertised_async: true,
         };
-        let key = benchmark_cache_key(&adapter, &candidate, profile(1280, 720, 30))
-            .expect("cache key");
+        let key =
+            benchmark_cache_key(&adapter, &candidate, profile(1280, 720, 30)).expect("cache key");
         assert_eq!(key.adapter_identity, "55667788:11223344");
         assert_eq!(key.driver_version, "31.0.15.5123");
         assert_eq!(key.encoder_clsid, "{encoder-clsid}");
