@@ -129,12 +129,7 @@ impl WorkerCapabilityState {
         *self.lock_snapshot() = WorkerCapabilitySnapshot::default();
     }
 
-    pub(crate) fn is_current(
-        &self,
-        generation: u64,
-        process_id: u32,
-        session_id: u32,
-    ) -> bool {
+    pub(crate) fn is_current(&self, generation: u64, process_id: u32, session_id: u32) -> bool {
         let snapshot = *self.lock_snapshot();
         generation != 0
             && snapshot.generation == generation
