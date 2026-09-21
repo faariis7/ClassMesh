@@ -177,7 +177,6 @@ impl WorkerRuntimeCapabilities {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkerEncoderEvidence {
     pub process_id: u32,
@@ -479,8 +478,10 @@ impl IpcFrame {
                 let session_id = u32::from_be_bytes(self.payload[4..8].try_into().expect("slice"));
                 let width = u16::from_be_bytes(self.payload[8..10].try_into().expect("slice"));
                 let height = u16::from_be_bytes(self.payload[10..12].try_into().expect("slice"));
-                let target_fps = u16::from_be_bytes(self.payload[12..14].try_into().expect("slice"));
-                let bitrate_bps = u32::from_be_bytes(self.payload[14..18].try_into().expect("slice"));
+                let target_fps =
+                    u16::from_be_bytes(self.payload[12..14].try_into().expect("slice"));
+                let bitrate_bps =
+                    u32::from_be_bytes(self.payload[14..18].try_into().expect("slice"));
                 let flags = u16::from_be_bytes(self.payload[18..20].try_into().expect("slice"));
                 if flags & !0x003f != 0 {
                     return Err(IpcMessageError::InvalidPayload);
@@ -504,7 +505,9 @@ impl IpcFrame {
                     u32::from_be_bytes(self.payload[38..42].try_into().expect("slice"));
                 let mut cursor = 42_usize;
                 let mut next_string = |maximum: usize| -> Result<String, IpcMessageError> {
-                    let end_len = cursor.checked_add(2).ok_or(IpcMessageError::InvalidPayload)?;
+                    let end_len = cursor
+                        .checked_add(2)
+                        .ok_or(IpcMessageError::InvalidPayload)?;
                     let length_bytes = self
                         .payload
                         .get(cursor..end_len)
@@ -747,7 +750,9 @@ mod tests {
             .encode()
             .expect("evidence frame should encode");
         let mut decoder = IpcFrameDecoder::default();
-        let frames = decoder.push_bytes(&encoded).expect("evidence frame should decode");
+        let frames = decoder
+            .push_bytes(&encoded)
+            .expect("evidence frame should decode");
         assert_eq!(
             frames[0].message().expect("typed evidence"),
             IpcMessage::WorkerEncoderEvidence(evidence)
