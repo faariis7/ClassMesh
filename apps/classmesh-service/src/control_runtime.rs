@@ -1293,16 +1293,40 @@ mod tests {
         assert!(state.apply_report(12, 120, 7, true, false));
 
         assert!(!state.apply_h264_qualification(11, 120, 7, true));
-        assert!(!state.hello_capabilities().contains(&Capability::H264HardwareEncode));
-        assert!(state.hello_capabilities().contains(&Capability::DxgiCapture));
+        assert!(
+            !state
+                .hello_capabilities()
+                .contains(&Capability::H264HardwareEncode)
+        );
+        assert!(
+            state
+                .hello_capabilities()
+                .contains(&Capability::DxgiCapture)
+        );
 
         assert!(state.apply_h264_qualification(12, 120, 7, true));
-        assert!(state.hello_capabilities().contains(&Capability::H264HardwareEncode));
-        assert!(state.hello_capabilities().contains(&Capability::DxgiCapture));
+        assert!(
+            state
+                .hello_capabilities()
+                .contains(&Capability::H264HardwareEncode)
+        );
+        assert!(
+            state
+                .hello_capabilities()
+                .contains(&Capability::DxgiCapture)
+        );
 
         assert!(state.apply_h264_qualification(12, 120, 7, false));
-        assert!(!state.hello_capabilities().contains(&Capability::H264HardwareEncode));
-        assert!(state.hello_capabilities().contains(&Capability::DxgiCapture));
+        assert!(
+            !state
+                .hello_capabilities()
+                .contains(&Capability::H264HardwareEncode)
+        );
+        assert!(
+            state
+                .hello_capabilities()
+                .contains(&Capability::DxgiCapture)
+        );
     }
 
     #[test]
