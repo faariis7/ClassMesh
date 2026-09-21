@@ -4,6 +4,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::time::{Duration, Instant};
 
     use classmesh_capture_win::CaptureStep;
+    use classmesh_worker::encoder_benchmark::{MeasuredEncoderEvidence, RuntimeEncoderBenchmark};
     use classmesh_win32::{InputInjector, NamedPipeClient};
     use classmesh_windows_runtime::ipc::{IpcFrame, IpcMessage};
 
@@ -50,8 +51,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ipc_thread = spawn_ipc_reader(reader_pipe, event_tx);
 
     let mut capture_restart = CaptureRestart::default();
+    let mut encoder_benchmark = None;
     let mut capture = match start_capture() {
-        Ok(capture) => Some(capture),
+        Ok((capture, adapter)) => {
+            encoder_benchmark = runtime_encoder_benchmark(adapter);
+            Some(capture)
+        }
         Err(error) => {
             capture_restart.record_failure(Instant::now());
             eprintln!(
@@ -94,6 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 classmesh_windows_runtime::ipc::IpcControlCommand::SuspendMedia => {
                     release_tracked_input(&mut input_injector);
                     capture = None;
+                    encoder_benchmark = None;
                     capture_restart.clear();
                     eprintln!("ClassMesh Worker DXGI capture suspended by Service");
                     continue;
@@ -104,7 +110,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     release_tracked_input(&mut input_injector);
                     capture_restart.clear();
                     capture = match start_capture() {
-                        Ok(capture) => {
+                        Ok((capture, adapter)) => {
+                            encoder_benchmark = runtime_encoder_benchmark(adapter);
                             eprintln!("ClassMesh Worker DXGI capture resumed by Service");
                             if !runtime_capabilities.dxgi_capture {
                                 runtime_capabilities.dxgi_capture = true;
@@ -190,7 +197,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if capture.is_none() && capture_restart.is_due(Instant::now()) {
             match start_capture() {
-                Ok(restarted) => {
+                Ok((restarted, adapter)) => {
+                    encoder_benchmark = runtime_encoder_benchmark(adapter);
                     capture = Some(restarted);
                     capture_restart.clear();
                     capture_due = Instant::now();
@@ -242,15 +250,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         meta.pointer_visible
                     );
                 }
-                // The next milestone hands this GPU-native texture directly to the encoder. For now
-                // dropping the frame releases the Desktop Duplication frame without CPU readback.
-                drop(frame);
-                capture_due = next_capture_due(active_focused_profile);
+                if encoder_benchmark.is_some() {
+                    let outcome = encoder_benchmark
+                        .as_mut()
+                        .expect("benchmark presence checked")
+                        .process_frame(meta, frame);
+                    match outcome {
+                        Ok(Some(evidence)) => {
+                            publish_worker_encoder_evidence(
+                                &pipe,
+                                std::process::id(),
+                                actual_session,
+                                evidence,
+                            )?;
+                            encoder_benchmark = None;
+                            eprintln!(
+                                "ClassMesh Worker completed bounded H264 benchmark and published measured evidence"
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            encoder_benchmark = None;
+                            eprintln!(
+                                "ClassMesh Worker H264 benchmark failed closed; control remains active: {error}"
+                            );
+                        }
+                    }
+                } else {
+                    // Outside qualification the production sender is still intentionally not wired.
+                    drop(frame);
+                }
+                capture_due = if encoder_benchmark.is_some() {
+                    Instant::now()
+                } else {
+                    next_capture_due(active_focused_profile)
+                };
             }
             CaptureStep::NoFrame => {
                 capture_due = Instant::now();
             }
             CaptureStep::RetryAfter { delay_ms, reason } => {
+                encoder_benchmark = None;
                 eprintln!("DXGI capture recovery scheduled after {reason:?} in {delay_ms} ms");
                 capture_due = Instant::now()
                     .checked_add(Duration::from_millis(delay_ms))
@@ -258,6 +298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             CaptureStep::Suspended(reason) => {
                 eprintln!("DXGI capture suspended by backend; control remains active: {reason:?}");
+                encoder_benchmark = None;
                 capture = None;
                 capture_restart.clear();
             }
@@ -265,6 +306,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!(
                     "DXGI capture failed after backend recovery; control remains active: {reason:?}"
                 );
+                encoder_benchmark = None;
                 capture = None;
                 capture_restart.record_failure(Instant::now());
             }
@@ -450,8 +492,16 @@ fn input_action_from_wire(
 }
 
 #[cfg(windows)]
-fn start_capture() -> Result<WorkerCapture, Box<dyn std::error::Error>> {
-    use classmesh_capture_win::{RecoveringCapture, enumerate_displays};
+fn start_capture() -> Result<
+    (
+        WorkerCapture,
+        classmesh_capture_win::AdapterCapabilityIdentity,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    use classmesh_capture_win::{
+        RecoveringCapture, enumerate_displays, query_adapter_capability_identity,
+    };
     use classmesh_core::recovery::RecoveryPolicy;
 
     let displays = enumerate_displays().map_err(capture_error)?;
@@ -471,13 +521,74 @@ fn start_capture() -> Result<WorkerCapture, Box<dyn std::error::Error>> {
         display.id.output_index
     );
 
+    let adapter = query_adapter_capability_identity(display.id).map_err(capture_error)?;
     let mut capture = RecoveringCapture::new(
         display.id,
         classmesh_capture_win::DxgiCaptureFactory,
         RecoveryPolicy::default(),
     );
     capture.start().map_err(capture_error)?;
-    Ok(capture)
+    Ok((capture, adapter))
+}
+
+#[cfg(windows)]
+fn runtime_encoder_benchmark(
+    adapter: classmesh_capture_win::AdapterCapabilityIdentity,
+) -> Option<RuntimeEncoderBenchmark> {
+    match RuntimeEncoderBenchmark::compatibility_720p30(adapter) {
+        Ok(benchmark) => Some(benchmark),
+        Err(error) => {
+            eprintln!(
+                "ClassMesh Worker could not initialize bounded H264 benchmark; control remains active: {error}"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(windows)]
+fn publish_worker_encoder_evidence(
+    pipe: &classmesh_win32::NamedPipeClient,
+    process_id: u32,
+    session_id: u32,
+    evidence: MeasuredEncoderEvidence,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use classmesh_video::EncoderClass;
+
+    let encoder_class = match evidence.result.class {
+        EncoderClass::Unsupported => 0,
+        EncoderClass::Compatibility => 1,
+        EncoderClass::Presentation1080p30 => 2,
+        EncoderClass::Presentation1080p60 => 3,
+    };
+    let report = classmesh_windows_runtime::ipc::WorkerEncoderEvidence {
+        process_id,
+        session_id,
+        adapter_identity: evidence.key.adapter_identity,
+        driver_version: evidence.key.driver_version,
+        encoder_clsid: evidence.key.encoder_clsid,
+        width: evidence.key.width,
+        height: evidence.key.height,
+        target_fps: evidence.key.target_fps,
+        bitrate_bps: evidence.key.bitrate_bps,
+        backend: evidence.result.probe.backend,
+        advertised_hardware: evidence.result.probe.advertised_hardware,
+        gpu_native_input: evidence.result.probe.gpu_native_input,
+        low_latency_accepted: evidence.result.probe.low_latency_accepted,
+        reset_ok: evidence.result.probe.reset_ok,
+        dynamic_bitrate_ok: evidence.result.probe.dynamic_bitrate_ok,
+        keyframe_request_ok: evidence.result.probe.keyframe_request_ok,
+        encoder_class,
+        sustained_fps: evidence.result.probe.sustained_fps,
+        p50_encode_ms: evidence.result.probe.p50_encode_ms,
+        p95_encode_ms: evidence.result.probe.p95_encode_ms,
+        output_frames: u32::try_from(evidence.result.output_frames)?,
+        dropped_or_missing: u32::try_from(evidence.result.dropped_or_missing)?,
+    };
+    let frame = classmesh_windows_runtime::ipc::IpcFrame::worker_encoder_evidence(&report)
+        .map_err(ipc_message_error)?;
+    pipe.write_all(&frame.encode().map_err(ipc_frame_error)?)?;
+    Ok(())
 }
 
 #[cfg(windows)]
