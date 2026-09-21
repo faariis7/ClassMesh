@@ -363,7 +363,7 @@ impl IpcFrame {
         payload.extend_from_slice(&evidence.target_fps.to_be_bytes());
         payload.extend_from_slice(&evidence.bitrate_bps.to_be_bytes());
         let mut flags = 0_u16;
-        flags |= u16::from(evidence.advertised_hardware) << 0;
+        flags |= u16::from(evidence.advertised_hardware);
         flags |= u16::from(evidence.gpu_native_input) << 1;
         flags |= u16::from(evidence.low_latency_accepted) << 2;
         flags |= u16::from(evidence.reset_ok) << 3;
