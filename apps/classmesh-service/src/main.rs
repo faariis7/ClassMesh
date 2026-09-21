@@ -563,9 +563,37 @@ mod windows_service_app {
                                             "Worker encoder evidence rejected by durable cache validation: {error}"
                                         );
                                     } else {
-                                        eprintln!(
-                                            "ClassMesh Service persisted measured H264 encoder evidence for pid {expected_process_id} session {expected_session_id}"
-                                        );
+                                        match encoder_capability_cache.load_exact(&key) {
+                                            Ok(Some(verified)) => {
+                                                let qualified =
+                                                    verified.class != EncoderClass::Unsupported;
+                                                if capabilities.apply_h264_qualification(
+                                                    generation,
+                                                    expected_process_id,
+                                                    expected_session_id,
+                                                    qualified,
+                                                ) {
+                                                    eprintln!(
+                                                        "ClassMesh Service persisted and verified measured H264 encoder evidence for pid {expected_process_id} session {expected_session_id}: qualified={qualified}"
+                                                    );
+                                                } else {
+                                                    eprintln!(
+                                                        "Measured H264 evidence became stale before runtime publication for pid {expected_process_id}"
+                                                    );
+                                                    return;
+                                                }
+                                            }
+                                            Ok(None) => {
+                                                eprintln!(
+                                                    "Persisted H264 evidence did not reload with its exact cache key; runtime capability remains disabled"
+                                                );
+                                            }
+                                            Err(error) => {
+                                                eprintln!(
+                                                    "Persisted H264 evidence failed exact reload; runtime capability remains disabled: {error}"
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                                 Err(error) => {
