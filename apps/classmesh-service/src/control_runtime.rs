@@ -154,6 +154,30 @@ impl WorkerCapabilityState {
         true
     }
 
+    pub(crate) fn apply_h264_qualification(
+        &self,
+        generation: u64,
+        process_id: u32,
+        session_id: u32,
+        qualified: bool,
+    ) -> bool {
+        let mut snapshot = self.lock_snapshot();
+        if generation == 0
+            || snapshot.generation != generation
+            || snapshot.process_id != process_id
+            || snapshot.session_id != session_id
+        {
+            return false;
+        }
+
+        if qualified {
+            snapshot.flags |= WORKER_CAP_H264_HARDWARE_ENCODE;
+        } else {
+            snapshot.flags &= !WORKER_CAP_H264_HARDWARE_ENCODE;
+        }
+        true
+    }
+
     pub(crate) fn apply_report(
         &self,
         generation: u64,
@@ -1260,6 +1284,25 @@ mod tests {
             state.hello_capabilities(),
             BTreeSet::from([Capability::ServiceSessionWorker])
         );
+    }
+
+    #[test]
+    fn h264_qualification_updates_only_the_current_worker_generation() {
+        let state = WorkerCapabilityState::default();
+        state.activate(12, 120, 7);
+        assert!(state.apply_report(12, 120, 7, true, false));
+
+        assert!(!state.apply_h264_qualification(11, 120, 7, true));
+        assert!(!state.hello_capabilities().contains(&Capability::H264HardwareEncode));
+        assert!(state.hello_capabilities().contains(&Capability::DxgiCapture));
+
+        assert!(state.apply_h264_qualification(12, 120, 7, true));
+        assert!(state.hello_capabilities().contains(&Capability::H264HardwareEncode));
+        assert!(state.hello_capabilities().contains(&Capability::DxgiCapture));
+
+        assert!(state.apply_h264_qualification(12, 120, 7, false));
+        assert!(!state.hello_capabilities().contains(&Capability::H264HardwareEncode));
+        assert!(state.hello_capabilities().contains(&Capability::DxgiCapture));
     }
 
     #[test]
