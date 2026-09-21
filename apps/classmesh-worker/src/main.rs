@@ -534,7 +534,9 @@ fn start_capture() -> Result<
 fn runtime_encoder_benchmark(
     adapter: classmesh_capture_win::AdapterCapabilityIdentity,
 ) -> Option<classmesh_worker::encoder_benchmark::RuntimeEncoderBenchmark> {
-    match classmesh_worker::encoder_benchmark::RuntimeEncoderBenchmark::compatibility_720p30(adapter) {
+    match classmesh_worker::encoder_benchmark::RuntimeEncoderBenchmark::compatibility_720p30(
+        adapter,
+    ) {
         Ok(benchmark) => Some(benchmark),
         Err(error) => {
             eprintln!(
