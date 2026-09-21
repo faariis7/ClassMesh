@@ -16,6 +16,7 @@ classmesh-core = { path = "../../crates/classmesh-core" }
 classmesh-identity-win = { path = "../../crates/classmesh-identity-win" }
 classmesh-protocol = { path = "../../crates/classmesh-protocol" }
 classmesh-security = { path = "../../crates/classmesh-security" }
+classmesh-video = { path = "../../crates/classmesh-video" }
 classmesh-win32 = { path = "../../crates/classmesh-win32" }
 quinn = "0.11.12"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

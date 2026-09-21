@@ -7,7 +7,7 @@ pub const IPC_MAGIC: u32 = 0x434D_4950; // "CMIP"
 pub const IPC_HEADER_LEN: usize = 12;
 pub const MAX_IPC_MESSAGE: usize = 1_048_576;
 pub const IPC_VERSION_MAJOR: u8 = 0;
-pub const IPC_VERSION_MINOR: u8 = 2;
+pub const IPC_VERSION_MINOR: u8 = 3;
 
 const MESSAGE_WORKER_HELLO: u16 = 1;
 const MESSAGE_SERVICE_READY: u16 = 2;
@@ -15,6 +15,13 @@ const MESSAGE_CONTROL: u16 = 10;
 const MESSAGE_INPUT_EVENT: u16 = 11;
 const MESSAGE_STREAM_RECONFIGURE: u16 = 12;
 const MESSAGE_WORKER_CAPABILITIES: u16 = 13;
+const MESSAGE_WORKER_ENCODER_EVIDENCE: u16 = 14;
+
+const MAX_EVIDENCE_ADAPTER_IDENTITY: usize = 128;
+const MAX_EVIDENCE_DRIVER_VERSION: usize = 128;
+const MAX_EVIDENCE_ENCODER_CLSID: usize = 128;
+const MAX_EVIDENCE_BACKEND: usize = 256;
+const ENCODER_EVIDENCE_FIXED_LEN: usize = 50;
 
 const WORKER_CAP_DXGI_CAPTURE: u32 = 1 << 0;
 const WORKER_CAP_H264_HARDWARE_ENCODE: u32 = 1 << 1;
@@ -171,6 +178,66 @@ impl WorkerRuntimeCapabilities {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct WorkerEncoderEvidence {
+    pub process_id: u32,
+    pub session_id: u32,
+    pub adapter_identity: String,
+    pub driver_version: String,
+    pub encoder_clsid: String,
+    pub width: u16,
+    pub height: u16,
+    pub target_fps: u16,
+    pub bitrate_bps: u32,
+    pub backend: String,
+    pub advertised_hardware: bool,
+    pub gpu_native_input: bool,
+    pub low_latency_accepted: bool,
+    pub reset_ok: bool,
+    pub dynamic_bitrate_ok: bool,
+    pub keyframe_request_ok: bool,
+    pub encoder_class: u8,
+    pub sustained_fps: f32,
+    pub p50_encode_ms: f32,
+    pub p95_encode_ms: f32,
+    pub output_frames: u32,
+    pub dropped_or_missing: u32,
+}
+
+impl WorkerEncoderEvidence {
+    fn validate(&self) -> Result<(), IpcMessageError> {
+        if self.process_id == 0
+            || self.session_id == 0
+            || self.width == 0
+            || self.height == 0
+            || self.target_fps == 0
+            || self.bitrate_bps == 0
+            || self.encoder_class > 3
+            || !self.sustained_fps.is_finite()
+            || self.sustained_fps < 0.0
+            || !self.p50_encode_ms.is_finite()
+            || self.p50_encode_ms <= 0.0
+            || !self.p95_encode_ms.is_finite()
+            || self.p95_encode_ms <= 0.0
+            || self.p50_encode_ms > self.p95_encode_ms
+        {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        validate_evidence_string(&self.adapter_identity, MAX_EVIDENCE_ADAPTER_IDENTITY)?;
+        validate_evidence_string(&self.driver_version, MAX_EVIDENCE_DRIVER_VERSION)?;
+        validate_evidence_string(&self.encoder_clsid, MAX_EVIDENCE_ENCODER_CLSID)?;
+        validate_evidence_string(&self.backend, MAX_EVIDENCE_BACKEND)?;
+        Ok(())
+    }
+}
+
+fn validate_evidence_string(value: &str, maximum: usize) -> Result<(), IpcMessageError> {
+    if value.is_empty() || value.len() > maximum || value.len() > usize::from(u16::MAX) {
+        return Err(IpcMessageError::InvalidPayload);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum IpcMessage {
     WorkerHello { process_id: u32, session_id: u32 },
     ServiceReady,
@@ -178,6 +245,7 @@ pub enum IpcMessage {
     InputEvent(InputEvent),
     StreamReconfigure(StreamReconfigure),
     WorkerCapabilities(WorkerRuntimeCapabilities),
+    WorkerEncoderEvidence(WorkerEncoderEvidence),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,6 +345,51 @@ impl IpcFrame {
         Self::new(MESSAGE_WORKER_CAPABILITIES, payload)
     }
 
+    pub fn worker_encoder_evidence(
+        evidence: &WorkerEncoderEvidence,
+    ) -> Result<Self, IpcMessageError> {
+        evidence.validate()?;
+        let mut payload = Vec::with_capacity(
+            ENCODER_EVIDENCE_FIXED_LEN
+                + evidence.adapter_identity.len()
+                + evidence.driver_version.len()
+                + evidence.encoder_clsid.len()
+                + evidence.backend.len(),
+        );
+        payload.extend_from_slice(&evidence.process_id.to_be_bytes());
+        payload.extend_from_slice(&evidence.session_id.to_be_bytes());
+        payload.extend_from_slice(&evidence.width.to_be_bytes());
+        payload.extend_from_slice(&evidence.height.to_be_bytes());
+        payload.extend_from_slice(&evidence.target_fps.to_be_bytes());
+        payload.extend_from_slice(&evidence.bitrate_bps.to_be_bytes());
+        let mut flags = 0_u16;
+        flags |= u16::from(evidence.advertised_hardware);
+        flags |= u16::from(evidence.gpu_native_input) << 1;
+        flags |= u16::from(evidence.low_latency_accepted) << 2;
+        flags |= u16::from(evidence.reset_ok) << 3;
+        flags |= u16::from(evidence.dynamic_bitrate_ok) << 4;
+        flags |= u16::from(evidence.keyframe_request_ok) << 5;
+        payload.extend_from_slice(&flags.to_be_bytes());
+        payload.push(evidence.encoder_class);
+        payload.push(0);
+        payload.extend_from_slice(&evidence.sustained_fps.to_bits().to_be_bytes());
+        payload.extend_from_slice(&evidence.p50_encode_ms.to_bits().to_be_bytes());
+        payload.extend_from_slice(&evidence.p95_encode_ms.to_bits().to_be_bytes());
+        payload.extend_from_slice(&evidence.output_frames.to_be_bytes());
+        payload.extend_from_slice(&evidence.dropped_or_missing.to_be_bytes());
+        for value in [
+            &evidence.adapter_identity,
+            &evidence.driver_version,
+            &evidence.encoder_clsid,
+            &evidence.backend,
+        ] {
+            let len = u16::try_from(value.len()).map_err(|_| IpcMessageError::InvalidPayload)?;
+            payload.extend_from_slice(&len.to_be_bytes());
+            payload.extend_from_slice(value.as_bytes());
+        }
+        Ok(Self::new(MESSAGE_WORKER_ENCODER_EVIDENCE, payload))
+    }
+
     pub fn message(&self) -> Result<IpcMessage, IpcMessageError> {
         if self.header.version_major != IPC_VERSION_MAJOR {
             return Err(IpcMessageError::UnsupportedVersion);
@@ -356,6 +469,99 @@ impl IpcFrame {
                     session_id,
                     flags: flags & KNOWN_WORKER_CAPABILITIES,
                 }))
+            }
+            MESSAGE_WORKER_ENCODER_EVIDENCE => {
+                if self.payload.len() < ENCODER_EVIDENCE_FIXED_LEN {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let process_id = u32::from_be_bytes(self.payload[0..4].try_into().expect("slice"));
+                let session_id = u32::from_be_bytes(self.payload[4..8].try_into().expect("slice"));
+                let width = u16::from_be_bytes(self.payload[8..10].try_into().expect("slice"));
+                let height = u16::from_be_bytes(self.payload[10..12].try_into().expect("slice"));
+                let target_fps =
+                    u16::from_be_bytes(self.payload[12..14].try_into().expect("slice"));
+                let bitrate_bps =
+                    u32::from_be_bytes(self.payload[14..18].try_into().expect("slice"));
+                let flags = u16::from_be_bytes(self.payload[18..20].try_into().expect("slice"));
+                if flags & !0x003f != 0 {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let encoder_class = self.payload[20];
+                if self.payload[21] != 0 {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let sustained_fps = f32::from_bits(u32::from_be_bytes(
+                    self.payload[22..26].try_into().expect("slice"),
+                ));
+                let p50_encode_ms = f32::from_bits(u32::from_be_bytes(
+                    self.payload[26..30].try_into().expect("slice"),
+                ));
+                let p95_encode_ms = f32::from_bits(u32::from_be_bytes(
+                    self.payload[30..34].try_into().expect("slice"),
+                ));
+                let output_frames =
+                    u32::from_be_bytes(self.payload[34..38].try_into().expect("slice"));
+                let dropped_or_missing =
+                    u32::from_be_bytes(self.payload[38..42].try_into().expect("slice"));
+                let mut cursor = 42_usize;
+                let mut next_string = |maximum: usize| -> Result<String, IpcMessageError> {
+                    let end_len = cursor
+                        .checked_add(2)
+                        .ok_or(IpcMessageError::InvalidPayload)?;
+                    let length_bytes = self
+                        .payload
+                        .get(cursor..end_len)
+                        .ok_or(IpcMessageError::InvalidPayload)?;
+                    let length = usize::from(u16::from_be_bytes(
+                        length_bytes.try_into().expect("two bytes"),
+                    ));
+                    cursor = end_len;
+                    if length == 0 || length > maximum {
+                        return Err(IpcMessageError::InvalidPayload);
+                    }
+                    let end = cursor
+                        .checked_add(length)
+                        .ok_or(IpcMessageError::InvalidPayload)?;
+                    let bytes = self
+                        .payload
+                        .get(cursor..end)
+                        .ok_or(IpcMessageError::InvalidPayload)?;
+                    cursor = end;
+                    String::from_utf8(bytes.to_vec()).map_err(|_| IpcMessageError::InvalidPayload)
+                };
+                let adapter_identity = next_string(MAX_EVIDENCE_ADAPTER_IDENTITY)?;
+                let driver_version = next_string(MAX_EVIDENCE_DRIVER_VERSION)?;
+                let encoder_clsid = next_string(MAX_EVIDENCE_ENCODER_CLSID)?;
+                let backend = next_string(MAX_EVIDENCE_BACKEND)?;
+                if cursor != self.payload.len() {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let evidence = WorkerEncoderEvidence {
+                    process_id,
+                    session_id,
+                    adapter_identity,
+                    driver_version,
+                    encoder_clsid,
+                    width,
+                    height,
+                    target_fps,
+                    bitrate_bps,
+                    backend,
+                    advertised_hardware: flags & (1 << 0) != 0,
+                    gpu_native_input: flags & (1 << 1) != 0,
+                    low_latency_accepted: flags & (1 << 2) != 0,
+                    reset_ok: flags & (1 << 3) != 0,
+                    dynamic_bitrate_ok: flags & (1 << 4) != 0,
+                    keyframe_request_ok: flags & (1 << 5) != 0,
+                    encoder_class,
+                    sustained_fps,
+                    p50_encode_ms,
+                    p95_encode_ms,
+                    output_frames,
+                    dropped_or_missing,
+                };
+                evidence.validate()?;
+                Ok(IpcMessage::WorkerEncoderEvidence(evidence))
             }
             _ => Err(IpcMessageError::UnknownMessageType),
         }
@@ -511,6 +717,52 @@ mod tests {
                 .expect("unknown future flag should be ignored"),
             IpcMessage::WorkerCapabilities(capabilities)
         );
+    }
+
+    #[test]
+    fn worker_encoder_evidence_round_trips() {
+        let evidence = WorkerEncoderEvidence {
+            process_id: 42,
+            session_id: 7,
+            adapter_identity: "55667788:11223344".into(),
+            driver_version: "31.0.15.5123".into(),
+            encoder_clsid: "{encoder-clsid}".into(),
+            width: 1280,
+            height: 720,
+            target_fps: 30,
+            bitrate_bps: 2_500_000,
+            backend: "test encoder".into(),
+            advertised_hardware: true,
+            gpu_native_input: true,
+            low_latency_accepted: true,
+            reset_ok: true,
+            dynamic_bitrate_ok: false,
+            keyframe_request_ok: true,
+            encoder_class: 1,
+            sustained_fps: 30.0,
+            p50_encode_ms: 4.0,
+            p95_encode_ms: 8.0,
+            output_frames: 120,
+            dropped_or_missing: 0,
+        };
+        let encoded = IpcFrame::worker_encoder_evidence(&evidence)
+            .expect("valid evidence")
+            .encode()
+            .expect("evidence frame should encode");
+        let mut decoder = IpcFrameDecoder::default();
+        let frames = decoder
+            .push_bytes(&encoded)
+            .expect("evidence frame should decode");
+        assert_eq!(
+            frames[0].message().expect("typed evidence"),
+            IpcMessage::WorkerEncoderEvidence(evidence)
+        );
+    }
+
+    #[test]
+    fn malformed_worker_encoder_evidence_is_rejected() {
+        let frame = IpcFrame::new(MESSAGE_WORKER_ENCODER_EVIDENCE, vec![0; 41]);
+        assert_eq!(frame.message(), Err(IpcMessageError::InvalidPayload));
     }
 
     #[test]
