@@ -4,9 +4,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::time::{Duration, Instant};
 
     use classmesh_capture_win::CaptureStep;
-    use classmesh_worker::encoder_benchmark::{MeasuredEncoderEvidence, RuntimeEncoderBenchmark};
     use classmesh_win32::{InputInjector, NamedPipeClient};
     use classmesh_windows_runtime::ipc::{IpcFrame, IpcMessage};
+    use classmesh_worker::encoder_benchmark::{MeasuredEncoderEvidence, RuntimeEncoderBenchmark};
 
     let args: Vec<String> = std::env::args().collect();
     let expected_session = parse_session(&args)?;
