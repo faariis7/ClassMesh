@@ -21,7 +21,7 @@ const MAX_EVIDENCE_ADAPTER_IDENTITY: usize = 128;
 const MAX_EVIDENCE_DRIVER_VERSION: usize = 128;
 const MAX_EVIDENCE_ENCODER_CLSID: usize = 128;
 const MAX_EVIDENCE_BACKEND: usize = 256;
-const ENCODER_EVIDENCE_FIXED_LEN: usize = 46;
+const ENCODER_EVIDENCE_FIXED_LEN: usize = 50;
 
 const WORKER_CAP_DXGI_CAPTURE: u32 = 1 << 0;
 const WORKER_CAP_H264_HARDWARE_ENCODE: u32 = 1 << 1;
@@ -482,6 +482,9 @@ impl IpcFrame {
                 let target_fps = u16::from_be_bytes(self.payload[12..14].try_into().expect("slice"));
                 let bitrate_bps = u32::from_be_bytes(self.payload[14..18].try_into().expect("slice"));
                 let flags = u16::from_be_bytes(self.payload[18..20].try_into().expect("slice"));
+                if flags & !0x003f != 0 {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
                 let encoder_class = self.payload[20];
                 if self.payload[21] != 0 {
                     return Err(IpcMessageError::InvalidPayload);
