@@ -557,7 +557,8 @@ mod windows_service_app {
                             }
                             match encoder_evidence_parts(evidence) {
                                 Ok((key, result)) => {
-                                    if let Err(error) = encoder_capability_cache.save(&key, &result) {
+                                    if let Err(error) = encoder_capability_cache.save(&key, &result)
+                                    {
                                         eprintln!(
                                             "Worker encoder evidence rejected by durable cache validation: {error}"
                                         );
