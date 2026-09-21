@@ -11,10 +11,12 @@ mod windows_service_app {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use classmesh_codec_win::capability_cache::DurableEncoderCapabilityCache;
+    use classmesh_codec_win::{EncoderBenchmarkResult, EncoderCapabilityCacheKey};
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity};
     use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure};
     use classmesh_security::persistence::DurableAuthorizationState;
     use classmesh_security::{CredentialFingerprint, PrincipalId};
+    use classmesh_video::{Codec, EncoderClass, EncoderProbeResult};
     use sha2::{Digest, Sha256};
 
     use classmesh_win32::{
@@ -79,6 +81,7 @@ mod windows_service_app {
         process: Option<SessionProcess>,
         pipe: Option<NamedPipeServer>,
         capabilities: Arc<WorkerCapabilityState>,
+        encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
         watchdog: WorkerWatchdog,
         pending_restart: Option<(SessionId, Instant)>,
         generation: u64,
@@ -86,7 +89,10 @@ mod windows_service_app {
     }
 
     impl WorkerManager {
-        fn new(capabilities: Arc<WorkerCapabilityState>) -> Self {
+        fn new(
+            capabilities: Arc<WorkerCapabilityState>,
+            encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
+        ) -> Self {
             let executable = std::env::current_exe().ok().map(|service| {
                 service.parent().map_or_else(
                     || PathBuf::from("classmesh-worker.exe"),
@@ -98,6 +104,7 @@ mod windows_service_app {
                 process: None,
                 pipe: None,
                 capabilities,
+                encoder_capability_cache,
                 watchdog: WorkerWatchdog::new(WorkerRestartPolicy::default()),
                 pending_restart: None,
                 generation: 0,
@@ -171,6 +178,7 @@ mod windows_service_app {
                             let _capability_reader = spawn_worker_capability_reader(
                                 reader,
                                 Arc::clone(&self.capabilities),
+                                Arc::clone(&self.encoder_capability_cache),
                                 worker_generation,
                                 process_id,
                                 session.0,
@@ -442,6 +450,7 @@ mod windows_service_app {
     fn spawn_worker_capability_reader(
         pipe: NamedPipeServer,
         capabilities: Arc<WorkerCapabilityState>,
+        encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
         generation: u64,
         expected_process_id: u32,
         expected_session_id: u32,
@@ -528,6 +537,48 @@ mod windows_service_app {
                                 expected_session_id,
                                 report.process_id,
                                 report.session_id
+                            );
+                            return;
+                        }
+                        Ok(IpcMessage::WorkerEncoderEvidence(evidence))
+                            if evidence.process_id == expected_process_id
+                                && evidence.session_id == expected_session_id =>
+                        {
+                            if !capabilities.is_current(
+                                generation,
+                                evidence.process_id,
+                                evidence.session_id,
+                            ) {
+                                eprintln!(
+                                    "Stale Worker encoder evidence ignored for pid {} session {}",
+                                    evidence.process_id, evidence.session_id
+                                );
+                                return;
+                            }
+                            match encoder_evidence_parts(evidence) {
+                                Ok((key, result)) => {
+                                    if let Err(error) = encoder_capability_cache.save(&key, &result) {
+                                        eprintln!(
+                                            "Worker encoder evidence rejected by durable cache validation: {error}"
+                                        );
+                                    } else {
+                                        eprintln!(
+                                            "ClassMesh Service persisted measured H264 encoder evidence for pid {expected_process_id} session {expected_session_id}"
+                                        );
+                                    }
+                                }
+                                Err(error) => {
+                                    eprintln!("Worker encoder evidence rejected: {error}");
+                                }
+                            }
+                        }
+                        Ok(IpcMessage::WorkerEncoderEvidence(evidence)) => {
+                            eprintln!(
+                                "Worker encoder evidence identity mismatch: expected pid {} session {}, received pid {} session {}",
+                                expected_process_id,
+                                expected_session_id,
+                                evidence.process_id,
+                                evidence.session_id
                             );
                             return;
                         }
@@ -640,6 +691,51 @@ mod windows_service_app {
                 "ProgramData is unavailable; refusing to start control runtime".to_owned()
             })?;
         Ok(PathBuf::from(program_data).join(STATE_DIRECTORY))
+    }
+
+    fn encoder_evidence_parts(
+        evidence: classmesh_windows_runtime::ipc::WorkerEncoderEvidence,
+    ) -> Result<(EncoderCapabilityCacheKey, EncoderBenchmarkResult), String> {
+        let class = match evidence.encoder_class {
+            0 => EncoderClass::Unsupported,
+            1 => EncoderClass::Compatibility,
+            2 => EncoderClass::Presentation1080p30,
+            3 => EncoderClass::Presentation1080p60,
+            value => return Err(format!("unsupported encoder class {value}")),
+        };
+        let output_frames = usize::try_from(evidence.output_frames)
+            .map_err(|_| "encoder output frame count is not representable".to_owned())?;
+        let dropped_or_missing = usize::try_from(evidence.dropped_or_missing)
+            .map_err(|_| "encoder missing frame count is not representable".to_owned())?;
+        Ok((
+            EncoderCapabilityCacheKey {
+                adapter_identity: evidence.adapter_identity,
+                driver_version: evidence.driver_version,
+                encoder_clsid: evidence.encoder_clsid,
+                width: evidence.width,
+                height: evidence.height,
+                target_fps: evidence.target_fps,
+                bitrate_bps: evidence.bitrate_bps,
+            },
+            EncoderBenchmarkResult {
+                probe: EncoderProbeResult {
+                    backend: evidence.backend,
+                    codec: Codec::H264,
+                    advertised_hardware: evidence.advertised_hardware,
+                    gpu_native_input: evidence.gpu_native_input,
+                    low_latency_accepted: evidence.low_latency_accepted,
+                    sustained_fps: evidence.sustained_fps,
+                    p50_encode_ms: evidence.p50_encode_ms,
+                    p95_encode_ms: evidence.p95_encode_ms,
+                    reset_ok: evidence.reset_ok,
+                    dynamic_bitrate_ok: evidence.dynamic_bitrate_ok,
+                    keyframe_request_ok: evidence.keyframe_request_ok,
+                },
+                class,
+                output_frames,
+                dropped_or_missing,
+            },
+        ))
     }
 
     fn encoder_capability_cache() -> Result<DurableEncoderCapabilityCache, String> {
@@ -800,7 +896,7 @@ mod windows_service_app {
             released_session_floor: Arc::clone(&released_media_session_floor),
         };
         let encoder_capability_cache = match encoder_capability_cache() {
-            Ok(cache) => cache,
+            Ok(cache) => Arc::new(cache),
             Err(error) => {
                 eprintln!("ClassMesh encoder capability cache path failed: {error}");
                 set_stopped_with_exit(&status_handle, 3)?;
@@ -834,7 +930,10 @@ mod windows_service_app {
         set_running(&status_handle)?;
 
         let mut supervisor = SessionSupervisor::default();
-        let mut workers = WorkerManager::new(Arc::clone(&worker_capabilities));
+        let mut workers = WorkerManager::new(
+            Arc::clone(&worker_capabilities),
+            Arc::clone(&encoder_capability_cache),
+        );
         let mut desired_focused_reconfigure: Option<StreamReconfigure> = None;
         let mut desired_focused_control_session_id: Option<u64> = None;
         let mut focused_reconfigure_worker_pid: Option<u32> = None;
