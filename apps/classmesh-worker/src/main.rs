@@ -534,8 +534,8 @@ fn start_capture() -> Result<
 #[cfg(windows)]
 fn runtime_encoder_benchmark(
     adapter: classmesh_capture_win::AdapterCapabilityIdentity,
-) -> Option<RuntimeEncoderBenchmark> {
-    match RuntimeEncoderBenchmark::compatibility_720p30(adapter) {
+) -> Option<classmesh_worker::encoder_benchmark::RuntimeEncoderBenchmark> {
+    match classmesh_worker::encoder_benchmark::RuntimeEncoderBenchmark::compatibility_720p30(adapter) {
         Ok(benchmark) => Some(benchmark),
         Err(error) => {
             eprintln!(
@@ -551,7 +551,7 @@ fn publish_worker_encoder_evidence(
     pipe: &classmesh_win32::NamedPipeClient,
     process_id: u32,
     session_id: u32,
-    evidence: MeasuredEncoderEvidence,
+    evidence: classmesh_worker::encoder_benchmark::MeasuredEncoderEvidence,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use classmesh_video::EncoderClass;
 
