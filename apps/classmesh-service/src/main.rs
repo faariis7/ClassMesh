@@ -540,6 +540,111 @@ mod windows_service_app {
                             );
                             return;
                         }
+                        Ok(IpcMessage::WorkerEncoderCacheQuery(query))
+                            if query.process_id == expected_process_id
+                                && query.session_id == expected_session_id =>
+                        {
+                            if !capabilities.is_current(
+                                generation,
+                                query.process_id,
+                                query.session_id,
+                            ) {
+                                eprintln!(
+                                    "Stale Worker encoder cache query ignored for pid {} session {}",
+                                    query.process_id, query.session_id
+                                );
+                                return;
+                            }
+                            let key = EncoderCapabilityCacheKey {
+                                adapter_identity: query.adapter_identity,
+                                driver_version: query.driver_version,
+                                encoder_clsid: query.encoder_clsid,
+                                width: query.width,
+                                height: query.height,
+                                target_fps: query.target_fps,
+                                bitrate_bps: query.bitrate_bps,
+                            };
+                            let (hit, qualified) = match encoder_capability_cache.load_exact(&key) {
+                                Ok(Some(verified))
+                                    if verified.class != EncoderClass::Unsupported =>
+                                {
+                                    (true, true)
+                                }
+                                Ok(Some(_)) | Ok(None) => (false, false),
+                                Err(error) => {
+                                    eprintln!(
+                                        "Encoder capability cache query failed closed and will re-probe: {error}"
+                                    );
+                                    (false, false)
+                                }
+                            };
+                            if !capabilities.apply_h264_qualification(
+                                generation,
+                                expected_process_id,
+                                expected_session_id,
+                                qualified,
+                            ) {
+                                eprintln!(
+                                    "Encoder cache query became stale before runtime publication for pid {expected_process_id}"
+                                );
+                                return;
+                            }
+                            let response = classmesh_windows_runtime::ipc::IpcFrame::service_encoder_cache_result(
+                                classmesh_windows_runtime::ipc::ServiceEncoderCacheResult {
+                                    process_id: expected_process_id,
+                                    session_id: expected_session_id,
+                                    hit,
+                                    qualified,
+                                },
+                            );
+                            let response = match response {
+                                Ok(response) => response,
+                                Err(error) => {
+                                    eprintln!(
+                                        "Encoder cache result IPC construction failed: {error:?}"
+                                    );
+                                    return;
+                                }
+                            };
+                            let encoded = match response.encode() {
+                                Ok(encoded) => encoded,
+                                Err(error) => {
+                                    eprintln!(
+                                        "Encoder cache result IPC encoding failed: {error:?}"
+                                    );
+                                    return;
+                                }
+                            };
+                            if let Err(error) = pipe.write_all(&encoded) {
+                                let _ = capabilities.clear_report_if_current(
+                                    generation,
+                                    expected_process_id,
+                                    expected_session_id,
+                                );
+                                eprintln!(
+                                    "Encoder cache result IPC write failed for pid {expected_process_id}: {error}"
+                                );
+                                return;
+                            }
+                            eprintln!(
+                                "ClassMesh Service encoder cache query resolved for pid {expected_process_id}: hit={hit} qualified={qualified}"
+                            );
+                        }
+                        Ok(IpcMessage::WorkerEncoderCacheQuery(query)) => {
+                            let _ = capabilities.clear_report_if_current(
+                                generation,
+                                expected_process_id,
+                                expected_session_id,
+                            );
+                            eprintln!(
+                                "Worker encoder cache query identity mismatch: expected pid {} session {}, received pid {} session {}",
+                                expected_process_id,
+                                expected_session_id,
+                                query.process_id,
+                                query.session_id
+                            );
+                            return;
+                        }
                         Ok(IpcMessage::WorkerEncoderEvidence(evidence))
                             if evidence.process_id == expected_process_id
                                 && evidence.session_id == expected_session_id =>

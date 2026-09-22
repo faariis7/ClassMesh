@@ -51,6 +51,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut capture_restart = CaptureRestart::default();
     let mut encoder_benchmark = None;
+    let mut encoder_cache_query_pending = false;
+    let mut encoder_cache_checked = false;
     let mut capture = match start_capture() {
         Ok((capture, adapter)) => {
             encoder_benchmark = runtime_encoder_benchmark(adapter);
@@ -99,6 +101,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     release_tracked_input(&mut input_injector);
                     capture = None;
                     encoder_benchmark = None;
+                    encoder_cache_query_pending = false;
+                    encoder_cache_checked = false;
                     capture_restart.clear();
                     eprintln!("ClassMesh Worker DXGI capture suspended by Service");
                     continue;
@@ -108,6 +112,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Retry once the interactive desktop is active again before accepting input.
                     release_tracked_input(&mut input_injector);
                     capture_restart.clear();
+                    encoder_cache_query_pending = false;
+                    encoder_cache_checked = false;
                     capture = match start_capture() {
                         Ok((capture, adapter)) => {
                             encoder_benchmark = runtime_encoder_benchmark(adapter);
@@ -170,6 +176,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            Ok(WorkerEvent::EncoderCacheResult(result)) => {
+                if result.process_id != std::process::id() || result.session_id != actual_session {
+                    release_tracked_input(&mut input_injector);
+                    return Err(format!(
+                        "encoder cache result identity mismatch: pid={} session={}",
+                        result.process_id, result.session_id
+                    )
+                    .into());
+                }
+                encoder_cache_query_pending = false;
+                encoder_cache_checked = true;
+                if result.hit {
+                    encoder_benchmark = None;
+                    eprintln!(
+                        "ClassMesh Worker exact encoder cache hit: qualified={}",
+                        result.qualified
+                    );
+                } else {
+                    eprintln!(
+                        "ClassMesh Worker encoder cache miss; bounded H264 benchmark will run"
+                    );
+                }
+                capture_due = Instant::now();
+            }
             Ok(WorkerEvent::Input(event)) => match input_action_from_wire(event) {
                 Ok(action) => {
                     if let Err(error) = input_injector.apply(action) {
@@ -197,6 +227,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if capture.is_none() && capture_restart.is_due(Instant::now()) {
             match start_capture() {
                 Ok((restarted, adapter)) => {
+                    encoder_cache_query_pending = false;
+                    encoder_cache_checked = false;
                     encoder_benchmark = runtime_encoder_benchmark(adapter);
                     capture = Some(restarted);
                     capture_restart.clear();
@@ -249,7 +281,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         meta.pointer_visible
                     );
                 }
-                if encoder_benchmark.is_some() {
+                if encoder_benchmark.is_some() && !encoder_cache_checked {
+                    if !encoder_cache_query_pending {
+                        let query_key = encoder_benchmark
+                            .as_mut()
+                            .expect("benchmark presence checked")
+                            .prepare_cache_key(&frame);
+                        match query_key {
+                            Ok(key) => {
+                                publish_worker_encoder_cache_query(
+                                    &pipe,
+                                    std::process::id(),
+                                    actual_session,
+                                    key,
+                                )?;
+                                encoder_cache_query_pending = true;
+                            }
+                            Err(error) => {
+                                encoder_benchmark = None;
+                                encoder_cache_checked = true;
+                                eprintln!(
+                                    "ClassMesh Worker encoder cache key preparation failed closed; control remains active: {error}"
+                                );
+                            }
+                        }
+                    }
+                    drop(frame);
+                } else if encoder_benchmark.is_some() {
                     let outcome = encoder_benchmark
                         .as_mut()
                         .expect("benchmark presence checked")
@@ -263,6 +321,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 evidence,
                             )?;
                             encoder_benchmark = None;
+                            encoder_cache_query_pending = false;
                             eprintln!(
                                 "ClassMesh Worker completed bounded H264 benchmark and published measured evidence"
                             );
@@ -270,6 +329,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(None) => {}
                         Err(error) => {
                             encoder_benchmark = None;
+                            encoder_cache_query_pending = false;
                             eprintln!(
                                 "ClassMesh Worker H264 benchmark failed closed; control remains active: {error}"
                             );
@@ -290,6 +350,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             CaptureStep::RetryAfter { delay_ms, reason } => {
                 encoder_benchmark = None;
+                encoder_cache_query_pending = false;
+                encoder_cache_checked = false;
                 eprintln!("DXGI capture recovery scheduled after {reason:?} in {delay_ms} ms");
                 capture_due = Instant::now()
                     .checked_add(Duration::from_millis(delay_ms))
@@ -298,6 +360,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             CaptureStep::Suspended(reason) => {
                 eprintln!("DXGI capture suspended by backend; control remains active: {reason:?}");
                 encoder_benchmark = None;
+                encoder_cache_query_pending = false;
+                encoder_cache_checked = false;
                 capture = None;
                 capture_restart.clear();
             }
@@ -306,6 +370,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "DXGI capture failed after backend recovery; control remains active: {reason:?}"
                 );
                 encoder_benchmark = None;
+                encoder_cache_query_pending = false;
+                encoder_cache_checked = false;
                 capture = None;
                 capture_restart.record_failure(Instant::now());
             }
@@ -366,6 +432,7 @@ enum WorkerEvent {
     Control(classmesh_windows_runtime::ipc::IpcControlCommand),
     Input(classmesh_protocol::control_wire::InputEvent),
     StreamReconfigure(classmesh_protocol::control_wire::StreamReconfigure),
+    EncoderCacheResult(classmesh_windows_runtime::ipc::ServiceEncoderCacheResult),
     IpcFailure(String),
 }
 
@@ -548,6 +615,30 @@ fn runtime_encoder_benchmark(
 }
 
 #[cfg(windows)]
+fn publish_worker_encoder_cache_query(
+    pipe: &classmesh_win32::NamedPipeClient,
+    process_id: u32,
+    session_id: u32,
+    key: classmesh_codec_win::EncoderCapabilityCacheKey,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let query = classmesh_windows_runtime::ipc::WorkerEncoderCacheQuery {
+        process_id,
+        session_id,
+        adapter_identity: key.adapter_identity,
+        driver_version: key.driver_version,
+        encoder_clsid: key.encoder_clsid,
+        width: key.width,
+        height: key.height,
+        target_fps: key.target_fps,
+        bitrate_bps: key.bitrate_bps,
+    };
+    let frame = classmesh_windows_runtime::ipc::IpcFrame::worker_encoder_cache_query(&query)
+        .map_err(ipc_message_error)?;
+    pipe.write_all(&frame.encode().map_err(ipc_frame_error)?)?;
+    Ok(())
+}
+
+#[cfg(windows)]
 fn publish_worker_encoder_evidence(
     pipe: &classmesh_win32::NamedPipeClient,
     process_id: u32,
@@ -664,6 +755,14 @@ fn spawn_ipc_reader(
                     Ok(IpcMessage::StreamReconfigure(reconfigure)) => {
                         if event_tx
                             .send(WorkerEvent::StreamReconfigure(reconfigure))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Ok(IpcMessage::ServiceEncoderCacheResult(result)) => {
+                        if event_tx
+                            .send(WorkerEvent::EncoderCacheResult(result))
                             .is_err()
                         {
                             return;
