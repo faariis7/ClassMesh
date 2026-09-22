@@ -1,3 +1,5 @@
+use std::net::{IpAddr, SocketAddr};
+
 use classmesh_core::adaptation::{StreamProfile, StreamProfileError};
 use classmesh_protocol::Capability;
 use classmesh_protocol::control_wire::{
@@ -6,6 +8,8 @@ use classmesh_protocol::control_wire::{
 };
 
 pub const MAX_STREAM_TRANSPORT_PARAMETERS: usize = 4 * 1024;
+pub const UDP_UNICAST_PARAMETERS_VERSION: u8 = 1;
+pub const UDP_UNICAST_PARAMETERS_LEN: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamOfferError {
@@ -18,6 +22,7 @@ pub enum StreamOfferError {
     UnsupportedTransport,
     TransportCapabilityNotNegotiated,
     TransportParametersTooLarge,
+    InvalidUdpUnicastParameters,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +31,27 @@ pub struct ValidatedInteractiveStreamOffer {
     pub profile: StreamProfile,
     pub transport: WireMediaTransport,
     pub transport_parameters: Vec<u8>,
+}
+
+pub fn udp_unicast_port(parameters: &[u8]) -> Result<u16, StreamOfferError> {
+    let [version, high, low] = parameters else {
+        return Err(StreamOfferError::InvalidUdpUnicastParameters);
+    };
+    if *version != UDP_UNICAST_PARAMETERS_VERSION {
+        return Err(StreamOfferError::InvalidUdpUnicastParameters);
+    }
+    let port = u16::from_be_bytes([*high, *low]);
+    if port == 0 {
+        return Err(StreamOfferError::InvalidUdpUnicastParameters);
+    }
+    Ok(port)
+}
+
+pub fn peer_bound_udp_unicast_destination(
+    peer_ip: IpAddr,
+    parameters: &[u8],
+) -> Result<SocketAddr, StreamOfferError> {
+    Ok(SocketAddr::new(peer_ip, udp_unicast_port(parameters)?))
 }
 
 pub fn stream_profile_from_wire(profile: &VideoProfile) -> Result<StreamProfile, StreamOfferError> {
@@ -78,7 +104,10 @@ pub fn validate_interactive_stream_offer(
     let transport = WireMediaTransport::try_from(offer.transport)
         .map_err(|_| StreamOfferError::UnsupportedTransport)?;
     let required_capability = match transport {
-        WireMediaTransport::UdpUnicast => Capability::UdpUnicast,
+        WireMediaTransport::UdpUnicast => {
+            let _ = udp_unicast_port(&offer.transport_parameters)?;
+            Capability::UdpUnicast
+        }
         WireMediaTransport::QuicDatagram => Capability::QuicDatagram,
         WireMediaTransport::Webrtc => Capability::WebRtc,
         WireMediaTransport::Unspecified
@@ -197,6 +226,31 @@ mod tests {
             validate_interactive_stream_offer(&hevc, &capabilities),
             Err(StreamOfferError::UnsupportedCodec)
         );
+    }
+
+    #[test]
+    fn udp_unicast_parameters_are_versioned_port_only() {
+        assert_eq!(udp_unicast_port(&[1, 0x1f, 0x90]), Ok(8080));
+        assert_eq!(
+            udp_unicast_port(&[2, 0x1f, 0x90]),
+            Err(StreamOfferError::InvalidUdpUnicastParameters)
+        );
+        assert_eq!(
+            udp_unicast_port(&[1, 0, 0]),
+            Err(StreamOfferError::InvalidUdpUnicastParameters)
+        );
+        assert_eq!(
+            udp_unicast_port(&[1, 0x1f, 0x90, 1]),
+            Err(StreamOfferError::InvalidUdpUnicastParameters)
+        );
+    }
+
+    #[test]
+    fn udp_destination_ip_is_bound_to_authenticated_control_peer() {
+        let peer = "192.0.2.44".parse::<IpAddr>().expect("peer ip");
+        let destination =
+            peer_bound_udp_unicast_destination(peer, &[1, 0x23, 0x28]).expect("destination");
+        assert_eq!(destination, "192.0.2.44:9000".parse().expect("socket"));
     }
 
     #[test]
