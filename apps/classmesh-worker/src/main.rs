@@ -761,7 +761,10 @@ fn spawn_ipc_reader(
                         }
                     }
                     Ok(IpcMessage::ServiceEncoderCacheResult(result)) => {
-                        if event_tx.send(WorkerEvent::EncoderCacheResult(result)).is_err() {
+                        if event_tx
+                            .send(WorkerEvent::EncoderCacheResult(result))
+                            .is_err()
+                        {
                             return;
                         }
                     }
