@@ -609,7 +609,9 @@ mod windows_service_app {
                             let encoded = match response.encode() {
                                 Ok(encoded) => encoded,
                                 Err(error) => {
-                                    eprintln!("Encoder cache result IPC encoding failed: {error:?}");
+                                    eprintln!(
+                                        "Encoder cache result IPC encoding failed: {error:?}"
+                                    );
                                     return;
                                 }
                             };
