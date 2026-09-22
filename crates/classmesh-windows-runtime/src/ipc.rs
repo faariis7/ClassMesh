@@ -239,7 +239,6 @@ fn validate_evidence_string(value: &str, maximum: usize) -> Result<(), IpcMessag
     Ok(())
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerEncoderCacheQuery {
     pub process_id: u32,
@@ -448,7 +447,9 @@ impl IpcFrame {
     ) -> Result<Self, IpcMessageError> {
         query.validate()?;
         let mut payload = Vec::with_capacity(
-            24 + query.adapter_identity.len() + query.driver_version.len() + query.encoder_clsid.len(),
+            24 + query.adapter_identity.len()
+                + query.driver_version.len()
+                + query.encoder_clsid.len(),
         );
         payload.extend_from_slice(&query.process_id.to_be_bytes());
         payload.extend_from_slice(&query.session_id.to_be_bytes());
@@ -940,8 +941,7 @@ mod tests {
             target_fps: 30,
             bitrate_bps: 2_500_000,
         };
-        let query_frame = IpcFrame::worker_encoder_cache_query(&query)
-            .expect("valid cache query");
+        let query_frame = IpcFrame::worker_encoder_cache_query(&query).expect("valid cache query");
         assert_eq!(
             query_frame.message().expect("typed cache query"),
             IpcMessage::WorkerEncoderCacheQuery(query)
