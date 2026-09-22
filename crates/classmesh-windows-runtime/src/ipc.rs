@@ -7,7 +7,7 @@ pub const IPC_MAGIC: u32 = 0x434D_4950; // "CMIP"
 pub const IPC_HEADER_LEN: usize = 12;
 pub const MAX_IPC_MESSAGE: usize = 1_048_576;
 pub const IPC_VERSION_MAJOR: u8 = 0;
-pub const IPC_VERSION_MINOR: u8 = 3;
+pub const IPC_VERSION_MINOR: u8 = 4;
 
 const MESSAGE_WORKER_HELLO: u16 = 1;
 const MESSAGE_SERVICE_READY: u16 = 2;
@@ -16,6 +16,8 @@ const MESSAGE_INPUT_EVENT: u16 = 11;
 const MESSAGE_STREAM_RECONFIGURE: u16 = 12;
 const MESSAGE_WORKER_CAPABILITIES: u16 = 13;
 const MESSAGE_WORKER_ENCODER_EVIDENCE: u16 = 14;
+const MESSAGE_WORKER_ENCODER_CACHE_QUERY: u16 = 15;
+const MESSAGE_SERVICE_ENCODER_CACHE_RESULT: u16 = 16;
 
 const MAX_EVIDENCE_ADAPTER_IDENTITY: usize = 128;
 const MAX_EVIDENCE_DRIVER_VERSION: usize = 128;
@@ -237,6 +239,55 @@ fn validate_evidence_string(value: &str, maximum: usize) -> Result<(), IpcMessag
     Ok(())
 }
 
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerEncoderCacheQuery {
+    pub process_id: u32,
+    pub session_id: u32,
+    pub adapter_identity: String,
+    pub driver_version: String,
+    pub encoder_clsid: String,
+    pub width: u16,
+    pub height: u16,
+    pub target_fps: u16,
+    pub bitrate_bps: u32,
+}
+
+impl WorkerEncoderCacheQuery {
+    fn validate(&self) -> Result<(), IpcMessageError> {
+        if self.process_id == 0
+            || self.session_id == 0
+            || self.width == 0
+            || self.height == 0
+            || self.target_fps == 0
+            || self.bitrate_bps == 0
+        {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        validate_evidence_string(&self.adapter_identity, MAX_EVIDENCE_ADAPTER_IDENTITY)?;
+        validate_evidence_string(&self.driver_version, MAX_EVIDENCE_DRIVER_VERSION)?;
+        validate_evidence_string(&self.encoder_clsid, MAX_EVIDENCE_ENCODER_CLSID)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceEncoderCacheResult {
+    pub process_id: u32,
+    pub session_id: u32,
+    pub hit: bool,
+    pub qualified: bool,
+}
+
+impl ServiceEncoderCacheResult {
+    fn validate(self) -> Result<(), IpcMessageError> {
+        if self.process_id == 0 || self.session_id == 0 || (self.qualified && !self.hit) {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum IpcMessage {
     WorkerHello { process_id: u32, session_id: u32 },
@@ -246,6 +297,8 @@ pub enum IpcMessage {
     StreamReconfigure(StreamReconfigure),
     WorkerCapabilities(WorkerRuntimeCapabilities),
     WorkerEncoderEvidence(WorkerEncoderEvidence),
+    WorkerEncoderCacheQuery(WorkerEncoderCacheQuery),
+    ServiceEncoderCacheResult(ServiceEncoderCacheResult),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,6 +441,44 @@ impl IpcFrame {
             payload.extend_from_slice(value.as_bytes());
         }
         Ok(Self::new(MESSAGE_WORKER_ENCODER_EVIDENCE, payload))
+    }
+
+    pub fn worker_encoder_cache_query(
+        query: &WorkerEncoderCacheQuery,
+    ) -> Result<Self, IpcMessageError> {
+        query.validate()?;
+        let mut payload = Vec::with_capacity(
+            24 + query.adapter_identity.len() + query.driver_version.len() + query.encoder_clsid.len(),
+        );
+        payload.extend_from_slice(&query.process_id.to_be_bytes());
+        payload.extend_from_slice(&query.session_id.to_be_bytes());
+        payload.extend_from_slice(&query.width.to_be_bytes());
+        payload.extend_from_slice(&query.height.to_be_bytes());
+        payload.extend_from_slice(&query.target_fps.to_be_bytes());
+        payload.extend_from_slice(&query.bitrate_bps.to_be_bytes());
+        for value in [
+            &query.adapter_identity,
+            &query.driver_version,
+            &query.encoder_clsid,
+        ] {
+            let len = u16::try_from(value.len()).map_err(|_| IpcMessageError::InvalidPayload)?;
+            payload.extend_from_slice(&len.to_be_bytes());
+            payload.extend_from_slice(value.as_bytes());
+        }
+        Ok(Self::new(MESSAGE_WORKER_ENCODER_CACHE_QUERY, payload))
+    }
+
+    pub fn service_encoder_cache_result(
+        result: ServiceEncoderCacheResult,
+    ) -> Result<Self, IpcMessageError> {
+        result.validate()?;
+        let mut payload = Vec::with_capacity(10);
+        payload.extend_from_slice(&result.process_id.to_be_bytes());
+        payload.extend_from_slice(&result.session_id.to_be_bytes());
+        let flags = u8::from(result.hit) | (u8::from(result.qualified) << 1);
+        payload.push(flags);
+        payload.push(0);
+        Ok(Self::new(MESSAGE_SERVICE_ENCODER_CACHE_RESULT, payload))
     }
 
     pub fn message(&self) -> Result<IpcMessage, IpcMessageError> {
@@ -562,6 +653,83 @@ impl IpcFrame {
                 };
                 evidence.validate()?;
                 Ok(IpcMessage::WorkerEncoderEvidence(evidence))
+            }
+            MESSAGE_WORKER_ENCODER_CACHE_QUERY => {
+                if self.payload.len() < 24 {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let process_id = u32::from_be_bytes(self.payload[0..4].try_into().expect("slice"));
+                let session_id = u32::from_be_bytes(self.payload[4..8].try_into().expect("slice"));
+                let width = u16::from_be_bytes(self.payload[8..10].try_into().expect("slice"));
+                let height = u16::from_be_bytes(self.payload[10..12].try_into().expect("slice"));
+                let target_fps =
+                    u16::from_be_bytes(self.payload[12..14].try_into().expect("slice"));
+                let bitrate_bps =
+                    u32::from_be_bytes(self.payload[14..18].try_into().expect("slice"));
+                let mut cursor = 18_usize;
+                let mut next_string = |maximum: usize| -> Result<String, IpcMessageError> {
+                    let end_len = cursor
+                        .checked_add(2)
+                        .ok_or(IpcMessageError::InvalidPayload)?;
+                    let length_bytes = self
+                        .payload
+                        .get(cursor..end_len)
+                        .ok_or(IpcMessageError::InvalidPayload)?;
+                    let length = usize::from(u16::from_be_bytes(
+                        length_bytes.try_into().expect("two bytes"),
+                    ));
+                    cursor = end_len;
+                    if length == 0 || length > maximum {
+                        return Err(IpcMessageError::InvalidPayload);
+                    }
+                    let end = cursor
+                        .checked_add(length)
+                        .ok_or(IpcMessageError::InvalidPayload)?;
+                    let bytes = self
+                        .payload
+                        .get(cursor..end)
+                        .ok_or(IpcMessageError::InvalidPayload)?;
+                    cursor = end;
+                    String::from_utf8(bytes.to_vec()).map_err(|_| IpcMessageError::InvalidPayload)
+                };
+                let adapter_identity = next_string(MAX_EVIDENCE_ADAPTER_IDENTITY)?;
+                let driver_version = next_string(MAX_EVIDENCE_DRIVER_VERSION)?;
+                let encoder_clsid = next_string(MAX_EVIDENCE_ENCODER_CLSID)?;
+                if cursor != self.payload.len() {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let query = WorkerEncoderCacheQuery {
+                    process_id,
+                    session_id,
+                    adapter_identity,
+                    driver_version,
+                    encoder_clsid,
+                    width,
+                    height,
+                    target_fps,
+                    bitrate_bps,
+                };
+                query.validate()?;
+                Ok(IpcMessage::WorkerEncoderCacheQuery(query))
+            }
+            MESSAGE_SERVICE_ENCODER_CACHE_RESULT => {
+                if self.payload.len() != 10 {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let process_id = u32::from_be_bytes(self.payload[0..4].try_into().expect("slice"));
+                let session_id = u32::from_be_bytes(self.payload[4..8].try_into().expect("slice"));
+                let flags = self.payload[8];
+                if flags & !0x03 != 0 || self.payload[9] != 0 {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let result = ServiceEncoderCacheResult {
+                    process_id,
+                    session_id,
+                    hit: flags & 1 != 0,
+                    qualified: flags & 2 != 0,
+                };
+                result.validate()?;
+                Ok(IpcMessage::ServiceEncoderCacheResult(result))
             }
             _ => Err(IpcMessageError::UnknownMessageType),
         }
@@ -756,6 +924,54 @@ mod tests {
         assert_eq!(
             frames[0].message().expect("typed evidence"),
             IpcMessage::WorkerEncoderEvidence(evidence)
+        );
+    }
+
+    #[test]
+    fn encoder_cache_query_and_result_round_trip() {
+        let query = WorkerEncoderCacheQuery {
+            process_id: 42,
+            session_id: 7,
+            adapter_identity: "55667788:11223344".into(),
+            driver_version: "31.0.15.5123".into(),
+            encoder_clsid: "{encoder-clsid}".into(),
+            width: 1280,
+            height: 720,
+            target_fps: 30,
+            bitrate_bps: 2_500_000,
+        };
+        let query_frame = IpcFrame::worker_encoder_cache_query(&query)
+            .expect("valid cache query");
+        assert_eq!(
+            query_frame.message().expect("typed cache query"),
+            IpcMessage::WorkerEncoderCacheQuery(query)
+        );
+
+        let result = ServiceEncoderCacheResult {
+            process_id: 42,
+            session_id: 7,
+            hit: true,
+            qualified: true,
+        };
+        let result_frame =
+            IpcFrame::service_encoder_cache_result(result).expect("valid cache result");
+        assert_eq!(
+            result_frame.message().expect("typed cache result"),
+            IpcMessage::ServiceEncoderCacheResult(result)
+        );
+    }
+
+    #[test]
+    fn cache_result_cannot_claim_qualified_without_hit() {
+        let result = ServiceEncoderCacheResult {
+            process_id: 42,
+            session_id: 7,
+            hit: false,
+            qualified: true,
+        };
+        assert_eq!(
+            IpcFrame::service_encoder_cache_result(result),
+            Err(IpcMessageError::InvalidPayload)
         );
     }
 
