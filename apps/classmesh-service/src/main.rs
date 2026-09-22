@@ -565,12 +565,12 @@ mod windows_service_app {
                                 bitrate_bps: query.bitrate_bps,
                             };
                             let (hit, qualified) = match encoder_capability_cache.load_exact(&key) {
-                                Ok(Some(verified)) => {
-                                    let qualified =
-                                        verified.class != EncoderClass::Unsupported;
-                                    (true, qualified)
+                                Ok(Some(verified))
+                                    if verified.class != EncoderClass::Unsupported =>
+                                {
+                                    (true, true)
                                 }
-                                Ok(None) => (false, false),
+                                Ok(Some(_)) | Ok(None) => (false, false),
                                 Err(error) => {
                                     eprintln!(
                                         "Encoder capability cache query failed closed and will re-probe: {error}"
