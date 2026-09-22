@@ -19,6 +19,7 @@ pub enum RuntimeEncoderBenchmarkError {
     InvalidAccumulator(classmesh_codec_win::BenchmarkAccumulatorError),
     InvalidSummary(classmesh_codec_win::BenchmarkError),
     InvalidProfile,
+    InvalidState,
     ResetMismatch,
 }
 
@@ -33,6 +34,7 @@ impl fmt::Display for RuntimeEncoderBenchmarkError {
                 write!(f, "encoder benchmark summary failed: {error:?}")
             }
             Self::InvalidProfile => write!(f, "encoder benchmark target is not representable"),
+            Self::InvalidState => write!(f, "encoder benchmark cache query is no longer available"),
             Self::ResetMismatch => write!(f, "encoder benchmark reset/recreate target changed"),
         }
     }
@@ -116,6 +118,26 @@ impl RuntimeEncoderBenchmark {
         self.completed
     }
 
+    pub fn prepare_cache_key(
+        &mut self,
+        frame: &DxgiFrame,
+    ) -> Result<EncoderCapabilityCacheKey, RuntimeEncoderBenchmarkError> {
+        if self.completed || self.pending_reset.is_some() || self.started.is_some() {
+            return Err(RuntimeEncoderBenchmarkError::InvalidState);
+        }
+        if self.pipeline.is_none() {
+            let target = PresentationTarget::try_from(self.config)?;
+            self.pipeline = Some(PresentationPipeline::from_first_frame_with_target(
+                frame, target,
+            )?);
+        }
+        let active = self
+            .pipeline
+            .as_ref()
+            .expect("cache-query pipeline initialized");
+        benchmark_cache_key(&self.adapter, active.encoder_candidate(), active.profile())
+    }
+
     pub fn process_frame(
         &mut self,
         meta: CapturedFrameMeta,
@@ -141,6 +163,10 @@ impl RuntimeEncoderBenchmark {
                 self.started = Some(Instant::now());
             }
             self.pipeline = Some(created);
+        }
+
+        if self.pending_reset.is_none() && self.started.is_none() {
+            self.started = Some(Instant::now());
         }
 
         let active = self
