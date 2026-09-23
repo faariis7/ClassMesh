@@ -1,6 +1,11 @@
 use classmesh_protocol::clipboard::{ClipboardTextError, validate_text};
 use classmesh_protocol::control_wire::{
-    ClipboardReadRequest, ClipboardWrite, ControlEnvelope, InputEvent, control_envelope,
+    ClipboardReadRequest, ClipboardWrite, ControlEnvelope, InputEvent, PresentationStart,
+    PresentationStop, control_envelope,
+};
+use classmesh_protocol::presentation::{
+    PresentationControlError, validate_start as validate_presentation_start,
+    validate_stop as validate_presentation_stop,
 };
 use classmesh_security::{AuthorizationStore, Permission};
 
@@ -11,6 +16,8 @@ pub enum PrivilegedControlCommand {
     InputEvent(InputEvent),
     ClipboardReadRequest(ClipboardReadRequest),
     ClipboardWrite(ClipboardWrite),
+    PresentationStart(PresentationStart),
+    PresentationStop(PresentationStop),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +27,8 @@ pub enum PrivilegedDispatchError {
     InputSequenceMismatch { envelope: u64, input: u64 },
     ClipboardReadRequestMissingId,
     InvalidClipboardText(ClipboardTextError),
+    PresentationRequestMissingId,
+    InvalidPresentation(PresentationControlError),
     Authorization(CommandAuthorizationError),
 }
 
@@ -87,6 +96,33 @@ pub fn dispatch_privileged_command(
             )?;
             Ok(PrivilegedControlCommand::ClipboardWrite(write.clone()))
         }
+        control_envelope::Payload::PresentationStart(start) => {
+            if envelope.request_id == 0 {
+                return Err(PrivilegedDispatchError::PresentationRequestMissingId);
+            }
+            validate_presentation_start(start)
+                .map_err(PrivilegedDispatchError::InvalidPresentation)?;
+            guard.authorize(
+                authorization,
+                envelope,
+                Permission::StartPresentation,
+                now_unix_ms,
+            )?;
+            Ok(PrivilegedControlCommand::PresentationStart(*start))
+        }
+        control_envelope::Payload::PresentationStop(stop) => {
+            if envelope.request_id == 0 {
+                return Err(PrivilegedDispatchError::PresentationRequestMissingId);
+            }
+            validate_presentation_stop(stop).map_err(PrivilegedDispatchError::InvalidPresentation)?;
+            guard.authorize(
+                authorization,
+                envelope,
+                Permission::StartPresentation,
+                now_unix_ms,
+            )?;
+            Ok(PrivilegedControlCommand::PresentationStop(*stop))
+        }
         _ => Err(PrivilegedDispatchError::UnsupportedPayload),
     }
 }
@@ -98,8 +134,8 @@ mod tests {
     use classmesh_protocol::ProtocolVersion;
     use classmesh_protocol::clipboard::MAX_CLIPBOARD_TEXT_BYTES;
     use classmesh_protocol::control_wire::{
-        ClipboardReadRequest, ClipboardWrite, Heartbeat, ProtocolVersion as WireProtocolVersion,
-        ReleaseAllInput, input_event,
+        ClipboardReadRequest, ClipboardWrite, Heartbeat, PresentationStart, PresentationStop,
+        ProtocolVersion as WireProtocolVersion, ReleaseAllInput, input_event,
     };
     use classmesh_security::{
         CredentialFingerprint, CredentialRecord, Principal, PrincipalId, PrincipalKind,
@@ -165,6 +201,41 @@ mod tests {
             request_id: 91,
             payload: Some(control_envelope::Payload::ClipboardReadRequest(
                 ClipboardReadRequest {},
+            )),
+        }
+    }
+
+    fn presentation_start_envelope(sequence: u64, request_id: u64) -> ControlEnvelope {
+        ControlEnvelope {
+            control_session_id: 77,
+            sequence,
+            protocol_version: Some(WireProtocolVersion {
+                major: u32::from(VERSION.major),
+                minor: u32::from(VERSION.minor),
+            }),
+            request_id,
+            payload: Some(control_envelope::Payload::PresentationStart(
+                PresentationStart {
+                    presentation_id: 55,
+                    stream_id: 7,
+                },
+            )),
+        }
+    }
+
+    fn presentation_stop_envelope(sequence: u64, request_id: u64) -> ControlEnvelope {
+        ControlEnvelope {
+            control_session_id: 77,
+            sequence,
+            protocol_version: Some(WireProtocolVersion {
+                major: u32::from(VERSION.major),
+                minor: u32::from(VERSION.minor),
+            }),
+            request_id,
+            payload: Some(control_envelope::Payload::PresentationStop(
+                PresentationStop {
+                    presentation_id: 55,
+                },
             )),
         }
     }
@@ -333,6 +404,77 @@ mod tests {
             Ok(PrivilegedControlCommand::ClipboardWrite(_))
         ));
         assert_eq!(guard.last_sequence(), 2);
+    }
+
+    #[test]
+    fn presentation_lifecycle_requires_explicit_start_permission() {
+        let allowed = store(BTreeSet::from([Permission::StartPresentation]));
+        let mut start_guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+        assert!(matches!(
+            dispatch_privileged_command(
+                &mut start_guard,
+                &allowed,
+                &presentation_start_envelope(2, 501),
+                150,
+            ),
+            Ok(PrivilegedControlCommand::PresentationStart(_))
+        ));
+
+        let mut stop_guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+        assert!(matches!(
+            dispatch_privileged_command(
+                &mut stop_guard,
+                &allowed,
+                &presentation_stop_envelope(2, 502),
+                150,
+            ),
+            Ok(PrivilegedControlCommand::PresentationStop(_))
+        ));
+
+        let denied = store(BTreeSet::new());
+        let mut denied_guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+        assert_eq!(
+            dispatch_privileged_command(
+                &mut denied_guard,
+                &denied,
+                &presentation_start_envelope(2, 503),
+                150,
+            ),
+            Err(PrivilegedDispatchError::Authorization(
+                CommandAuthorizationError::Unauthorized {
+                    permission: Permission::StartPresentation,
+                }
+            ))
+        );
+        assert_eq!(denied_guard.last_sequence(), 2);
+    }
+
+    #[test]
+    fn malformed_presentation_fails_before_sequence_consumption() {
+        let allowed = store(BTreeSet::from([Permission::StartPresentation]));
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+
+        let mut missing_request = presentation_start_envelope(2, 0);
+        assert_eq!(
+            dispatch_privileged_command(&mut guard, &allowed, &missing_request, 150),
+            Err(PrivilegedDispatchError::PresentationRequestMissingId)
+        );
+        assert_eq!(guard.last_sequence(), 1);
+
+        missing_request.request_id = 504;
+        let Some(control_envelope::Payload::PresentationStart(start)) =
+            missing_request.payload.as_mut()
+        else {
+            panic!("expected presentation start");
+        };
+        start.stream_id = 0;
+        assert_eq!(
+            dispatch_privileged_command(&mut guard, &allowed, &missing_request, 150),
+            Err(PrivilegedDispatchError::InvalidPresentation(
+                PresentationControlError::InvalidStreamId
+            ))
+        );
+        assert_eq!(guard.last_sequence(), 1);
     }
 
     #[test]
