@@ -343,12 +343,7 @@ impl PresentationDispatchState {
             .ownership
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .start(
-                principal_id,
-                control_session_id,
-                presentation_id,
-                stream_id,
-            );
+            .start(principal_id, control_session_id, presentation_id, stream_id);
         match result {
             Ok(owner) => PresentationStatus {
                 presentation_id: owner.presentation_id,
@@ -1625,7 +1620,10 @@ mod tests {
         let busy = presentation.start(other, 11, 21, 31);
         assert_eq!(busy.state, WirePresentationState::Rejected as i32);
         assert_eq!(busy.diagnostic, "control.presentation.busy");
-        assert_eq!(presentation.owner().map(|value| value.principal_id), Some(owner));
+        assert_eq!(
+            presentation.owner().map(|value| value.principal_id),
+            Some(owner)
+        );
 
         let rejected_stop = presentation.stop(other, 11, 20);
         assert_eq!(rejected_stop.state, WirePresentationState::Rejected as i32);
