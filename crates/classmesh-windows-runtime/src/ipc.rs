@@ -509,9 +509,7 @@ impl IpcFrame {
         Ok(Self::new(MESSAGE_SERVICE_ENCODER_CACHE_RESULT, payload))
     }
 
-    pub fn service_udp_stream_start(
-        start: ServiceUdpStreamStart,
-    ) -> Result<Self, IpcMessageError> {
+    pub fn service_udp_stream_start(start: ServiceUdpStreamStart) -> Result<Self, IpcMessageError> {
         start.validate()?;
         let mut payload = Vec::with_capacity(SERVICE_UDP_STREAM_START_LEN);
         payload.extend_from_slice(&start.stream_id.to_be_bytes());
@@ -788,8 +786,7 @@ impl IpcFrame {
                 if self.payload.len() != SERVICE_UDP_STREAM_START_LEN {
                     return Err(IpcMessageError::InvalidPayload);
                 }
-                let stream_id =
-                    u32::from_be_bytes(self.payload[0..4].try_into().expect("slice"));
+                let stream_id = u32::from_be_bytes(self.payload[0..4].try_into().expect("slice"));
                 let width = u16::from_be_bytes(self.payload[4..6].try_into().expect("slice"));
                 let height = u16::from_be_bytes(self.payload[6..8].try_into().expect("slice"));
                 let fps = self.payload[8];
@@ -797,8 +794,7 @@ impl IpcFrame {
                 let port = u16::from_be_bytes(self.payload[10..12].try_into().expect("slice"));
                 let bitrate_kbps =
                     u32::from_be_bytes(self.payload[12..16].try_into().expect("slice"));
-                let address_bytes: [u8; 16] =
-                    self.payload[16..32].try_into().expect("slice");
+                let address_bytes: [u8; 16] = self.payload[16..32].try_into().expect("slice");
                 let ip = match family {
                     4 => {
                         if address_bytes[4..].iter().any(|byte| *byte != 0) {
@@ -1065,8 +1061,7 @@ mod tests {
                 fps: 30,
                 bitrate_kbps: 2_500,
             };
-            let frame =
-                IpcFrame::service_udp_stream_start(start).expect("valid UDP stream start");
+            let frame = IpcFrame::service_udp_stream_start(start).expect("valid UDP stream start");
             assert_eq!(
                 frame.message().expect("typed UDP stream start"),
                 IpcMessage::ServiceUdpStreamStart(start)
@@ -1099,10 +1094,7 @@ mod tests {
             Err(IpcMessageError::InvalidPayload)
         );
         assert_eq!(
-            IpcFrame::service_udp_stream_start(ServiceUdpStreamStart {
-                width: 0,
-                ..valid
-            }),
+            IpcFrame::service_udp_stream_start(ServiceUdpStreamStart { width: 0, ..valid }),
             Err(IpcMessageError::InvalidPayload)
         );
     }
