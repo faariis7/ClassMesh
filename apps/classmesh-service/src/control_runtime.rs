@@ -95,10 +95,50 @@ pub(crate) struct FocusedMediaReconfigure {
     pub(crate) reconfigure: StreamReconfigure,
 }
 
+const MEDIA_START_PENDING: u8 = 0;
+const MEDIA_START_COMMITTED: u8 = 1;
+const MEDIA_START_CANCELLED: u8 = 2;
+
+#[derive(Debug, Clone)]
+pub(crate) struct FocusedMediaStartCommit(Arc<AtomicU8>);
+
+impl FocusedMediaStartCommit {
+    fn pending() -> Self {
+        Self(Arc::new(AtomicU8::new(MEDIA_START_PENDING)))
+    }
+
+    pub(crate) fn try_commit(&self) -> bool {
+        self.0
+            .compare_exchange(
+                MEDIA_START_PENDING,
+                MEDIA_START_COMMITTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn cancel(&self) -> bool {
+        self.0
+            .compare_exchange(
+                MEDIA_START_PENDING,
+                MEDIA_START_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn is_committed(&self) -> bool {
+        self.0.load(Ordering::Acquire) == MEDIA_START_COMMITTED
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct FocusedMediaStart {
     pub(crate) control_session_id: u64,
     pub(crate) start: ServiceUdpStreamStart,
+    pub(crate) commit: FocusedMediaStartCommit,
     pub(crate) reply_tx: oneshot::Sender<Result<(), String>>,
 }
 
@@ -808,15 +848,17 @@ async fn run_established_session(
                                         fps: validated.profile.fps,
                                         bitrate_kbps: validated.profile.bitrate_kbps,
                                     };
-                                    let (reply_tx, reply_rx) = oneshot::channel();
+                                    let (reply_tx, mut reply_rx) = oneshot::channel();
+                                    let commit = FocusedMediaStartCommit::pending();
                                     match media.start_tx.try_send(FocusedMediaStart {
                                         control_session_id: session.control_session_id,
                                         start,
+                                        commit: commit.clone(),
                                         reply_tx,
                                     }) {
                                         Ok(()) => match tokio::time::timeout(
                                             Duration::from_secs(1),
-                                            reply_rx,
+                                            &mut reply_rx,
                                         )
                                         .await
                                         {
@@ -824,7 +866,20 @@ async fn run_established_session(
                                             Ok(Err(_)) => {
                                                 Err("control.media.start_reply_dropped".to_owned())
                                             }
-                                            Err(_) => Err("control.media.start_timeout".to_owned()),
+                                            Err(_) if commit.cancel() => {
+                                                Err("control.media.start_timeout".to_owned())
+                                            }
+                                            Err(_) if commit.is_committed() => reply_rx
+                                                .await
+                                                .unwrap_or_else(|_| {
+                                                    Err(
+                                                        "control.media.start_reply_dropped"
+                                                            .to_owned(),
+                                                    )
+                                                }),
+                                            Err(_) => {
+                                                Err("control.media.start_cancelled".to_owned())
+                                            }
                                         },
                                         Err(mpsc::TrySendError::Full(_)) => {
                                             Err("control.media.start_backpressure".to_owned())
