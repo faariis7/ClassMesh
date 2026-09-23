@@ -71,7 +71,7 @@ Protocol minor 0.3 adds the transport-neutral Phase 7 presentation lifecycle con
 
 - `PresentationStart` binds a non-zero presentation ID to a non-zero media stream ID that fits the existing 32-bit media packet header.
 - `PresentationStop` names the presentation to stop.
-- `PresentationStatus` reports lifecycle state without selecting a transport.
+- `PresentationStatus` reports lifecycle state without selecting a transport; status IDs/state are validated and its free-form diagnostic is bounded to 1 KiB.
 - Start/stop are correlated privileged commands with non-zero `request_id` and require `Permission::StartPresentation` on the authenticated peer.
 - v0.2 sessions cannot dispatch the new lifecycle commands.
 - The lifecycle contract does **not** choose UDP multicast, UDP unicast, QUIC Datagram, WebRTC, or any fallback. Media negotiation remains in `StreamOffer` and the Phase 4 UDP-vs-QUIC-Datagram decision remains physically gated.
