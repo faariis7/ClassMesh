@@ -12,6 +12,7 @@ pub mod framing;
 pub mod handshake;
 pub mod issuance;
 pub mod peer_identity;
+pub mod presentation_state;
 pub mod quic;
 pub mod stream;
 pub mod x509_issuance;
