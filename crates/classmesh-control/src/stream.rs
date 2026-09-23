@@ -14,6 +14,7 @@ pub const UDP_UNICAST_PARAMETERS_LEN: usize = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamOfferError {
     InvalidStreamId,
+    StreamIdOutOfRange,
     UnsupportedKind,
     MissingProfile,
     UnsupportedCodec,
@@ -87,6 +88,9 @@ pub fn validate_interactive_stream_offer(
 ) -> Result<ValidatedInteractiveStreamOffer, StreamOfferError> {
     if offer.stream_id == 0 {
         return Err(StreamOfferError::InvalidStreamId);
+    }
+    if u32::try_from(offer.stream_id).is_err() {
+        return Err(StreamOfferError::StreamIdOutOfRange);
     }
     if offer.kind != WireStreamKind::Interactive as i32 {
         return Err(StreamOfferError::UnsupportedKind);
@@ -199,6 +203,17 @@ mod tests {
         assert_eq!(
             validate_interactive_stream_offer(&large, &BTreeSet::from([Capability::QuicDatagram]),),
             Err(StreamOfferError::TransportParametersTooLarge)
+        );
+    }
+
+    #[test]
+    fn stream_id_must_fit_media_packet_header() {
+        let capabilities = BTreeSet::from([Capability::UdpUnicast]);
+        let mut large = offer(WireMediaTransport::UdpUnicast);
+        large.stream_id = u64::from(u32::MAX) + 1;
+        assert_eq!(
+            validate_interactive_stream_offer(&large, &capabilities),
+            Err(StreamOfferError::StreamIdOutOfRange)
         );
     }
 
