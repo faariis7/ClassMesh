@@ -188,6 +188,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            Ok(WorkerEvent::MediaFeedback(feedback)) => {
+                let result = active_udp_stream
+                    .as_mut()
+                    .ok_or("worker.media.no_active_stream")
+                    .and_then(|stream| {
+                        stream.apply_feedback(&feedback).map_err(|error| match error {
+                            classmesh_worker::udp_stream::FocusedUdpStreamError::StreamMismatch => {
+                                "worker.media.feedback_stream_mismatch"
+                            }
+                            _ => "worker.media.feedback_failed",
+                        })
+                    });
+                match result {
+                    Ok(outcome) => {
+                        if outcome.retransmitted_packets > 0 || outcome.keyframe_requested {
+                            eprintln!(
+                                "ClassMesh Worker applied media recovery feedback: retransmitted={}, keyframe_requested={}",
+                                outcome.retransmitted_packets, outcome.keyframe_requested
+                            );
+                        }
+                    }
+                    Err(code) => {
+                        eprintln!("ClassMesh Worker rejected media recovery feedback: {code}");
+                    }
+                }
+            }
             Ok(WorkerEvent::StreamReconfigure(reconfigure)) => {
                 match FocusedWorkerProfile::from_reconfigure(&reconfigure) {
                     Ok(profile) => {
@@ -497,6 +523,7 @@ enum WorkerEvent {
     Input(classmesh_protocol::control_wire::InputEvent),
     StreamReconfigure(classmesh_protocol::control_wire::StreamReconfigure),
     UdpStreamStart(classmesh_windows_runtime::ipc::ServiceUdpStreamStart),
+    MediaFeedback(classmesh_protocol::feedback::FeedbackMessage),
     EncoderCacheResult(classmesh_windows_runtime::ipc::ServiceEncoderCacheResult),
     IpcFailure(String),
 }
@@ -837,6 +864,11 @@ fn spawn_ipc_reader(
                     }
                     Ok(IpcMessage::ServiceUdpStreamStart(start)) => {
                         if event_tx.send(WorkerEvent::UdpStreamStart(start)).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(IpcMessage::ServiceMediaFeedback(feedback)) => {
+                        if event_tx.send(WorkerEvent::MediaFeedback(feedback)).is_err() {
                             return;
                         }
                     }
