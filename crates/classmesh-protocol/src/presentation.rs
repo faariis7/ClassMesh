@@ -37,16 +37,17 @@ pub fn validate_status(status: &PresentationStatus) -> Result<(), PresentationCo
     if status.presentation_id == 0 {
         return Err(PresentationControlError::InvalidPresentationId);
     }
-    if status.stream_id == 0 {
-        return Err(PresentationControlError::InvalidStreamId);
-    }
-    if u32::try_from(status.stream_id).is_err() {
-        return Err(PresentationControlError::StreamIdOutOfRange);
-    }
     let state = PresentationState::try_from(status.state)
         .map_err(|_| PresentationControlError::InvalidState)?;
     if state == PresentationState::Unspecified {
         return Err(PresentationControlError::InvalidState);
+    }
+    if status.stream_id == 0 {
+        if state != PresentationState::Rejected {
+            return Err(PresentationControlError::InvalidStreamId);
+        }
+    } else if u32::try_from(status.stream_id).is_err() {
+        return Err(PresentationControlError::StreamIdOutOfRange);
     }
     if status.diagnostic.len() > MAX_PRESENTATION_DIAGNOSTIC_BYTES {
         return Err(PresentationControlError::DiagnosticTooLarge);
@@ -110,6 +111,21 @@ mod tests {
         assert_eq!(
             validate_status(&status),
             Err(PresentationControlError::InvalidState)
+        );
+
+        status.state = PresentationState::Rejected as i32;
+        status.stream_id = 0;
+        status.diagnostic = "control.presentation.not_owner".to_owned();
+        assert_eq!(
+            validate_status(&status),
+            Ok(()),
+            "a rejected lifecycle response may omit a stream that the requester does not own"
+        );
+
+        status.state = PresentationState::Stopped as i32;
+        assert_eq!(
+            validate_status(&status),
+            Err(PresentationControlError::InvalidStreamId)
         );
 
         status.state = PresentationState::Rejected as i32;
