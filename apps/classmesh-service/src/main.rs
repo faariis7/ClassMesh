@@ -24,7 +24,7 @@ mod windows_service_app {
         worker_pipe_name,
     };
     use classmesh_windows_runtime::ipc::{
-        IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage,
+        IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage, ServiceUdpStreamStart,
     };
     use classmesh_windows_runtime::worker::{
         WorkerProcess, WorkerRestartDecision, WorkerRestartPolicy, WorkerWatchdog,
@@ -56,7 +56,8 @@ mod windows_service_app {
 
     use crate::control_runtime::{
         ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, FocusedMediaDispatchChannels,
-        FocusedMediaReconfigure, InputAvailability, InputDispatchChannels, WorkerCapabilityState,
+        FocusedMediaReconfigure, FocusedMediaStart, InputAvailability, InputDispatchChannels,
+        WorkerCapabilityState,
     };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -336,6 +337,25 @@ mod windows_service_app {
                 .as_ref()
                 .ok_or_else(|| "Worker IPC pipe is unavailable for media reset".to_owned())?;
             send_control(pipe, IpcControlCommand::ClearFocusedProfile)
+        }
+
+        fn send_udp_stream_start(&self, start: ServiceUdpStreamStart) -> Result<u32, String> {
+            let process = self
+                .process
+                .as_ref()
+                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
+            if !process
+                .is_running()
+                .map_err(|error| format!("Worker UDP media liveness probe failed: {error}"))?
+            {
+                return Err("interactive Worker exited before UDP media start".to_owned());
+            }
+            let pipe = self
+                .pipe
+                .as_ref()
+                .ok_or_else(|| "Worker IPC pipe is unavailable for UDP media start".to_owned())?;
+            send_udp_stream_start(pipe, start)?;
+            Ok(process.process_id())
         }
 
         fn send_stream_reconfigure(&self, reconfigure: &StreamReconfigure) -> Result<u32, String> {
@@ -807,6 +827,18 @@ mod windows_service_app {
             .map_err(|error| format!("Worker input IPC write failed: {error}"))
     }
 
+    fn send_udp_stream_start(
+        pipe: &NamedPipeServer,
+        start: ServiceUdpStreamStart,
+    ) -> Result<(), String> {
+        let bytes = IpcFrame::service_udp_stream_start(start)
+            .map_err(|error| format!("failed to build Worker UDP media frame: {error:?}"))?
+            .encode()
+            .map_err(|error| format!("failed to encode Worker UDP media frame: {error:?}"))?;
+        pipe.write_all(&bytes)
+            .map_err(|error| format!("Worker UDP media IPC write failed: {error}"))
+    }
+
     fn send_stream_reconfigure(
         pipe: &NamedPipeServer,
         reconfigure: &StreamReconfigure,
@@ -1022,12 +1054,17 @@ mod windows_service_app {
             cleanup_tx: input_cleanup_tx,
             availability: Arc::clone(&input_availability),
         };
+        let (media_start_tx, media_start_rx) =
+            mpsc::sync_channel::<FocusedMediaStart>(FOCUSED_MEDIA_QUEUE_CAPACITY);
         let (media_reconfigure_tx, media_reconfigure_rx) =
             mpsc::sync_channel::<FocusedMediaReconfigure>(FOCUSED_MEDIA_QUEUE_CAPACITY);
         let released_media_session_floor = Arc::new(AtomicU64::new(0));
+        let media_owner = Arc::new(AtomicU64::new(0));
         let media_channels = FocusedMediaDispatchChannels {
+            start_tx: media_start_tx,
             reconfigure_tx: media_reconfigure_tx,
             released_session_floor: Arc::clone(&released_media_session_floor),
+            owner: Arc::clone(&media_owner),
         };
         let encoder_capability_cache = match encoder_capability_cache() {
             Ok(cache) => Arc::new(cache),
@@ -1068,13 +1105,17 @@ mod windows_service_app {
             Arc::clone(&worker_capabilities),
             Arc::clone(&encoder_capability_cache),
         );
+        let mut desired_focused_start: Option<ServiceUdpStreamStart> = None;
         let mut desired_focused_reconfigure: Option<StreamReconfigure> = None;
         let mut desired_focused_control_session_id: Option<u64> = None;
+        let mut focused_start_worker_pid: Option<u32> = None;
         let mut focused_reconfigure_worker_pid: Option<u32> = None;
         let mut focused_profile_clear_pending = false;
         let mut focused_media_session_floor = 0_u64;
+        let mut focused_start_attempts = 0_u8;
         let mut focused_reconfigure_attempts = 0_u8;
         let mut focused_clear_attempts = 0_u8;
+        let mut next_media_start_attempt = Instant::now();
         let mut next_media_reconfigure_attempt = Instant::now();
         let mut next_worker_poll = Instant::now();
         loop {
@@ -1109,13 +1150,51 @@ mod windows_service_app {
                     released_floor,
                     desired_focused_control_session_id,
                 ) {
+                    desired_focused_start = None;
                     desired_focused_reconfigure = None;
                     desired_focused_control_session_id = None;
+                    focused_start_worker_pid = None;
                     focused_reconfigure_worker_pid = None;
                     focused_profile_clear_pending = true;
+                    focused_start_attempts = 0;
                     focused_clear_attempts = 0;
                     focused_reconfigure_attempts = 0;
+                    next_media_start_attempt = Instant::now();
                     next_media_reconfigure_attempt = Instant::now();
+                }
+            }
+
+            while let Ok(dispatch) = media_start_rx.try_recv() {
+                if dispatch.control_session_id <= focused_media_session_floor {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(Err("control.media.start_stale".to_owned()));
+                    continue;
+                }
+                match workers.send_udp_stream_start(dispatch.start) {
+                    Ok(process_id) => {
+                        desired_focused_start = Some(dispatch.start);
+                        desired_focused_reconfigure = None;
+                        desired_focused_control_session_id = Some(dispatch.control_session_id);
+                        focused_start_worker_pid = Some(process_id);
+                        focused_reconfigure_worker_pid = None;
+                        focused_profile_clear_pending = false;
+                        focused_start_attempts = 0;
+                        focused_reconfigure_attempts = 0;
+                        focused_clear_attempts = 0;
+                        next_media_start_attempt = Instant::now();
+                        next_media_reconfigure_attempt = Instant::now();
+                        let _ = dispatch.reply_tx.send(Ok(()));
+                        eprintln!(
+                            "ClassMesh Service started focused UDP media on Worker {process_id}"
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("ClassMesh Service UDP media start failed: {error}");
+                        let _ = dispatch
+                            .reply_tx
+                            .send(Err("control.media.worker_unavailable".to_owned()));
+                    }
                 }
             }
 
@@ -1137,6 +1216,43 @@ mod windows_service_app {
             }
 
             let current_worker_pid = workers.current_process_id();
+            if !focused_profile_clear_pending
+                && let Some(start) = desired_focused_start
+                && current_worker_pid.is_some()
+                && focused_start_worker_pid != current_worker_pid
+                && Instant::now() >= next_media_start_attempt
+            {
+                match workers.send_udp_stream_start(start) {
+                    Ok(process_id) => {
+                        focused_start_worker_pid = Some(process_id);
+                        focused_reconfigure_worker_pid = None;
+                        focused_start_attempts = 0;
+                        eprintln!(
+                            "ClassMesh Service restored focused UDP media on Worker {process_id}"
+                        );
+                    }
+                    Err(error) => {
+                        focused_start_attempts = focused_start_attempts.saturating_add(1);
+                        if focused_start_attempts >= MAX_MEDIA_RECONFIGURE_ATTEMPTS {
+                            focused_start_worker_pid = current_worker_pid;
+                            eprintln!(
+                                "ClassMesh Service focused UDP media restore abandoned after {} attempts: {error}",
+                                focused_start_attempts
+                            );
+                        } else {
+                            focused_start_worker_pid = None;
+                            next_media_start_attempt = Instant::now()
+                                .checked_add(MEDIA_RECONFIGURE_RETRY)
+                                .unwrap_or_else(Instant::now);
+                            eprintln!(
+                                "ClassMesh Service will retry focused UDP media restore ({}/{}): {error}",
+                                focused_start_attempts, MAX_MEDIA_RECONFIGURE_ATTEMPTS
+                            );
+                        }
+                    }
+                }
+            }
+
             if focused_profile_clear_pending {
                 if current_worker_pid.is_none() {
                     focused_profile_clear_pending = false;
@@ -1172,6 +1288,7 @@ mod windows_service_app {
             if !focused_profile_clear_pending
                 && let Some(reconfigure) = desired_focused_reconfigure.as_ref()
                 && current_worker_pid.is_some()
+                && focused_start_worker_pid == current_worker_pid
                 && focused_reconfigure_worker_pid != current_worker_pid
                 && Instant::now() >= next_media_reconfigure_attempt
             {
