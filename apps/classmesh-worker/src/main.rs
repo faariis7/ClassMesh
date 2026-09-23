@@ -213,7 +213,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                             }
                             Err(code) => {
-                                eprintln!("ClassMesh Worker rejected focused profile update: {code}");
+                                eprintln!(
+                                    "ClassMesh Worker rejected focused profile update: {code}"
+                                );
                             }
                         }
                     }
