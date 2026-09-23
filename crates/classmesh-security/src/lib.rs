@@ -473,7 +473,9 @@ mod tests {
             .expect("principal should register");
 
         assert_eq!(
-            store.principal(principal_id).map(|principal| principal.kind),
+            store
+                .principal(principal_id)
+                .map(|principal| principal.kind),
             Some(PrincipalKind::Teacher)
         );
         assert!(store.principal(id(8)).is_none());
