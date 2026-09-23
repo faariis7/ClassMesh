@@ -41,8 +41,14 @@ impl GroupMediaEpoch {
 pub struct GroupMediaKeyMaterial([u8; GROUP_MEDIA_KEY_BYTES]);
 
 impl GroupMediaKeyMaterial {
-    #[must_use]
-    pub const fn new(bytes: [u8; GROUP_MEDIA_KEY_BYTES]) -> Self {
+    pub fn generate() -> Result<Self, GroupMediaError> {
+        let mut bytes = [0_u8; GROUP_MEDIA_KEY_BYTES];
+        getrandom::fill(&mut bytes).map_err(|_| GroupMediaError::KeyGenerationFailed)?;
+        Ok(Self(bytes))
+    }
+
+    #[cfg(test)]
+    const fn from_test_bytes(bytes: [u8; GROUP_MEDIA_KEY_BYTES]) -> Self {
         Self(bytes)
     }
 
@@ -68,6 +74,7 @@ pub enum GroupMediaReplayError {
 pub enum GroupMediaError {
     InvalidEpoch,
     InvalidReplayTolerance,
+    KeyGenerationFailed,
     MissingAssociatedData,
     AadTooLarge,
     FrameTooLarge,
@@ -82,6 +89,9 @@ impl fmt::Display for GroupMediaError {
             Self::InvalidEpoch => formatter.write_str("group-media epoch must be non-zero"),
             Self::InvalidReplayTolerance => {
                 formatter.write_str("group-media replay tolerance is outside the bounded range")
+            }
+            Self::KeyGenerationFailed => {
+                formatter.write_str("group-media key generation failed")
             }
             Self::MissingAssociatedData => {
                 formatter.write_str("group-media associated data is required")
@@ -103,6 +113,7 @@ impl std::error::Error for GroupMediaError {
             Self::Crypto(error) => Some(error),
             Self::InvalidEpoch
             | Self::InvalidReplayTolerance
+            | Self::KeyGenerationFailed
             | Self::MissingAssociatedData
             | Self::AadTooLarge
             | Self::FrameTooLarge
@@ -121,7 +132,7 @@ pub struct GroupMediaSender {
 impl GroupMediaSender {
     pub fn new(
         epoch: GroupMediaEpoch,
-        key_material: GroupMediaKeyMaterial,
+        key_material: &GroupMediaKeyMaterial,
     ) -> Result<Self, GroupMediaError> {
         let key = EncryptionKey::derive_from(
             GROUP_MEDIA_CIPHER_SUITE,
@@ -174,7 +185,7 @@ pub struct GroupMediaReceiver {
 impl GroupMediaReceiver {
     pub fn new(
         epoch: GroupMediaEpoch,
-        key_material: GroupMediaKeyMaterial,
+        key_material: &GroupMediaKeyMaterial,
         replay_tolerance_frames: usize,
     ) -> Result<Self, GroupMediaError> {
         if !(1..=MAX_GROUP_MEDIA_REPLAY_TOLERANCE_FRAMES).contains(&replay_tolerance_frames) {
@@ -199,7 +210,7 @@ impl GroupMediaReceiver {
 
     pub fn with_default_replay_tolerance(
         epoch: GroupMediaEpoch,
-        key_material: GroupMediaKeyMaterial,
+        key_material: &GroupMediaKeyMaterial,
     ) -> Result<Self, GroupMediaError> {
         Self::new(
             epoch,
@@ -282,15 +293,24 @@ mod tests {
     }
 
     fn key(value: u8) -> GroupMediaKeyMaterial {
-        GroupMediaKeyMaterial::new([value; GROUP_MEDIA_KEY_BYTES])
+        GroupMediaKeyMaterial::from_test_bytes([value; GROUP_MEDIA_KEY_BYTES])
     }
 
     fn pair(epoch_value: u32, key_value: u8) -> (GroupMediaSender, GroupMediaReceiver) {
+        let material = key(key_value);
         (
-            GroupMediaSender::new(epoch(epoch_value), key(key_value)).expect("sender"),
-            GroupMediaReceiver::with_default_replay_tolerance(epoch(epoch_value), key(key_value))
+            GroupMediaSender::new(epoch(epoch_value), &material).expect("sender"),
+            GroupMediaReceiver::with_default_replay_tolerance(epoch(epoch_value), &material)
                 .expect("receiver"),
         )
+    }
+
+    #[test]
+    fn production_key_generation_returns_nonzero_random_material() {
+        let first = GroupMediaKeyMaterial::generate().expect("first key");
+        let second = GroupMediaKeyMaterial::generate().expect("second key");
+        assert_ne!(first.as_bytes(), &[0; GROUP_MEDIA_KEY_BYTES]);
+        assert_ne!(first.as_bytes(), second.as_bytes());
     }
 
     #[test]
@@ -368,8 +388,8 @@ mod tests {
 
     #[test]
     fn another_epoch_is_rejected_before_decryption() {
-        let mut sender = GroupMediaSender::new(epoch(4), key(0x44)).expect("sender");
-        let mut receiver = GroupMediaReceiver::with_default_replay_tolerance(epoch(5), key(0x55))
+        let mut sender = GroupMediaSender::new(epoch(4), &key(0x44)).expect("sender");
+        let mut receiver = GroupMediaReceiver::with_default_replay_tolerance(epoch(5), &key(0x55))
             .expect("receiver");
         let sealed = sender
             .seal_frame(b"frame", b"binding")
@@ -385,8 +405,8 @@ mod tests {
 
     #[test]
     fn replay_window_accepts_in_window_reordering_and_rejects_too_old_frames() {
-        let mut sender = GroupMediaSender::new(epoch(6), key(0x66)).expect("sender");
-        let mut receiver = GroupMediaReceiver::new(epoch(6), key(0x66), 3).expect("receiver");
+        let mut sender = GroupMediaSender::new(epoch(6), &key(0x66)).expect("sender");
+        let mut receiver = GroupMediaReceiver::new(epoch(6), &key(0x66), 3).expect("receiver");
         let aad = b"bounded-replay";
         let frames: Vec<Vec<u8>> = (0..5)
             .map(|value| sender.seal_frame(&[value], aad).expect("encrypted frame"))
@@ -411,13 +431,13 @@ mod tests {
     #[test]
     fn replay_tolerance_is_bounded() {
         assert!(matches!(
-            GroupMediaReceiver::new(epoch(1), key(1), 0),
+            GroupMediaReceiver::new(epoch(1), &key(1), 0),
             Err(GroupMediaError::InvalidReplayTolerance)
         ));
         assert!(matches!(
             GroupMediaReceiver::new(
                 epoch(1),
-                key(1),
+                &key(1),
                 MAX_GROUP_MEDIA_REPLAY_TOLERANCE_FRAMES + 1
             ),
             Err(GroupMediaError::InvalidReplayTolerance)
