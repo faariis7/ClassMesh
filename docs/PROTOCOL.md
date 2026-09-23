@@ -76,6 +76,7 @@ Protocol minor 0.3 adds the transport-neutral Phase 7 presentation lifecycle con
 - v0.2 sessions cannot dispatch the new lifecycle commands.
 - The lifecycle contract does **not** choose UDP multicast, UDP unicast, QUIC Datagram, WebRTC, or any fallback. Media negotiation remains in `StreamOffer` and the Phase 4 UDP-vs-QUIC-Datagram decision remains physically gated.
 - This schema/authorization slice does not claim a production presentation runtime exists; runtime ownership, cleanup, shared encoded output, multicast security and scale validation remain later Phase 7 slices.
+
 ### Phase 6E clipboard skeleton
 
 Clipboard support is deliberately narrow and opt-in:
