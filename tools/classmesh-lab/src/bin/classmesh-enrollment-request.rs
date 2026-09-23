@@ -10,9 +10,7 @@ mod windows_app {
     use std::io::Write;
     use std::path::PathBuf;
 
-    use classmesh_control::enrollment::{
-        ENROLLMENT_MIN_VERSION, validate_enrollment_request,
-    };
+    use classmesh_control::enrollment::{ENROLLMENT_MIN_VERSION, validate_enrollment_request};
     use classmesh_identity_win::{CngMachineKey, CngRcgenSigningKey};
     use classmesh_protocol::control_wire::{EnrollmentRequest, PrincipalRole};
     use prost::Message;
