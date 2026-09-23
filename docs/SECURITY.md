@@ -36,15 +36,19 @@ Enrollment establishes which teacher/classroom authority can control an agent.
 
 Plain multicast video is not acceptable.
 
-Design:
+Phase 7E adopts RFC 9605 SFrame behind `classmesh-security::group_media` (ADR-0008). The baseline cipher suite is AES-GCM-256/SHA-512 through the pinned `sframe` 2.0.0 implementation rather than a ClassMesh-defined cipher/nonce construction.
+
+Security rules:
 
 1. teacher and student establish an authenticated control session;
-2. teacher creates a random presentation session key;
-3. key is delivered individually over the authenticated control channel;
-4. multicast video payloads are encrypted/authenticated with an AEAD construction;
-5. keys rotate for new presentation sessions and can rotate when membership changes.
+2. each presentation security epoch uses a fresh random 32-byte base key and a non-zero epoch/KID;
+3. key material is delivered individually only over the authenticated control channel;
+4. SFrame authenticates encrypted presentation frames plus bounded external ClassMesh binding metadata;
+5. receiver replay state is bounded and recorded only after successful frame authentication;
+6. a sender must never restart counters with the same epoch/key pair; rebuilding sender state requires a fresh epoch/key;
+7. keys rotate for new presentations and may rotate when membership changes.
 
-Exact nonce/key-rotation format must be specified before production use and covered by cryptographic review/tests. Do not invent a custom cipher.
+The crypto core alone does not enable production multicast. Authenticated key distribution/rotation, production sender/receiver wiring and physical scale qualification remain separate Phase 7 gates.
 
 ## Unicast media
 
