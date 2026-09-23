@@ -112,7 +112,7 @@ pub fn dispatch_privileged_command(
                 Permission::StartPresentation,
                 now_unix_ms,
             )?;
-            Ok(PrivilegedControlCommand::PresentationStart(*start))
+            Ok(PrivilegedControlCommand::PresentationStart(start.clone()))
         }
         control_envelope::Payload::PresentationStop(stop) => {
             if guard.protocol_version().major == 0 && guard.protocol_version().minor < 3 {
@@ -128,7 +128,7 @@ pub fn dispatch_privileged_command(
                 Permission::StartPresentation,
                 now_unix_ms,
             )?;
-            Ok(PrivilegedControlCommand::PresentationStop(*stop))
+            Ok(PrivilegedControlCommand::PresentationStop(stop.clone()))
         }
         _ => Err(PrivilegedDispatchError::UnsupportedPayload),
     }
