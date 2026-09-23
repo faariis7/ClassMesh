@@ -550,6 +550,7 @@ fn capability_to_wire(capability: Capability) -> i32 {
         Capability::WebRtc => 9,
         Capability::LocalSfu => 10,
         Capability::ClipboardText => 11,
+        Capability::TeacherPresentation => 12,
     }
 }
 
@@ -566,6 +567,7 @@ fn capability_from_wire(value: i32) -> Option<Capability> {
         9 => Some(Capability::WebRtc),
         10 => Some(Capability::LocalSfu),
         11 => Some(Capability::ClipboardText),
+        12 => Some(Capability::TeacherPresentation),
         _ => None,
     }
 }
@@ -592,6 +594,7 @@ mod tests {
                 Capability::H264HardwareDecode,
                 Capability::UdpUnicast,
                 Capability::ClipboardText,
+                Capability::TeacherPresentation,
             ]),
             hostname: "student-05".to_owned(),
             app_version: "0.0.1".to_owned(),

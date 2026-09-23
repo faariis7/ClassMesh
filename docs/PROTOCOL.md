@@ -1,4 +1,4 @@
-# ClassMesh Protocol Baseline v0.2
+# ClassMesh Protocol Baseline v0.3
 
 This document describes the protocol intent currently represented by `classmesh-protocol`, `classmesh-network` and the `.proto` schemas. It is **not** a frozen wire-compatibility promise yet.
 
@@ -64,6 +64,18 @@ A `Hello` / `HelloAck` exchange explicitly negotiates the protocol minor version
 After establishment, privileged control messages must use the exact established `control_session_id` and a strictly increasing application sequence on the ordered QUIC control stream. Permission checks re-validate the current credential/principal state for each privileged command; revoked, expired, future-issued, or disabled identities therefore stop authorizing even on an already-established transport.
 
 Application heartbeat tracks device/control liveness independently from `MediaHealth`. The initial policy is a 2-second heartbeat interval, suspect after 6 seconds, and offline after 10 seconds. Peer monotonic timestamps are diagnostic only and are never directly compared across machines.
+
+### Teacher Presentation lifecycle contract (v0.3)
+
+Protocol minor 0.3 adds the transport-neutral Phase 7 presentation lifecycle contract. `CAPABILITY_TEACHER_PRESENTATION` is negotiated independently from media transport capabilities.
+
+- `PresentationStart` binds a non-zero presentation ID to a non-zero media stream ID that fits the existing 32-bit media packet header.
+- `PresentationStop` names the presentation to stop.
+- `PresentationStatus` reports lifecycle state without selecting a transport; status IDs/state are validated and its free-form diagnostic is bounded to 1 KiB.
+- Start/stop are correlated privileged commands with non-zero `request_id` and require `Permission::StartPresentation` on the authenticated peer.
+- v0.2 sessions cannot dispatch the new lifecycle commands.
+- The lifecycle contract does **not** choose UDP multicast, UDP unicast, QUIC Datagram, WebRTC, or any fallback. Media negotiation remains in `StreamOffer` and the Phase 4 UDP-vs-QUIC-Datagram decision remains physically gated.
+- This schema/authorization slice does not claim a production presentation runtime exists; runtime ownership, cleanup, shared encoded output, multicast security and scale validation remain later Phase 7 slices.
 
 ### Phase 6E clipboard skeleton
 

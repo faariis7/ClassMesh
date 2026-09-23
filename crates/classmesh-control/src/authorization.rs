@@ -61,6 +61,11 @@ impl AuthenticatedControlGuard {
         self.last_sequence
     }
 
+    #[must_use]
+    pub const fn protocol_version(self) -> ProtocolVersion {
+        self.protocol_version
+    }
+
     /// Validates and consumes one post-handshake envelope for this authenticated session.
     ///
     /// Sequence monotonicity is global to the peer's control stream, not per payload type.

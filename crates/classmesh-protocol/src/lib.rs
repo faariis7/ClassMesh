@@ -3,13 +3,14 @@
 pub mod clipboard;
 pub mod feedback;
 pub mod media;
+pub mod presentation;
 
 /// Generated Protocol Buffers types for the reliable control plane.
 pub mod control_wire {
     include!(concat!(env!("OUT_DIR"), "/classmesh.control.v1.rs"));
 }
 
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 2 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 3 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProtocolVersion {
@@ -57,6 +58,7 @@ pub enum Capability {
     WebRtc,
     LocalSfu,
     ClipboardText,
+    TeacherPresentation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,12 +147,38 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_marks_enrollment_as_minor_two() {
-        assert_eq!(PROTOCOL_VERSION, ProtocolVersion { major: 0, minor: 2 });
+    fn protocol_version_marks_presentation_contract_as_minor_three() {
+        assert_eq!(PROTOCOL_VERSION, ProtocolVersion { major: 0, minor: 3 });
         assert_eq!(
-            PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 1 }),
-            Some(ProtocolVersion { major: 0, minor: 1 })
+            PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 2 }),
+            Some(ProtocolVersion { major: 0, minor: 2 })
         );
+    }
+
+    #[test]
+    fn presentation_start_round_trips_on_v03() {
+        let envelope = control_wire::ControlEnvelope {
+            control_session_id: 44,
+            sequence: 8,
+            protocol_version: Some(control_wire::ProtocolVersion { major: 0, minor: 3 }),
+            request_id: 77,
+            payload: Some(control_wire::control_envelope::Payload::PresentationStart(
+                control_wire::PresentationStart {
+                    presentation_id: 900,
+                    stream_id: 12,
+                },
+            )),
+        };
+
+        let decoded = control_wire::ControlEnvelope::decode(envelope.encode_to_vec().as_slice())
+            .expect("presentation start should decode");
+        let Some(control_wire::control_envelope::Payload::PresentationStart(start)) =
+            decoded.payload
+        else {
+            panic!("expected presentation start");
+        };
+        assert_eq!(start.presentation_id, 900);
+        assert_eq!(start.stream_id, 12);
     }
 
     #[test]

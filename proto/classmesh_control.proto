@@ -20,6 +20,7 @@ enum Capability {
   CAPABILITY_WEBRTC = 9;
   CAPABILITY_LOCAL_SFU = 10;
   CAPABILITY_CLIPBOARD_TEXT = 11;
+  CAPABILITY_TEACHER_PRESENTATION = 12;
 }
 
 enum PrincipalRole {
@@ -281,6 +282,33 @@ message ClipboardWrite {
   string text_utf8 = 1;
 }
 
+// Phase 7 presentation lifecycle is transport-neutral. Media transport/profile
+// negotiation remains in StreamOffer so lifecycle control does not select a
+// multicast/unicast transport before the relevant physical evidence exists.
+message PresentationStart {
+  uint64 presentation_id = 1;
+  uint64 stream_id = 2;
+}
+
+message PresentationStop {
+  uint64 presentation_id = 1;
+}
+
+enum PresentationState {
+  PRESENTATION_STATE_UNSPECIFIED = 0;
+  PRESENTATION_STATE_STARTING = 1;
+  PRESENTATION_STATE_ACTIVE = 2;
+  PRESENTATION_STATE_STOPPED = 3;
+  PRESENTATION_STATE_REJECTED = 4;
+}
+
+message PresentationStatus {
+  uint64 presentation_id = 1;
+  uint64 stream_id = 2;
+  PresentationState state = 3;
+  string diagnostic = 4;
+}
+
 message SessionWorkerStatus {
   uint32 windows_session_id = 1;
   enum State {
@@ -323,6 +351,10 @@ message ControlEnvelope {
     ClipboardReadRequest clipboard_read_request = 32;
     ClipboardReadResponse clipboard_read_response = 33;
     ClipboardWrite clipboard_write = 34;
+
+    PresentationStart presentation_start = 35;
+    PresentationStop presentation_stop = 36;
+    PresentationStatus presentation_status = 37;
 
     EnrollmentRequest enrollment_request = 40;
     EnrollmentReceipt enrollment_receipt = 41;

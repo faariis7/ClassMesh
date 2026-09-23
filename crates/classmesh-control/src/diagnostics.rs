@@ -112,6 +112,13 @@ pub const fn privileged_dispatch_diagnostic_code(error: &PrivilegedDispatchError
         PrivilegedDispatchError::InvalidClipboardText(_) => {
             "control.command.clipboard_text_too_large"
         }
+        PrivilegedDispatchError::PresentationRequestMissingId => {
+            "control.command.presentation_missing_request_id"
+        }
+        PrivilegedDispatchError::PresentationRequiresProtocolV3 => {
+            "control.command.presentation_requires_v0_3"
+        }
+        PrivilegedDispatchError::InvalidPresentation(_) => "control.command.presentation_invalid",
         PrivilegedDispatchError::Authorization(error) => {
             command_authorization_diagnostic_code(error)
         }
@@ -204,6 +211,28 @@ mod tests {
         assert_eq!(
             privileged_dispatch_diagnostic_code(&error),
             "control.command.clipboard_text_too_large"
+        );
+    }
+
+    #[test]
+    fn presentation_codes_are_stable_and_non_sensitive() {
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(
+                &PrivilegedDispatchError::PresentationRequestMissingId
+            ),
+            "control.command.presentation_missing_request_id"
+        );
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(
+                &PrivilegedDispatchError::PresentationRequiresProtocolV3
+            ),
+            "control.command.presentation_requires_v0_3"
+        );
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(&PrivilegedDispatchError::InvalidPresentation(
+                classmesh_protocol::presentation::PresentationControlError::InvalidStreamId
+            )),
+            "control.command.presentation_invalid"
         );
     }
 
