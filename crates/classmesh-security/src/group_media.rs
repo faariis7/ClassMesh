@@ -90,9 +90,7 @@ impl fmt::Display for GroupMediaError {
             Self::InvalidReplayTolerance => {
                 formatter.write_str("group-media replay tolerance is outside the bounded range")
             }
-            Self::KeyGenerationFailed => {
-                formatter.write_str("group-media key generation failed")
-            }
+            Self::KeyGenerationFailed => formatter.write_str("group-media key generation failed"),
             Self::MissingAssociatedData => {
                 formatter.write_str("group-media associated data is required")
             }
