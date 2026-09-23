@@ -824,10 +824,12 @@ async fn run_listener(
                                 &mut channel,
                                 &session,
                                 peer,
-                                authorization.as_ref(),
-                                &input,
-                                &media,
-                                &presentation,
+                                EstablishedSessionRuntime {
+                                    authorization: authorization.as_ref(),
+                                    input: &input,
+                                    media: &media,
+                                    presentation: &presentation,
+                                },
                             )
                             .await;
                             let _ = input.release_owner(session.control_session_id);
@@ -855,17 +857,28 @@ async fn run_listener(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct EstablishedSessionRuntime<'a> {
+    authorization: &'a AuthorizationStore,
+    input: &'a InputDispatchState,
+    media: &'a FocusedMediaDispatchChannels,
+    presentation: &'a PresentationDispatchState,
+}
+
 async fn run_established_session(
     connection: &quinn::Connection,
     channel: &mut ControlChannel,
     session: &EstablishedControlSession,
     peer: EstablishedAuthenticatedPeer,
-    authorization: &AuthorizationStore,
-    input: &InputDispatchState,
-    media: &FocusedMediaDispatchChannels,
-    presentation: &PresentationDispatchState,
+    runtime: EstablishedSessionRuntime<'_>,
 ) {
     const HELLO_SEQUENCE: u64 = 1;
+    let EstablishedSessionRuntime {
+        authorization,
+        input,
+        media,
+        presentation,
+    } = runtime;
 
     let mut guard = AuthenticatedControlGuard::new(
         peer.identity,
