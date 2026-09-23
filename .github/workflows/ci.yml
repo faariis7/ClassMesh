@@ -71,9 +71,14 @@ jobs:
       - name: Build Phase 6F interactive qualification client
         run: cargo build -p classmesh-lab --bin classmesh-interactive-qualification --release
 
-      - name: Validate Phase 6F qualification client help
+      - name: Build protected Teacher enrollment request tool
+        run: cargo build -p classmesh-lab --bin classmesh-enrollment-request --release
+
+      - name: Validate Phase 6F tool help
         shell: pwsh
-        run: .\target\release\classmesh-interactive-qualification.exe --help
+        run: |
+          .\target\release\classmesh-interactive-qualification.exe --help
+          .\target\release\classmesh-enrollment-request.exe --help
 
       - name: Stage Phase 4 qualification bundle
         shell: pwsh
@@ -101,6 +106,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path phase6f-bundle -Force | Out-Null
           Copy-Item target/release/classmesh-interactive-qualification.exe phase6f-bundle/
+          Copy-Item target/release/classmesh-enrollment-request.exe phase6f-bundle/
           Copy-Item docs/PHASE6F_TWO_PC_QUALIFICATION.md phase6f-bundle/
           Copy-Item docs/PHASE6F_TWO_PC_RESULTS.md phase6f-bundle/
 
