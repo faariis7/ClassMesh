@@ -8,10 +8,12 @@ publish = false
 
 [dependencies]
 bytes = "1"
+getrandom = "0.3"
 classmesh-core = { path = "../../crates/classmesh-core" }
 classmesh-network = { path = "../../crates/classmesh-network" }
 classmesh-protocol = { path = "../../crates/classmesh-protocol" }
 classmesh-video = { path = "../../crates/classmesh-video" }
+prost = "0.14.4"
 quinn = "0.11.12"
 rcgen = "0.14"
 rustls = "0.23"
