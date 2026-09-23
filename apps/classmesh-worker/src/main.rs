@@ -189,17 +189,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Ok(WorkerEvent::MediaFeedback(feedback)) => {
-                let result = active_udp_stream
-                    .as_mut()
-                    .ok_or("worker.media.no_active_stream")
-                    .and_then(|stream| {
-                        stream.apply_feedback(&feedback).map_err(|error| match error {
-                            classmesh_worker::udp_stream::FocusedUdpStreamError::StreamMismatch => {
-                                "worker.media.feedback_stream_mismatch"
-                            }
-                            _ => "worker.media.feedback_failed",
-                        })
-                    });
+                let result =
+                    active_udp_stream
+                        .as_mut()
+                        .ok_or("worker.media.no_active_stream")
+                        .and_then(|stream| {
+                            stream.apply_feedback(&feedback).map_err(|error| {
+                                match error {
+                                    classmesh_worker::udp_stream::FocusedUdpStreamError::StreamMismatch => {
+                                        "worker.media.feedback_stream_mismatch"
+                                    }
+                                    _ => "worker.media.feedback_failed",
+                                }
+                            })
+                        });
                 match result {
                     Ok(outcome) => {
                         if outcome.retransmitted_packets > 0 || outcome.keyframe_requested {
