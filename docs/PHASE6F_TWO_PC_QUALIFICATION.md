@@ -34,6 +34,20 @@ The tool creates a machine-scoped ECDSA P-256 CNG key with export policy `0`, si
 The generated key name is deterministically bound to the random stable PrincipalId and is printed for diagnostics. If request creation fails before the file is committed, the newly-created key is deleted. The tool refuses to overwrite an existing request file.
 
 Move only `teacher-request.pb` to the enrollment authority. Do **not** copy private-key material, and do not substitute a self-signed Teacher certificate. Authority approval/result installation is a separate fail-closed step.
+## Approve the Teacher request on the enrollment authority
+
+On a trusted Windows authority host that already owns the classroom CA certificate and its matching **non-exportable machine CNG key**, approve the bounded Teacher request offline:
+
+    .\classmesh-enrollment-authority.exe `
+      --request C:\ClassMesh\authority\teacher-request.pb `
+      --ca-cert C:\ClassMesh\authority\classroom-ca.der `
+      --ca-key-name "ClassMesh-Classroom-Authority" `
+      --output C:\ClassMesh\authority\teacher-approved.pb `
+      --lifetime-hours 24
+
+The authority validates the request shape and PKCS#10 proof-of-possession, accepts only the Teacher role in this Phase 6F slice, verifies the CA CNG key remains non-exportable, binds issuance to the exact PrincipalId and CSR SHA-256, and refuses to overwrite an existing result. The approved result contains the issued leaf plus CA certificate; the CA private key never leaves CNG.
+
+Use a separately provisioned trusted classroom CA; do not generate an ad-hoc CA just to make the qualification pass. Student authorization for the newly issued Teacher credential is a separate explicit step.
 ## Install an approved Teacher enrollment result
 
 After the trusted enrollment authority returns an approved protobuf `EnrollmentResult`, move that result back to Teacher together with the DER trust root(s) used to authenticate the Student server. Keep the original request file for binding verification.
