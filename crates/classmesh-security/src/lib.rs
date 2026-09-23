@@ -283,6 +283,11 @@ pub struct AuthorizationStore {
 }
 
 impl AuthorizationStore {
+    #[must_use]
+    pub fn principal(&self, principal: PrincipalId) -> Option<&Principal> {
+        self.principals.get(&principal)
+    }
+
     pub fn upsert(&mut self, principal: Principal) -> Result<(), AuthorizationStoreError> {
         for fingerprint in principal.credentials.keys() {
             if let Some(owner) = self.credential_owners.get(fingerprint) {
@@ -456,6 +461,24 @@ mod tests {
             permissions,
             credentials,
         }
+    }
+
+    #[test]
+    fn principal_lookup_is_read_only_and_exact() {
+        let principal_id = id(7);
+        let credential = fingerprint(9);
+        let mut store = AuthorizationStore::default();
+        store
+            .upsert(teacher_with_credential(principal_id, credential))
+            .expect("principal should register");
+
+        assert_eq!(
+            store
+                .principal(principal_id)
+                .map(|principal| principal.kind),
+            Some(PrincipalKind::Teacher)
+        );
+        assert!(store.principal(id(8)).is_none());
     }
 
     #[test]
