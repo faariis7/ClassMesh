@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use classmesh_core::adaptation::StreamProfile;
 use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure};
 use prost::Message;
 
@@ -7,7 +9,7 @@ pub const IPC_MAGIC: u32 = 0x434D_4950; // "CMIP"
 pub const IPC_HEADER_LEN: usize = 12;
 pub const MAX_IPC_MESSAGE: usize = 1_048_576;
 pub const IPC_VERSION_MAJOR: u8 = 0;
-pub const IPC_VERSION_MINOR: u8 = 4;
+pub const IPC_VERSION_MINOR: u8 = 5;
 
 const MESSAGE_WORKER_HELLO: u16 = 1;
 const MESSAGE_SERVICE_READY: u16 = 2;
@@ -18,6 +20,8 @@ const MESSAGE_WORKER_CAPABILITIES: u16 = 13;
 const MESSAGE_WORKER_ENCODER_EVIDENCE: u16 = 14;
 const MESSAGE_WORKER_ENCODER_CACHE_QUERY: u16 = 15;
 const MESSAGE_SERVICE_ENCODER_CACHE_RESULT: u16 = 16;
+const MESSAGE_SERVICE_UDP_STREAM_START: u16 = 17;
+const SERVICE_UDP_STREAM_START_LEN: usize = 32;
 
 const MAX_EVIDENCE_ADAPTER_IDENTITY: usize = 128;
 const MAX_EVIDENCE_DRIVER_VERSION: usize = 128;
@@ -287,6 +291,28 @@ impl ServiceEncoderCacheResult {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceUdpStreamStart {
+    pub stream_id: u32,
+    pub destination: SocketAddr,
+    pub width: u16,
+    pub height: u16,
+    pub fps: u8,
+    pub bitrate_kbps: u32,
+}
+
+impl ServiceUdpStreamStart {
+    fn validate(self) -> Result<(), IpcMessageError> {
+        if self.stream_id == 0 || self.destination.port() == 0 {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        StreamProfile::new(self.width, self.height, self.fps, self.bitrate_kbps)
+            .validate()
+            .map_err(|_| IpcMessageError::InvalidPayload)?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum IpcMessage {
     WorkerHello { process_id: u32, session_id: u32 },
@@ -298,6 +324,7 @@ pub enum IpcMessage {
     WorkerEncoderEvidence(WorkerEncoderEvidence),
     WorkerEncoderCacheQuery(WorkerEncoderCacheQuery),
     ServiceEncoderCacheResult(ServiceEncoderCacheResult),
+    ServiceUdpStreamStart(ServiceUdpStreamStart),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -480,6 +507,29 @@ impl IpcFrame {
         payload.push(flags);
         payload.push(0);
         Ok(Self::new(MESSAGE_SERVICE_ENCODER_CACHE_RESULT, payload))
+    }
+
+    pub fn service_udp_stream_start(start: ServiceUdpStreamStart) -> Result<Self, IpcMessageError> {
+        start.validate()?;
+        let mut payload = Vec::with_capacity(SERVICE_UDP_STREAM_START_LEN);
+        payload.extend_from_slice(&start.stream_id.to_be_bytes());
+        payload.extend_from_slice(&start.width.to_be_bytes());
+        payload.extend_from_slice(&start.height.to_be_bytes());
+        payload.push(start.fps);
+        let (family, address) = match start.destination.ip() {
+            IpAddr::V4(address) => {
+                let mut bytes = [0_u8; 16];
+                bytes[..4].copy_from_slice(&address.octets());
+                (4_u8, bytes)
+            }
+            IpAddr::V6(address) => (6_u8, address.octets()),
+        };
+        payload.push(family);
+        payload.extend_from_slice(&start.destination.port().to_be_bytes());
+        payload.extend_from_slice(&start.bitrate_kbps.to_be_bytes());
+        payload.extend_from_slice(&address);
+        debug_assert_eq!(payload.len(), SERVICE_UDP_STREAM_START_LEN);
+        Ok(Self::new(MESSAGE_SERVICE_UDP_STREAM_START, payload))
     }
 
     pub fn message(&self) -> Result<IpcMessage, IpcMessageError> {
@@ -732,6 +782,42 @@ impl IpcFrame {
                 result.validate()?;
                 Ok(IpcMessage::ServiceEncoderCacheResult(result))
             }
+            MESSAGE_SERVICE_UDP_STREAM_START => {
+                if self.payload.len() != SERVICE_UDP_STREAM_START_LEN {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let stream_id = u32::from_be_bytes(self.payload[0..4].try_into().expect("slice"));
+                let width = u16::from_be_bytes(self.payload[4..6].try_into().expect("slice"));
+                let height = u16::from_be_bytes(self.payload[6..8].try_into().expect("slice"));
+                let fps = self.payload[8];
+                let family = self.payload[9];
+                let port = u16::from_be_bytes(self.payload[10..12].try_into().expect("slice"));
+                let bitrate_kbps =
+                    u32::from_be_bytes(self.payload[12..16].try_into().expect("slice"));
+                let address_bytes: [u8; 16] = self.payload[16..32].try_into().expect("slice");
+                let ip = match family {
+                    4 => {
+                        if address_bytes[4..].iter().any(|byte| *byte != 0) {
+                            return Err(IpcMessageError::InvalidPayload);
+                        }
+                        IpAddr::V4(Ipv4Addr::from(
+                            <[u8; 4]>::try_from(&address_bytes[..4]).expect("four bytes"),
+                        ))
+                    }
+                    6 => IpAddr::V6(Ipv6Addr::from(address_bytes)),
+                    _ => return Err(IpcMessageError::InvalidPayload),
+                };
+                let start = ServiceUdpStreamStart {
+                    stream_id,
+                    destination: SocketAddr::new(ip, port),
+                    width,
+                    height,
+                    fps,
+                    bitrate_kbps,
+                };
+                start.validate()?;
+                Ok(IpcMessage::ServiceUdpStreamStart(start))
+            }
             _ => Err(IpcMessageError::UnknownMessageType),
         }
     }
@@ -958,6 +1044,58 @@ mod tests {
         assert_eq!(
             result_frame.message().expect("typed cache result"),
             IpcMessage::ServiceEncoderCacheResult(result)
+        );
+    }
+
+    #[test]
+    fn service_udp_stream_start_round_trips_ipv4_and_ipv6() {
+        for destination in [
+            "192.0.2.44:9000".parse().expect("ipv4 destination"),
+            "[2001:db8::44]:9001".parse().expect("ipv6 destination"),
+        ] {
+            let start = ServiceUdpStreamStart {
+                stream_id: 7,
+                destination,
+                width: 1280,
+                height: 720,
+                fps: 30,
+                bitrate_kbps: 2_500,
+            };
+            let frame = IpcFrame::service_udp_stream_start(start).expect("valid UDP stream start");
+            assert_eq!(
+                frame.message().expect("typed UDP stream start"),
+                IpcMessage::ServiceUdpStreamStart(start)
+            );
+        }
+    }
+
+    #[test]
+    fn service_udp_stream_start_rejects_invalid_identity_and_profile() {
+        let valid = ServiceUdpStreamStart {
+            stream_id: 7,
+            destination: "192.0.2.44:9000".parse().expect("destination"),
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 2_500,
+        };
+        assert_eq!(
+            IpcFrame::service_udp_stream_start(ServiceUdpStreamStart {
+                stream_id: 0,
+                ..valid
+            }),
+            Err(IpcMessageError::InvalidPayload)
+        );
+        assert_eq!(
+            IpcFrame::service_udp_stream_start(ServiceUdpStreamStart {
+                destination: "192.0.2.44:0".parse().expect("zero-port destination"),
+                ..valid
+            }),
+            Err(IpcMessageError::InvalidPayload)
+        );
+        assert_eq!(
+            IpcFrame::service_udp_stream_start(ServiceUdpStreamStart { width: 0, ..valid }),
+            Err(IpcMessageError::InvalidPayload)
         );
     }
 
