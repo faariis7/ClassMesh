@@ -11,8 +11,8 @@ use sframe::key::{DecryptionKey, EncryptionKey};
 use zeroize::Zeroize;
 
 pub const GROUP_MEDIA_KEY_BYTES: usize = 32;
-pub const DEFAULT_GROUP_MEDIA_REPLAY_TOLERANCE_FRAMES: usize = 512;
-pub const MAX_GROUP_MEDIA_REPLAY_TOLERANCE_FRAMES: usize = 4_096;
+pub const DEFAULT_GROUP_MEDIA_REPLAY_TOLERANCE_FRAMES: usize = 64;
+pub const MAX_GROUP_MEDIA_REPLAY_TOLERANCE_FRAMES: usize = 512;
 pub const MAX_GROUP_MEDIA_AAD_BYTES: usize = 256;
 pub const MAX_GROUP_MEDIA_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_GROUP_MEDIA_SEALED_BYTES: usize = MAX_GROUP_MEDIA_FRAME_BYTES + 64;
