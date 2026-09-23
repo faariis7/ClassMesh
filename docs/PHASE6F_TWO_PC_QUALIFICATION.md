@@ -21,6 +21,19 @@ The Teacher qualification client requires its own **pre-enrolled teacher** `mach
 
 Do not copy the Student identity to the Teacher and do not create an exportable private-key shortcut for qualification. If a valid enrolled Teacher identity is not available yet, record Phase 6F as **blocked on enrollment/provisioning** rather than weakening mTLS.
 
+## Prepare the Teacher enrollment request
+
+If Teacher is not already enrolled, create the request **on the Teacher PC** so its private key never leaves that machine:
+
+    .\classmesh-enrollment-request.exe `
+      --display-name "Phase 6F Teacher" `
+      --output C:\ClassMesh\enrollment\teacher-request.pb
+
+The tool creates a machine-scoped ECDSA P-256 CNG key with export policy `0`, signs a PKCS#10 request with that protected key, validates the bounded ClassMesh `EnrollmentRequest`, and writes only the protobuf request plus non-secret metadata.
+
+The generated key name is deterministically bound to the random stable PrincipalId and is printed for diagnostics. If request creation fails before the file is committed, the newly-created key is deleted. The tool refuses to overwrite an existing request file.
+
+Move only `teacher-request.pb` to the enrollment authority. Do **not** copy private-key material, and do not substitute a self-signed Teacher certificate. Authority approval/result installation is a separate fail-closed step.
 ## CI artifact
 
 Use the `classmesh-phase6f-qualification-windows-x64` artifact. It contains the qualification executable, this runbook, and `PHASE6F_TWO_PC_RESULTS.md`.
