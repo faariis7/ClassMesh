@@ -37,11 +37,11 @@ use classmesh_protocol::control_wire::{
 };
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::{AuthorizationStore, Permission};
+use classmesh_windows_runtime::ipc::ServiceUdpStreamStart;
 use quinn::Endpoint;
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use rustls::server::WebPkiClientVerifier;
-use classmesh_windows_runtime::ipc::ServiceUdpStreamStart;
 use serde::Deserialize;
 use tokio::sync::oneshot;
 
@@ -869,14 +869,12 @@ async fn run_established_session(
                                             Err(_) if commit.cancel() => {
                                                 Err("control.media.start_timeout".to_owned())
                                             }
-                                            Err(_) if commit.is_committed() => reply_rx
-                                                .await
-                                                .unwrap_or_else(|_| {
-                                                    Err(
-                                                        "control.media.start_reply_dropped"
-                                                            .to_owned(),
-                                                    )
-                                                }),
+                                            Err(_) if commit.is_committed() => {
+                                                reply_rx.await.unwrap_or_else(|_| {
+                                                    Err("control.media.start_reply_dropped"
+                                                        .to_owned())
+                                                })
+                                            }
                                             Err(_) => {
                                                 Err("control.media.start_cancelled".to_owned())
                                             }
@@ -1239,7 +1237,6 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use classmesh_protocol::control_wire::{VideoCodec, VideoProfile};
 
     use super::*;
 
