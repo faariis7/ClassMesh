@@ -18,7 +18,11 @@ impl MulticastMembership {
         if group.octets()[0] != 239 {
             return Err(MulticastContractError::GroupOutsideAdministrativeScope);
         }
-        if interface.is_multicast() {
+        if interface.is_unspecified()
+            || interface.is_loopback()
+            || interface.is_multicast()
+            || interface == Ipv4Addr::BROADCAST
+        {
             return Err(MulticastContractError::InvalidInterface);
         }
         Ok(Self { group, interface })
@@ -204,13 +208,17 @@ mod tests {
             ),
             Err(MulticastContractError::GroupOutsideAdministrativeScope)
         );
-        assert_eq!(
-            MulticastMembership::new(
-                Ipv4Addr::new(239, 10, 20, 30),
-                Ipv4Addr::new(239, 10, 20, 31),
-            ),
-            Err(MulticastContractError::InvalidInterface)
-        );
+        for interface in [
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::LOCALHOST,
+            Ipv4Addr::BROADCAST,
+            Ipv4Addr::new(239, 10, 20, 31),
+        ] {
+            assert_eq!(
+                MulticastMembership::new(Ipv4Addr::new(239, 10, 20, 30), interface),
+                Err(MulticastContractError::InvalidInterface)
+            );
+        }
     }
 
     #[test]
