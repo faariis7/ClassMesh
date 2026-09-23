@@ -79,6 +79,12 @@ PR #86 added the isolated control-frame fuzz harness; PR #88 added stable non-se
 
 PR #63 merged the authenticated control-session guard with PR CI #330 green. The enrolled server derives identity from the verified QUIC/mTLS connection, binds `Hello.device_id` to that stable PrincipalId, and rejects spoofing before session establishment. Negotiated protocol version and capability intersection are therefore established inside the authenticated Hello path. Privileged envelopes then require the exact established `control_session_id`, a strictly increasing sequence number, current credential validity, and the requested permission. A denied in-session sequence is consumed so the same administrative command cannot be replayed after a later permission grant.
 
+### Phase 7 — wired classroom Teacher Presentation active
+
+Phase 7 is progressing without weakening the still-open Phase 4 and Phase 6F physical gates. PR #154 added the transport-neutral authenticated presentation lifecycle contract. PR #156/#157 added bounded single-owner presentation state, exact authenticated-session cleanup and Service runtime integration. PR #158 hardened the existing shared encoded-frame distributor so one encoded allocation can fan out to bounded independent sinks without a slow sink blocking healthy receivers. PR #159 added bounded multicast membership/probe contracts, administratively scoped IPv4 group validation and explicit join/receive/leave probe outcomes.
+
+The current 7D probe-tool slice packages a two-PC diagnostic that sends only small CMV1 correlation packets. Hosted CI can verify the tool and contracts but cannot establish wired-classroom multicast viability. Production multicast media remains blocked on 7E authenticated group-media security and later physical scale evidence.
+
 ## Remaining security/control work
 
 - Phase 6F physical interactive-control validation under Issue #108, including degraded/lost media while authenticated control remains responsive; hosted CI cannot close this gate;
@@ -93,5 +99,5 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 
 1. Keep Issue #3 open and perform Phase 4 physical qualification when two Windows PCs are available; do not select the default one-to-one UDP-vs-QUIC-Datagram transport before that evidence exists.
 2. Run Phase 6F physical interactive-control validation, including degraded/lost media while authenticated control remains responsive, stuck-input cleanup, secure-desktop diagnostics and bounded focused-media recovery.
-3. After the physical gates provide the required evidence, continue Phase 7 wired-classroom presentation/fan-out work in roadmap order without retroactively treating hosted CI as transport-selection evidence.
+3. Continue Phase 7 wired-classroom presentation work in parallel where it does not depend on unresolved physical transport evidence; keep multicast production/security and scale claims behind their explicit 7E/7H gates and never treat hosted CI as transport-selection evidence.
 4. Continue later production security, Wi-Fi fan-out, monitoring-grid, installer/update and UI work in roadmap order.

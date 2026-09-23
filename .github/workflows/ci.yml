@@ -68,6 +68,9 @@ jobs:
       - name: Build transport benchmark
         run: cargo build -p classmesh-lab --bin classmesh-transport-benchmark --release
 
+      - name: Build Phase 7 multicast probe
+        run: cargo build -p classmesh-lab --bin classmesh-multicast-probe --release
+
       - name: Build Phase 6F interactive qualification client
         run: cargo build -p classmesh-lab --bin classmesh-interactive-qualification --release
 
@@ -95,6 +98,10 @@ jobs:
       - name: Validate Phase 6F physical runner help
         shell: pwsh
         run: .\scripts\phase6f-two-pc.ps1 -Mode Help
+
+      - name: Validate Phase 7 multicast probe help
+        shell: pwsh
+        run: .\target\release\classmesh-multicast-probe.exe --help
 
       - name: Stage Phase 4 qualification bundle
         shell: pwsh
@@ -135,6 +142,21 @@ jobs:
         with:
           name: classmesh-phase6f-qualification-windows-x64
           path: phase6f-bundle/
+          if-no-files-found: error
+
+      - name: Stage Phase 7 multicast probe bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path phase7-multicast-probe-bundle -Force | Out-Null
+          Copy-Item target/release/classmesh-multicast-probe.exe phase7-multicast-probe-bundle/
+          Copy-Item docs/PHASE7_MULTICAST_PROBE.md phase7-multicast-probe-bundle/
+          Copy-Item docs/PHASE7_MULTICAST_PROBE_RESULTS.md phase7-multicast-probe-bundle/
+
+      - name: Upload Phase 7 multicast probe bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-phase7-multicast-probe-windows-x64
+          path: phase7-multicast-probe-bundle/
           if-no-files-found: error
 
       - name: Upload media probe
