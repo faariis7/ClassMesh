@@ -4,14 +4,18 @@ use std::time::{Duration, Instant};
 
 use classmesh_capture_win::{CapturedFrameMeta, DxgiFrame};
 use classmesh_core::adaptation::StreamProfile;
+use classmesh_network::feedback::{FeedbackOutcome, apply_sender_feedback};
 use classmesh_network::transport::{UdpFrameSender, UdpSendError, UdpSenderConfig};
 use classmesh_network::udp::{DatagramError, UdpMediaSocket};
 use classmesh_protocol::control_wire::{MediaTransport, StreamReconfigure, VideoCodec};
+use classmesh_protocol::feedback::FeedbackMessage;
+use classmesh_video::KeyframeCoordinator;
 use classmesh_windows_runtime::ipc::ServiceUdpStreamStart;
 
 use crate::presentation::{PresentationError, PresentationPipeline, PresentationTarget};
 
 const MEDIA_WRITE_TIMEOUT: Duration = Duration::from_millis(20);
+const MIN_KEYFRAME_INTERVAL_US: u64 = 500_000;
 
 #[derive(Debug)]
 pub enum FocusedUdpStreamError {
@@ -67,6 +71,7 @@ pub struct FocusedUdpStream {
     profile: StreamProfile,
     sender: UdpFrameSender,
     pipeline: Option<PresentationPipeline>,
+    keyframes: KeyframeCoordinator,
     clock: Instant,
 }
 
@@ -91,6 +96,7 @@ impl FocusedUdpStream {
             profile,
             sender,
             pipeline: None,
+            keyframes: KeyframeCoordinator::new(MIN_KEYFRAME_INTERVAL_US),
             clock: Instant::now(),
         })
     }
@@ -150,6 +156,32 @@ impl FocusedUdpStream {
         Ok(())
     }
 
+    pub fn apply_feedback(
+        &mut self,
+        feedback: &FeedbackMessage,
+    ) -> Result<FeedbackOutcome, FocusedUdpStreamError> {
+        if feedback.stream_id() != self.stream_id {
+            return Err(FocusedUdpStreamError::StreamMismatch);
+        }
+        let now_us = u64::try_from(self.clock.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let outcome = apply_sender_feedback(&mut self.sender, now_us, feedback)?;
+        if outcome.keyframe_requested {
+            self.keyframes.request();
+            self.request_keyframe_if_due(now_us)?;
+        }
+        Ok(outcome)
+    }
+
+    fn request_keyframe_if_due(&mut self, now_us: u64) -> Result<(), FocusedUdpStreamError> {
+        let Some(pipeline) = self.pipeline.as_mut() else {
+            return Ok(());
+        };
+        if self.keyframes.poll(now_us) {
+            pipeline.request_keyframe()?;
+        }
+        Ok(())
+    }
+
     pub fn process_frame(
         &mut self,
         meta: CapturedFrameMeta,
@@ -161,12 +193,13 @@ impl FocusedUdpStream {
                 &frame, target,
             )?);
         }
+        let now_us = u64::try_from(self.clock.elapsed().as_micros()).unwrap_or(u64::MAX);
+        self.request_keyframe_if_due(now_us)?;
         let outputs = self
             .pipeline
             .as_mut()
             .expect("focused UDP pipeline initialized")
             .process_frame(meta, frame)?;
-        let now_us = u64::try_from(self.clock.elapsed().as_micros()).unwrap_or(u64::MAX);
         let mut sent = 0_usize;
         for output in outputs {
             self.sender.send_frame(now_us, &output)?;
@@ -204,6 +237,47 @@ mod tests {
             transport: MediaTransport::Unspecified as i32,
             transport_parameters: Vec::new(),
         }
+    }
+
+    #[test]
+    fn focused_udp_feedback_is_stream_bound_and_keyframes_are_coalesced() {
+        let mut stream = FocusedUdpStream::new(start()).expect("stream should bind");
+        let request = FeedbackMessage::RequestKeyframe {
+            stream_id: 7,
+            after_frame_id: 41,
+        };
+        let outcome = stream
+            .apply_feedback(&request)
+            .expect("matching keyframe request should queue");
+        assert!(outcome.keyframe_requested);
+        assert_eq!(stream.keyframes.pending_requests(), 1);
+
+        stream
+            .apply_feedback(&request)
+            .expect("duplicate request should coalesce");
+        assert_eq!(stream.keyframes.pending_requests(), 2);
+
+        assert!(matches!(
+            stream.apply_feedback(&FeedbackMessage::RequestKeyframe {
+                stream_id: 8,
+                after_frame_id: 41,
+            }),
+            Err(FocusedUdpStreamError::StreamMismatch)
+        ));
+    }
+
+    #[test]
+    fn focused_udp_nack_uses_bounded_sender_cache() {
+        let mut stream = FocusedUdpStream::new(start()).expect("stream should bind");
+        let outcome = stream
+            .apply_feedback(&FeedbackMessage::Nack {
+                stream_id: 7,
+                frame_id: 99,
+                missing_packet_indices: vec![0, 2],
+            })
+            .expect("cache miss is not a transport failure");
+        assert_eq!(outcome.retransmitted_packets, 0);
+        assert!(!outcome.keyframe_requested);
     }
 
     #[test]
