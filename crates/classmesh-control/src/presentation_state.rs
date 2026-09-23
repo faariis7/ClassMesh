@@ -68,10 +68,9 @@ impl PresentationOwnership {
         control_session_id: u64,
         presentation_id: u64,
     ) -> Result<PresentationOwner, PresentationOwnershipError> {
-        let current = self
-            .owner
-            .ok_or(PresentationOwnershipError::NotOwner)?;
-        if current.principal_id != principal_id || current.control_session_id != control_session_id {
+        let current = self.owner.ok_or(PresentationOwnershipError::NotOwner)?;
+        if current.principal_id != principal_id || current.control_session_id != control_session_id
+        {
             return Err(PresentationOwnershipError::NotOwner);
         }
         if current.presentation_id != presentation_id {
@@ -87,7 +86,8 @@ impl PresentationOwnership {
         control_session_id: u64,
     ) -> Option<PresentationOwner> {
         let current = self.owner?;
-        if current.principal_id == principal_id && current.control_session_id == control_session_id {
+        if current.principal_id == principal_id && current.control_session_id == control_session_id
+        {
             self.owner = None;
             Some(current)
         } else {
@@ -138,7 +138,9 @@ mod tests {
         assert!(state.owner().is_some());
 
         assert_eq!(
-            state.stop(principal(1), 10, 20).map(|owner| owner.stream_id),
+            state
+                .stop(principal(1), 10, 20)
+                .map(|owner| owner.stream_id),
             Ok(30)
         );
         assert!(state.owner().is_none());
