@@ -117,10 +117,7 @@ impl Default for FrameDistributor {
 }
 
 impl FrameDistributor {
-    pub fn with_limits(
-        max_sinks: usize,
-        max_queue_depth: usize,
-    ) -> Result<Self, DistributorError> {
+    pub fn with_limits(max_sinks: usize, max_queue_depth: usize) -> Result<Self, DistributorError> {
         if max_sinks == 0 {
             return Err(DistributorError::InvalidMaxSinks);
         }
