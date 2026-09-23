@@ -28,6 +28,7 @@ pub enum PrivilegedDispatchError {
     ClipboardReadRequestMissingId,
     InvalidClipboardText(ClipboardTextError),
     PresentationRequestMissingId,
+    PresentationRequiresProtocolV3,
     InvalidPresentation(PresentationControlError),
     Authorization(CommandAuthorizationError),
 }
@@ -97,6 +98,9 @@ pub fn dispatch_privileged_command(
             Ok(PrivilegedControlCommand::ClipboardWrite(write.clone()))
         }
         control_envelope::Payload::PresentationStart(start) => {
+            if guard.protocol_version().major != 0 || guard.protocol_version().minor < 3 {
+                return Err(PrivilegedDispatchError::PresentationRequiresProtocolV3);
+            }
             if envelope.request_id == 0 {
                 return Err(PrivilegedDispatchError::PresentationRequestMissingId);
             }
@@ -111,6 +115,9 @@ pub fn dispatch_privileged_command(
             Ok(PrivilegedControlCommand::PresentationStart(*start))
         }
         control_envelope::Payload::PresentationStop(stop) => {
+            if guard.protocol_version().major != 0 || guard.protocol_version().minor < 3 {
+                return Err(PrivilegedDispatchError::PresentationRequiresProtocolV3);
+            }
             if envelope.request_id == 0 {
                 return Err(PrivilegedDispatchError::PresentationRequestMissingId);
             }
@@ -144,7 +151,7 @@ mod tests {
     use super::*;
     use crate::peer_identity::AuthenticatedPeerIdentity;
 
-    const VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 2 };
+    const VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 3 };
 
     fn identity() -> AuthenticatedPeerIdentity {
         AuthenticatedPeerIdentity {
@@ -447,6 +454,21 @@ mod tests {
             ))
         );
         assert_eq!(denied_guard.last_sequence(), 2);
+    }
+
+    #[test]
+    fn presentation_lifecycle_is_not_accepted_on_protocol_v02() {
+        let allowed = store(BTreeSet::from([Permission::StartPresentation]));
+        let version = ProtocolVersion { major: 0, minor: 2 };
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, version, 1);
+        let mut envelope = presentation_start_envelope(2, 500);
+        envelope.protocol_version = Some(WireProtocolVersion { major: 0, minor: 2 });
+
+        assert_eq!(
+            dispatch_privileged_command(&mut guard, &allowed, &envelope, 150),
+            Err(PrivilegedDispatchError::PresentationRequiresProtocolV3)
+        );
+        assert_eq!(guard.last_sequence(), 1);
     }
 
     #[test]
