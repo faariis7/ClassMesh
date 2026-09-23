@@ -307,9 +307,8 @@ mod tests {
     fn production_generated_key_supports_authenticated_round_trip() {
         let material = GroupMediaKeyMaterial::generate().expect("generated key");
         let mut sender = GroupMediaSender::new(epoch(7), &material).expect("sender");
-        let mut receiver =
-            GroupMediaReceiver::with_default_replay_tolerance(epoch(7), &material)
-                .expect("receiver");
+        let mut receiver = GroupMediaReceiver::with_default_replay_tolerance(epoch(7), &material)
+            .expect("receiver");
         let aad = b"generated-key-binding";
         let sealed = sender
             .seal_frame(b"generated-key-frame", aad)
