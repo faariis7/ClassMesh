@@ -118,8 +118,8 @@ impl FocusedUdpStream {
         &mut self,
         reconfigure: &StreamReconfigure,
     ) -> Result<(), FocusedUdpStreamError> {
-        let stream_id =
-            u32::try_from(reconfigure.stream_id).map_err(|_| FocusedUdpStreamError::StreamMismatch)?;
+        let stream_id = u32::try_from(reconfigure.stream_id)
+            .map_err(|_| FocusedUdpStreamError::StreamMismatch)?;
         if stream_id != self.stream_id {
             return Err(FocusedUdpStreamError::StreamMismatch);
         }
@@ -210,7 +210,10 @@ mod tests {
     fn focused_udp_stream_reconfigure_is_profile_only_and_stream_bound() {
         let mut stream = FocusedUdpStream::new(start()).expect("stream should bind");
         assert_eq!(stream.stream_id(), 7);
-        assert_eq!(stream.destination(), "127.0.0.1:9000".parse().expect("socket"));
+        assert_eq!(
+            stream.destination(),
+            "127.0.0.1:9000".parse().expect("socket")
+        );
         assert_eq!(stream.capture_interval(), Duration::from_micros(33_333));
 
         stream
