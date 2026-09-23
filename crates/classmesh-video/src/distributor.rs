@@ -3,6 +3,19 @@ use std::sync::Arc;
 
 use crate::{Codec, EncodedFrameMeta};
 
+pub const DEFAULT_MAX_SINKS: usize = 64;
+pub const DEFAULT_MAX_QUEUE_DEPTH: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DistributorError {
+    InvalidMaxSinks,
+    InvalidMaxQueueDepth,
+    InvalidQueueCapacity,
+    QueueCapacityExceeded,
+    DuplicateSink,
+    SinkLimitReached,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SinkId(pub u64);
 
@@ -42,7 +55,6 @@ struct SinkQueue {
 
 impl SinkQueue {
     fn new(mode: SinkMode, capacity: usize) -> Self {
-        assert!(capacity > 0, "sink queue capacity must be non-zero");
         Self {
             mode,
             frames: BTreeMap::new(),
@@ -87,14 +99,61 @@ pub struct SinkStats {
 /// This enforces the "encode once, distribute many" invariant at the encoded-frame boundary.
 /// Individual sinks own bounded queues so a slow receiver/transport cannot hold back the encoder or
 /// other healthy sinks.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FrameDistributor {
     sinks: BTreeMap<SinkId, SinkQueue>,
+    max_sinks: usize,
+    max_queue_depth: usize,
+}
+
+impl Default for FrameDistributor {
+    fn default() -> Self {
+        Self {
+            sinks: BTreeMap::new(),
+            max_sinks: DEFAULT_MAX_SINKS,
+            max_queue_depth: DEFAULT_MAX_QUEUE_DEPTH,
+        }
+    }
 }
 
 impl FrameDistributor {
-    pub fn add_sink(&mut self, id: SinkId, mode: SinkMode, capacity: usize) {
+    pub fn with_limits(
+        max_sinks: usize,
+        max_queue_depth: usize,
+    ) -> Result<Self, DistributorError> {
+        if max_sinks == 0 {
+            return Err(DistributorError::InvalidMaxSinks);
+        }
+        if max_queue_depth == 0 {
+            return Err(DistributorError::InvalidMaxQueueDepth);
+        }
+        Ok(Self {
+            sinks: BTreeMap::new(),
+            max_sinks,
+            max_queue_depth,
+        })
+    }
+
+    pub fn add_sink(
+        &mut self,
+        id: SinkId,
+        mode: SinkMode,
+        capacity: usize,
+    ) -> Result<(), DistributorError> {
+        if capacity == 0 {
+            return Err(DistributorError::InvalidQueueCapacity);
+        }
+        if capacity > self.max_queue_depth {
+            return Err(DistributorError::QueueCapacityExceeded);
+        }
+        if self.sinks.contains_key(&id) {
+            return Err(DistributorError::DuplicateSink);
+        }
+        if self.sinks.len() >= self.max_sinks {
+            return Err(DistributorError::SinkLimitReached);
+        }
         self.sinks.insert(id, SinkQueue::new(mode, capacity));
+        Ok(())
     }
 
     pub fn remove_sink(&mut self, id: SinkId) -> bool {
@@ -190,14 +249,14 @@ mod tests {
 
     #[test]
     fn distributor_rejects_unbounded_membership_and_queue_depth() {
-        assert_eq!(
+        assert!(matches!(
             FrameDistributor::with_limits(0, 2),
             Err(DistributorError::InvalidMaxSinks)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             FrameDistributor::with_limits(2, 0),
             Err(DistributorError::InvalidMaxQueueDepth)
-        );
+        ));
 
         let mut distributor = FrameDistributor::with_limits(2, 3).expect("valid limits");
         assert_eq!(
