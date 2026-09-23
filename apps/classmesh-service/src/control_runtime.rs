@@ -31,10 +31,11 @@ use classmesh_core::adaptation::{
 use classmesh_core::{NetworkMetrics, StreamKind};
 use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver};
 use classmesh_protocol::control_wire::{
-    ControlEnvelope, HeartbeatAck, InputEvent, MediaTransport as WireMediaTransport,
-    ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamAnswer, StreamReconfigure,
+    ControlEnvelope, HeartbeatAck, InputEvent, KeyframeRequest, MediaTransport as WireMediaTransport,
+    Nack, ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamAnswer, StreamReconfigure,
     control_envelope,
 };
+use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::{AuthorizationStore, Permission};
 use classmesh_windows_runtime::ipc::ServiceUdpStreamStart;
@@ -95,6 +96,12 @@ pub(crate) struct FocusedMediaReconfigure {
     pub(crate) reconfigure: StreamReconfigure,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct FocusedMediaFeedback {
+    pub(crate) control_session_id: u64,
+    pub(crate) feedback: FeedbackMessage,
+}
+
 const MEDIA_START_PENDING: u8 = 0;
 const MEDIA_START_COMMITTED: u8 = 1;
 const MEDIA_START_CANCELLED: u8 = 2;
@@ -146,6 +153,7 @@ pub(crate) struct FocusedMediaStart {
 pub(crate) struct FocusedMediaDispatchChannels {
     pub(crate) start_tx: mpsc::SyncSender<FocusedMediaStart>,
     pub(crate) reconfigure_tx: mpsc::SyncSender<FocusedMediaReconfigure>,
+    pub(crate) feedback_tx: mpsc::SyncSender<FocusedMediaFeedback>,
     pub(crate) released_session_floor: Arc<AtomicU64>,
     pub(crate) owner: Arc<AtomicU64>,
 }
@@ -162,6 +170,10 @@ impl FocusedMediaDispatchChannels {
             Ok(_) => true,
             Err(current) => current == session_id,
         }
+    }
+
+    fn is_owner(&self, session_id: u64) -> bool {
+        session_id != 0 && self.owner.load(Ordering::Acquire) == session_id
     }
 
     fn release_owner(&self, session_id: u64) -> bool {
@@ -352,6 +364,69 @@ impl FocusedAdaptationState {
             transport: WireMediaTransport::Unspecified as i32,
             transport_parameters: Vec::new(),
         }))
+    }
+}
+
+fn feedback_message_from_nack(nack: &Nack) -> Result<FeedbackMessage, &'static str> {
+    let stream_id =
+        u32::try_from(nack.stream_id).map_err(|_| "control.media.feedback_invalid_stream")?;
+    if stream_id == 0 {
+        return Err("control.media.feedback_invalid_stream");
+    }
+    if nack.missing_packet_indices.is_empty()
+        || nack.missing_packet_indices.len() > MAX_NACK_PACKET_INDICES
+    {
+        return Err("control.media.feedback_invalid_nack");
+    }
+    let missing_packet_indices = nack
+        .missing_packet_indices
+        .iter()
+        .copied()
+        .map(|index| {
+            u16::try_from(index).map_err(|_| "control.media.feedback_invalid_packet_index")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(FeedbackMessage::Nack {
+        stream_id,
+        frame_id: nack.frame_id,
+        missing_packet_indices,
+    })
+}
+
+fn feedback_message_from_keyframe(
+    request: &KeyframeRequest,
+) -> Result<FeedbackMessage, &'static str> {
+    let stream_id =
+        u32::try_from(request.stream_id).map_err(|_| "control.media.feedback_invalid_stream")?;
+    if stream_id == 0 {
+        return Err("control.media.feedback_invalid_stream");
+    }
+    Ok(FeedbackMessage::RequestKeyframe {
+        stream_id,
+        after_frame_id: request.last_decodable_frame_id,
+    })
+}
+
+fn dispatch_media_feedback(
+    media: &FocusedMediaDispatchChannels,
+    control_session_id: u64,
+    feedback: FeedbackMessage,
+) {
+    if !media.is_owner(control_session_id) {
+        eprintln!("ClassMesh media feedback ignored: control.media.feedback_not_owner");
+        return;
+    }
+    match media.feedback_tx.try_send(FocusedMediaFeedback {
+        control_session_id,
+        feedback,
+    }) {
+        Ok(()) => {}
+        Err(mpsc::TrySendError::Full(_)) => {
+            eprintln!("ClassMesh media feedback dropped: control.media.feedback_backpressure");
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => {
+            eprintln!("ClassMesh media feedback dropped: control.media.feedback_disconnected");
+        }
     }
 }
 
@@ -1033,6 +1108,66 @@ async fn run_established_session(
                     return;
                 }
             }
+            Some(control_envelope::Payload::Nack(nack)) => {
+                let now_unix_ms = match unix_time_ms() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"invalid service clock");
+                        return;
+                    }
+                };
+                if let Err(error) = guard.authorize(
+                    authorization,
+                    &envelope,
+                    Permission::ViewInteractive,
+                    now_unix_ms,
+                ) {
+                    eprintln!(
+                        "ClassMesh NACK rejected: {}",
+                        command_authorization_diagnostic_code(&error)
+                    );
+                    connection.close(0_u32.into(), b"media feedback unauthorized");
+                    return;
+                }
+                match feedback_message_from_nack(nack) {
+                    Ok(feedback) => {
+                        dispatch_media_feedback(media, session.control_session_id, feedback);
+                    }
+                    Err(code) => {
+                        eprintln!("ClassMesh NACK ignored: {code}");
+                    }
+                }
+            }
+            Some(control_envelope::Payload::KeyframeRequest(request)) => {
+                let now_unix_ms = match unix_time_ms() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"invalid service clock");
+                        return;
+                    }
+                };
+                if let Err(error) = guard.authorize(
+                    authorization,
+                    &envelope,
+                    Permission::ViewInteractive,
+                    now_unix_ms,
+                ) {
+                    eprintln!(
+                        "ClassMesh keyframe request rejected: {}",
+                        command_authorization_diagnostic_code(&error)
+                    );
+                    connection.close(0_u32.into(), b"media feedback unauthorized");
+                    return;
+                }
+                match feedback_message_from_keyframe(request) {
+                    Ok(feedback) => {
+                        dispatch_media_feedback(media, session.control_session_id, feedback);
+                    }
+                    Err(code) => {
+                        eprintln!("ClassMesh keyframe request ignored: {code}");
+                    }
+                }
+            }
             Some(control_envelope::Payload::InputEvent(_)) => {
                 let now_unix_ms = match unix_time_ms() {
                     Ok(value) => value,
@@ -1310,6 +1445,7 @@ mod tests {
         let channels = FocusedMediaDispatchChannels {
             start_tx: mpsc::sync_channel(1).0,
             reconfigure_tx: mpsc::sync_channel(1).0,
+            feedback_tx: mpsc::sync_channel(1).0,
             released_session_floor: Arc::new(AtomicU64::new(0)),
             owner: Arc::new(AtomicU64::new(0)),
         };
@@ -1319,6 +1455,61 @@ mod tests {
         assert!(!channels.release_owner(8));
         assert!(channels.release_owner(7));
         assert!(channels.try_acquire_owner(8));
+    }
+
+    #[test]
+    fn wire_recovery_feedback_is_bounded_and_stream_safe() {
+        assert_eq!(
+            feedback_message_from_nack(&Nack {
+                stream_id: 7,
+                frame_id: 42,
+                missing_packet_indices: vec![0, 3, u32::from(u16::MAX)],
+                recovery_deadline_us: 123,
+            }),
+            Ok(FeedbackMessage::Nack {
+                stream_id: 7,
+                frame_id: 42,
+                missing_packet_indices: vec![0, 3, u16::MAX],
+            })
+        );
+        assert_eq!(
+            feedback_message_from_keyframe(&KeyframeRequest {
+                stream_id: 7,
+                last_decodable_frame_id: 42,
+            }),
+            Ok(FeedbackMessage::RequestKeyframe {
+                stream_id: 7,
+                after_frame_id: 42,
+            })
+        );
+
+        assert_eq!(
+            feedback_message_from_nack(&Nack {
+                stream_id: 0,
+                frame_id: 42,
+                missing_packet_indices: vec![0],
+                recovery_deadline_us: 123,
+            }),
+            Err("control.media.feedback_invalid_stream")
+        );
+        assert_eq!(
+            feedback_message_from_nack(&Nack {
+                stream_id: 7,
+                frame_id: 42,
+                missing_packet_indices: vec![u32::from(u16::MAX) + 1],
+                recovery_deadline_us: 123,
+            }),
+            Err("control.media.feedback_invalid_packet_index")
+        );
+        assert_eq!(
+            feedback_message_from_nack(&Nack {
+                stream_id: 7,
+                frame_id: 42,
+                missing_packet_indices: vec![0; MAX_NACK_PACKET_INDICES + 1],
+                recovery_deadline_us: 123,
+            }),
+            Err("control.media.feedback_invalid_nack")
+        );
     }
 
     #[test]
