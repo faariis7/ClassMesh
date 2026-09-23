@@ -107,7 +107,7 @@ pub(crate) struct FocusedMediaDispatchChannels {
     pub(crate) start_tx: mpsc::SyncSender<FocusedMediaStart>,
     pub(crate) reconfigure_tx: mpsc::SyncSender<FocusedMediaReconfigure>,
     pub(crate) released_session_floor: Arc<AtomicU64>,
-    owner: Arc<AtomicU64>,
+    pub(crate) owner: Arc<AtomicU64>,
 }
 
 impl FocusedMediaDispatchChannels {
