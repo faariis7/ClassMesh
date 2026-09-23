@@ -6,3 +6,5 @@ pub mod encoder_benchmark;
 pub mod presentation;
 #[cfg(windows)]
 pub mod receiver_render;
+#[cfg(windows)]
+pub mod udp_stream;
