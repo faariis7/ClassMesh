@@ -173,9 +173,7 @@ pub const fn evaluate_multicast_probe(
         return MulticastProbeOutcome::Unavailable(MulticastProbeFailure::LeaveFailed);
     }
     if !observation.probe_datagram_observed {
-        return MulticastProbeOutcome::Unavailable(
-            MulticastProbeFailure::ProbeDatagramNotObserved,
-        );
+        return MulticastProbeOutcome::Unavailable(MulticastProbeFailure::ProbeDatagramNotObserved);
     }
     MulticastProbeOutcome::Available
 }
@@ -202,10 +200,7 @@ mod tests {
             Err(MulticastContractError::InvalidGroup)
         );
         assert_eq!(
-            MulticastMembership::new(
-                Ipv4Addr::new(224, 0, 0, 1),
-                Ipv4Addr::new(192, 168, 1, 20),
-            ),
+            MulticastMembership::new(Ipv4Addr::new(224, 0, 0, 1), Ipv4Addr::new(192, 168, 1, 20)),
             Err(MulticastContractError::GroupOutsideAdministrativeScope)
         );
         for interface in [
@@ -258,7 +253,9 @@ mod tests {
     fn cleanup_clears_bounded_membership_state() {
         let mut registry = MulticastMembershipRegistry::default();
         registry.join(membership(30, 10)).expect("first membership");
-        registry.join(membership(31, 10)).expect("second membership");
+        registry
+            .join(membership(31, 10))
+            .expect("second membership");
 
         let cleanup = registry.take_all();
         assert_eq!(cleanup.len(), 2);
