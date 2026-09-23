@@ -156,6 +156,32 @@ mod tests {
     }
 
     #[test]
+    fn presentation_start_round_trips_on_v03() {
+        let envelope = control_wire::ControlEnvelope {
+            control_session_id: 44,
+            sequence: 8,
+            protocol_version: Some(control_wire::ProtocolVersion { major: 0, minor: 3 }),
+            request_id: 77,
+            payload: Some(control_wire::control_envelope::Payload::PresentationStart(
+                control_wire::PresentationStart {
+                    presentation_id: 900,
+                    stream_id: 12,
+                },
+            )),
+        };
+
+        let decoded = control_wire::ControlEnvelope::decode(envelope.encode_to_vec().as_slice())
+            .expect("presentation start should decode");
+        let Some(control_wire::control_envelope::Payload::PresentationStart(start)) =
+            decoded.payload
+        else {
+            panic!("expected presentation start");
+        };
+        assert_eq!(start.presentation_id, 900);
+        assert_eq!(start.stream_id, 12);
+    }
+
+    #[test]
     fn generated_control_envelope_round_trips() {
         let envelope = control_wire::ControlEnvelope {
             control_session_id: 44,
