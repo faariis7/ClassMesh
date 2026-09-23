@@ -98,7 +98,7 @@ pub fn dispatch_privileged_command(
             Ok(PrivilegedControlCommand::ClipboardWrite(write.clone()))
         }
         control_envelope::Payload::PresentationStart(start) => {
-            if guard.protocol_version().major != 0 || guard.protocol_version().minor < 3 {
+            if guard.protocol_version().major == 0 && guard.protocol_version().minor < 3 {
                 return Err(PrivilegedDispatchError::PresentationRequiresProtocolV3);
             }
             if envelope.request_id == 0 {
@@ -115,7 +115,7 @@ pub fn dispatch_privileged_command(
             Ok(PrivilegedControlCommand::PresentationStart(*start))
         }
         control_envelope::Payload::PresentationStop(stop) => {
-            if guard.protocol_version().major != 0 || guard.protocol_version().minor < 3 {
+            if guard.protocol_version().major == 0 && guard.protocol_version().minor < 3 {
                 return Err(PrivilegedDispatchError::PresentationRequiresProtocolV3);
             }
             if envelope.request_id == 0 {
