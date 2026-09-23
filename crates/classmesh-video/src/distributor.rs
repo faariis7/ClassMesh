@@ -147,8 +147,12 @@ mod tests {
     #[test]
     fn one_allocation_is_shared_across_many_sinks() {
         let mut distributor = FrameDistributor::default();
-        distributor.add_sink(SinkId(1), SinkMode::Multicast, 2);
-        distributor.add_sink(SinkId(2), SinkMode::Unicast, 2);
+        distributor
+            .add_sink(SinkId(1), SinkMode::Multicast, 2)
+            .expect("sink 1");
+        distributor
+            .add_sink(SinkId(2), SinkMode::Unicast, 2)
+            .expect("sink 2");
         let original = frame(1);
         let pointer = Arc::as_ptr(&original.data);
         distributor.publish(original);
@@ -163,10 +167,73 @@ mod tests {
     }
 
     #[test]
+    fn classroom_scale_shares_one_encoded_allocation() {
+        let mut distributor = FrameDistributor::default();
+        let original = frame(1);
+        let pointer = Arc::as_ptr(&original.data);
+
+        for id in 1..=20 {
+            distributor
+                .add_sink(SinkId(id), SinkMode::Unicast, 2)
+                .expect("classroom sink should fit default bound");
+        }
+        distributor.publish(original);
+
+        for id in 1..=20 {
+            let delivered = distributor
+                .pop_latest(SinkId(id))
+                .expect("each sink gets the shared frame");
+            assert_eq!(Arc::as_ptr(&delivered.data), pointer);
+        }
+        assert_eq!(distributor.sink_count(), 20);
+    }
+
+    #[test]
+    fn distributor_rejects_unbounded_membership_and_queue_depth() {
+        assert_eq!(
+            FrameDistributor::with_limits(0, 2),
+            Err(DistributorError::InvalidMaxSinks)
+        );
+        assert_eq!(
+            FrameDistributor::with_limits(2, 0),
+            Err(DistributorError::InvalidMaxQueueDepth)
+        );
+
+        let mut distributor = FrameDistributor::with_limits(2, 3).expect("valid limits");
+        assert_eq!(
+            distributor.add_sink(SinkId(1), SinkMode::Unicast, 0),
+            Err(DistributorError::InvalidQueueCapacity)
+        );
+        assert_eq!(
+            distributor.add_sink(SinkId(1), SinkMode::Unicast, 4),
+            Err(DistributorError::QueueCapacityExceeded)
+        );
+        distributor
+            .add_sink(SinkId(1), SinkMode::Unicast, 2)
+            .expect("first sink");
+        assert_eq!(
+            distributor.add_sink(SinkId(1), SinkMode::Multicast, 2),
+            Err(DistributorError::DuplicateSink)
+        );
+        distributor
+            .add_sink(SinkId(2), SinkMode::Multicast, 3)
+            .expect("second sink");
+        assert_eq!(
+            distributor.add_sink(SinkId(3), SinkMode::Unicast, 1),
+            Err(DistributorError::SinkLimitReached)
+        );
+        assert_eq!(distributor.sink_count(), 2);
+    }
+
+    #[test]
     fn slow_sink_drops_old_frames_without_affecting_other_sink() {
         let mut distributor = FrameDistributor::default();
-        distributor.add_sink(SinkId(1), SinkMode::Multicast, 2);
-        distributor.add_sink(SinkId(2), SinkMode::Unicast, 2);
+        distributor
+            .add_sink(SinkId(1), SinkMode::Multicast, 2)
+            .expect("sink 1");
+        distributor
+            .add_sink(SinkId(2), SinkMode::Unicast, 2)
+            .expect("sink 2");
 
         distributor.publish(frame(1));
         let _ = distributor.pop_latest(SinkId(1));
