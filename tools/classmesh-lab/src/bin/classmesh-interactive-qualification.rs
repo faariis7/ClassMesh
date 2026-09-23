@@ -11,14 +11,12 @@ mod windows_app {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
+    use classmesh_control::ControlHello;
     use classmesh_control::client_session::connect_client_session_with_retries;
     use classmesh_control::quic::{
         DEFAULT_IO_TIMEOUT, DEFAULT_RECONNECT_POLICY, enrolled_client_config,
     };
-    use classmesh_control::ControlHello;
-    use classmesh_identity_win::{
-        CngMachineKey, DurableMachineIdentity, cng_client_cert_resolver,
-    };
+    use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity, cng_client_cert_resolver};
     use classmesh_protocol::control_wire::{
         ControlEnvelope, Heartbeat, InputEvent, KeyEvent, KeyframeRequest,
         MediaHealth as WireMediaHealth, MediaTransport, MouseMove, ProtocolVersion as WireVersion,
@@ -151,11 +149,12 @@ mod windows_app {
                 }
             }
 
-            let connect = connect.ok_or_else(|| format!("--connect is required\n\n{}", Self::usage()))?;
-            let server_name =
-                server_name.ok_or_else(|| format!("--server-name is required\n\n{}", Self::usage()))?;
-            let identity_path =
-                identity_path.ok_or_else(|| format!("--identity is required\n\n{}", Self::usage()))?;
+            let connect =
+                connect.ok_or_else(|| format!("--connect is required\n\n{}", Self::usage()))?;
+            let server_name = server_name
+                .ok_or_else(|| format!("--server-name is required\n\n{}", Self::usage()))?;
+            let identity_path = identity_path
+                .ok_or_else(|| format!("--identity is required\n\n{}", Self::usage()))?;
             if seconds == 0 {
                 return Err("--seconds must be greater than zero".to_owned());
             }
@@ -299,7 +298,10 @@ Optional:\n\
                             if header.flags.contains(MediaFlags::RETRANSMIT) {
                                 stats.retransmits = stats.retransmits.saturating_add(1);
                             }
-                            if stats.highest_frame_id.is_none_or(|frame| header.frame_id > frame) {
+                            if stats
+                                .highest_frame_id
+                                .is_none_or(|frame| header.frame_id > frame)
+                            {
                                 stats.highest_frame_id = Some(header.frame_id);
                                 stats.frames = stats.frames.saturating_add(1);
                             }
@@ -327,7 +329,10 @@ Optional:\n\
         }
 
         if drop_after.is_some() {
-            println!("media_receiver=closed elapsed_s={}", started.elapsed().as_secs());
+            println!(
+                "media_receiver=closed elapsed_s={}",
+                started.elapsed().as_secs()
+            );
         }
         stats
     }
@@ -346,7 +351,12 @@ Optional:\n\
 
         let identity = DurableMachineIdentity::new(&config.identity_path)
             .load()?
-            .ok_or_else(|| format!("teacher identity not found: {}", config.identity_path.display()))?;
+            .ok_or_else(|| {
+                format!(
+                    "teacher identity not found: {}",
+                    config.identity_path.display()
+                )
+            })?;
         let key = CngMachineKey::open(identity.cng_key_name.clone())?;
         let certificate_chain = identity
             .certificate_chain_der
@@ -378,10 +388,7 @@ Optional:\n\
             principal_id: principal,
             role: ControlRole::Teacher,
             version: PROTOCOL_VERSION,
-            capabilities: BTreeSet::from([
-                Capability::UdpUnicast,
-                Capability::H264HardwareDecode,
-            ]),
+            capabilities: BTreeSet::from([Capability::UdpUnicast, Capability::H264HardwareDecode]),
             hostname: std::env::var("COMPUTERNAME")
                 .unwrap_or_else(|_| "phase6f-teacher".to_owned()),
             app_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -408,7 +415,10 @@ Optional:\n\
             .capabilities
             .contains(&Capability::UdpUnicast)
         {
-            return Err("student did not negotiate UDP unicast; Worker media capability is not ready".into());
+            return Err(
+                "student did not negotiate UDP unicast; Worker media capability is not ready"
+                    .into(),
+            );
         }
 
         let stream_id = 6_001_u32;
@@ -445,7 +455,9 @@ Optional:\n\
         let Some(control_envelope::Payload::StreamAnswer(answer)) = answer_envelope.payload else {
             return Err("expected StreamAnswer".into());
         };
-        if answer.stream_id != u64::from(stream_id) || answer_envelope.request_id != offer_request_id {
+        if answer.stream_id != u64::from(stream_id)
+            || answer_envelope.request_id != offer_request_id
+        {
             return Err("StreamAnswer correlation mismatch".into());
         }
         if !answer.accepted {
