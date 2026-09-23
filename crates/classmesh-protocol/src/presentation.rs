@@ -1,10 +1,14 @@
-use crate::control_wire::{PresentationStart, PresentationStop};
+use crate::control_wire::{PresentationStart, PresentationState, PresentationStatus, PresentationStop};
+
+pub const MAX_PRESENTATION_DIAGNOSTIC_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresentationControlError {
     InvalidPresentationId,
     InvalidStreamId,
     StreamIdOutOfRange,
+    InvalidState,
+    DiagnosticTooLarge,
 }
 
 pub fn validate_start(start: &PresentationStart) -> Result<(), PresentationControlError> {
@@ -23,6 +27,27 @@ pub fn validate_start(start: &PresentationStart) -> Result<(), PresentationContr
 pub fn validate_stop(stop: &PresentationStop) -> Result<(), PresentationControlError> {
     if stop.presentation_id == 0 {
         return Err(PresentationControlError::InvalidPresentationId);
+    }
+    Ok(())
+}
+
+pub fn validate_status(status: &PresentationStatus) -> Result<(), PresentationControlError> {
+    if status.presentation_id == 0 {
+        return Err(PresentationControlError::InvalidPresentationId);
+    }
+    if status.stream_id == 0 {
+        return Err(PresentationControlError::InvalidStreamId);
+    }
+    if u32::try_from(status.stream_id).is_err() {
+        return Err(PresentationControlError::StreamIdOutOfRange);
+    }
+    let state = PresentationState::try_from(status.state)
+        .map_err(|_| PresentationControlError::InvalidState)?;
+    if state == PresentationState::Unspecified {
+        return Err(PresentationControlError::InvalidState);
+    }
+    if status.diagnostic.len() > MAX_PRESENTATION_DIAGNOSTIC_BYTES {
+        return Err(PresentationControlError::DiagnosticTooLarge);
     }
     Ok(())
 }
@@ -60,6 +85,36 @@ mod tests {
                 stream_id: 7,
             }),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn status_is_bounded_and_requires_known_state() {
+        let mut status = PresentationStatus {
+            presentation_id: 9,
+            stream_id: 7,
+            state: PresentationState::Active as i32,
+            diagnostic: String::new(),
+        };
+        assert_eq!(validate_status(&status), Ok(()));
+
+        status.state = PresentationState::Unspecified as i32;
+        assert_eq!(
+            validate_status(&status),
+            Err(PresentationControlError::InvalidState)
+        );
+
+        status.state = i32::MAX;
+        assert_eq!(
+            validate_status(&status),
+            Err(PresentationControlError::InvalidState)
+        );
+
+        status.state = PresentationState::Rejected as i32;
+        status.diagnostic = "x".repeat(MAX_PRESENTATION_DIAGNOSTIC_BYTES + 1);
+        assert_eq!(
+            validate_status(&status),
+            Err(PresentationControlError::DiagnosticTooLarge)
         );
     }
 
