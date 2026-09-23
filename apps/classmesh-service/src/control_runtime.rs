@@ -832,7 +832,7 @@ async fn run_listener(
                             .await;
                             let _ = input.release_owner(session.control_session_id);
                             let _ = presentation.release_session(
-                                peer.identity.principal_id,
+                                peer.identity.principal_id(),
                                 session.control_session_id,
                             );
                             if media.release_owner(session.control_session_id) {
@@ -1292,13 +1292,13 @@ async fn run_established_session(
                     now_unix_ms,
                 ) {
                     Ok(PrivilegedControlCommand::PresentationStart(start)) => presentation.start(
-                        peer.identity.principal_id,
+                        peer.identity.principal_id(),
                         session.control_session_id,
                         start.presentation_id,
                         start.stream_id,
                     ),
                     Ok(PrivilegedControlCommand::PresentationStop(stop)) => presentation.stop(
-                        peer.identity.principal_id,
+                        peer.identity.principal_id(),
                         session.control_session_id,
                         stop.presentation_id,
                     ),
