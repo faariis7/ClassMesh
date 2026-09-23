@@ -118,8 +118,10 @@ Only the signed PKCS#10 request and non-secret enrollment metadata leave this PC
 
         let mut principal_id = [0_u8; 32];
         let mut client_nonce = [0_u8; 32];
-        getrandom::fill(&mut principal_id)?;
-        getrandom::fill(&mut client_nonce)?;
+        getrandom::fill(&mut principal_id)
+            .map_err(|error| format!("failed to generate PrincipalId randomness: {error}"))?;
+        getrandom::fill(&mut client_nonce)
+            .map_err(|error| format!("failed to generate enrollment nonce randomness: {error}"))?;
 
         let principal_hex = hex(&principal_id);
         let key_name = format!("ClassMesh-Teacher-{principal_hex}");
