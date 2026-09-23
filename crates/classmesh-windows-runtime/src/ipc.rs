@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use classmesh_core::adaptation::StreamProfile;
 use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure};
+use classmesh_protocol::feedback::FeedbackMessage;
 use prost::Message;
 
 pub const IPC_MAGIC: u32 = 0x434D_4950; // "CMIP"
@@ -21,6 +22,7 @@ const MESSAGE_WORKER_ENCODER_EVIDENCE: u16 = 14;
 const MESSAGE_WORKER_ENCODER_CACHE_QUERY: u16 = 15;
 const MESSAGE_SERVICE_ENCODER_CACHE_RESULT: u16 = 16;
 const MESSAGE_SERVICE_UDP_STREAM_START: u16 = 17;
+const MESSAGE_SERVICE_MEDIA_FEEDBACK: u16 = 18;
 const SERVICE_UDP_STREAM_START_LEN: usize = 32;
 
 const MAX_EVIDENCE_ADAPTER_IDENTITY: usize = 128;
@@ -325,6 +327,7 @@ pub enum IpcMessage {
     WorkerEncoderCacheQuery(WorkerEncoderCacheQuery),
     ServiceEncoderCacheResult(ServiceEncoderCacheResult),
     ServiceUdpStreamStart(ServiceUdpStreamStart),
+    ServiceMediaFeedback(FeedbackMessage),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -530,6 +533,16 @@ impl IpcFrame {
         payload.extend_from_slice(&address);
         debug_assert_eq!(payload.len(), SERVICE_UDP_STREAM_START_LEN);
         Ok(Self::new(MESSAGE_SERVICE_UDP_STREAM_START, payload))
+    }
+
+    pub fn service_media_feedback(feedback: &FeedbackMessage) -> Result<Self, IpcMessageError> {
+        if feedback.stream_id() == 0 {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        let payload = feedback
+            .encode()
+            .map_err(|_| IpcMessageError::InvalidPayload)?;
+        Ok(Self::new(MESSAGE_SERVICE_MEDIA_FEEDBACK, payload))
     }
 
     pub fn message(&self) -> Result<IpcMessage, IpcMessageError> {
@@ -818,6 +831,14 @@ impl IpcFrame {
                 start.validate()?;
                 Ok(IpcMessage::ServiceUdpStreamStart(start))
             }
+            MESSAGE_SERVICE_MEDIA_FEEDBACK => {
+                let feedback = FeedbackMessage::decode(self.payload.as_slice())
+                    .map_err(|_| IpcMessageError::InvalidPayload)?;
+                if feedback.stream_id() == 0 {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                Ok(IpcMessage::ServiceMediaFeedback(feedback))
+            }
             _ => Err(IpcMessageError::UnknownMessageType),
         }
     }
@@ -1067,6 +1088,50 @@ mod tests {
                 IpcMessage::ServiceUdpStreamStart(start)
             );
         }
+    }
+
+    #[test]
+    fn service_media_feedback_round_trips_bounded_nack_and_keyframe_request() {
+        for feedback in [
+            FeedbackMessage::Nack {
+                stream_id: 7,
+                frame_id: 42,
+                missing_packet_indices: vec![0, 3, 17],
+            },
+            FeedbackMessage::RequestKeyframe {
+                stream_id: 7,
+                after_frame_id: 42,
+            },
+        ] {
+            let frame = IpcFrame::service_media_feedback(&feedback).expect("valid media feedback");
+            assert_eq!(
+                frame.message().expect("typed media feedback"),
+                IpcMessage::ServiceMediaFeedback(feedback)
+            );
+        }
+    }
+
+    #[test]
+    fn service_media_feedback_rejects_zero_stream_and_oversized_nack() {
+        assert_eq!(
+            IpcFrame::service_media_feedback(&FeedbackMessage::RequestKeyframe {
+                stream_id: 0,
+                after_frame_id: 42,
+            }),
+            Err(IpcMessageError::InvalidPayload)
+        );
+        assert_eq!(
+            IpcFrame::service_media_feedback(&FeedbackMessage::Nack {
+                stream_id: 7,
+                frame_id: 42,
+                missing_packet_indices: vec![
+                    0;
+                    classmesh_protocol::feedback::MAX_NACK_PACKET_INDICES
+                        + 1
+                ],
+            }),
+            Err(IpcMessageError::InvalidPayload)
+        );
     }
 
     #[test]
