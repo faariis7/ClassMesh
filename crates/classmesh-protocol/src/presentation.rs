@@ -113,6 +113,21 @@ mod tests {
         );
 
         status.state = PresentationState::Rejected as i32;
+        status.stream_id = 0;
+        status.diagnostic = "control.presentation.not_owner".to_owned();
+        assert_eq!(
+            validate_status(&status),
+            Ok(()),
+            "a rejected lifecycle response may omit a stream that the requester does not own"
+        );
+
+        status.state = PresentationState::Stopped as i32;
+        assert_eq!(
+            validate_status(&status),
+            Err(PresentationControlError::InvalidStreamId)
+        );
+
+        status.state = PresentationState::Rejected as i32;
         status.diagnostic = "x".repeat(MAX_PRESENTATION_DIAGNOSTIC_BYTES + 1);
         assert_eq!(
             validate_status(&status),
