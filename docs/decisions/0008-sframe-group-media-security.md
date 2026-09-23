@@ -54,8 +54,8 @@ Receivers use the SFrame replay validator:
 - replay state is recorded only after AEAD authentication succeeds;
 - duplicate and too-old counters are rejected;
 - a Key ID from another epoch is rejected;
-- the ClassMesh default reorder/replay tolerance is 512 frames;
-- the ClassMesh hard maximum is 4096 frames.
+- the ClassMesh default reorder/replay tolerance is 64 frames;
+- the ClassMesh hard maximum is 512 frames.
 
 The replay window is deliberately bounded. A forged frame that fails authentication must not consume replay state.
 
@@ -75,7 +75,7 @@ The initial crypto wrapper enforces:
 - associated data <= 256 bytes;
 - plaintext encoded frame <= 8 MiB;
 - sealed SFrame frame <= plaintext limit + 64 bytes;
-- replay tolerance <= 4096 frames.
+- replay tolerance <= 512 frames.
 
 These are safety bounds, not codec target sizes. Media policy may impose tighter bounds later.
 
