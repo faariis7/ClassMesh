@@ -85,10 +85,10 @@ impl MulticastMembershipRegistry {
         }
     }
 
-    pub fn clear(&mut self) -> usize {
-        let count = self.memberships.len();
+    pub fn take_all(&mut self) -> Vec<MulticastMembership> {
+        let memberships = self.memberships.iter().copied().collect();
         self.memberships.clear();
-        count
+        memberships
     }
 
     #[must_use]
@@ -226,9 +226,12 @@ mod tests {
         registry.join(membership(30, 10)).expect("first membership");
         registry.join(membership(31, 10)).expect("second membership");
 
-        assert_eq!(registry.clear(), 2);
+        let cleanup = registry.take_all();
+        assert_eq!(cleanup.len(), 2);
+        assert!(cleanup.contains(&membership(30, 10)));
+        assert!(cleanup.contains(&membership(31, 10)));
         assert!(registry.is_empty());
-        assert_eq!(registry.clear(), 0);
+        assert!(registry.take_all().is_empty());
     }
 
     #[test]
