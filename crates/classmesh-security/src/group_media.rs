@@ -70,6 +70,7 @@ pub enum GroupMediaReplayError {
 pub enum GroupMediaError {
     InvalidEpoch,
     InvalidReplayTolerance,
+    MissingAssociatedData,
     AadTooLarge,
     FrameTooLarge,
     SealedFrameTooLarge,
@@ -83,6 +84,9 @@ impl fmt::Display for GroupMediaError {
             Self::InvalidEpoch => formatter.write_str("group-media epoch must be non-zero"),
             Self::InvalidReplayTolerance => {
                 formatter.write_str("group-media replay tolerance is outside the bounded range")
+            }
+            Self::MissingAssociatedData => {
+                formatter.write_str("group-media associated data is required")
             }
             Self::AadTooLarge => formatter.write_str("group-media associated data is too large"),
             Self::FrameTooLarge => formatter.write_str("group-media plaintext frame is too large"),
@@ -101,6 +105,7 @@ impl std::error::Error for GroupMediaError {
             Self::Crypto(error) => Some(error),
             Self::InvalidEpoch
             | Self::InvalidReplayTolerance
+            | Self::MissingAssociatedData
             | Self::AadTooLarge
             | Self::FrameTooLarge
             | Self::SealedFrameTooLarge
@@ -237,6 +242,9 @@ fn validate_plaintext_len(len: usize) -> Result<(), GroupMediaError> {
 }
 
 fn validate_aad_len(len: usize) -> Result<(), GroupMediaError> {
+    if len == 0 {
+        return Err(GroupMediaError::MissingAssociatedData);
+    }
     if len > MAX_GROUP_MEDIA_AAD_BYTES {
         return Err(GroupMediaError::AadTooLarge);
     }
@@ -412,6 +420,10 @@ mod tests {
         assert!(matches!(
             validate_plaintext_len(MAX_GROUP_MEDIA_FRAME_BYTES + 1),
             Err(GroupMediaError::FrameTooLarge)
+        ));
+        assert!(matches!(
+            validate_aad_len(0),
+            Err(GroupMediaError::MissingAssociatedData)
         ));
         assert!(validate_aad_len(MAX_GROUP_MEDIA_AAD_BYTES).is_ok());
         assert!(matches!(
