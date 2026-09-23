@@ -15,6 +15,9 @@ impl MulticastMembership {
         if !group.is_multicast() {
             return Err(MulticastContractError::InvalidGroup);
         }
+        if group.octets()[0] != 239 {
+            return Err(MulticastContractError::GroupOutsideAdministrativeScope);
+        }
         if interface.is_multicast() {
             return Err(MulticastContractError::InvalidInterface);
         }
@@ -35,6 +38,7 @@ impl MulticastMembership {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MulticastContractError {
     InvalidGroup,
+    GroupOutsideAdministrativeScope,
     InvalidInterface,
     InvalidMaxMemberships,
     MaxMembershipsExceeded,
@@ -192,6 +196,13 @@ mod tests {
                 Ipv4Addr::new(192, 168, 1, 20),
             ),
             Err(MulticastContractError::InvalidGroup)
+        );
+        assert_eq!(
+            MulticastMembership::new(
+                Ipv4Addr::new(224, 0, 0, 1),
+                Ipv4Addr::new(192, 168, 1, 20),
+            ),
+            Err(MulticastContractError::GroupOutsideAdministrativeScope)
         );
         assert_eq!(
             MulticastMembership::new(
