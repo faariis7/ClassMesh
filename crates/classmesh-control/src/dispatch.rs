@@ -121,7 +121,8 @@ pub fn dispatch_privileged_command(
             if envelope.request_id == 0 {
                 return Err(PrivilegedDispatchError::PresentationRequestMissingId);
             }
-            validate_presentation_stop(stop).map_err(PrivilegedDispatchError::InvalidPresentation)?;
+            validate_presentation_stop(stop)
+                .map_err(PrivilegedDispatchError::InvalidPresentation)?;
             guard.authorize(
                 authorization,
                 envelope,
