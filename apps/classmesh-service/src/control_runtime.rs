@@ -251,6 +251,11 @@ impl WorkerCapabilityState {
         if snapshot.flags & WORKER_CAP_H264_HARDWARE_ENCODE != 0 {
             capabilities.insert(Capability::H264HardwareEncode);
         }
+        if snapshot.flags & WORKER_CAP_DXGI_CAPTURE != 0
+            && snapshot.flags & WORKER_CAP_H264_HARDWARE_ENCODE != 0
+        {
+            capabilities.insert(Capability::UdpUnicast);
+        }
         capabilities
     }
 
@@ -1092,23 +1097,6 @@ impl InputDispatchState {
     }
 }
 
-fn stream_offer_answer(
-    offer: &StreamOffer,
-    negotiated_capabilities: &BTreeSet<Capability>,
-) -> StreamAnswer {
-    let rejection_reason = match validate_interactive_stream_offer(offer, negotiated_capabilities) {
-        Ok(_) => "control.stream.runtime_not_ready",
-        Err(error) => stream_offer_diagnostic_code(&error),
-    };
-
-    StreamAnswer {
-        stream_id: offer.stream_id,
-        accepted: false,
-        rejection_reason: rejection_reason.to_owned(),
-        supported_transports: negotiated_interactive_transports(negotiated_capabilities),
-    }
-}
-
 fn negotiated_interactive_transports(capabilities: &BTreeSet<Capability>) -> Vec<i32> {
     let mut transports = Vec::with_capacity(3);
     if capabilities.contains(&Capability::UdpUnicast) {
@@ -1262,38 +1250,6 @@ mod tests {
     }
 
     #[test]
-    fn stream_offer_preflight_never_accepts_before_runtime_dispatch_exists() {
-        let capabilities = BTreeSet::from([Capability::UdpUnicast]);
-        let answer = stream_offer_answer(
-            &interactive_offer(WireMediaTransport::UdpUnicast),
-            &capabilities,
-        );
-
-        assert!(!answer.accepted);
-        assert_eq!(answer.stream_id, 7);
-        assert_eq!(answer.rejection_reason, "control.stream.runtime_not_ready");
-        assert_eq!(
-            answer.supported_transports,
-            vec![WireMediaTransport::UdpUnicast as i32]
-        );
-    }
-
-    #[test]
-    fn stream_offer_preflight_reports_unnegotiated_transport_explicitly() {
-        let answer = stream_offer_answer(
-            &interactive_offer(WireMediaTransport::UdpUnicast),
-            &BTreeSet::new(),
-        );
-
-        assert!(!answer.accepted);
-        assert_eq!(
-            answer.rejection_reason,
-            "control.stream.transport_not_negotiated"
-        );
-        assert!(answer.supported_transports.is_empty());
-    }
-
-    #[test]
     fn stream_offer_supported_transport_list_is_deterministic_and_explicit() {
         let capabilities = BTreeSet::from([
             Capability::WebRtc,
@@ -1391,7 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_capabilities_are_generation_bound_and_transport_neutral() {
+    fn worker_capabilities_gate_explicit_udp_on_verified_h264_and_dxgi() {
         let state = WorkerCapabilityState::default();
         assert_eq!(
             state.hello_capabilities(),
@@ -1412,9 +1368,10 @@ mod tests {
                 Capability::DxgiCapture,
                 Capability::H264HardwareEncode,
                 Capability::ServiceSessionWorker,
+                Capability::UdpUnicast,
             ])
         );
-        assert!(!state.hello_capabilities().contains(&Capability::UdpUnicast));
+        assert!(state.hello_capabilities().contains(&Capability::UdpUnicast));
         assert!(
             !state
                 .hello_capabilities()
@@ -1457,6 +1414,7 @@ mod tests {
                 .hello_capabilities()
                 .contains(&Capability::DxgiCapture)
         );
+        assert!(state.hello_capabilities().contains(&Capability::UdpUnicast));
 
         assert!(state.apply_h264_qualification(12, 120, 7, false));
         assert!(
