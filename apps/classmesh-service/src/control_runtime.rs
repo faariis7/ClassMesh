@@ -1116,7 +1116,11 @@ mod tests {
                 codec: VideoCodec::H264 as i32,
             }),
             transport_parameters: if transport == WireMediaTransport::UdpUnicast {
-                vec![classmesh_control::stream::UDP_UNICAST_PARAMETERS_VERSION, 0x23, 0x28]
+                vec![
+                    classmesh_control::stream::UDP_UNICAST_PARAMETERS_VERSION,
+                    0x23,
+                    0x28,
+                ]
             } else {
                 Vec::new()
             },
