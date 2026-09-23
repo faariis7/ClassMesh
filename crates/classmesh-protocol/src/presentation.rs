@@ -1,4 +1,6 @@
-use crate::control_wire::{PresentationStart, PresentationState, PresentationStatus, PresentationStop};
+use crate::control_wire::{
+    PresentationStart, PresentationState, PresentationStatus, PresentationStop,
+};
 
 pub const MAX_PRESENTATION_DIAGNOSTIC_BYTES: usize = 1024;
 
