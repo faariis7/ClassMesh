@@ -63,6 +63,17 @@ On Teacher:
 The installer fails closed unless the result binds to the exact PrincipalId and CSR, is approved and unexpired, the declared fingerprint matches the leaf certificate, the certificate matches the protected CNG private key, the CNG export policy remains `0`, and every supplied server trust root parses as a certificate. It refuses to overwrite an existing identity file.
 
 `--trust-root` may be repeated when the Student server trust set contains more than one root. Authority approval/signing is deliberately separate from request creation and result installation.
+## Authorize the approved Teacher on Student
+
+After the approved Teacher result has been installed on Teacher, copy only `teacher-approved.pb` to Student and update Student's existing durable authorization state:
+
+    .\classmesh-student-authorize-teacher.exe `
+      --result C:\ClassMesh\enrollment\teacher-approved.pb `
+      --authorization C:\ProgramData\ClassMesh\state\authorization.json
+
+The qualification tool validates the bounded approved result, rejects expired credentials, recomputes the leaf certificate SHA-256 fingerprint, and adds a **new** Teacher principal with only `ViewInteractive` and `ControlInput`. It refuses to replace an existing PrincipalId, and the durable authorization writer keeps its existing atomic/backup behavior.
+
+Stop the ClassMesh Service before changing its durable authorization file, then start it again so the runtime reloads the new authorization state. Do not grant broader permissions for Phase 6F.
 ## CI artifact
 
 Use the `classmesh-phase6f-qualification-windows-x64` artifact. It contains the qualification executable, this runbook, and `PHASE6F_TWO_PC_RESULTS.md`.
