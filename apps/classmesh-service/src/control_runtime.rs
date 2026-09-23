@@ -1237,7 +1237,6 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-
     use super::*;
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(1);
