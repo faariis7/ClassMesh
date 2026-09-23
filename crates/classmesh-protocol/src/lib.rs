@@ -3,13 +3,14 @@
 pub mod clipboard;
 pub mod feedback;
 pub mod media;
+pub mod presentation;
 
 /// Generated Protocol Buffers types for the reliable control plane.
 pub mod control_wire {
     include!(concat!(env!("OUT_DIR"), "/classmesh.control.v1.rs"));
 }
 
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 2 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 3 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProtocolVersion {
@@ -57,6 +58,7 @@ pub enum Capability {
     WebRtc,
     LocalSfu,
     ClipboardText,
+    TeacherPresentation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,11 +147,11 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_marks_enrollment_as_minor_two() {
-        assert_eq!(PROTOCOL_VERSION, ProtocolVersion { major: 0, minor: 2 });
+    fn protocol_version_marks_presentation_contract_as_minor_three() {
+        assert_eq!(PROTOCOL_VERSION, ProtocolVersion { major: 0, minor: 3 });
         assert_eq!(
-            PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 1 }),
-            Some(ProtocolVersion { major: 0, minor: 1 })
+            PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 2 }),
+            Some(ProtocolVersion { major: 0, minor: 2 })
         );
     }
 
