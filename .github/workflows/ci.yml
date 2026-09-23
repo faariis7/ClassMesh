@@ -92,6 +92,10 @@ jobs:
           .\target\release\classmesh-enrollment-authority.exe --help
           .\target\release\classmesh-student-authorize-teacher.exe --help
 
+      - name: Validate Phase 6F physical runner help
+        shell: pwsh
+        run: .\scripts\phase6f-two-pc.ps1 -Mode Help
+
       - name: Stage Phase 4 qualification bundle
         shell: pwsh
         run: |
@@ -122,6 +126,7 @@ jobs:
           Copy-Item target/release/classmesh-enrollment-install.exe phase6f-bundle/
           Copy-Item target/release/classmesh-enrollment-authority.exe phase6f-bundle/
           Copy-Item target/release/classmesh-student-authorize-teacher.exe phase6f-bundle/
+          Copy-Item scripts/phase6f-two-pc.ps1 phase6f-bundle/
           Copy-Item docs/PHASE6F_TWO_PC_QUALIFICATION.md phase6f-bundle/
           Copy-Item docs/PHASE6F_TWO_PC_RESULTS.md phase6f-bundle/
 
