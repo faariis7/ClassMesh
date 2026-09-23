@@ -18,6 +18,7 @@ use classmesh_control::handshake::{
     EstablishedAuthenticatedPeer, EstablishedControlSession, ServerHelloConfig,
     server_hello_enrolled,
 };
+use classmesh_control::presentation_state::{PresentationOwnership, PresentationOwnershipError};
 use classmesh_control::quic::{
     ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
 };
@@ -32,12 +33,13 @@ use classmesh_core::{NetworkMetrics, StreamKind};
 use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver};
 use classmesh_protocol::control_wire::{
     ControlEnvelope, HeartbeatAck, InputEvent, KeyframeRequest,
-    MediaTransport as WireMediaTransport, Nack, ProtocolVersion as WireProtocolVersion,
-    ReceiverFeedback, StreamAnswer, StreamReconfigure, control_envelope,
+    MediaTransport as WireMediaTransport, Nack, PresentationState as WirePresentationState,
+    PresentationStatus, ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamAnswer,
+    StreamReconfigure, control_envelope,
 };
 use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
-use classmesh_security::{AuthorizationStore, Permission};
+use classmesh_security::{AuthorizationStore, Permission, PrincipalId};
 use classmesh_windows_runtime::ipc::ServiceUdpStreamStart;
 use quinn::Endpoint;
 use rustls::RootCertStore;
@@ -322,6 +324,102 @@ impl WorkerCapabilityState {
 struct InputDispatchState {
     channels: InputDispatchChannels,
     owner: Arc<AtomicU64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PresentationDispatchState {
+    ownership: Arc<Mutex<PresentationOwnership>>,
+}
+
+impl PresentationDispatchState {
+    fn start(
+        &self,
+        principal_id: PrincipalId,
+        control_session_id: u64,
+        presentation_id: u64,
+        stream_id: u64,
+    ) -> PresentationStatus {
+        let result = self
+            .ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .start(
+                principal_id,
+                control_session_id,
+                presentation_id,
+                stream_id,
+            );
+        match result {
+            Ok(owner) => PresentationStatus {
+                presentation_id: owner.presentation_id,
+                stream_id: owner.stream_id,
+                state: WirePresentationState::Starting as i32,
+                diagnostic: String::new(),
+            },
+            Err(PresentationOwnershipError::Busy) => PresentationStatus {
+                presentation_id,
+                stream_id,
+                state: WirePresentationState::Rejected as i32,
+                diagnostic: "control.presentation.busy".to_owned(),
+            },
+            Err(_) => PresentationStatus {
+                presentation_id,
+                stream_id: 0,
+                state: WirePresentationState::Rejected as i32,
+                diagnostic: "control.presentation.invalid_state".to_owned(),
+            },
+        }
+    }
+
+    fn stop(
+        &self,
+        principal_id: PrincipalId,
+        control_session_id: u64,
+        presentation_id: u64,
+    ) -> PresentationStatus {
+        let result = self
+            .ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stop(principal_id, control_session_id, presentation_id);
+        match result {
+            Ok(owner) => PresentationStatus {
+                presentation_id: owner.presentation_id,
+                stream_id: owner.stream_id,
+                state: WirePresentationState::Stopped as i32,
+                diagnostic: String::new(),
+            },
+            Err(PresentationOwnershipError::NotOwner)
+            | Err(PresentationOwnershipError::PresentationMismatch) => PresentationStatus {
+                presentation_id,
+                stream_id: 0,
+                state: WirePresentationState::Rejected as i32,
+                diagnostic: "control.presentation.not_owner".to_owned(),
+            },
+            Err(_) => PresentationStatus {
+                presentation_id,
+                stream_id: 0,
+                state: WirePresentationState::Rejected as i32,
+                diagnostic: "control.presentation.invalid_state".to_owned(),
+            },
+        }
+    }
+
+    fn release_session(&self, principal_id: PrincipalId, control_session_id: u64) -> bool {
+        self.ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .release_session(principal_id, control_session_id)
+            .is_some()
+    }
+
+    #[cfg(test)]
+    fn owner(&self) -> Option<classmesh_control::presentation_state::PresentationOwner> {
+        self.ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .owner()
+    }
 }
 
 #[derive(Debug)]
@@ -666,6 +764,7 @@ async fn run_listener(
         channels: input,
         owner: Arc::new(AtomicU64::new(0)),
     };
+    let presentation = PresentationDispatchState::default();
 
     loop {
         tokio::select! {
@@ -682,6 +781,7 @@ async fn run_listener(
                 let session_ids = Arc::clone(&session_ids);
                 let input = input.clone();
                 let media = media.clone();
+                let presentation = presentation.clone();
                 let worker_capabilities = Arc::clone(&worker_capabilities);
                 tokio::spawn(async move {
                     let connection = match incoming.await {
@@ -699,7 +799,7 @@ async fn run_listener(
                     let session_id = next_session_id(&session_ids);
                     let hello_config = ServerHelloConfig {
                         local_version: PROTOCOL_VERSION,
-                        local_capabilities: worker_capabilities.hello_capabilities(),
+                        local_capabilities: service_hello_capabilities(&worker_capabilities),
                         control_session_id: session_id,
                     };
                     let now_unix_ms = match unix_time_ms() {
@@ -732,9 +832,14 @@ async fn run_listener(
                                 authorization.as_ref(),
                                 &input,
                                 &media,
+                                &presentation,
                             )
                             .await;
                             let _ = input.release_owner(session.control_session_id);
+                            let _ = presentation.release_session(
+                                peer.identity.principal_id,
+                                session.control_session_id,
+                            );
                             if media.release_owner(session.control_session_id) {
                                 media
                                     .released_session_floor
@@ -763,6 +868,7 @@ async fn run_established_session(
     authorization: &AuthorizationStore,
     input: &InputDispatchState,
     media: &FocusedMediaDispatchChannels,
+    presentation: &PresentationDispatchState,
 ) {
     const HELLO_SEQUENCE: u64 = 1;
 
@@ -1168,6 +1274,81 @@ async fn run_established_session(
                     }
                 }
             }
+            Some(control_envelope::Payload::PresentationStart(_))
+            | Some(control_envelope::Payload::PresentationStop(_)) => {
+                if !presentation_capability_negotiated(&session.negotiated.capabilities) {
+                    eprintln!(
+                        "ClassMesh presentation command rejected: control.presentation.capability_not_negotiated"
+                    );
+                    connection.close(0_u32.into(), b"presentation capability not negotiated");
+                    return;
+                }
+                let now_unix_ms = match unix_time_ms() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"invalid service clock");
+                        return;
+                    }
+                };
+                let status = match dispatch_privileged_command(
+                    &mut guard,
+                    authorization,
+                    &envelope,
+                    now_unix_ms,
+                ) {
+                    Ok(PrivilegedControlCommand::PresentationStart(start)) => presentation.start(
+                        peer.identity.principal_id,
+                        session.control_session_id,
+                        start.presentation_id,
+                        start.stream_id,
+                    ),
+                    Ok(PrivilegedControlCommand::PresentationStop(stop)) => presentation.stop(
+                        peer.identity.principal_id,
+                        session.control_session_id,
+                        stop.presentation_id,
+                    ),
+                    Ok(_) => {
+                        eprintln!(
+                            "ClassMesh presentation command rejected: control.command.payload_mismatch"
+                        );
+                        connection.close(0_u32.into(), b"privileged payload mismatch");
+                        return;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "ClassMesh presentation command rejected: {}",
+                            privileged_dispatch_diagnostic_code(&error)
+                        );
+                        connection.close(0_u32.into(), b"privileged command rejected");
+                        return;
+                    }
+                };
+
+                let Some(next_sequence) = outbound_sequence.checked_add(1) else {
+                    eprintln!("ClassMesh control session closed: control.sequence.exhausted");
+                    connection.close(0_u32.into(), b"control sequence exhausted");
+                    return;
+                };
+                outbound_sequence = next_sequence;
+                let response = ControlEnvelope {
+                    control_session_id: session.control_session_id,
+                    sequence: outbound_sequence,
+                    protocol_version: Some(WireProtocolVersion {
+                        major: u32::from(session.negotiated.version.major),
+                        minor: u32::from(session.negotiated.version.minor),
+                    }),
+                    request_id: envelope.request_id,
+                    payload: Some(control_envelope::Payload::PresentationStatus(status)),
+                };
+                if let Err(error) = channel.send(&response).await {
+                    eprintln!(
+                        "ClassMesh presentation status failed: {}",
+                        transport_diagnostic_code(&error)
+                    );
+                    connection.close(0_u32.into(), b"presentation status failed");
+                    return;
+                }
+            }
             Some(control_envelope::Payload::InputEvent(_)) => {
                 let now_unix_ms = match unix_time_ms() {
                     Ok(value) => value,
@@ -1281,6 +1462,16 @@ impl InputDispatchState {
             .compare_exchange(session_id, 0, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
+}
+
+fn service_hello_capabilities(worker_capabilities: &WorkerCapabilityState) -> BTreeSet<Capability> {
+    let mut capabilities = worker_capabilities.hello_capabilities();
+    capabilities.insert(Capability::TeacherPresentation);
+    capabilities
+}
+
+fn presentation_capability_negotiated(capabilities: &BTreeSet<Capability>) -> bool {
+    capabilities.contains(&Capability::TeacherPresentation)
 }
 
 fn negotiated_interactive_transports(capabilities: &BTreeSet<Capability>) -> Vec<i32> {
@@ -1407,6 +1598,59 @@ mod tests {
         assert!(ControlRuntimeConfig::load(&path).is_err());
 
         let _ = fs::remove_dir_all(path.parent().expect("test parent"));
+    }
+
+    #[test]
+    fn presentation_runtime_capability_is_explicit_and_transport_neutral() {
+        let worker = WorkerCapabilityState::default();
+        let capabilities = service_hello_capabilities(&worker);
+        assert!(capabilities.contains(&Capability::TeacherPresentation));
+        assert!(capabilities.contains(&Capability::ServiceSessionWorker));
+        assert!(!capabilities.contains(&Capability::UdpUnicast));
+        assert!(!capabilities.contains(&Capability::QuicDatagram));
+        assert!(presentation_capability_negotiated(&capabilities));
+        assert!(!presentation_capability_negotiated(&BTreeSet::new()));
+    }
+
+    #[test]
+    fn presentation_runtime_enforces_exact_owner_and_bounded_rejection() {
+        let presentation = PresentationDispatchState::default();
+        let owner = PrincipalId([1; 32]);
+        let other = PrincipalId([2; 32]);
+
+        let started = presentation.start(owner, 10, 20, 30);
+        assert_eq!(started.state, WirePresentationState::Starting as i32);
+        assert_eq!((started.presentation_id, started.stream_id), (20, 30));
+
+        let busy = presentation.start(other, 11, 21, 31);
+        assert_eq!(busy.state, WirePresentationState::Rejected as i32);
+        assert_eq!(busy.diagnostic, "control.presentation.busy");
+        assert_eq!(presentation.owner().map(|value| value.principal_id), Some(owner));
+
+        let rejected_stop = presentation.stop(other, 11, 20);
+        assert_eq!(rejected_stop.state, WirePresentationState::Rejected as i32);
+        assert_eq!(rejected_stop.stream_id, 0);
+        assert_eq!(rejected_stop.diagnostic, "control.presentation.not_owner");
+        assert!(presentation.owner().is_some());
+
+        let stopped = presentation.stop(owner, 10, 20);
+        assert_eq!(stopped.state, WirePresentationState::Stopped as i32);
+        assert_eq!((stopped.presentation_id, stopped.stream_id), (20, 30));
+        assert!(presentation.owner().is_none());
+    }
+
+    #[test]
+    fn presentation_disconnect_cleanup_requires_exact_authenticated_session() {
+        let presentation = PresentationDispatchState::default();
+        let owner = PrincipalId([3; 32]);
+        let other = PrincipalId([4; 32]);
+        let _ = presentation.start(owner, 40, 50, 60);
+
+        assert!(!presentation.release_session(owner, 41));
+        assert!(!presentation.release_session(other, 40));
+        assert!(presentation.owner().is_some());
+        assert!(presentation.release_session(owner, 40));
+        assert!(presentation.owner().is_none());
     }
 
     #[test]
