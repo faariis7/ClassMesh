@@ -399,6 +399,39 @@ mod tests {
     }
 
     #[test]
+    fn replay_window_accepts_in_window_reordering_and_rejects_too_old_frames() {
+        let mut sender =
+            GroupMediaSender::new(epoch(6), key(0x66)).expect("sender");
+        let mut receiver =
+            GroupMediaReceiver::new(epoch(6), key(0x66), 3).expect("receiver");
+        let aad = b"bounded-replay";
+        let frames: Vec<Vec<u8>> = (0..5)
+            .map(|value| {
+                sender
+                    .seal_frame(&[value], aad)
+                    .expect("encrypted frame")
+            })
+            .collect();
+
+        assert_eq!(
+            receiver
+                .open_frame(&frames[4], aad)
+                .expect("newest frame"),
+            vec![4]
+        );
+        assert_eq!(
+            receiver
+                .open_frame(&frames[3], aad)
+                .expect("in-window reordered frame"),
+            vec![3]
+        );
+        assert!(matches!(
+            receiver.open_frame(&frames[0], aad),
+            Err(GroupMediaError::Replay(GroupMediaReplayError::TooOld))
+        ));
+    }
+
+    #[test]
     fn replay_tolerance_is_bounded() {
         assert!(matches!(
             GroupMediaReceiver::new(epoch(1), key(1), 0),
