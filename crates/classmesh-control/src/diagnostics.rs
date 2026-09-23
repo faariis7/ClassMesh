@@ -78,6 +78,7 @@ pub const fn heartbeat_diagnostic_code(error: &HeartbeatError) -> &'static str {
 pub const fn stream_offer_diagnostic_code(error: &StreamOfferError) -> &'static str {
     match error {
         StreamOfferError::InvalidStreamId => "control.stream.invalid_stream",
+        StreamOfferError::StreamIdOutOfRange => "control.stream.stream_id_out_of_range",
         StreamOfferError::UnsupportedKind => "control.stream.unsupported_kind",
         StreamOfferError::MissingProfile => "control.stream.missing_profile",
         StreamOfferError::UnsupportedCodec => "control.stream.unsupported_codec",
@@ -161,6 +162,10 @@ mod tests {
         assert_eq!(
             stream_offer_diagnostic_code(&StreamOfferError::InvalidStreamId),
             "control.stream.invalid_stream"
+        );
+        assert_eq!(
+            stream_offer_diagnostic_code(&StreamOfferError::StreamIdOutOfRange),
+            "control.stream.stream_id_out_of_range"
         );
         assert_eq!(
             stream_offer_diagnostic_code(&StreamOfferError::TransportCapabilityNotNegotiated),
