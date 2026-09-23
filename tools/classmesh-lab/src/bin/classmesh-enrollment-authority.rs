@@ -70,9 +70,7 @@ mod windows_app {
             }
 
             if lifetime_hours == 0 || lifetime_hours > MAX_LIFETIME_HOURS {
-                return Err(format!(
-                    "--lifetime-hours must be 1..={MAX_LIFETIME_HOURS}"
-                ));
+                return Err(format!("--lifetime-hours must be 1..={MAX_LIFETIME_HOURS}"));
             }
 
             Ok(Self {
@@ -172,7 +170,8 @@ This tool approves only validated Teacher requests and refuses output overwrite.
         );
         let csr_sha256: [u8; 32] = Sha256::digest(&request.pkcs10_csr_der).into();
 
-        let ca_cert_der = read_bounded(&config.ca_cert, MAX_CA_CERT_BYTES, "authority certificate")?;
+        let ca_cert_der =
+            read_bounded(&config.ca_cert, MAX_CA_CERT_BYTES, "authority certificate")?;
         let ca_key = CngMachineKey::open(config.ca_key_name.clone())?;
         if ca_key.export_policy()? != 0 {
             return Err("authority CNG key is exportable; refusing certificate issuance".into());
@@ -217,10 +216,7 @@ This tool approves only validated Teacher requests and refuses output overwrite.
         let result = EnrollmentResult {
             enrollment_id: enrollment_id.to_vec(),
             status: 2,
-            certificate_chain_der: vec![
-                issued.certificate_der.as_ref().to_vec(),
-                ca_cert_der,
-            ],
+            certificate_chain_der: vec![issued.certificate_der.as_ref().to_vec(), ca_cert_der],
             credential_fingerprint_sha256: issued.credential_fingerprint_sha256.to_vec(),
             not_after_unix_ms: issued.not_after_unix_ms,
             diagnostic: "approved".to_owned(),
