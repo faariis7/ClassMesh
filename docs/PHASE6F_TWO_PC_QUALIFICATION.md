@@ -76,10 +76,20 @@ The qualification tool validates the bounded approved result, rejects expired cr
 Stop the ClassMesh Service before changing its durable authorization file, then start it again so the runtime reloads the new authorization state. Do not grant broader permissions for Phase 6F.
 ## CI artifact
 
-Use the `classmesh-phase6f-qualification-windows-x64` artifact. It contains the qualification executable, this runbook, and `PHASE6F_TWO_PC_RESULTS.md`.
+Use the `classmesh-phase6f-qualification-windows-x64` artifact. It contains the qualification/provisioning executables, `phase6f-two-pc.ps1`, this runbook, and `PHASE6F_TWO_PC_RESULTS.md`.
 
 The client uses the production enrolled QUIC/TLS control stack and focused-media StreamOffer path. It opens a UDP receiver on Teacher, verifies ClassMesh media packet headers, keeps authenticated heartbeats alive, can send bounded degraded feedback, can deliberately close the media receiver while keeping control alive, and can send visible input pulses.
 
+### Optional runner for the repeatable Teacher-side cases
+
+`phase6f-two-pc.ps1` wraps the same production qualification client for the four repeatable Teacher-side cases and writes timestamped logs without claiming a physical pass:
+
+    .\phase6f-two-pc.ps1 -Mode Healthy -BinDir . -Connect <STUDENT_IP>:44991 -ServerName <STUDENT_CERTIFICATE_DNS_NAME> -Identity C:\ClassMesh\teacher\machine-identity.json
+    .\phase6f-two-pc.ps1 -Mode Degraded -BinDir . -Connect <STUDENT_IP>:44991 -ServerName <STUDENT_CERTIFICATE_DNS_NAME> -Identity C:\ClassMesh\teacher\machine-identity.json
+    .\phase6f-two-pc.ps1 -Mode MediaDrop -BinDir . -Connect <STUDENT_IP>:44991 -ServerName <STUDENT_CERTIFICATE_DNS_NAME> -Identity C:\ClassMesh\teacher\machine-identity.json -DropMediaAfter 10
+    .\phase6f-two-pc.ps1 -Mode DisconnectCleanup -BinDir . -Connect <STUDENT_IP>:44991 -ServerName <STUDENT_CERTIFICATE_DNS_NAME> -Identity C:\ClassMesh\teacher\machine-identity.json -Seconds 10 -HoldKeyVk 65
+
+Logs default to `.\phase6f-results`. Visible input behavior, lock/unlock, Worker restart, secure desktop, and the final evidence matrix still require physical observation and must be recorded manually.
 ## Student preparation
 
 Confirm `control-runtime.json` binds to a reachable private-LAN address and non-zero port, for example:
