@@ -4,7 +4,7 @@ This roadmap favors measured, recoverable primitives before UI breadth. It is de
 
 ## Current execution note — 2026-09-20
 
-Phase 4 implementation/tooling is complete but its physical two-PC acceptance gate remains open in Issue #3. Phase 5 control-plane work is complete under Issue #32 through PR #107. Phase 6 interactive remote control is now active under Issue #108; its first authenticated mouse/keyboard execution slice is already merged through PR #105–#107. The live execution order and current gates are maintained in `docs/WORK_PLAN.md`.
+Phase 4 implementation/tooling is complete but its physical two-PC acceptance gate remains open in Issue #3. Phase 5 control-plane work is complete under Issue #32 through PR #107. Phase 6 implementation is complete through 6E under Issue #108: authenticated input/lifecycle/secure-desktop handling, focused interactive H.264/UDP media adaptation and bounded recovery feedback are merged through PR #145 (CI #619 green), and the clipboard skeleton is merged in PR #116. Phase 6F physical interactive-control validation remains open. The live execution order and current gates are maintained in `docs/WORK_PLAN.md`.
 
 ## Phase 0 — Architecture and repository foundation
 
