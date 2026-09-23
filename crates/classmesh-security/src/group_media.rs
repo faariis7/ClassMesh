@@ -3,9 +3,7 @@ use std::num::NonZeroU32;
 
 use sframe::CipherSuite;
 use sframe::error::SframeError;
-use sframe::frame::validation::{
-    ReplayAttackProtection, ReplayAttackProtectionError, Tolerance,
-};
+use sframe::frame::validation::{ReplayAttackProtection, ReplayAttackProtectionError, Tolerance};
 use sframe::frame::{EncryptedFrameView, MediaFrame, MonotonicCounter};
 use sframe::key::{DecryptionKey, EncryptionKey};
 use zeroize::Zeroize;
@@ -152,10 +150,11 @@ impl GroupMediaSender {
         validate_plaintext_len(plaintext.len())?;
         validate_aad_len(associated_data.len())?;
 
-        let frame =
-            MediaFrame::try_with_meta_data(&mut self.counter, plaintext, associated_data)
-                .map_err(GroupMediaError::from_sframe)?;
-        let encrypted = frame.encrypt(&self.key).map_err(GroupMediaError::from_sframe)?;
+        let frame = MediaFrame::try_with_meta_data(&mut self.counter, plaintext, associated_data)
+            .map_err(GroupMediaError::from_sframe)?;
+        let encrypted = frame
+            .encrypt(&self.key)
+            .map_err(GroupMediaError::from_sframe)?;
 
         let header = Vec::from(encrypted.header());
         let mut sealed = Vec::with_capacity(header.len() + encrypted.cipher_text().len());
@@ -178,9 +177,7 @@ impl GroupMediaReceiver {
         key_material: GroupMediaKeyMaterial,
         replay_tolerance_frames: usize,
     ) -> Result<Self, GroupMediaError> {
-        if !(1..=MAX_GROUP_MEDIA_REPLAY_TOLERANCE_FRAMES)
-            .contains(&replay_tolerance_frames)
-        {
+        if !(1..=MAX_GROUP_MEDIA_REPLAY_TOLERANCE_FRAMES).contains(&replay_tolerance_frames) {
             return Err(GroupMediaError::InvalidReplayTolerance);
         }
 
@@ -269,9 +266,7 @@ impl GroupMediaError {
                 ReplayAttackProtectionError::DuplicatedFrame { .. } => {
                     GroupMediaReplayError::Duplicate
                 }
-                ReplayAttackProtectionError::CounterTooOld { .. } => {
-                    GroupMediaReplayError::TooOld
-                }
+                ReplayAttackProtectionError::CounterTooOld { .. } => GroupMediaReplayError::TooOld,
             });
 
         replay.map_or(Self::Crypto(error), Self::Replay)
@@ -290,17 +285,11 @@ mod tests {
         GroupMediaKeyMaterial::new([value; GROUP_MEDIA_KEY_BYTES])
     }
 
-    fn pair(
-        epoch_value: u32,
-        key_value: u8,
-    ) -> (GroupMediaSender, GroupMediaReceiver) {
+    fn pair(epoch_value: u32, key_value: u8) -> (GroupMediaSender, GroupMediaReceiver) {
         (
             GroupMediaSender::new(epoch(epoch_value), key(key_value)).expect("sender"),
-            GroupMediaReceiver::with_default_replay_tolerance(
-                epoch(epoch_value),
-                key(key_value),
-            )
-            .expect("receiver"),
+            GroupMediaReceiver::with_default_replay_tolerance(epoch(epoch_value), key(key_value))
+                .expect("receiver"),
         )
     }
 
@@ -379,13 +368,9 @@ mod tests {
 
     #[test]
     fn another_epoch_is_rejected_before_decryption() {
-        let mut sender =
-            GroupMediaSender::new(epoch(4), key(0x44)).expect("sender");
-        let mut receiver = GroupMediaReceiver::with_default_replay_tolerance(
-            epoch(5),
-            key(0x55),
-        )
-        .expect("receiver");
+        let mut sender = GroupMediaSender::new(epoch(4), key(0x44)).expect("sender");
+        let mut receiver = GroupMediaReceiver::with_default_replay_tolerance(epoch(5), key(0x55))
+            .expect("receiver");
         let sealed = sender
             .seal_frame(b"frame", b"binding")
             .expect("encrypted frame");
@@ -400,23 +385,15 @@ mod tests {
 
     #[test]
     fn replay_window_accepts_in_window_reordering_and_rejects_too_old_frames() {
-        let mut sender =
-            GroupMediaSender::new(epoch(6), key(0x66)).expect("sender");
-        let mut receiver =
-            GroupMediaReceiver::new(epoch(6), key(0x66), 3).expect("receiver");
+        let mut sender = GroupMediaSender::new(epoch(6), key(0x66)).expect("sender");
+        let mut receiver = GroupMediaReceiver::new(epoch(6), key(0x66), 3).expect("receiver");
         let aad = b"bounded-replay";
         let frames: Vec<Vec<u8>> = (0..5)
-            .map(|value| {
-                sender
-                    .seal_frame(&[value], aad)
-                    .expect("encrypted frame")
-            })
+            .map(|value| sender.seal_frame(&[value], aad).expect("encrypted frame"))
             .collect();
 
         assert_eq!(
-            receiver
-                .open_frame(&frames[4], aad)
-                .expect("newest frame"),
+            receiver.open_frame(&frames[4], aad).expect("newest frame"),
             vec![4]
         );
         assert_eq!(
