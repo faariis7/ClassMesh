@@ -304,11 +304,23 @@ mod tests {
     }
 
     #[test]
-    fn production_key_generation_returns_nonzero_random_material() {
-        let first = GroupMediaKeyMaterial::generate().expect("first key");
-        let second = GroupMediaKeyMaterial::generate().expect("second key");
-        assert_ne!(first.as_bytes(), &[0; GROUP_MEDIA_KEY_BYTES]);
-        assert_ne!(first.as_bytes(), second.as_bytes());
+    fn production_generated_key_supports_authenticated_round_trip() {
+        let material = GroupMediaKeyMaterial::generate().expect("generated key");
+        let mut sender = GroupMediaSender::new(epoch(7), &material).expect("sender");
+        let mut receiver =
+            GroupMediaReceiver::with_default_replay_tolerance(epoch(7), &material)
+                .expect("receiver");
+        let aad = b"generated-key-binding";
+        let sealed = sender
+            .seal_frame(b"generated-key-frame", aad)
+            .expect("encrypted frame");
+
+        assert_eq!(
+            receiver
+                .open_frame(&sealed, aad)
+                .expect("generated key should decrypt"),
+            b"generated-key-frame"
+        );
     }
 
     #[test]
