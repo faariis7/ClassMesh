@@ -2,11 +2,12 @@ use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
 pub const DEFAULT_MAX_MULTICAST_MEMBERSHIPS: usize = 8;
+pub const MAX_MULTICAST_MEMBERSHIPS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MulticastMembership {
-    pub group: Ipv4Addr,
-    pub interface: Ipv4Addr,
+    group: Ipv4Addr,
+    interface: Ipv4Addr,
 }
 
 impl MulticastMembership {
@@ -19,6 +20,16 @@ impl MulticastMembership {
         }
         Ok(Self { group, interface })
     }
+
+    #[must_use]
+    pub const fn group(self) -> Ipv4Addr {
+        self.group
+    }
+
+    #[must_use]
+    pub const fn interface(self) -> Ipv4Addr {
+        self.interface
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +37,7 @@ pub enum MulticastContractError {
     InvalidGroup,
     InvalidInterface,
     InvalidMaxMemberships,
+    MaxMembershipsExceeded,
     MembershipLimitReached,
 }
 
@@ -56,6 +68,9 @@ impl MulticastMembershipRegistry {
     pub fn with_limit(max_memberships: usize) -> Result<Self, MulticastContractError> {
         if max_memberships == 0 {
             return Err(MulticastContractError::InvalidMaxMemberships);
+        }
+        if max_memberships > MAX_MULTICAST_MEMBERSHIPS {
+            return Err(MulticastContractError::MaxMembershipsExceeded);
         }
         Ok(Self {
             memberships: BTreeSet::new(),
@@ -277,10 +292,14 @@ mod tests {
     }
 
     #[test]
-    fn invalid_zero_membership_limit_is_rejected() {
+    fn invalid_or_unbounded_membership_limit_is_rejected() {
         assert!(matches!(
             MulticastMembershipRegistry::with_limit(0),
             Err(MulticastContractError::InvalidMaxMemberships)
+        ));
+        assert!(matches!(
+            MulticastMembershipRegistry::with_limit(MAX_MULTICAST_MEMBERSHIPS + 1),
+            Err(MulticastContractError::MaxMembershipsExceeded)
         ));
     }
 }
