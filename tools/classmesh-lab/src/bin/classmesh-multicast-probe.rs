@@ -199,9 +199,10 @@ fn run_receiver(args: &[String]) -> AnyResult<()> {
                     invalid_datagrams = invalid_datagrams.saturating_add(1);
                 }
                 Err(DatagramError::Io(error))
-                    if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) =>
-                {
-                }
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) => {}
                 Err(error) => {
                     invalid_datagrams = invalid_datagrams.saturating_add(1);
                     eprintln!("ClassMesh multicast probe ignored datagram error: {error}");
@@ -387,9 +388,11 @@ mod tests {
     #[test]
     fn token_parser_rejects_bad_length_and_non_hex() {
         assert!("00".parse::<ProbeToken>().is_err());
-        assert!("00112233445566778899aabbccddeefg"
-            .parse::<ProbeToken>()
-            .is_err());
+        assert!(
+            "00112233445566778899aabbccddeefg"
+                .parse::<ProbeToken>()
+                .is_err()
+        );
     }
 
     #[test]
@@ -426,13 +429,15 @@ mod tests {
             "--timeout-ms".to_owned(),
             "100".to_owned(),
         ];
-        assert!(parse_u64_arg(
-            &args,
-            "--timeout-ms",
-            DEFAULT_TIMEOUT_MS,
-            MIN_TIMEOUT_MS,
-            MAX_TIMEOUT_MS
-        )
-        .is_err());
+        assert!(
+            parse_u64_arg(
+                &args,
+                "--timeout-ms",
+                DEFAULT_TIMEOUT_MS,
+                MIN_TIMEOUT_MS,
+                MAX_TIMEOUT_MS
+            )
+            .is_err()
+        );
     }
 }
