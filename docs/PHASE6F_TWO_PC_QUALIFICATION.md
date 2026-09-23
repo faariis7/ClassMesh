@@ -34,6 +34,21 @@ The tool creates a machine-scoped ECDSA P-256 CNG key with export policy `0`, si
 The generated key name is deterministically bound to the random stable PrincipalId and is printed for diagnostics. If request creation fails before the file is committed, the newly-created key is deleted. The tool refuses to overwrite an existing request file.
 
 Move only `teacher-request.pb` to the enrollment authority. Do **not** copy private-key material, and do not substitute a self-signed Teacher certificate. Authority approval/result installation is a separate fail-closed step.
+## Install an approved Teacher enrollment result
+
+After the trusted enrollment authority returns an approved protobuf `EnrollmentResult`, move that result back to Teacher together with the DER trust root(s) used to authenticate the Student server. Keep the original request file for binding verification.
+
+On Teacher:
+
+    .\classmesh-enrollment-install.exe `
+      --request C:\ClassMesh\enrollment\teacher-request.pb `
+      --result C:\ClassMesh\enrollment\teacher-approved.pb `
+      --trust-root C:\ClassMesh\enrollment\classroom-root.der `
+      --identity-output C:\ClassMesh\teacher\machine-identity.json
+
+The installer fails closed unless the result binds to the exact PrincipalId and CSR, is approved and unexpired, the declared fingerprint matches the leaf certificate, the certificate matches the protected CNG private key, the CNG export policy remains `0`, and every supplied server trust root parses as a certificate. It refuses to overwrite an existing identity file.
+
+`--trust-root` may be repeated when the Student server trust set contains more than one root. Authority approval/signing is deliberately separate from request creation and result installation.
 ## CI artifact
 
 Use the `classmesh-phase6f-qualification-windows-x64` artifact. It contains the qualification executable, this runbook, and `PHASE6F_TWO_PC_RESULTS.md`.
