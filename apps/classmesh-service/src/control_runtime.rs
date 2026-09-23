@@ -1297,6 +1297,35 @@ mod tests {
     }
 
     #[test]
+    fn focused_media_start_commit_is_single_winner() {
+        let cancelled = FocusedMediaStartCommit::pending();
+        assert!(cancelled.cancel());
+        assert!(!cancelled.try_commit());
+        assert!(!cancelled.is_committed());
+
+        let committed = FocusedMediaStartCommit::pending();
+        assert!(committed.try_commit());
+        assert!(committed.is_committed());
+        assert!(!committed.cancel());
+    }
+
+    #[test]
+    fn focused_media_owner_is_independent_and_session_bound() {
+        let channels = FocusedMediaDispatchChannels {
+            start_tx: mpsc::sync_channel(1).0,
+            reconfigure_tx: mpsc::sync_channel(1).0,
+            released_session_floor: Arc::new(AtomicU64::new(0)),
+            owner: Arc::new(AtomicU64::new(0)),
+        };
+        assert!(channels.try_acquire_owner(7));
+        assert!(channels.try_acquire_owner(7));
+        assert!(!channels.try_acquire_owner(8));
+        assert!(!channels.release_owner(8));
+        assert!(channels.release_owner(7));
+        assert!(channels.try_acquire_owner(8));
+    }
+
+    #[test]
     fn wire_media_health_rejects_unspecified_and_unknown_values() {
         assert_eq!(media_health_from_wire(0), None);
         assert_eq!(media_health_from_wire(99), None);
