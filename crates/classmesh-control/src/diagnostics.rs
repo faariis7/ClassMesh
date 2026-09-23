@@ -118,9 +118,7 @@ pub const fn privileged_dispatch_diagnostic_code(error: &PrivilegedDispatchError
         PrivilegedDispatchError::PresentationRequiresProtocolV3 => {
             "control.command.presentation_requires_v0_3"
         }
-        PrivilegedDispatchError::InvalidPresentation(_) => {
-            "control.command.presentation_invalid"
-        }
+        PrivilegedDispatchError::InvalidPresentation(_) => "control.command.presentation_invalid",
         PrivilegedDispatchError::Authorization(error) => {
             command_authorization_diagnostic_code(error)
         }
@@ -231,11 +229,9 @@ mod tests {
             "control.command.presentation_requires_v0_3"
         );
         assert_eq!(
-            privileged_dispatch_diagnostic_code(
-                &PrivilegedDispatchError::InvalidPresentation(
-                    classmesh_protocol::presentation::PresentationControlError::InvalidStreamId
-                )
-            ),
+            privileged_dispatch_diagnostic_code(&PrivilegedDispatchError::InvalidPresentation(
+                classmesh_protocol::presentation::PresentationControlError::InvalidStreamId
+            )),
             "control.command.presentation_invalid"
         );
     }
