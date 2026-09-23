@@ -2,6 +2,7 @@
 
 pub mod feedback;
 pub mod impairment;
+pub mod multicast;
 pub mod receiver;
 pub mod reliability;
 pub mod transport;
