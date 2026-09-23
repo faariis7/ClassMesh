@@ -66,7 +66,6 @@ impl AuthenticatedControlGuard {
         self.protocol_version
     }
 
-
     /// Validates and consumes one post-handshake envelope for this authenticated session.
     ///
     /// Sequence monotonicity is global to the peer's control stream, not per payload type.
