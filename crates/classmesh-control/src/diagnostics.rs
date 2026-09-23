@@ -91,6 +91,9 @@ pub const fn stream_offer_diagnostic_code(error: &StreamOfferError) -> &'static 
         StreamOfferError::TransportParametersTooLarge => {
             "control.stream.transport_parameters_too_large"
         }
+        StreamOfferError::InvalidUdpUnicastParameters => {
+            "control.stream.invalid_udp_unicast_parameters"
+        }
     }
 }
 
@@ -162,6 +165,10 @@ mod tests {
         assert_eq!(
             stream_offer_diagnostic_code(&StreamOfferError::TransportCapabilityNotNegotiated),
             "control.stream.transport_not_negotiated"
+        );
+        assert_eq!(
+            stream_offer_diagnostic_code(&StreamOfferError::InvalidUdpUnicastParameters),
+            "control.stream.invalid_udp_unicast_parameters"
         );
         assert_eq!(
             stream_offer_diagnostic_code(&StreamOfferError::InvalidProfile(
