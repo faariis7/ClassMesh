@@ -535,9 +535,7 @@ impl IpcFrame {
         Ok(Self::new(MESSAGE_SERVICE_UDP_STREAM_START, payload))
     }
 
-    pub fn service_media_feedback(
-        feedback: &FeedbackMessage,
-    ) -> Result<Self, IpcMessageError> {
+    pub fn service_media_feedback(feedback: &FeedbackMessage) -> Result<Self, IpcMessageError> {
         if feedback.stream_id() == 0 {
             return Err(IpcMessageError::InvalidPayload);
         }
@@ -1105,8 +1103,7 @@ mod tests {
                 after_frame_id: 42,
             },
         ] {
-            let frame =
-                IpcFrame::service_media_feedback(&feedback).expect("valid media feedback");
+            let frame = IpcFrame::service_media_feedback(&feedback).expect("valid media feedback");
             assert_eq!(
                 frame.message().expect("typed media feedback"),
                 IpcMessage::ServiceMediaFeedback(feedback)
@@ -1129,7 +1126,8 @@ mod tests {
                 frame_id: 42,
                 missing_packet_indices: vec![
                     0;
-                    classmesh_protocol::feedback::MAX_NACK_PACKET_INDICES + 1
+                    classmesh_protocol::feedback::MAX_NACK_PACKET_INDICES
+                        + 1
                 ],
             }),
             Err(IpcMessageError::InvalidPayload)
