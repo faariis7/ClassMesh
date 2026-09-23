@@ -83,7 +83,9 @@ PR #63 merged the authenticated control-session guard with PR CI #330 green. The
 
 Phase 7 is progressing without weakening the still-open Phase 4 and Phase 6F physical gates. PR #154 added the transport-neutral authenticated presentation lifecycle contract. PR #156/#157 added bounded single-owner presentation state, exact authenticated-session cleanup and Service runtime integration. PR #158 hardened the existing shared encoded-frame distributor so one encoded allocation can fan out to bounded independent sinks without a slow sink blocking healthy receivers. PR #159 added bounded multicast membership/probe contracts, administratively scoped IPv4 group validation and explicit join/receive/leave probe outcomes.
 
-The current 7D probe-tool slice packages a two-PC diagnostic that sends only small CMV1 correlation packets. Hosted CI can verify the tool and contracts but cannot establish wired-classroom multicast viability. Production multicast media remains blocked on 7E authenticated group-media security and later physical scale evidence.
+PR #160 completed the 7D two-PC diagnostic bundle after CI #666, and the corresponding `main` push CI #667 is green. Hosted CI verifies the tool/contracts but does not establish wired-classroom multicast viability; the physical probe result remains pending.
+
+Phase 7E is now implementing the group-media security baseline from ADR-0008: RFC 9605 SFrame is isolated behind `classmesh-security`, with a pinned security dependency, fresh non-zero key epochs, authenticated external metadata, bounded frame/AAD sizes and bounded replay protection. This crypto core does not yet distribute keys or enable production multicast. Authenticated key delivery/rotation, sender/receiver runtime integration and physical scale evidence remain explicit later gates.
 
 ## Remaining security/control work
 
