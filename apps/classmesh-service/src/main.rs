@@ -14,6 +14,7 @@ mod windows_service_app {
     use classmesh_codec_win::{EncoderBenchmarkResult, EncoderCapabilityCacheKey};
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity};
     use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure};
+    use classmesh_protocol::feedback::FeedbackMessage;
     use classmesh_security::persistence::DurableAuthorizationState;
     use classmesh_security::{CredentialFingerprint, PrincipalId};
     use classmesh_video::{Codec, EncoderClass, EncoderProbeResult};
@@ -50,14 +51,15 @@ mod windows_service_app {
     const INPUT_QUEUE_CAPACITY: usize = 256;
     const INPUT_CLEANUP_QUEUE_CAPACITY: usize = 1;
     const FOCUSED_MEDIA_QUEUE_CAPACITY: usize = 4;
+    const FOCUSED_MEDIA_FEEDBACK_QUEUE_CAPACITY: usize = 32;
     const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
     const MEDIA_RECONFIGURE_RETRY: Duration = Duration::from_millis(250);
     const MAX_MEDIA_RECONFIGURE_ATTEMPTS: u8 = 4;
 
     use crate::control_runtime::{
         ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, FocusedMediaDispatchChannels,
-        FocusedMediaReconfigure, FocusedMediaStart, InputAvailability, InputDispatchChannels,
-        WorkerCapabilityState,
+        FocusedMediaFeedback, FocusedMediaReconfigure, FocusedMediaStart, InputAvailability,
+        InputDispatchChannels, WorkerCapabilityState,
     };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -356,6 +358,24 @@ mod windows_service_app {
                 .ok_or_else(|| "Worker IPC pipe is unavailable for UDP media start".to_owned())?;
             send_udp_stream_start(pipe, start)?;
             Ok(process.process_id())
+        }
+
+        fn send_media_feedback(&self, feedback: &FeedbackMessage) -> Result<(), String> {
+            let process = self
+                .process
+                .as_ref()
+                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
+            if !process
+                .is_running()
+                .map_err(|error| format!("Worker media-feedback liveness probe failed: {error}"))?
+            {
+                return Err("interactive Worker exited before media feedback".to_owned());
+            }
+            let pipe = self
+                .pipe
+                .as_ref()
+                .ok_or_else(|| "Worker IPC pipe is unavailable for media feedback".to_owned())?;
+            send_media_feedback(pipe, feedback)
         }
 
         fn send_stream_reconfigure(&self, reconfigure: &StreamReconfigure) -> Result<u32, String> {
@@ -839,6 +859,18 @@ mod windows_service_app {
             .map_err(|error| format!("Worker UDP media IPC write failed: {error}"))
     }
 
+    fn send_media_feedback(
+        pipe: &NamedPipeServer,
+        feedback: &FeedbackMessage,
+    ) -> Result<(), String> {
+        let bytes = IpcFrame::service_media_feedback(feedback)
+            .map_err(|error| format!("failed to build Worker media feedback frame: {error:?}"))?
+            .encode()
+            .map_err(|error| format!("failed to encode Worker media feedback frame: {error:?}"))?;
+        pipe.write_all(&bytes)
+            .map_err(|error| format!("Worker media feedback IPC write failed: {error}"))
+    }
+
     fn send_stream_reconfigure(
         pipe: &NamedPipeServer,
         reconfigure: &StreamReconfigure,
@@ -1058,11 +1090,14 @@ mod windows_service_app {
             mpsc::sync_channel::<FocusedMediaStart>(FOCUSED_MEDIA_QUEUE_CAPACITY);
         let (media_reconfigure_tx, media_reconfigure_rx) =
             mpsc::sync_channel::<FocusedMediaReconfigure>(FOCUSED_MEDIA_QUEUE_CAPACITY);
+        let (media_feedback_tx, media_feedback_rx) =
+            mpsc::sync_channel::<FocusedMediaFeedback>(FOCUSED_MEDIA_FEEDBACK_QUEUE_CAPACITY);
         let released_media_session_floor = Arc::new(AtomicU64::new(0));
         let media_owner = Arc::new(AtomicU64::new(0));
         let media_channels = FocusedMediaDispatchChannels {
             start_tx: media_start_tx,
             reconfigure_tx: media_reconfigure_tx,
+            feedback_tx: media_feedback_tx,
             released_session_floor: Arc::clone(&released_media_session_floor),
             owner: Arc::clone(&media_owner),
         };
@@ -1219,6 +1254,27 @@ mod windows_service_app {
                 focused_reconfigure_attempts = 0;
                 focused_clear_attempts = 0;
                 next_media_reconfigure_attempt = Instant::now();
+            }
+
+            while let Ok(dispatch) = media_feedback_rx.try_recv() {
+                if focused_feedback_is_stale(
+                    dispatch.control_session_id,
+                    dispatch.feedback.stream_id(),
+                    focused_media_session_floor,
+                    desired_focused_control_session_id,
+                    desired_focused_start,
+                ) {
+                    continue;
+                }
+                let current_worker_pid = workers.current_process_id();
+                if current_worker_pid.is_none() || focused_start_worker_pid != current_worker_pid {
+                    continue;
+                }
+                if let Err(error) = workers.send_media_feedback(&dispatch.feedback) {
+                    eprintln!(
+                        "ClassMesh Service dropped media recovery feedback; control remains active: {error}"
+                    );
+                }
             }
 
             let current_worker_pid = workers.current_process_id();
@@ -1385,6 +1441,22 @@ mod windows_service_app {
             || desired_session.is_some_and(|desired| control_session_id < desired)
     }
 
+    fn focused_feedback_is_stale(
+        control_session_id: u64,
+        stream_id: u32,
+        released_floor: u64,
+        desired_session: Option<u64>,
+        desired_start: Option<ServiceUdpStreamStart>,
+    ) -> bool {
+        if control_session_id <= released_floor || desired_session != Some(control_session_id) {
+            return true;
+        }
+        match desired_start {
+            Some(start) => start.stream_id != stream_id,
+            None => true,
+        }
+    }
+
     fn set_running(handle: &ServiceStatusHandle) -> windows_service::Result<()> {
         handle.set_service_status(ServiceStatus {
             service_type: SERVICE_TYPE,
@@ -1517,6 +1589,23 @@ mod windows_service_app {
         fn newer_desired_session_rejects_older_in_flight_profile() {
             assert!(focused_reconfigure_is_stale(8, 7, Some(9)));
             assert!(!focused_reconfigure_is_stale(9, 7, Some(8)));
+        }
+
+        #[test]
+        fn media_feedback_requires_current_session_and_stream() {
+            let start = ServiceUdpStreamStart {
+                stream_id: 7,
+                destination: "127.0.0.1:9000".parse().expect("destination"),
+                width: 1280,
+                height: 720,
+                fps: 30,
+                bitrate_kbps: 2_500,
+            };
+            assert!(!focused_feedback_is_stale(9, 7, 8, Some(9), Some(start)));
+            assert!(focused_feedback_is_stale(8, 7, 8, Some(9), Some(start)));
+            assert!(focused_feedback_is_stale(9, 8, 8, Some(9), Some(start)));
+            assert!(focused_feedback_is_stale(9, 7, 8, Some(10), Some(start)));
+            assert!(focused_feedback_is_stale(9, 7, 8, Some(9), None));
         }
 
         #[test]
