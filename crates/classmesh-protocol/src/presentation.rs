@@ -37,16 +37,17 @@ pub fn validate_status(status: &PresentationStatus) -> Result<(), PresentationCo
     if status.presentation_id == 0 {
         return Err(PresentationControlError::InvalidPresentationId);
     }
-    if status.stream_id == 0 {
-        return Err(PresentationControlError::InvalidStreamId);
-    }
-    if u32::try_from(status.stream_id).is_err() {
-        return Err(PresentationControlError::StreamIdOutOfRange);
-    }
     let state = PresentationState::try_from(status.state)
         .map_err(|_| PresentationControlError::InvalidState)?;
     if state == PresentationState::Unspecified {
         return Err(PresentationControlError::InvalidState);
+    }
+    if status.stream_id == 0 {
+        if state != PresentationState::Rejected {
+            return Err(PresentationControlError::InvalidStreamId);
+        }
+    } else if u32::try_from(status.stream_id).is_err() {
+        return Err(PresentationControlError::StreamIdOutOfRange);
     }
     if status.diagnostic.len() > MAX_PRESENTATION_DIAGNOSTIC_BYTES {
         return Err(PresentationControlError::DiagnosticTooLarge);
