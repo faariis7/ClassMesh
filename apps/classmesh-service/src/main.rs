@@ -1172,7 +1172,7 @@ mod windows_service_app {
                     continue;
                 }
                 match workers.send_udp_stream_start(dispatch.start) {
-                    Ok(process_id) => {
+                    Ok(process_id) if dispatch.commit.try_commit() => {
                         desired_focused_start = Some(dispatch.start);
                         desired_focused_reconfigure = None;
                         desired_focused_control_session_id = Some(dispatch.control_session_id);
@@ -1188,6 +1188,12 @@ mod windows_service_app {
                         eprintln!(
                             "ClassMesh Service started focused UDP media on Worker {process_id}"
                         );
+                    }
+                    Ok(_) => {
+                        let _ = workers.clear_focused_profile();
+                        let _ = dispatch
+                            .reply_tx
+                            .send(Err("control.media.start_cancelled".to_owned()));
                     }
                     Err(error) => {
                         eprintln!("ClassMesh Service UDP media start failed: {error}");
