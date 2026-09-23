@@ -53,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut encoder_benchmark = None;
     let mut encoder_cache_query_pending = false;
     let mut encoder_cache_checked = false;
+    let mut active_udp_stream: Option<classmesh_worker::udp_stream::FocusedUdpStream> = None;
     let mut capture = match start_capture() {
         Ok((capture, adapter)) => {
             encoder_benchmark = runtime_encoder_benchmark(adapter);
@@ -103,6 +104,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     encoder_benchmark = None;
                     encoder_cache_query_pending = false;
                     encoder_cache_checked = false;
+                    if let Some(stream) = active_udp_stream.as_mut() {
+                        stream.reset_pipeline();
+                    }
                     capture_restart.clear();
                     eprintln!("ClassMesh Worker DXGI capture suspended by Service");
                     continue;
@@ -152,24 +156,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 classmesh_windows_runtime::ipc::IpcControlCommand::ClearFocusedProfile => {
                     active_focused_profile = None;
+                    active_udp_stream = None;
                     capture_due = Instant::now();
                     eprintln!("ClassMesh Worker cleared focused media profile");
                     continue;
                 }
             },
-            Ok(WorkerEvent::StreamReconfigure(reconfigure)) => {
-                match FocusedWorkerProfile::from_reconfigure(&reconfigure) {
-                    Ok(profile) => {
-                        active_focused_profile = Some(profile);
-                        capture_due = Instant::now();
+            Ok(WorkerEvent::UdpStreamStart(start)) => {
+                let profile = FocusedWorkerProfile::from_udp_start(start);
+                match classmesh_worker::udp_stream::FocusedUdpStream::new(start) {
+                    Ok(stream) => {
                         eprintln!(
-                            "ClassMesh Worker focused profile updated: stream={}, {}x{}@{}fps, {} kbps",
-                            profile.stream_id,
+                            "ClassMesh Worker focused UDP stream ready: stream={}, destination={}, {}x{}@{}fps, {} kbps",
+                            stream.stream_id(),
+                            stream.destination(),
                             profile.width,
                             profile.height,
                             profile.fps,
                             profile.bitrate_kbps
                         );
+                        active_udp_stream = Some(stream);
+                        active_focused_profile = Some(profile);
+                        capture_due = Instant::now();
+                    }
+                    Err(error) => {
+                        active_udp_stream = None;
+                        active_focused_profile = None;
+                        eprintln!(
+                            "ClassMesh Worker focused UDP stream failed closed; control remains active: {error}"
+                        );
+                    }
+                }
+            }
+            Ok(WorkerEvent::StreamReconfigure(reconfigure)) => {
+                match FocusedWorkerProfile::from_reconfigure(&reconfigure) {
+                    Ok(profile) => {
+                        let applied = active_udp_stream
+                            .as_mut()
+                            .ok_or("worker.media.no_active_stream")
+                            .and_then(|stream| {
+                                stream
+                                    .apply_reconfigure(&reconfigure)
+                                    .map_err(|_| "worker.media.reconfigure_failed")
+                            });
+                        match applied {
+                            Ok(()) => {
+                                active_focused_profile = Some(profile);
+                                capture_due = Instant::now();
+                                eprintln!(
+                                    "ClassMesh Worker focused profile updated: stream={}, {}x{}@{}fps, {} kbps",
+                                    profile.stream_id,
+                                    profile.width,
+                                    profile.height,
+                                    profile.fps,
+                                    profile.bitrate_kbps
+                                );
+                            }
+                            Err(code) => {
+                                eprintln!("ClassMesh Worker rejected focused profile update: {code}");
+                            }
+                        }
                     }
                     Err(code) => {
                         eprintln!("ClassMesh Worker rejected focused profile update: {code}");
@@ -335,8 +381,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
                     }
+                } else if let Some(stream) = active_udp_stream.as_mut() {
+                    if let Err(error) = stream.process_frame(meta, frame) {
+                        eprintln!(
+                            "ClassMesh Worker focused UDP media failed; control remains active: {error}"
+                        );
+                        active_udp_stream = None;
+                        active_focused_profile = None;
+                    }
                 } else {
-                    // Outside qualification the production sender is still intentionally not wired.
                     drop(frame);
                 }
                 capture_due = if encoder_benchmark.is_some() {
@@ -350,6 +403,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             CaptureStep::RetryAfter { delay_ms, reason } => {
                 encoder_benchmark = None;
+                if let Some(stream) = active_udp_stream.as_mut() {
+                    stream.reset_pipeline();
+                }
                 encoder_cache_query_pending = false;
                 encoder_cache_checked = false;
                 eprintln!("DXGI capture recovery scheduled after {reason:?} in {delay_ms} ms");
@@ -360,6 +416,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             CaptureStep::Suspended(reason) => {
                 eprintln!("DXGI capture suspended by backend; control remains active: {reason:?}");
                 encoder_benchmark = None;
+                if let Some(stream) = active_udp_stream.as_mut() {
+                    stream.reset_pipeline();
+                }
                 encoder_cache_query_pending = false;
                 encoder_cache_checked = false;
                 capture = None;
@@ -370,6 +429,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "DXGI capture failed after backend recovery; control remains active: {reason:?}"
                 );
                 encoder_benchmark = None;
+                if let Some(stream) = active_udp_stream.as_mut() {
+                    stream.reset_pipeline();
+                }
                 encoder_cache_query_pending = false;
                 encoder_cache_checked = false;
                 capture = None;
@@ -432,6 +494,7 @@ enum WorkerEvent {
     Control(classmesh_windows_runtime::ipc::IpcControlCommand),
     Input(classmesh_protocol::control_wire::InputEvent),
     StreamReconfigure(classmesh_protocol::control_wire::StreamReconfigure),
+    UdpStreamStart(classmesh_windows_runtime::ipc::ServiceUdpStreamStart),
     EncoderCacheResult(classmesh_windows_runtime::ipc::ServiceEncoderCacheResult),
     IpcFailure(String),
 }
@@ -448,6 +511,16 @@ struct FocusedWorkerProfile {
 
 #[cfg(windows)]
 impl FocusedWorkerProfile {
+    fn from_udp_start(start: classmesh_windows_runtime::ipc::ServiceUdpStreamStart) -> Self {
+        Self {
+            stream_id: u64::from(start.stream_id),
+            width: u32::from(start.width),
+            height: u32::from(start.height),
+            fps: u32::from(start.fps),
+            bitrate_kbps: start.bitrate_kbps,
+        }
+    }
+
     fn from_reconfigure(
         reconfigure: &classmesh_protocol::control_wire::StreamReconfigure,
     ) -> Result<Self, &'static str> {
@@ -757,6 +830,11 @@ fn spawn_ipc_reader(
                             .send(WorkerEvent::StreamReconfigure(reconfigure))
                             .is_err()
                         {
+                            return;
+                        }
+                    }
+                    Ok(IpcMessage::ServiceUdpStreamStart(start)) => {
+                        if event_tx.send(WorkerEvent::UdpStreamStart(start)).is_err() {
                             return;
                         }
                     }
