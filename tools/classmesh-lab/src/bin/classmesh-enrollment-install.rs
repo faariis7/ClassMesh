@@ -17,9 +17,7 @@ mod windows_app {
     use classmesh_identity_win::{
         CngMachineKey, DurableMachineIdentity, MachineIdentityBundle, cng_client_cert_resolver,
     };
-    use classmesh_protocol::control_wire::{
-        EnrollmentRequest, EnrollmentResult, PrincipalRole,
-    };
+    use classmesh_protocol::control_wire::{EnrollmentRequest, EnrollmentResult, PrincipalRole};
     use prost::Message;
     use rustls::RootCertStore;
     use rustls::pki_types::CertificateDer;
@@ -81,9 +79,8 @@ mod windows_app {
                 result: result
                     .ok_or_else(|| format!("--result is required\n\n{}", Self::usage()))?,
                 trust_roots,
-                identity_output: identity_output.ok_or_else(|| {
-                    format!("--identity-output is required\n\n{}", Self::usage())
-                })?,
+                identity_output: identity_output
+                    .ok_or_else(|| format!("--identity-output is required\n\n{}", Self::usage()))?,
             })
         }
 
@@ -126,10 +123,10 @@ key matching/export policy, bounded trust roots, and refuses to overwrite identi
     }
 
     fn unix_time_ms() -> AppResult<u64> {
-        Ok(u64::try_from(
-            SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+        Ok(
+            u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())
+                .map_err(|_| "system time does not fit u64 milliseconds")?,
         )
-        .map_err(|_| "system time does not fit u64 milliseconds")?)
     }
 
     pub fn run() -> AppResult {
@@ -152,7 +149,8 @@ key matching/export policy, bounded trust roots, and refuses to overwrite identi
             .into());
         }
 
-        let request_bytes = read_bounded(&config.request, MAX_PROTOBUF_BYTES, "enrollment request")?;
+        let request_bytes =
+            read_bounded(&config.request, MAX_PROTOBUF_BYTES, "enrollment request")?;
         let request = EnrollmentRequest::decode(request_bytes.as_slice())?;
         validate_enrollment_request(ENROLLMENT_MIN_VERSION, &request)
             .map_err(|error| format!("enrollment request rejected: {error:?}"))?;
@@ -204,8 +202,9 @@ key matching/export policy, bounded trust roots, and refuses to overwrite identi
             .cloned()
             .map(CertificateDer::from)
             .collect();
-        cng_client_cert_resolver(certificate_chain, key)
-            .map_err(|error| format!("approved certificate does not match protected key: {error}"))?;
+        cng_client_cert_resolver(certificate_chain, key).map_err(|error| {
+            format!("approved certificate does not match protected key: {error}")
+        })?;
 
         let mut trust_roots_der = Vec::with_capacity(config.trust_roots.len());
         let mut root_store = RootCertStore::empty();
