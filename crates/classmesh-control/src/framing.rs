@@ -125,7 +125,7 @@ pub fn decode_frame(frame: &[u8]) -> Result<ControlEnvelope, FrameError> {
 #[cfg(test)]
 mod tests {
     use classmesh_protocol::control_wire::{
-        ControlEnvelope, Heartbeat, ProtocolVersion, control_envelope,
+        ControlEnvelope, Heartbeat, PresentationKeyGrant, ProtocolVersion, control_envelope,
     };
 
     use super::*;
@@ -152,6 +152,35 @@ mod tests {
 
         assert_eq!(decoded.control_session_id, 7);
         assert_eq!(decoded.sequence, 11);
+    }
+
+    #[test]
+    fn sensitive_group_key_frame_round_trips_without_changing_wire_contract() {
+        let envelope = ControlEnvelope {
+            control_session_id: 7,
+            sequence: 12,
+            protocol_version: Some(ProtocolVersion { major: 0, minor: 4 }),
+            request_id: 44,
+            payload: Some(control_envelope::Payload::PresentationKeyGrant(
+                PresentationKeyGrant {
+                    presentation_id: 55,
+                    stream_id: 9,
+                    epoch: 2,
+                    key_material: vec![0x5a; 32],
+                },
+            )),
+        };
+
+        let frame = encode_frame(&envelope).expect("sensitive control frame should encode");
+        let decoded = decode_frame(&frame).expect("sensitive control frame should decode");
+        let Some(control_envelope::Payload::PresentationKeyGrant(grant)) = decoded.payload else {
+            panic!("expected presentation key grant");
+        };
+
+        assert_eq!(grant.presentation_id, 55);
+        assert_eq!(grant.stream_id, 9);
+        assert_eq!(grant.epoch, 2);
+        assert_eq!(grant.key_material, vec![0x5a; 32]);
     }
 
     #[test]
