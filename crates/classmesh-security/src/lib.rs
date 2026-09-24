@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod group_media;
+pub mod group_media_coordinator;
 pub mod persistence;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
