@@ -479,6 +479,37 @@ mod tests {
     }
 
     #[test]
+    fn pending_receiver_does_not_block_healthy_receiver_media() {
+        let authorization = store(&[(1, true), (2, true)]);
+        let mut coordinator = GroupMediaCoordinator::default();
+        coordinator
+            .register_receiver(&authorization, principal(1))
+            .expect("healthy receiver");
+        coordinator
+            .register_receiver(&authorization, principal(2))
+            .expect("slow receiver");
+        let epoch = coordinator.begin_epoch().expect("epoch");
+
+        coordinator
+            .issue_key(&authorization, principal(1))
+            .expect("healthy key");
+        coordinator
+            .mark_installed(&authorization, principal(1), epoch)
+            .expect("healthy install");
+
+        assert_eq!(
+            coordinator.receiver_state(principal(2)),
+            Some(GroupMediaReceiverInstallState::AwaitingKey)
+        );
+        assert!(
+            coordinator
+                .seal_frame(&authorization, b"frame", b"presentation-binding")
+                .is_ok(),
+            "a slow receiver must not create a global key-install barrier"
+        );
+    }
+
+    #[test]
     fn live_permission_revocation_evicts_receiver_and_requires_rotation_before_more_media() {
         let mut authorization = store(&[(1, true)]);
         let mut coordinator = GroupMediaCoordinator::default();
