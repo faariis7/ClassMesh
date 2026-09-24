@@ -87,14 +87,15 @@ pub fn install_received_presentation_key(
         return Err(PresentationKeyInstallError::InvalidWire(error));
     }
 
-    let epoch =
-        GroupMediaEpoch::new(grant.epoch).map_err(PresentationKeyInstallError::Security)?;
     let key_material = GroupMediaKeyMaterial::import_received_wire(&mut grant.key_material)
         .map_err(PresentationKeyInstallError::Security)?;
+    let epoch =
+        GroupMediaEpoch::new(grant.epoch).map_err(PresentationKeyInstallError::Security)?;
+    let stream_id = u32::try_from(grant.stream_id).map_err(|_| {
+        PresentationKeyInstallError::InvalidWire(GroupMediaControlError::StreamIdOutOfRange)
+    })?;
     let receiver = GroupMediaReceiver::with_default_replay_tolerance(epoch, &key_material)
         .map_err(PresentationKeyInstallError::Security)?;
-    let stream_id = u32::try_from(grant.stream_id)
-        .expect("validated presentation key stream id fits the media header");
 
     Ok(InstalledPresentationKey {
         presentation_id: grant.presentation_id,
