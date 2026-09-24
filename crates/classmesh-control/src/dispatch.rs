@@ -142,8 +142,8 @@ mod tests {
     use classmesh_protocol::ProtocolVersion;
     use classmesh_protocol::clipboard::MAX_CLIPBOARD_TEXT_BYTES;
     use classmesh_protocol::control_wire::{
-        ClipboardReadRequest, ClipboardWrite, Heartbeat, PresentationStart, PresentationStop,
-        ProtocolVersion as WireProtocolVersion, ReleaseAllInput, input_event,
+        ClipboardReadRequest, ClipboardWrite, Heartbeat, PresentationKeyGrant, PresentationStart,
+        PresentationStop, ProtocolVersion as WireProtocolVersion, ReleaseAllInput, input_event,
     };
     use classmesh_security::{
         CredentialFingerprint, CredentialRecord, Principal, PrincipalId, PrincipalKind,
@@ -324,6 +324,37 @@ mod tests {
             Err(PrivilegedDispatchError::UnsupportedPayload)
         );
         assert_eq!(guard.last_sequence(), 1);
+    }
+
+    #[test]
+    fn group_media_key_grant_is_not_mapped_to_sender_permission_yet() {
+        let authorization = store(BTreeSet::from([Permission::StartPresentation]));
+        let version = ProtocolVersion { major: 0, minor: 4 };
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, version, 1);
+        let envelope = ControlEnvelope {
+            control_session_id: 77,
+            sequence: 2,
+            protocol_version: Some(WireProtocolVersion { major: 0, minor: 4 }),
+            request_id: 700,
+            payload: Some(control_envelope::Payload::PresentationKeyGrant(
+                PresentationKeyGrant {
+                    presentation_id: 55,
+                    stream_id: 7,
+                    epoch: 1,
+                    key_material: vec![1; 32],
+                },
+            )),
+        };
+
+        assert_eq!(
+            dispatch_privileged_command(&mut guard, &authorization, &envelope, 150),
+            Err(PrivilegedDispatchError::UnsupportedPayload)
+        );
+        assert_eq!(
+            guard.last_sequence(),
+            1,
+            "wire key delivery must remain unavailable until recipient/session semantics are integrated"
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# ClassMesh Protocol Baseline v0.3
+# ClassMesh Protocol Baseline v0.4
 
 This document describes the protocol intent currently represented by `classmesh-protocol`, `classmesh-network` and the `.proto` schemas. It is **not** a frozen wire-compatibility promise yet.
 
@@ -76,6 +76,18 @@ Protocol minor 0.3 adds the transport-neutral Phase 7 presentation lifecycle con
 - v0.2 sessions cannot dispatch the new lifecycle commands.
 - The lifecycle contract does **not** choose UDP multicast, UDP unicast, QUIC Datagram, WebRTC, or any fallback. Media negotiation remains in `StreamOffer` and the Phase 4 UDP-vs-QUIC-Datagram decision remains physically gated.
 - This schema/authorization slice does not claim a production presentation runtime exists; runtime ownership, cleanup, shared encoded output, multicast security and scale validation remain later Phase 7 slices.
+
+### Group-media key contract (v0.4)
+
+Protocol minor 0.4 adds the sensitive control-wire contract used by the Phase 7E SFrame coordinator. It does not enable production multicast by itself.
+
+- `CAPABILITY_SFRAME_GROUP_MEDIA` is negotiated explicitly in addition to `CAPABILITY_TEACHER_PRESENTATION`; peers that only understand the v0.3 lifecycle contract must not receive a group key.
+- `PresentationKeyGrant` binds a non-zero presentation ID, a non-zero 32-bit-compatible stream ID, a non-zero security epoch, and exactly 32 bytes of SFrame base-key material.
+- `PresentationKeyAck` acknowledges only the exact presentation/stream/epoch installed by the receiver.
+- The receiving PrincipalId is deliberately absent from the payload. Runtime delivery must bind the grant to the exact authenticated control peer/session selected by the authorization-gated coordinator rather than trusting a serialized recipient identity.
+- Key grant/ack are correlated with a non-zero `ControlEnvelope.request_id` when runtime integration is added.
+- Raw key material must not be logged or durably persisted. The production sender/receiver integration must zeroize transient serialized key buffers after use.
+- This v0.4 schema is intentionally not mapped into the existing privileged-command dispatcher yet. The later Service integration slice must define the receiver/session direction explicitly and re-check live `ReceivePresentation` authorization before delivery/ack acceptance.
 
 ### Phase 6E clipboard skeleton
 

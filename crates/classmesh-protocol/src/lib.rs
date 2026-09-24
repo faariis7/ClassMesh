@@ -2,6 +2,7 @@
 
 pub mod clipboard;
 pub mod feedback;
+pub mod group_media_control;
 pub mod media;
 pub mod presentation;
 
@@ -10,7 +11,7 @@ pub mod control_wire {
     include!(concat!(env!("OUT_DIR"), "/classmesh.control.v1.rs"));
 }
 
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 3 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 4 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProtocolVersion {
@@ -59,6 +60,7 @@ pub enum Capability {
     LocalSfu,
     ClipboardText,
     TeacherPresentation,
+    SframeGroupMedia,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,11 +149,11 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_marks_presentation_contract_as_minor_three() {
-        assert_eq!(PROTOCOL_VERSION, ProtocolVersion { major: 0, minor: 3 });
+    fn protocol_version_marks_group_media_contract_as_minor_four() {
+        assert_eq!(PROTOCOL_VERSION, ProtocolVersion { major: 0, minor: 4 });
         assert_eq!(
-            PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 2 }),
-            Some(ProtocolVersion { major: 0, minor: 2 })
+            PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 3 }),
+            Some(ProtocolVersion { major: 0, minor: 3 })
         );
     }
 
@@ -179,6 +181,38 @@ mod tests {
         };
         assert_eq!(start.presentation_id, 900);
         assert_eq!(start.stream_id, 12);
+    }
+
+    #[test]
+    fn presentation_key_grant_round_trips_on_v04() {
+        let envelope = control_wire::ControlEnvelope {
+            control_session_id: 44,
+            sequence: 9,
+            protocol_version: Some(control_wire::ProtocolVersion { major: 0, minor: 4 }),
+            request_id: 78,
+            payload: Some(
+                control_wire::control_envelope::Payload::PresentationKeyGrant(
+                    control_wire::PresentationKeyGrant {
+                        presentation_id: 900,
+                        stream_id: 12,
+                        epoch: 4,
+                        key_material: vec![7; 32],
+                    },
+                ),
+            ),
+        };
+
+        let decoded = control_wire::ControlEnvelope::decode(envelope.encode_to_vec().as_slice())
+            .expect("presentation key grant should decode");
+        let Some(control_wire::control_envelope::Payload::PresentationKeyGrant(grant)) =
+            decoded.payload
+        else {
+            panic!("expected presentation key grant");
+        };
+        assert_eq!(grant.presentation_id, 900);
+        assert_eq!(grant.stream_id, 12);
+        assert_eq!(grant.epoch, 4);
+        assert_eq!(grant.key_material, vec![7; 32]);
     }
 
     #[test]
