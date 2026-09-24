@@ -63,9 +63,13 @@ The replay window is deliberately bounded. A forged frame that fails authenticat
 
 ### Key handling
 
-- Group-media base keys are exposed for delivery only through a bounded coordinator after a live `ReceivePresentation` authorization check; control-wire delivery is a later 7E slice.
+- Group-media base keys are exposed for delivery only through a bounded coordinator after a live `ReceivePresentation` authorization check.
+- Protocol v0.4 carries a `PresentationKeyGrant` only on the authenticated control channel and only when both `TeacherPresentation` and `SframeGroupMedia` were negotiated.
+- The grant binds presentation ID + stream ID + non-zero epoch + exactly 32 bytes of key material. The recipient PrincipalId is intentionally not serialized; runtime must bind delivery to the exact authenticated peer/session selected by the coordinator.
+- `PresentationKeyAck` binds the install acknowledgement to the same presentation/stream/epoch. Runtime integration must correlate the exchange with a non-zero control `request_id`.
+- The v0.4 wire payload is not yet mapped into the existing privileged-command dispatcher; Service direction/session semantics and live receiver authorization stay fail-closed until the next 7E slice.
 - Keys are never sent in multicast discovery/media packets.
-- Raw group-media key material is not logged.
+- Raw group-media key material is not logged or durably persisted. Transient encoded control buffers containing key bytes must be zeroized after use in the production integration.
 - The ClassMesh key-material wrapper zeroizes its owned 32-byte input when dropped.
 - Derived SFrame key state is owned by the SFrame implementation, which uses zeroizing secret storage.
 - Key epochs/receivers remain bounded; there is no unbounded historical key store.
