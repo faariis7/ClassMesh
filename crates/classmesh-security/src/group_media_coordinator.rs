@@ -601,8 +601,10 @@ mod tests {
 
     #[test]
     fn epoch_counter_is_monotonic_and_exhaustion_fails_closed() {
-        let mut coordinator = GroupMediaCoordinator::default();
-        coordinator.last_epoch = u32::MAX;
+        let mut coordinator = GroupMediaCoordinator {
+            last_epoch: u32::MAX,
+            ..GroupMediaCoordinator::default()
+        };
         assert!(matches!(
             coordinator.begin_epoch(),
             Err(GroupMediaCoordinatorError::EpochExhausted)
