@@ -551,6 +551,7 @@ fn capability_to_wire(capability: Capability) -> i32 {
         Capability::LocalSfu => 10,
         Capability::ClipboardText => 11,
         Capability::TeacherPresentation => 12,
+        Capability::SframeGroupMedia => 13,
     }
 }
 
@@ -568,6 +569,7 @@ fn capability_from_wire(value: i32) -> Option<Capability> {
         10 => Some(Capability::LocalSfu),
         11 => Some(Capability::ClipboardText),
         12 => Some(Capability::TeacherPresentation),
+        13 => Some(Capability::SframeGroupMedia),
         _ => None,
     }
 }
@@ -595,6 +597,7 @@ mod tests {
                 Capability::UdpUnicast,
                 Capability::ClipboardText,
                 Capability::TeacherPresentation,
+                Capability::SframeGroupMedia,
             ]),
             hostname: "student-05".to_owned(),
             app_version: "0.0.1".to_owned(),
