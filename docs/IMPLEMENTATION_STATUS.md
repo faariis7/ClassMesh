@@ -89,7 +89,9 @@ PR #161 merged the first Phase 7E security slice after CI #675: RFC 9605 SFrame 
 
 PR #162 merged the bounded 7E receiver/key coordinator: at most 64 receiver principals, live `ReceivePresentation` authorization before registration/key grant, exact principal + epoch acknowledgement, and fail-closed epoch rotation whenever active membership or authorization changes. Per-receiver install state stays independent so a slow receiver does not stall healthy presentation receivers.
 
-PR #163 merged the protocol v0.4 `PresentationKeyGrant`/`PresentationKeyAck` contract, exact 32-byte SFrame key validation and explicit `SframeGroupMedia` capability negotiation after CI #684 passed on Portable and Windows. The current follow-up hardens the generic control framing/QUIC path so process-owned intermediate protobuf payloads and raw send/receive frame buffers are zeroized after use. Decoded protobuf key storage remains deliberately unhandled until the exact authenticated receiver/session key-install path is defined; the sensitive key payload is still not routed through the existing privileged-command dispatcher.
+PR #163 merged the protocol v0.4 `PresentationKeyGrant`/`PresentationKeyAck` contract, exact 32-byte SFrame key validation and explicit `SframeGroupMedia` capability negotiation after CI #684 passed on Portable and Windows. PR #165 then hardened the generic control framing/QUIC path so process-owned intermediate protobuf payloads and raw send/receive frame buffers are zeroized after use.
+
+The current follow-up adds a receiver-side key-install primitive: validated `PresentationKeyGrant.key_material` is imported through `classmesh-security`, the caller-owned protobuf buffer is zeroized on success or failure, and the control-layer installed object retains only presentation/stream/epoch metadata plus derived SFrame decryption/replay state. The sensitive key payload is still not routed through Service dispatch; exact authenticated receiver/session binding and ACK correlation remain the next gate.
 
 ## Remaining security/control work
 
