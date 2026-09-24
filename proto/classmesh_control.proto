@@ -21,6 +21,7 @@ enum Capability {
   CAPABILITY_LOCAL_SFU = 10;
   CAPABILITY_CLIPBOARD_TEXT = 11;
   CAPABILITY_TEACHER_PRESENTATION = 12;
+  CAPABILITY_SFRAME_GROUP_MEDIA = 13;
 }
 
 enum PrincipalRole {
@@ -309,6 +310,27 @@ message PresentationStatus {
   string diagnostic = 4;
 }
 
+// Protocol v0.4 group-media key delivery is carried only over the authenticated
+// control channel. The receiving principal is deliberately not serialized in
+// the payload: runtime delivery must bind the grant to the exact authenticated
+// control peer/session selected by the coordinator. key_material is a sensitive
+// 32-byte SFrame base key and must never be logged or durably persisted.
+message PresentationKeyGrant {
+  uint64 presentation_id = 1;
+  uint64 stream_id = 2;
+  uint32 epoch = 3;
+  bytes key_material = 4;
+}
+
+// An acknowledgement is valid only after the receiver has installed the exact
+// presentation/stream/epoch key delivered on its authenticated control session.
+// request_id correlation is carried by ControlEnvelope.
+message PresentationKeyAck {
+  uint64 presentation_id = 1;
+  uint64 stream_id = 2;
+  uint32 epoch = 3;
+}
+
 message SessionWorkerStatus {
   uint32 windows_session_id = 1;
   enum State {
@@ -355,6 +377,8 @@ message ControlEnvelope {
     PresentationStart presentation_start = 35;
     PresentationStop presentation_stop = 36;
     PresentationStatus presentation_status = 37;
+    PresentationKeyGrant presentation_key_grant = 38;
+    PresentationKeyAck presentation_key_ack = 39;
 
     EnrollmentRequest enrollment_request = 40;
     EnrollmentReceipt enrollment_receipt = 41;
