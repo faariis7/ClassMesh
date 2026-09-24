@@ -85,7 +85,9 @@ Phase 7 is progressing without weakening the still-open Phase 4 and Phase 6F phy
 
 PR #160 completed the 7D two-PC diagnostic bundle after CI #666, and the corresponding `main` push CI #667 is green. Hosted CI verifies the tool/contracts but does not establish wired-classroom multicast viability; the physical probe result remains pending.
 
-Phase 7E is now implementing the group-media security baseline from ADR-0008: RFC 9605 SFrame is isolated behind `classmesh-security`, with a pinned security dependency, fresh non-zero key epochs, authenticated external metadata, bounded frame/AAD sizes and bounded replay protection. This crypto core does not yet distribute keys or enable production multicast. Authenticated key delivery/rotation, sender/receiver runtime integration and physical scale evidence remain explicit later gates.
+PR #161 merged the first Phase 7E security slice after CI #675: RFC 9605 SFrame is isolated behind `classmesh-security`, with a pinned security dependency, CSPRNG-generated non-zero key epochs, authenticated external metadata, bounded frame/AAD sizes and bounded replay protection.
+
+The current 7E coordinator slice keeps at most 64 receiver principals, requires live `ReceivePresentation` authorization before registration/key grant, binds acknowledgement to exact principal + exact epoch, and fails closed by requiring a fresh epoch whenever active membership or authorization changes. Per-receiver key-install state is independent, so a slow receiver does not stall healthy presentation receivers. Control-wire key delivery, sensitive-buffer zeroization on send/receive, Worker receiver integration and physical scale evidence remain explicit later gates.
 
 ## Remaining security/control work
 
