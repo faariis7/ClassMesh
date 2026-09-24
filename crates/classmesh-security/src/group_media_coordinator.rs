@@ -180,6 +180,17 @@ impl GroupMediaCoordinator {
         Ok(epoch)
     }
 
+    pub fn end_epoch(&mut self) -> Option<GroupMediaEpoch> {
+        let ended = self.active.take().map(|active| active.epoch);
+        if ended.is_some() {
+            for state in self.receivers.values_mut() {
+                state.install = GroupMediaReceiverInstallState::AwaitingKey;
+            }
+        }
+        self.rotation_required = false;
+        ended
+    }
+
     pub fn issue_key(
         &mut self,
         authorization: &AuthorizationStore,
@@ -476,6 +487,33 @@ mod tests {
             coordinator.receiver_state(principal(2)),
             Some(GroupMediaReceiverInstallState::AwaitingKey)
         );
+    }
+
+    #[test]
+    fn ending_epoch_drops_active_key_state_without_reusing_epoch_number() {
+        let authorization = store(&[(1, true)]);
+        let mut coordinator = GroupMediaCoordinator::default();
+        coordinator
+            .register_receiver(&authorization, principal(1))
+            .expect("receiver");
+        let first = coordinator.begin_epoch().expect("first epoch");
+        coordinator
+            .issue_key(&authorization, principal(1))
+            .expect("grant");
+
+        assert_eq!(coordinator.end_epoch(), Some(first));
+        assert!(coordinator.active_epoch().is_none());
+        assert_eq!(
+            coordinator.receiver_state(principal(1)),
+            Some(GroupMediaReceiverInstallState::AwaitingKey)
+        );
+        assert!(matches!(
+            coordinator.seal_frame(&authorization, b"frame", b"binding"),
+            Err(GroupMediaCoordinatorError::NoActiveEpoch)
+        ));
+
+        let second = coordinator.begin_epoch().expect("second epoch");
+        assert_eq!(second.get(), first.get() + 1);
     }
 
     #[test]
