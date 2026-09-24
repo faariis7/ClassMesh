@@ -1,6 +1,6 @@
 # ClassMesh Implementation Status
 
-Last updated: 2026-09-23
+Last updated: 2026-09-24
 
 This file distinguishes **implemented code**, **hosted-CI validation**, **real-hardware validation still required**, and **future product work**. Architecture documents must not be read as claims that every planned feature is already production-ready.
 
@@ -87,7 +87,9 @@ PR #160 completed the 7D two-PC diagnostic bundle after CI #666, and the corresp
 
 PR #161 merged the first Phase 7E security slice after CI #675: RFC 9605 SFrame is isolated behind `classmesh-security`, with a pinned security dependency, CSPRNG-generated non-zero key epochs, authenticated external metadata, bounded frame/AAD sizes and bounded replay protection.
 
-The current 7E coordinator slice keeps at most 64 receiver principals, requires live `ReceivePresentation` authorization before registration/key grant, binds acknowledgement to exact principal + exact epoch, and fails closed by requiring a fresh epoch whenever active membership or authorization changes. Per-receiver key-install state is independent, so a slow receiver does not stall healthy presentation receivers. Control-wire key delivery, sensitive-buffer zeroization on send/receive, Worker receiver integration and physical scale evidence remain explicit later gates.
+PR #162 merged the bounded 7E receiver/key coordinator: at most 64 receiver principals, live `ReceivePresentation` authorization before registration/key grant, exact principal + epoch acknowledgement, and fail-closed epoch rotation whenever active membership or authorization changes. Per-receiver install state stays independent so a slow receiver does not stall healthy presentation receivers.
+
+The current v0.4 wire-contract slice adds `PresentationKeyGrant`/`PresentationKeyAck`, exact 32-byte SFrame key validation and explicit `SframeGroupMedia` capability negotiation. It deliberately does not route key payloads through the existing privileged-command dispatcher yet; exact authenticated receiver/session binding, non-zero request correlation, transient serialized-buffer zeroization, Service/Worker receiver integration and physical scale evidence remain explicit later gates.
 
 ## Remaining security/control work
 
