@@ -374,15 +374,19 @@ impl ControlChannel {
         // the decoded protobuf still require payload-specific zeroization by
         // the runtime once that payload is consumed.
         let mut payload = Zeroizing::new(vec![0_u8; length]);
-        timeout(self.io_timeout, self.recv.read_exact(payload.as_mut_slice()))
-            .await
-            .map_err(|_| ControlTransportError::Timeout {
-                operation: "read control frame payload",
-            })?
-            .map_err(|error| ControlTransportError::Transport(error.to_string()))?;
+        timeout(
+            self.io_timeout,
+            self.recv.read_exact(payload.as_mut_slice()),
+        )
+        .await
+        .map_err(|_| ControlTransportError::Timeout {
+            operation: "read control frame payload",
+        })?
+        .map_err(|error| ControlTransportError::Transport(error.to_string()))?;
 
-        let mut frame =
-            Zeroizing::new(Vec::with_capacity(CONTROL_LENGTH_PREFIX_BYTES + payload.len()));
+        let mut frame = Zeroizing::new(Vec::with_capacity(
+            CONTROL_LENGTH_PREFIX_BYTES + payload.len(),
+        ));
         frame.extend_from_slice(&prefix);
         frame.extend_from_slice(payload.as_slice());
         crate::framing::decode_frame(frame.as_slice()).map_err(Into::into)
