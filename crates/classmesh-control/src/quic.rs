@@ -17,6 +17,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::ResolvesServerCert;
 use rustls::server::danger::ClientCertVerifier;
 use tokio::time::{sleep, timeout};
+use zeroize::Zeroizing;
 
 use crate::framing::{CONTROL_LENGTH_PREFIX_BYTES, FrameError, declared_payload_len, encode_frame};
 
@@ -347,8 +348,10 @@ impl ControlChannel {
     }
 
     pub async fn send(&mut self, envelope: &ControlEnvelope) -> Result<(), ControlTransportError> {
-        let frame = encode_frame(envelope)?;
-        timeout(self.io_timeout, self.send.write_all(&frame))
+        // The encoded control frame may contain sensitive key material. Keep
+        // the process-owned frame zeroizing through the entire QUIC write.
+        let frame = Zeroizing::new(encode_frame(envelope)?);
+        timeout(self.io_timeout, self.send.write_all(frame.as_slice()))
             .await
             .map_err(|_| ControlTransportError::Timeout {
                 operation: "write control frame",
@@ -366,18 +369,23 @@ impl ControlChannel {
             .map_err(|error| ControlTransportError::Transport(error.to_string()))?;
 
         let length = declared_payload_len(prefix)?;
-        let mut payload = vec![0_u8; length];
-        timeout(self.io_timeout, self.recv.read_exact(&mut payload))
+        // The raw payload/frame may contain a Phase 7E key grant. Zeroize both
+        // owned receive buffers after decoding. Any sensitive bytes moved into
+        // the decoded protobuf still require payload-specific zeroization by
+        // the runtime once that payload is consumed.
+        let mut payload = Zeroizing::new(vec![0_u8; length]);
+        timeout(self.io_timeout, self.recv.read_exact(payload.as_mut_slice()))
             .await
             .map_err(|_| ControlTransportError::Timeout {
                 operation: "read control frame payload",
             })?
             .map_err(|error| ControlTransportError::Transport(error.to_string()))?;
 
-        let mut frame = Vec::with_capacity(CONTROL_LENGTH_PREFIX_BYTES + payload.len());
+        let mut frame =
+            Zeroizing::new(Vec::with_capacity(CONTROL_LENGTH_PREFIX_BYTES + payload.len()));
         frame.extend_from_slice(&prefix);
-        frame.extend_from_slice(&payload);
-        crate::framing::decode_frame(&frame).map_err(Into::into)
+        frame.extend_from_slice(payload.as_slice());
+        crate::framing::decode_frame(frame.as_slice()).map_err(Into::into)
     }
 
     pub fn finish(&mut self) -> Result<(), ControlTransportError> {
