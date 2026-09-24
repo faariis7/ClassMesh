@@ -42,10 +42,6 @@ impl GroupMediaKeyGrant {
         self.epoch
     }
 
-    #[must_use]
-    pub const fn key_bytes(&self) -> &[u8; GROUP_MEDIA_KEY_BYTES] {
-        &self.key_bytes
-    }
 }
 
 impl Drop for GroupMediaKeyGrant {
@@ -70,11 +66,29 @@ pub enum GroupMediaCoordinatorError {
 
 impl fmt::Display for GroupMediaCoordinatorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{self:?}")
+        match self {
+            Self::InvalidReceiverLimit => formatter.write_str("invalid group-media receiver limit"),
+            Self::ReceiverLimitExceeded => formatter.write_str("group-media receiver limit exceeded"),
+            Self::UnauthorizedReceiver => formatter.write_str("group-media receiver is unauthorized"),
+            Self::ReceiverNotRegistered => formatter.write_str("group-media receiver is not registered"),
+            Self::NoActiveEpoch => formatter.write_str("no active group-media epoch"),
+            Self::RotationRequired => formatter.write_str("group-media epoch rotation is required"),
+            Self::KeyNotIssued => formatter.write_str("group-media key was not issued to receiver"),
+            Self::StaleEpoch => formatter.write_str("group-media epoch is stale"),
+            Self::EpochExhausted => formatter.write_str("group-media epoch space is exhausted"),
+            Self::Crypto(error) => write!(formatter, "group-media crypto failure: {error}"),
+        }
     }
 }
 
-impl std::error::Error for GroupMediaCoordinatorError {}
+impl std::error::Error for GroupMediaCoordinatorError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Crypto(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<GroupMediaError> for GroupMediaCoordinatorError {
     fn from(value: GroupMediaError) -> Self {
