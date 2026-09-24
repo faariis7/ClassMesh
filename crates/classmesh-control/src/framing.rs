@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 
 use classmesh_protocol::control_wire::ControlEnvelope;
 use prost::Message;
+use zeroize::Zeroizing;
 
 pub const CONTROL_LENGTH_PREFIX_BYTES: usize = 4;
 pub const MAX_CONTROL_MESSAGE_BYTES: usize = 256 * 1024;
@@ -78,12 +79,15 @@ pub fn encode_frame(envelope: &ControlEnvelope) -> Result<Vec<u8>, FrameError> {
         maximum: MAX_CONTROL_MESSAGE_BYTES,
     })?;
 
-    let payload = envelope.encode_to_vec();
+    // Protobuf payloads can contain transient secrets (for example Phase 7E
+    // group-media key grants). Keep the intermediate encoded allocation
+    // zeroizing even though the returned frame remains caller-owned.
+    let payload = Zeroizing::new(envelope.encode_to_vec());
     debug_assert_eq!(payload.len(), length);
 
     let mut frame = Vec::with_capacity(CONTROL_LENGTH_PREFIX_BYTES + payload.len());
     frame.extend_from_slice(&length_u32.to_be_bytes());
-    frame.extend_from_slice(&payload);
+    frame.extend_from_slice(payload.as_slice());
     Ok(frame)
 }
 
