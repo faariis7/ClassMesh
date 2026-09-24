@@ -48,9 +48,12 @@ Security rules:
 6. a sender must never restart counters with the same epoch/key pair; rebuilding sender state requires a fresh epoch/key;
 7. keys rotate for every new presentation and before more media after any active-epoch receiver membership change;
 8. no Principal enters the group-key receiver set or receives a key grant without a live `ReceivePresentation` authorization check;
-9. receiver/key state is bounded to 64 principals, and a slow receiver never creates a classroom-wide key-install barrier.
+9. receiver/key state is bounded to 64 principals, and a slow receiver never creates a classroom-wide key-install barrier;
+10. protocol v0.4 key delivery requires explicit `SframeGroupMedia` capability negotiation in addition to `TeacherPresentation`;
+11. the wire grant never carries a recipient PrincipalId: the recipient is the exact authenticated control peer/session selected by the coordinator, preventing a payload-supplied identity from redirecting a group key;
+12. serialized key bytes are sensitive transient material and must be zeroized after authenticated send/receive processing; generated wire values and buffers must not be logged.
 
-The crypto core alone does not enable production multicast. Authenticated key distribution/rotation, production sender/receiver wiring and physical scale qualification remain separate Phase 7 gates.
+The crypto/coordinator/wire-contract slices alone do not enable production multicast. Service session binding, authenticated key delivery/ack handling, production sender/receiver wiring and physical scale qualification remain separate Phase 7 gates.
 
 ## Unicast media
 
