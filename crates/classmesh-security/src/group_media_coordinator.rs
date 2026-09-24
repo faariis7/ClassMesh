@@ -41,7 +41,6 @@ impl GroupMediaKeyGrant {
     pub const fn epoch(&self) -> GroupMediaEpoch {
         self.epoch
     }
-
 }
 
 impl Drop for GroupMediaKeyGrant {
@@ -68,9 +67,15 @@ impl fmt::Display for GroupMediaCoordinatorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidReceiverLimit => formatter.write_str("invalid group-media receiver limit"),
-            Self::ReceiverLimitExceeded => formatter.write_str("group-media receiver limit exceeded"),
-            Self::UnauthorizedReceiver => formatter.write_str("group-media receiver is unauthorized"),
-            Self::ReceiverNotRegistered => formatter.write_str("group-media receiver is not registered"),
+            Self::ReceiverLimitExceeded => {
+                formatter.write_str("group-media receiver limit exceeded")
+            }
+            Self::UnauthorizedReceiver => {
+                formatter.write_str("group-media receiver is unauthorized")
+            }
+            Self::ReceiverNotRegistered => {
+                formatter.write_str("group-media receiver is not registered")
+            }
             Self::NoActiveEpoch => formatter.write_str("no active group-media epoch"),
             Self::RotationRequired => formatter.write_str("group-media epoch rotation is required"),
             Self::KeyNotIssued => formatter.write_str("group-media key was not issued to receiver"),
@@ -328,10 +333,7 @@ impl GroupMediaCoordinator {
     }
 
     #[must_use]
-    pub fn receiver_state(
-        &self,
-        principal: PrincipalId,
-    ) -> Option<GroupMediaReceiverInstallState> {
+    pub fn receiver_state(&self, principal: PrincipalId) -> Option<GroupMediaReceiverInstallState> {
         self.receivers.get(&principal).map(|state| state.install)
     }
 }
@@ -340,9 +342,7 @@ impl GroupMediaCoordinator {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use crate::{
-        CredentialFingerprint, CredentialRecord, Principal, PrincipalKind,
-    };
+    use crate::{CredentialFingerprint, CredentialRecord, Principal, PrincipalKind};
 
     use super::*;
 
@@ -360,10 +360,7 @@ mod tests {
                 permissions.insert(Permission::ReceivePresentation);
             }
             let mut credentials = BTreeMap::new();
-            credentials.insert(
-                fingerprint,
-                CredentialRecord::active(fingerprint, 1),
-            );
+            credentials.insert(fingerprint, CredentialRecord::active(fingerprint, 1));
             store
                 .upsert(Principal {
                     id: principal_id,
@@ -473,9 +470,11 @@ mod tests {
             .mark_installed(&authorization, principal(1), first)
             .expect("first install");
 
-        assert!(coordinator
-            .seal_frame(&authorization, b"frame", b"presentation-binding")
-            .is_ok());
+        assert!(
+            coordinator
+                .seal_frame(&authorization, b"frame", b"presentation-binding")
+                .is_ok()
+        );
 
         coordinator
             .register_receiver(&authorization, principal(2))
