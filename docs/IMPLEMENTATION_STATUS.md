@@ -85,7 +85,7 @@ Phase 7 is progressing without weakening the still-open Phase 4 and Phase 6F phy
 
 PR #160 completed the 7D two-PC diagnostic bundle after CI #666, and the corresponding `main` push CI #667 is green. Hosted CI verifies the tool/contracts but does not establish wired-classroom multicast viability; the physical probe result remains pending.
 
-PR #161 merged the first Phase 7E security slice after CI #675: RFC 9605 SFrame is isolated behind `classmesh-security`, with a pinned security dependency, CSPRNG-generated non-zero key epochs, authenticated external metadata, bounded frame/AAD sizes and bounded replay protection.
+PR #161 merged the first Phase 7E security slice after CI #675: RFC 9605 SFrame is isolated behind `classmesh-security`, with a pinned security dependency, non-zero monotonic key epochs and CSPRNG-generated keys, authenticated external metadata, bounded frame/AAD sizes and bounded replay protection.
 
 PR #162 merged the bounded 7E receiver/key coordinator: at most 64 receiver principals, live `ReceivePresentation` authorization before registration/key grant, exact principal + epoch acknowledgement, and fail-closed epoch rotation whenever active membership or authorization changes. Per-receiver install state stays independent so a slow receiver does not stall healthy presentation receivers.
 
