@@ -379,10 +379,10 @@ mod tests {
         let authorization = store(&[(1, true), (2, false)]);
         let mut coordinator = GroupMediaCoordinator::default();
 
-        assert_eq!(
+        assert!(matches!(
             coordinator.register_receiver(&authorization, principal(1)),
             Ok(GroupMediaRegistration::Added)
-        );
+        ));
         assert!(matches!(
             coordinator.register_receiver(&authorization, principal(2)),
             Err(GroupMediaCoordinatorError::UnauthorizedReceiver)
@@ -395,18 +395,18 @@ mod tests {
         let authorization = store(&[(1, true), (2, true), (3, true)]);
         let mut coordinator = GroupMediaCoordinator::with_limit(2).expect("bounded coordinator");
 
-        assert_eq!(
+        assert!(matches!(
             coordinator.register_receiver(&authorization, principal(1)),
             Ok(GroupMediaRegistration::Added)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             coordinator.register_receiver(&authorization, principal(1)),
             Ok(GroupMediaRegistration::AlreadyRegistered)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             coordinator.register_receiver(&authorization, principal(2)),
             Ok(GroupMediaRegistration::Added)
-        );
+        ));
         assert!(matches!(
             coordinator.register_receiver(&authorization, principal(3)),
             Err(GroupMediaCoordinatorError::ReceiverLimitExceeded)
