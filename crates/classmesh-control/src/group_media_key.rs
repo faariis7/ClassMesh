@@ -59,7 +59,9 @@ pub enum PresentationKeyInstallError {
 impl fmt::Display for PresentationKeyInstallError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidWire(error) => write!(formatter, "invalid presentation key grant: {error:?}"),
+            Self::InvalidWire(error) => {
+                write!(formatter, "invalid presentation key grant: {error:?}")
+            }
             Self::Security(error) => write!(formatter, "presentation key install failed: {error}"),
         }
     }
@@ -89,8 +91,7 @@ pub fn install_received_presentation_key(
 
     let key_material = GroupMediaKeyMaterial::import_received_wire(&mut grant.key_material)
         .map_err(PresentationKeyInstallError::Security)?;
-    let epoch =
-        GroupMediaEpoch::new(grant.epoch).map_err(PresentationKeyInstallError::Security)?;
+    let epoch = GroupMediaEpoch::new(grant.epoch).map_err(PresentationKeyInstallError::Security)?;
     let stream_id = u32::try_from(grant.stream_id).map_err(|_| {
         PresentationKeyInstallError::InvalidWire(GroupMediaControlError::StreamIdOutOfRange)
     })?;
