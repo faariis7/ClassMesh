@@ -114,8 +114,16 @@ impl Default for GroupMediaCoordinator {
 
 impl GroupMediaCoordinator {
     pub fn with_limit(max_receivers: usize) -> Result<Self, GroupMediaCoordinatorError> {
-        let _ = max_receivers;
-        todo!("implemented after coordinator invariant tests")
+        if max_receivers == 0 || max_receivers > MAX_GROUP_MEDIA_RECEIVERS {
+            return Err(GroupMediaCoordinatorError::InvalidReceiverLimit);
+        }
+        Ok(Self {
+            receivers: BTreeMap::new(),
+            max_receivers,
+            last_epoch: 0,
+            active: None,
+            rotation_required: false,
+        })
     }
 
     pub fn register_receiver(
@@ -123,17 +131,53 @@ impl GroupMediaCoordinator {
         authorization: &AuthorizationStore,
         principal: PrincipalId,
     ) -> Result<GroupMediaRegistration, GroupMediaCoordinatorError> {
-        let _ = (authorization, principal);
-        todo!("implemented after coordinator invariant tests")
+        if !authorization.authorize(principal, Permission::ReceivePresentation) {
+            return Err(GroupMediaCoordinatorError::UnauthorizedReceiver);
+        }
+        if self.receivers.contains_key(&principal) {
+            return Ok(GroupMediaRegistration::AlreadyRegistered);
+        }
+        if self.receivers.len() >= self.max_receivers {
+            return Err(GroupMediaCoordinatorError::ReceiverLimitExceeded);
+        }
+
+        self.receivers.insert(
+            principal,
+            ReceiverState {
+                install: GroupMediaReceiverInstallState::AwaitingKey,
+            },
+        );
+        if self.active.is_some() {
+            self.rotation_required = true;
+        }
+        Ok(GroupMediaRegistration::Added)
     }
 
     pub fn remove_receiver(&mut self, principal: PrincipalId) -> bool {
-        let _ = principal;
-        todo!("implemented after coordinator invariant tests")
+        let removed = self.receivers.remove(&principal).is_some();
+        if removed && self.active.is_some() {
+            self.rotation_required = true;
+        }
+        removed
     }
 
     pub fn begin_epoch(&mut self) -> Result<GroupMediaEpoch, GroupMediaCoordinatorError> {
-        todo!("implemented after coordinator invariant tests")
+        let next = self
+            .last_epoch
+            .checked_add(1)
+            .ok_or(GroupMediaCoordinatorError::EpochExhausted)?;
+        let epoch = GroupMediaEpoch::new(next)?;
+        let key = GroupMediaKeyMaterial::generate()?;
+        let sender = GroupMediaSender::new(epoch, &key)?;
+
+        for state in self.receivers.values_mut() {
+            state.install = GroupMediaReceiverInstallState::AwaitingKey;
+        }
+
+        self.active = Some(ActiveEpoch { epoch, key, sender });
+        self.last_epoch = next;
+        self.rotation_required = false;
+        Ok(epoch)
     }
 
     pub fn issue_key(
@@ -141,8 +185,29 @@ impl GroupMediaCoordinator {
         authorization: &AuthorizationStore,
         principal: PrincipalId,
     ) -> Result<GroupMediaKeyGrant, GroupMediaCoordinatorError> {
-        let _ = (authorization, principal);
-        todo!("implemented after coordinator invariant tests")
+        self.reconcile_authorization(authorization);
+        if !authorization.authorize(principal, Permission::ReceivePresentation) {
+            return Err(GroupMediaCoordinatorError::UnauthorizedReceiver);
+        }
+        if self.rotation_required {
+            return Err(GroupMediaCoordinatorError::RotationRequired);
+        }
+
+        let active = self
+            .active
+            .as_ref()
+            .ok_or(GroupMediaCoordinatorError::NoActiveEpoch)?;
+        let state = self
+            .receivers
+            .get_mut(&principal)
+            .ok_or(GroupMediaCoordinatorError::ReceiverNotRegistered)?;
+        state.install = GroupMediaReceiverInstallState::KeyIssued(active.epoch);
+
+        Ok(GroupMediaKeyGrant {
+            principal,
+            epoch: active.epoch,
+            key_bytes: active.key.copy_bytes(),
+        })
     }
 
     pub fn mark_installed(
@@ -151,8 +216,41 @@ impl GroupMediaCoordinator {
         principal: PrincipalId,
         epoch: GroupMediaEpoch,
     ) -> Result<(), GroupMediaCoordinatorError> {
-        let _ = (authorization, principal, epoch);
-        todo!("implemented after coordinator invariant tests")
+        self.reconcile_authorization(authorization);
+        if !authorization.authorize(principal, Permission::ReceivePresentation) {
+            return Err(GroupMediaCoordinatorError::UnauthorizedReceiver);
+        }
+        if self.rotation_required {
+            return Err(GroupMediaCoordinatorError::RotationRequired);
+        }
+
+        let active_epoch = self
+            .active
+            .as_ref()
+            .map(|active| active.epoch)
+            .ok_or(GroupMediaCoordinatorError::NoActiveEpoch)?;
+        if epoch != active_epoch {
+            return Err(GroupMediaCoordinatorError::StaleEpoch);
+        }
+
+        let state = self
+            .receivers
+            .get_mut(&principal)
+            .ok_or(GroupMediaCoordinatorError::ReceiverNotRegistered)?;
+        match state.install {
+            GroupMediaReceiverInstallState::AwaitingKey => {
+                Err(GroupMediaCoordinatorError::KeyNotIssued)
+            }
+            GroupMediaReceiverInstallState::KeyIssued(issued) if issued == epoch => {
+                state.install = GroupMediaReceiverInstallState::Installed(epoch);
+                Ok(())
+            }
+            GroupMediaReceiverInstallState::Installed(installed) if installed == epoch => Ok(()),
+            GroupMediaReceiverInstallState::KeyIssued(_)
+            | GroupMediaReceiverInstallState::Installed(_) => {
+                Err(GroupMediaCoordinatorError::StaleEpoch)
+            }
+        }
     }
 
     pub fn seal_frame(
@@ -161,8 +259,29 @@ impl GroupMediaCoordinator {
         plaintext: &[u8],
         associated_data: &[u8],
     ) -> Result<Vec<u8>, GroupMediaCoordinatorError> {
-        let _ = (authorization, plaintext, associated_data);
-        todo!("implemented after coordinator invariant tests")
+        self.reconcile_authorization(authorization);
+        if self.rotation_required {
+            return Err(GroupMediaCoordinatorError::RotationRequired);
+        }
+
+        let active = self
+            .active
+            .as_mut()
+            .ok_or(GroupMediaCoordinatorError::NoActiveEpoch)?;
+        active
+            .sender
+            .seal_frame(plaintext, associated_data)
+            .map_err(Into::into)
+    }
+
+    fn reconcile_authorization(&mut self, authorization: &AuthorizationStore) {
+        let before = self.receivers.len();
+        self.receivers.retain(|principal, _| {
+            authorization.authorize(*principal, Permission::ReceivePresentation)
+        });
+        if self.receivers.len() != before && self.active.is_some() {
+            self.rotation_required = true;
+        }
     }
 
     #[must_use]
