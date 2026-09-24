@@ -51,7 +51,7 @@ Security rules:
 9. receiver/key state is bounded to 64 principals, and a slow receiver never creates a classroom-wide key-install barrier;
 10. protocol v0.4 key delivery requires explicit `SframeGroupMedia` capability negotiation in addition to `TeacherPresentation`;
 11. the wire grant never carries a recipient PrincipalId: the recipient is the exact authenticated control peer/session selected by the coordinator, preventing a payload-supplied identity from redirecting a group key;
-12. serialized key bytes are sensitive transient material and must be zeroized after authenticated send/receive processing; generated wire values and buffers must not be logged.
+12. serialized key bytes are sensitive transient material: the generic control framing/QUIC path zeroizes its process-owned intermediate encoded payloads and raw send/receive frame buffers; payload-specific decoded key storage must also be zeroized immediately after the later key-install handler consumes it; generated wire values and buffers must not be logged.
 
 The crypto/coordinator/wire-contract slices alone do not enable production multicast. Service session binding, authenticated key delivery/ack handling, production sender/receiver wiring and physical scale qualification remain separate Phase 7 gates.
 
