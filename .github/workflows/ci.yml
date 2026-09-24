@@ -123,6 +123,7 @@ jobs:
           name: classmesh-phase4-qualification-windows-x64
           path: phase4-bundle/
           if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
       - name: Stage Phase 6F qualification bundle
         shell: pwsh
@@ -143,6 +144,7 @@ jobs:
           name: classmesh-phase6f-qualification-windows-x64
           path: phase6f-bundle/
           if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
       - name: Stage Phase 7 multicast probe bundle
         shell: pwsh
@@ -158,6 +160,7 @@ jobs:
           name: classmesh-phase7-multicast-probe-windows-x64
           path: phase7-multicast-probe-bundle/
           if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
       - name: Upload media probe
         uses: actions/upload-artifact@v4
@@ -165,6 +168,7 @@ jobs:
           name: classmesh-media-probe-windows-x64
           path: target/release/classmesh-media-probe.exe
           if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
       - name: Upload media receiver
         uses: actions/upload-artifact@v4
@@ -172,6 +176,7 @@ jobs:
           name: classmesh-media-receiver-windows-x64
           path: target/release/classmesh-media-receiver.exe
           if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
       - name: Upload media recovery probe
         uses: actions/upload-artifact@v4
@@ -179,6 +184,7 @@ jobs:
           name: classmesh-media-recovery-probe-windows-x64
           path: target/release/classmesh-media-recovery-probe.exe
           if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
       - name: Upload network impairment proxy
         uses: actions/upload-artifact@v4
@@ -186,6 +192,7 @@ jobs:
           name: classmesh-network-impairment-proxy-windows-x64
           path: target/release/classmesh-network-impairment-proxy.exe
           if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
       - name: Upload transport benchmark
         uses: actions/upload-artifact@v4
@@ -193,3 +200,4 @@ jobs:
           name: classmesh-transport-benchmark-windows-x64
           path: target/release/classmesh-transport-benchmark.exe
           if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
