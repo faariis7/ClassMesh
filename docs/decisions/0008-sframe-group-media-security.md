@@ -69,7 +69,8 @@ The replay window is deliberately bounded. A forged frame that fails authenticat
 - `PresentationKeyAck` binds the install acknowledgement to the same presentation/stream/epoch. Runtime integration must correlate the exchange with a non-zero control `request_id`.
 - The v0.4 wire payload is not yet mapped into the existing privileged-command dispatcher; Service direction/session semantics and live receiver authorization stay fail-closed until the next 7E slice.
 - Keys are never sent in multicast discovery/media packets.
-- Raw group-media key material is not logged or durably persisted. Transient encoded control buffers containing key bytes must be zeroized after use in the production integration.
+- Raw group-media key material is not logged or durably persisted. Generic control framing/QUIC buffers containing key bytes are zeroized after use.
+- Receiver-side decoded key bytes are imported through a dedicated API that zeroizes the caller-owned wire buffer on both success and failure; the control-layer installed receiver retains only derived SFrame key/replay state plus non-secret binding metadata.
 - The ClassMesh key-material wrapper zeroizes its owned 32-byte input when dropped.
 - Derived SFrame key state is owned by the SFrame implementation, which uses zeroizing secret storage.
 - Key epochs/receivers remain bounded; there is no unbounded historical key store.
