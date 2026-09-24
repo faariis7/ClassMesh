@@ -36,7 +36,9 @@ Each active presentation security epoch has:
 
 Recreating a sender with the same epoch **and** the same base key after its counter state is lost is forbidden because reusing the same key/KID/counter combination would violate AEAD nonce uniqueness. Runtime integration must rotate to a fresh epoch/key before rebuilding sender counter state.
 
-A new presentation always starts with a fresh epoch/key. Membership changes may trigger rotation; the exact authenticated distribution/acknowledgement state machine is a later 7E slice.
+A new presentation always starts with a fresh epoch/key. During an active epoch, any receiver membership change requires rotation before more media may be sealed. This is intentionally conservative: adding a receiver cannot expose earlier frames from the current epoch, and removing/revoking a receiver cannot leave the old key usable for future frames.
+
+The receiver set is bounded to 64 principals. A principal may enter the receiver set and receive a transient key grant only while the live authorization store grants `ReceivePresentation`. Key-install acknowledgement is exact-principal + exact-epoch state; a slow or non-acknowledging receiver never creates a classroom-wide barrier for healthy receivers.
 
 ### Associated data
 
@@ -61,7 +63,7 @@ The replay window is deliberately bounded. A forged frame that fails authenticat
 
 ### Key handling
 
-- Group-media base keys are delivered only through the authenticated control plane in a later 7E slice.
+- Group-media base keys are exposed for delivery only through a bounded coordinator after a live `ReceivePresentation` authorization check; control-wire delivery is a later 7E slice.
 - Keys are never sent in multicast discovery/media packets.
 - Raw group-media key material is not logged.
 - The ClassMesh key-material wrapper zeroizes its owned 32-byte input when dropped.

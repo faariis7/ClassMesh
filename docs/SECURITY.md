@@ -46,7 +46,9 @@ Security rules:
 4. SFrame authenticates encrypted presentation frames plus bounded external ClassMesh binding metadata;
 5. receiver replay state is bounded and recorded only after successful frame authentication;
 6. a sender must never restart counters with the same epoch/key pair; rebuilding sender state requires a fresh epoch/key;
-7. keys rotate for new presentations and may rotate when membership changes.
+7. keys rotate for every new presentation and before more media after any active-epoch receiver membership change;
+8. no Principal enters the group-key receiver set or receives a key grant without a live `ReceivePresentation` authorization check;
+9. receiver/key state is bounded to 64 principals, and a slow receiver never creates a classroom-wide key-install barrier.
 
 The crypto core alone does not enable production multicast. Authenticated key distribution/rotation, production sender/receiver wiring and physical scale qualification remain separate Phase 7 gates.
 
