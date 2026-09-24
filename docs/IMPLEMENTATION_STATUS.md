@@ -89,7 +89,7 @@ PR #161 merged the first Phase 7E security slice after CI #675: RFC 9605 SFrame 
 
 PR #162 merged the bounded 7E receiver/key coordinator: at most 64 receiver principals, live `ReceivePresentation` authorization before registration/key grant, exact principal + epoch acknowledgement, and fail-closed epoch rotation whenever active membership or authorization changes. Per-receiver install state stays independent so a slow receiver does not stall healthy presentation receivers.
 
-The current v0.4 wire-contract slice adds `PresentationKeyGrant`/`PresentationKeyAck`, exact 32-byte SFrame key validation and explicit `SframeGroupMedia` capability negotiation. It deliberately does not route key payloads through the existing privileged-command dispatcher yet; exact authenticated receiver/session binding, non-zero request correlation, transient serialized-buffer zeroization, Service/Worker receiver integration and physical scale evidence remain explicit later gates.
+PR #163 merged the protocol v0.4 `PresentationKeyGrant`/`PresentationKeyAck` contract, exact 32-byte SFrame key validation and explicit `SframeGroupMedia` capability negotiation after CI #684 passed on Portable and Windows. The current follow-up hardens the generic control framing/QUIC path so process-owned intermediate protobuf payloads and raw send/receive frame buffers are zeroized after use. Decoded protobuf key storage remains deliberately unhandled until the exact authenticated receiver/session key-install path is defined; the sensitive key payload is still not routed through the existing privileged-command dispatcher.
 
 ## Remaining security/control work
 
