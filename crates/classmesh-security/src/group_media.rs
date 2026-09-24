@@ -55,6 +55,10 @@ impl GroupMediaKeyMaterial {
     fn as_bytes(&self) -> &[u8; GROUP_MEDIA_KEY_BYTES] {
         &self.0
     }
+
+    pub(crate) const fn copy_bytes(&self) -> [u8; GROUP_MEDIA_KEY_BYTES] {
+        self.0
+    }
 }
 
 impl Drop for GroupMediaKeyMaterial {
