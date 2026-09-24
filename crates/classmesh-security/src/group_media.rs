@@ -47,6 +47,27 @@ impl GroupMediaKeyMaterial {
         Ok(Self(bytes))
     }
 
+    /// Imports authenticated control-wire key bytes for a receiver and zeroizes
+    /// the caller-owned buffer on both success and failure.
+    ///
+    /// This is deliberately separate from `generate`: sender keys are created
+    /// locally with the OS CSPRNG, while receivers may install exactly one
+    /// authenticated 32-byte grant delivered by the control plane.
+    pub fn import_received_wire(bytes: &mut [u8]) -> Result<Self, GroupMediaError> {
+        if bytes.len() != GROUP_MEDIA_KEY_BYTES {
+            bytes.zeroize();
+            return Err(GroupMediaError::InvalidKeyMaterialLength);
+        }
+
+        let mut key = [0_u8; GROUP_MEDIA_KEY_BYTES];
+        key.copy_from_slice(bytes);
+        bytes.zeroize();
+
+        let material = Self(key);
+        key.zeroize();
+        Ok(material)
+    }
+
     #[cfg(test)]
     const fn from_test_bytes(bytes: [u8; GROUP_MEDIA_KEY_BYTES]) -> Self {
         Self(bytes)
@@ -78,6 +99,7 @@ pub enum GroupMediaReplayError {
 pub enum GroupMediaError {
     InvalidEpoch,
     InvalidReplayTolerance,
+    InvalidKeyMaterialLength,
     KeyGenerationFailed,
     MissingAssociatedData,
     AadTooLarge,
@@ -93,6 +115,9 @@ impl fmt::Display for GroupMediaError {
             Self::InvalidEpoch => formatter.write_str("group-media epoch must be non-zero"),
             Self::InvalidReplayTolerance => {
                 formatter.write_str("group-media replay tolerance is outside the bounded range")
+            }
+            Self::InvalidKeyMaterialLength => {
+                formatter.write_str("group-media key material must be exactly 32 bytes")
             }
             Self::KeyGenerationFailed => formatter.write_str("group-media key generation failed"),
             Self::MissingAssociatedData => {
@@ -115,6 +140,7 @@ impl std::error::Error for GroupMediaError {
             Self::Crypto(error) => Some(error),
             Self::InvalidEpoch
             | Self::InvalidReplayTolerance
+            | Self::InvalidKeyMaterialLength
             | Self::KeyGenerationFailed
             | Self::MissingAssociatedData
             | Self::AadTooLarge
@@ -324,6 +350,43 @@ mod tests {
                 .expect("generated key should decrypt"),
             b"generated-key-frame"
         );
+    }
+
+    #[test]
+    fn received_wire_key_import_zeroizes_source_and_builds_matching_receiver() {
+        let mut sender_bytes = vec![0x77; GROUP_MEDIA_KEY_BYTES];
+        let sender_material =
+            GroupMediaKeyMaterial::import_received_wire(&mut sender_bytes).expect("sender key");
+        assert!(sender_bytes.iter().all(|byte| *byte == 0));
+
+        let mut received_bytes = vec![0x77; GROUP_MEDIA_KEY_BYTES];
+        let received_material =
+            GroupMediaKeyMaterial::import_received_wire(&mut received_bytes).expect("wire key");
+        assert!(received_bytes.iter().all(|byte| *byte == 0));
+
+        let mut sender = GroupMediaSender::new(epoch(8), &sender_material).expect("sender");
+        let mut receiver =
+            GroupMediaReceiver::with_default_replay_tolerance(epoch(8), &received_material)
+                .expect("receiver");
+        let sealed = sender
+            .seal_frame(b"wire-key-frame", b"wire-key-binding")
+            .expect("sealed frame");
+        assert_eq!(
+            receiver
+                .open_frame(&sealed, b"wire-key-binding")
+                .expect("matching imported key"),
+            b"wire-key-frame"
+        );
+    }
+
+    #[test]
+    fn invalid_received_wire_key_length_is_rejected_and_zeroized() {
+        let mut received_bytes = vec![0x44; GROUP_MEDIA_KEY_BYTES - 1];
+        assert!(matches!(
+            GroupMediaKeyMaterial::import_received_wire(&mut received_bytes),
+            Err(GroupMediaError::InvalidKeyMaterialLength)
+        ));
+        assert!(received_bytes.iter().all(|byte| *byte == 0));
     }
 
     #[test]
