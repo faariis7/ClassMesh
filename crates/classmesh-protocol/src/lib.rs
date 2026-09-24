@@ -190,14 +190,16 @@ mod tests {
             sequence: 9,
             protocol_version: Some(control_wire::ProtocolVersion { major: 0, minor: 4 }),
             request_id: 78,
-            payload: Some(control_wire::control_envelope::Payload::PresentationKeyGrant(
-                control_wire::PresentationKeyGrant {
-                    presentation_id: 900,
-                    stream_id: 12,
-                    epoch: 4,
-                    key_material: vec![7; 32],
-                },
-            )),
+            payload: Some(
+                control_wire::control_envelope::Payload::PresentationKeyGrant(
+                    control_wire::PresentationKeyGrant {
+                        presentation_id: 900,
+                        stream_id: 12,
+                        epoch: 4,
+                        key_material: vec![7; 32],
+                    },
+                ),
+            ),
         };
 
         let decoded = control_wire::ControlEnvelope::decode(envelope.encode_to_vec().as_slice())
