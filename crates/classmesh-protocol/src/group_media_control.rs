@@ -26,9 +26,7 @@ pub fn group_media_control_available(
         && capabilities.contains(&Capability::SframeGroupMedia)
 }
 
-pub fn validate_key_grant(
-    grant: &PresentationKeyGrant,
-) -> Result<(), GroupMediaControlError> {
+pub fn validate_key_grant(grant: &PresentationKeyGrant) -> Result<(), GroupMediaControlError> {
     validate_binding(grant.presentation_id, grant.stream_id, grant.epoch)?;
     if grant.key_material.len() != PRESENTATION_GROUP_KEY_BYTES {
         return Err(GroupMediaControlError::InvalidKeyLength {
