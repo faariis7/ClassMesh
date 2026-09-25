@@ -158,7 +158,7 @@ impl BoundGroupMediaReceiverSession {
         let epoch = grant.epoch();
 
         let mut key_bytes = grant.copy_key_material_for_delivery();
-        let wire_grant = PresentationKeyGrant {
+        let mut wire_grant = PresentationKeyGrant {
             presentation_id,
             stream_id,
             epoch: epoch.get(),
@@ -166,23 +166,18 @@ impl BoundGroupMediaReceiverSession {
         };
         key_bytes.zeroize();
 
-        let mut sensitive = SensitivePresentationKeyEnvelope::new(ControlEnvelope {
+        if let Err(error) = validate_key_grant(&wire_grant) {
+            wire_grant.key_material.zeroize();
+            return Err(GroupMediaSessionError::InvalidGrant(error));
+        }
+
+        let sensitive = SensitivePresentationKeyEnvelope::new(ControlEnvelope {
             control_session_id: self.control_session_id,
             sequence,
             protocol_version: Some(version_to_wire(self.protocol_version)),
             request_id,
             payload: Some(control_envelope::Payload::PresentationKeyGrant(wire_grant)),
         });
-
-        let Some(control_envelope::Payload::PresentationKeyGrant(wire_grant)) =
-            sensitive.envelope.payload.as_ref()
-        else {
-            unreachable!("sensitive envelope is constructed with a key grant");
-        };
-        if let Err(error) = validate_key_grant(wire_grant) {
-            sensitive.zeroize_key_material();
-            return Err(GroupMediaSessionError::InvalidGrant(error));
-        }
 
         let pending = PendingPresentationKeyAck {
             principal: self.principal,
@@ -254,6 +249,7 @@ pub enum PresentationKeyAckError {
     UnexpectedPayload,
     InvalidAck(GroupMediaControlError),
     PeerMismatch,
+    SessionMismatch { expected: u64, received: u64 },
     Authorization(CommandAuthorizationError),
     RequestMismatch { expected: u64, received: u64 },
     PresentationMismatch { expected: u64, received: u64 },
@@ -269,7 +265,13 @@ impl fmt::Display for PresentationKeyAckError {
             Self::UnexpectedPayload => formatter.write_str("expected PresentationKeyAck payload"),
             Self::InvalidAck(error) => write!(formatter, "invalid PresentationKeyAck: {error:?}"),
             Self::PeerMismatch => formatter.write_str("presentation key ACK peer mismatch"),
-            Self::Authorization(error) => write!(formatter, "presentation key ACK authorization: {error:?}"),
+            Self::SessionMismatch { expected, received } => write!(
+                formatter,
+                "presentation key ACK session mismatch: expected={expected}, received={received}"
+            ),
+            Self::Authorization(error) => {
+                write!(formatter, "presentation key ACK authorization: {error:?}")
+            }
             Self::RequestMismatch { expected, received } => write!(
                 formatter,
                 "presentation key ACK request mismatch: expected={expected}, received={received}"
@@ -356,6 +358,12 @@ impl PendingPresentationKeyAck {
 
         if guard.peer().principal_id() != self.principal {
             return Err(PresentationKeyAckError::PeerMismatch);
+        }
+        if envelope.control_session_id != self.control_session_id {
+            return Err(PresentationKeyAckError::SessionMismatch {
+                expected: self.control_session_id,
+                received: envelope.control_session_id,
+            });
         }
 
         guard
@@ -624,6 +632,26 @@ mod tests {
             coordinator.receiver_state(receiver),
             Some(GroupMediaReceiverInstallState::Installed(pending.epoch()))
         );
+    }
+
+    #[test]
+    fn wrong_session_ack_is_rejected_before_sequence_consumption() {
+        let (_, _, authorization, mut coordinator, bound, identity) = setup();
+        let (_sensitive, mut pending) = bound
+            .issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 2)
+            .expect("key grant");
+        let mut guard = AuthenticatedControlGuard::new(identity, 77, VERSION, 1);
+        let ack = ack_envelope(78, 2, 44, 55, 7, pending.epoch().get());
+
+        assert!(matches!(
+            pending.accept(&mut guard, &authorization, &mut coordinator, &ack, 10),
+            Err(PresentationKeyAckError::SessionMismatch {
+                expected: 77,
+                received: 78
+            })
+        ));
+        assert_eq!(guard.last_sequence(), 1);
+        assert!(!pending.is_acknowledged());
     }
 
     #[test]
