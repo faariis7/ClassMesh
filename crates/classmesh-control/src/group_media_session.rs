@@ -63,7 +63,10 @@ impl fmt::Display for GroupMediaSessionError {
                 formatter.write_str("group-media authenticated server peer must be a StudentDevice")
             }
             Self::PeerIdentity(error) => {
-                write!(formatter, "group-media authenticated server identity failed: {error:?}")
+                write!(
+                    formatter,
+                    "group-media authenticated server identity failed: {error:?}"
+                )
             }
             Self::ContractUnavailable => {
                 formatter.write_str("group-media v0.4 capability contract is unavailable")
@@ -180,9 +183,8 @@ impl BoundGroupMediaReceiverSession {
         authorization: &AuthorizationStore,
         now_unix_ms: u64,
     ) -> Result<Self, GroupMediaSessionError> {
-        let identity =
-            authenticated_peer_identity(&session.connection, authorization, now_unix_ms)
-                .map_err(GroupMediaSessionError::PeerIdentity)?;
+        let identity = authenticated_peer_identity(&session.connection, authorization, now_unix_ms)
+            .map_err(GroupMediaSessionError::PeerIdentity)?;
         Self::bind_client_identity(&session.established, identity, authorization)
     }
 
