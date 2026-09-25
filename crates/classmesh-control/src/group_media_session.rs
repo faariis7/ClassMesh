@@ -411,7 +411,7 @@ fn version_to_wire(version: ProtocolVersion) -> WireProtocolVersion {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use classmesh_protocol::{Capability, NegotiatedHello};
+    use classmesh_protocol::Capability;
     use classmesh_security::group_media_coordinator::GroupMediaReceiverInstallState;
     use classmesh_security::{
         CredentialFingerprint, CredentialRecord, Principal, PrincipalKind,
