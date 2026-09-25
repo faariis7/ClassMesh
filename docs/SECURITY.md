@@ -55,7 +55,9 @@ Security rules:
 13. receiver-side decoded `PresentationKeyGrant.key_material` is imported through a dedicated installer that zeroizes the protobuf buffer on success and failure, derives bounded SFrame receiver/replay state, and retains no raw base-key bytes in the control-layer installed-key object;
 14. sender-side delivery is bound to the server-side enrolled mTLS peer identity + exact control session, requires `StudentDevice` role and the v0.4 group-media capability contract, carries no payload-supplied recipient identity, and rechecks the authenticated credential + `ReceivePresentation` permission immediately before grant issuance;
 15. each issued key has one bounded pending ACK record keyed by authenticated PrincipalId + control session + request ID + presentation + stream + epoch; ACK acceptance rechecks the live credential and `ReceivePresentation` permission before installation;
-16. the current Student Service is not used as the grant sender because its authenticated peer is the Teacher. Production delivery must be hosted by the Teacher-side runtime where the authenticated peer is the StudentDevice receiver.
+16. sensitive sender envelopes are one-shot: sending consumes the grant wrapper and zeroizes the decoded protobuf key bytes before returning on either success or transport failure;
+17. receiver ACK construction is derived from the same already-installed grant envelope and preserves its exact control session, protocol version, request ID, presentation, stream and epoch without re-exposing raw key material;
+18. the current Student Service is not used as the grant sender because its authenticated peer is the Teacher. Production delivery must be hosted by the Teacher-side runtime where the authenticated peer is the StudentDevice receiver.
 
 The crypto/coordinator/wire-contract/session-binding slices alone do not enable production multicast. Teacher runtime delivery, receiver ACK emission/runtime integration, production sender/receiver wiring and physical scale qualification remain separate Phase 7 gates.
 
