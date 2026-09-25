@@ -11,11 +11,15 @@ use classmesh_security::group_media::GroupMediaEpoch;
 use classmesh_security::group_media_coordinator::{
     GroupMediaCoordinator, GroupMediaCoordinatorError,
 };
-use classmesh_security::{AuthorizationStore, Permission, PrincipalId};
+use classmesh_security::{AuthorizationStore, Permission, PrincipalId, PrincipalKind};
 use zeroize::Zeroize;
 
 use crate::authorization::{AuthenticatedControlGuard, CommandAuthorizationError};
+use crate::client_session::ClientControlSession;
 use crate::handshake::{EstablishedAuthenticatedPeer, EstablishedControlSession};
+use crate::peer_identity::{
+    AuthenticatedPeerIdentity, PeerIdentityError, authenticated_peer_identity,
+};
 use crate::quic::{ControlChannel, ControlTransportError};
 
 #[derive(Debug)]
@@ -24,6 +28,9 @@ pub enum GroupMediaSessionError {
     SessionMismatch { negotiated: u64, authenticated: u64 },
     IdentityMismatch,
     ReceiverRoleRequired,
+    TeacherRoleRequired,
+    ReceiverPrincipalRequired,
+    PeerIdentity(PeerIdentityError),
     ContractUnavailable,
     ReceiverUnauthorized,
     ZeroRequestId,
@@ -48,6 +55,18 @@ impl fmt::Display for GroupMediaSessionError {
             }
             Self::ReceiverRoleRequired => {
                 formatter.write_str("group-media receiver must negotiate StudentDevice role")
+            }
+            Self::TeacherRoleRequired => {
+                formatter.write_str("group-media client sender must negotiate Teacher role")
+            }
+            Self::ReceiverPrincipalRequired => {
+                formatter.write_str("group-media authenticated server peer must be a StudentDevice")
+            }
+            Self::PeerIdentity(error) => {
+                write!(
+                    formatter,
+                    "group-media authenticated server identity failed: {error:?}"
+                )
             }
             Self::ContractUnavailable => {
                 formatter.write_str("group-media v0.4 capability contract is unavailable")
@@ -147,6 +166,55 @@ impl BoundGroupMediaReceiverSession {
 
         Ok(Self {
             identity: peer.identity,
+            control_session_id: session.control_session_id,
+            protocol_version: session.negotiated.version,
+        })
+    }
+
+    /// Binds the Teacher client's established control session to the TLS-authenticated
+    /// Student Service server identity.
+    ///
+    /// Client-side Hello state describes the local Teacher, not the remote server. The
+    /// receiver Principal therefore comes only from the verified server certificate and
+    /// the live authorization store. Accepting the bundled ClientControlSession also avoids
+    /// exposing separate connection/session parameters at this binding boundary.
+    pub fn bind_client(
+        session: &ClientControlSession,
+        authorization: &AuthorizationStore,
+        now_unix_ms: u64,
+    ) -> Result<Self, GroupMediaSessionError> {
+        let identity = authenticated_peer_identity(&session.connection, authorization, now_unix_ms)
+            .map_err(GroupMediaSessionError::PeerIdentity)?;
+        Self::bind_client_identity(&session.established, identity, authorization)
+    }
+
+    fn bind_client_identity(
+        session: &EstablishedControlSession,
+        identity: AuthenticatedPeerIdentity,
+        authorization: &AuthorizationStore,
+    ) -> Result<Self, GroupMediaSessionError> {
+        if session.control_session_id == 0 {
+            return Err(GroupMediaSessionError::InvalidSessionId);
+        }
+        if session.negotiated.role != ControlRole::Teacher {
+            return Err(GroupMediaSessionError::TeacherRoleRequired);
+        }
+        if !group_media_control_available(
+            session.negotiated.version,
+            &session.negotiated.capabilities,
+        ) {
+            return Err(GroupMediaSessionError::ContractUnavailable);
+        }
+
+        let principal = identity.principal_id();
+        if authorization.principal(principal).map(|record| record.kind)
+            != Some(PrincipalKind::StudentDevice)
+        {
+            return Err(GroupMediaSessionError::ReceiverPrincipalRequired);
+        }
+
+        Ok(Self {
+            identity,
             control_session_id: session.control_session_id,
             protocol_version: session.negotiated.version,
         })
@@ -638,6 +706,82 @@ mod tests {
         assert!(matches!(
             BoundGroupMediaReceiverSession::bind(&missing_capability, exact_peer),
             Err(GroupMediaSessionError::ContractUnavailable)
+        ));
+    }
+
+    #[test]
+    fn client_binding_uses_authenticated_student_server_not_local_teacher_identity() {
+        let receiver = principal(7);
+        let teacher = principal(8);
+        let credential = fingerprint(9);
+        let authorization = authorization(receiver, credential);
+        let identity = AuthenticatedPeerIdentity {
+            principal_id: receiver,
+            credential_fingerprint: credential,
+        };
+        let teacher_session = EstablishedControlSession {
+            control_session_id: 77,
+            negotiated: crate::NegotiatedHello {
+                principal_id: teacher,
+                role: ControlRole::Teacher,
+                version: VERSION,
+                capabilities: BTreeSet::from([
+                    Capability::TeacherPresentation,
+                    Capability::SframeGroupMedia,
+                ]),
+            },
+        };
+
+        let bound = BoundGroupMediaReceiverSession::bind_client_identity(
+            &teacher_session,
+            identity,
+            &authorization,
+        )
+        .expect("authenticated Student Service should bind");
+        assert_eq!(bound.principal(), receiver);
+        assert_eq!(bound.control_session_id(), 77);
+
+        let mut wrong_local_role = teacher_session.clone();
+        wrong_local_role.negotiated.role = ControlRole::StudentDevice;
+        assert!(matches!(
+            BoundGroupMediaReceiverSession::bind_client_identity(
+                &wrong_local_role,
+                identity,
+                &authorization
+            ),
+            Err(GroupMediaSessionError::TeacherRoleRequired)
+        ));
+
+        let mut missing_contract = teacher_session.clone();
+        missing_contract
+            .negotiated
+            .capabilities
+            .remove(&Capability::SframeGroupMedia);
+        assert!(matches!(
+            BoundGroupMediaReceiverSession::bind_client_identity(
+                &missing_contract,
+                identity,
+                &authorization
+            ),
+            Err(GroupMediaSessionError::ContractUnavailable)
+        ));
+
+        let mut wrong_kind_authorization = authorization(receiver, credential);
+        let mut receiver_record = wrong_kind_authorization
+            .principal(receiver)
+            .expect("receiver")
+            .clone();
+        receiver_record.kind = PrincipalKind::Teacher;
+        wrong_kind_authorization
+            .upsert(receiver_record)
+            .expect("replace receiver kind");
+        assert!(matches!(
+            BoundGroupMediaReceiverSession::bind_client_identity(
+                &teacher_session,
+                identity,
+                &wrong_kind_authorization
+            ),
+            Err(GroupMediaSessionError::ReceiverPrincipalRequired)
         ));
     }
 
