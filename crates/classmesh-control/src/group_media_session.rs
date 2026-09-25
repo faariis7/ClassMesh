@@ -248,7 +248,7 @@ impl Drop for SensitivePresentationKeyEnvelope {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum PresentationKeyAckError {
     AlreadyAcknowledged,
     UnexpectedPayload,
