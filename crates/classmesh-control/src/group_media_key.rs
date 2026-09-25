@@ -80,6 +80,11 @@ impl std::error::Error for PresentationKeyInstallError {
     }
 }
 
+/// Explicitly clears decoded protobuf group-key bytes on a pre-install rejection path.
+pub fn zeroize_received_presentation_key(grant: &mut PresentationKeyGrant) {
+    grant.key_material.zeroize();
+}
+
 /// Validates and installs one received v0.4 group-media key grant.
 ///
 /// The raw protobuf key bytes are zeroized before this function returns on both
@@ -89,7 +94,7 @@ pub fn install_received_presentation_key(
     grant: &mut PresentationKeyGrant,
 ) -> Result<InstalledPresentationKey, PresentationKeyInstallError> {
     if let Err(error) = validate_key_grant(grant) {
-        grant.key_material.zeroize();
+        zeroize_received_presentation_key(grant);
         return Err(PresentationKeyInstallError::InvalidWire(error));
     }
 
@@ -238,6 +243,13 @@ mod tests {
         assert_eq!(installed.epoch().get(), 3);
         assert!(grant.key_material.iter().all(|byte| *byte == 0));
         assert!(!format!("{installed:?}").contains("5a"));
+    }
+
+    #[test]
+    fn explicit_preinstall_rejection_zeroizes_decoded_key_bytes() {
+        let mut grant = grant(0x6a);
+        zeroize_received_presentation_key(&mut grant);
+        assert!(grant.key_material.iter().all(|byte| *byte == 0));
     }
 
     #[test]
