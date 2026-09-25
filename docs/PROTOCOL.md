@@ -85,9 +85,12 @@ Protocol minor 0.4 adds the sensitive control-wire contract used by the Phase 7E
 - `PresentationKeyGrant` binds a non-zero presentation ID, a non-zero 32-bit-compatible stream ID, a non-zero security epoch, and exactly 32 bytes of SFrame base-key material.
 - `PresentationKeyAck` acknowledges only the exact presentation/stream/epoch installed by the receiver.
 - The receiving PrincipalId is deliberately absent from the payload. Runtime delivery must bind the grant to the exact authenticated control peer/session selected by the authorization-gated coordinator rather than trusting a serialized recipient identity.
-- Key grant/ack are correlated with a non-zero `ControlEnvelope.request_id` when runtime integration is added.
-- Raw key material must not be logged or durably persisted. The production sender/receiver integration must zeroize transient serialized key buffers after use.
-- This v0.4 schema is intentionally not mapped into the existing privileged-command dispatcher yet. The later Service integration slice must define the receiver/session direction explicitly and re-check live `ReceivePresentation` authorization before delivery/ack acceptance.
+- Key grant/ack use a non-zero `ControlEnvelope.request_id`. The Phase 7E binding layer records exactly one pending ACK correlation per issued grant and matches request ID + presentation ID + stream ID + epoch.
+- Sender-side key delivery binds to the server-side enrolled-handshake result: stable authenticated `PrincipalId`, exact `control_session_id`, `StudentDevice` role, negotiated v0.4, `TeacherPresentation`, and `SframeGroupMedia`.
+- ACK acceptance reuses the authenticated-session guard, so exact session/version/monotonic sequence and live credential state are checked again, then `ReceivePresentation` is re-authorized before the coordinator marks the receiver installed.
+- A mismatched correlated ACK may consume its otherwise valid in-session sequence but never installs the key; the pending record remains usable for a later correctly correlated higher sequence.
+- Raw key material must not be logged or durably persisted. Sensitive grant envelopes zeroize their wire key buffer on drop, in addition to the generic transport-buffer zeroization and receiver-side decoded-key zeroization.
+- The binding primitive is deliberately not wired into the current Student Service runtime because that runtime accepts Teacher clients; production grant delivery requires the Teacher-side runtime where the authenticated peer is the StudentDevice receiver.
 
 ### Phase 6E clipboard skeleton
 
