@@ -133,9 +133,8 @@ impl fmt::Display for PresentationKeyAckBuildError {
             Self::MissingProtocolVersion => {
                 formatter.write_str("presentation key grant is missing protocol_version")
             }
-            Self::BindingMismatch => formatter.write_str(
-                "installed presentation key does not match the received grant binding",
-            ),
+            Self::BindingMismatch => formatter
+                .write_str("installed presentation key does not match the received grant binding"),
             Self::InvalidAck(error) => {
                 write!(formatter, "invalid presentation key ACK: {error:?}")
             }
@@ -223,7 +222,9 @@ mod tests {
                 minor: 4,
             }),
             request_id: 44,
-            payload: Some(control_envelope::Payload::PresentationKeyGrant(grant(value))),
+            payload: Some(control_envelope::Payload::PresentationKeyGrant(grant(
+                value,
+            ))),
         }
     }
 
@@ -277,10 +278,7 @@ mod tests {
         assert_eq!(ack.request_id, 44);
         assert_eq!(
             ack.protocol_version,
-            Some(classmesh_protocol::control_wire::ProtocolVersion {
-                major: 0,
-                minor: 4,
-            })
+            Some(classmesh_protocol::control_wire::ProtocolVersion { major: 0, minor: 4 })
         );
         let Some(control_envelope::Payload::PresentationKeyAck(ack_payload)) = ack.payload else {
             panic!("expected ACK");
