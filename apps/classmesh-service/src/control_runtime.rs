@@ -16,6 +16,7 @@ use classmesh_control::diagnostics::{
 use classmesh_control::dispatch::{PrivilegedControlCommand, dispatch_privileged_command};
 use classmesh_control::group_media_key::{
     InstalledPresentationKey, build_presentation_key_ack, install_received_presentation_key,
+    zeroize_received_presentation_key,
 };
 use classmesh_control::handshake::{
     EstablishedAuthenticatedPeer, EstablishedControlSession, ServerHelloConfig,
@@ -1310,6 +1311,7 @@ async fn run_established_session(
                     eprintln!(
                         "ClassMesh presentation key rejected: control.presentation.group_media_capability_not_negotiated"
                     );
+                    zeroize_presentation_key_envelope(&mut envelope);
                     connection.close(0_u32.into(), b"group-media capability not negotiated");
                     return;
                 }
@@ -1317,6 +1319,7 @@ async fn run_established_session(
                 let now_unix_ms = match unix_time_ms() {
                     Ok(value) => value,
                     Err(_) => {
+                        zeroize_presentation_key_envelope(&mut envelope);
                         connection.close(0_u32.into(), b"invalid service clock");
                         return;
                     }
@@ -1331,6 +1334,7 @@ async fn run_established_session(
                         "ClassMesh presentation key rejected: {}",
                         command_authorization_diagnostic_code(&error)
                     );
+                    zeroize_presentation_key_envelope(&mut envelope);
                     connection.close(0_u32.into(), b"presentation key unauthorized");
                     return;
                 }
@@ -1350,6 +1354,7 @@ async fn run_established_session(
                     eprintln!(
                         "ClassMesh presentation key rejected: control.presentation.key_not_owner"
                     );
+                    zeroize_presentation_key_envelope(&mut envelope);
                     connection.close(0_u32.into(), b"presentation key owner mismatch");
                     return;
                 }
@@ -1362,6 +1367,7 @@ async fn run_established_session(
                     eprintln!(
                         "ClassMesh presentation key rejected: control.presentation.key_epoch_stale"
                     );
+                    zeroize_presentation_key_envelope(&mut envelope);
                     connection.close(0_u32.into(), b"stale presentation key epoch");
                     return;
                 }
@@ -1599,6 +1605,12 @@ impl InputDispatchState {
         self.owner
             .compare_exchange(session_id, 0, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+    }
+}
+
+fn zeroize_presentation_key_envelope(envelope: &mut ControlEnvelope) {
+    if let Some(control_envelope::Payload::PresentationKeyGrant(grant)) = envelope.payload.as_mut() {
+        zeroize_received_presentation_key(grant);
     }
 }
 
