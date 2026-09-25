@@ -1848,6 +1848,45 @@ mod tests {
     }
 
     #[test]
+    fn presentation_key_epoch_must_increase_within_exact_live_binding() {
+        let mut grant = classmesh_protocol::control_wire::PresentationKeyGrant {
+            presentation_id: 80,
+            stream_id: 90,
+            epoch: 3,
+            key_material: vec![0x33; classmesh_security::group_media::GROUP_MEDIA_KEY_BYTES],
+        };
+        let installed =
+            install_received_presentation_key(&mut grant).expect("test key should install");
+
+        assert!(!presentation_key_epoch_is_fresh(
+            Some(&installed),
+            80,
+            90,
+            3
+        ));
+        assert!(!presentation_key_epoch_is_fresh(
+            Some(&installed),
+            80,
+            90,
+            2
+        ));
+        assert!(presentation_key_epoch_is_fresh(
+            Some(&installed),
+            80,
+            90,
+            4
+        ));
+        assert!(!presentation_key_epoch_is_fresh(
+            Some(&installed),
+            81,
+            90,
+            4
+        ));
+        assert!(!presentation_key_epoch_is_fresh(None, 80, 90, 0));
+        assert!(presentation_key_epoch_is_fresh(None, 80, 90, 1));
+    }
+
+    #[test]
     fn stream_offer_supported_transport_list_is_deterministic_and_explicit() {
         let capabilities = BTreeSet::from([
             Capability::WebRtc,
