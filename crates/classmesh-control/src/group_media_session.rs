@@ -52,9 +52,8 @@ impl fmt::Display for GroupMediaSessionError {
             Self::ContractUnavailable => {
                 formatter.write_str("group-media v0.4 capability contract is unavailable")
             }
-            Self::ReceiverUnauthorized => {
-                formatter.write_str("group-media receiver credential/permission is no longer authorized")
-            }
+            Self::ReceiverUnauthorized => formatter
+                .write_str("group-media receiver credential/permission is no longer authorized"),
             Self::ZeroRequestId => {
                 formatter.write_str("group-media key grant request_id must be non-zero")
             }
@@ -642,10 +641,7 @@ mod tests {
     #[test]
     fn revoked_receiver_credential_blocks_grant_before_key_issue() {
         let (receiver, credential, mut authorization, mut coordinator, bound, _) = setup();
-        let mut record = authorization
-            .principal(receiver)
-            .expect("receiver")
-            .clone();
+        let mut record = authorization.principal(receiver).expect("receiver").clone();
         record
             .revoke_credential(credential, 5)
             .expect("credential revoke");
