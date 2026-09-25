@@ -250,7 +250,7 @@ impl SensitivePresentationKeyEnvelope {
     }
 
     #[must_use]
-    pub const fn envelope(&self) -> &ControlEnvelope {
+    const fn envelope(&self) -> &ControlEnvelope {
         &self.envelope
     }
 
