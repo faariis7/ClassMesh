@@ -1,8 +1,8 @@
 use std::fmt;
 
 use classmesh_protocol::control_wire::{
-    ControlEnvelope, PresentationKeyAck, PresentationKeyGrant,
-    ProtocolVersion as WireProtocolVersion, control_envelope,
+    ControlEnvelope, PresentationKeyGrant, ProtocolVersion as WireProtocolVersion,
+    control_envelope,
 };
 use classmesh_protocol::group_media_control::{
     GroupMediaControlError, group_media_control_available, validate_key_ack, validate_key_grant,
@@ -96,6 +96,31 @@ pub struct BoundGroupMediaReceiverSession {
     protocol_version: ProtocolVersion,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationKeyGrantRequest {
+    pub presentation_id: u64,
+    pub stream_id: u64,
+    pub request_id: u64,
+    pub sequence: u64,
+}
+
+impl PresentationKeyGrantRequest {
+    #[must_use]
+    pub const fn new(
+        presentation_id: u64,
+        stream_id: u64,
+        request_id: u64,
+        sequence: u64,
+    ) -> Self {
+        Self {
+            presentation_id,
+            stream_id,
+            request_id,
+            sequence,
+        }
+    }
+}
+
 impl BoundGroupMediaReceiverSession {
     pub fn bind(
         session: &EstablishedControlSession,
@@ -146,31 +171,28 @@ impl BoundGroupMediaReceiverSession {
         self,
         coordinator: &mut GroupMediaCoordinator,
         authorization: &AuthorizationStore,
-        presentation_id: u64,
-        stream_id: u64,
-        request_id: u64,
-        sequence: u64,
+        request: PresentationKeyGrantRequest,
         now_unix_ms: u64,
     ) -> Result<(SensitivePresentationKeyEnvelope, PendingPresentationKeyAck), GroupMediaSessionError>
     {
-        if request_id == 0 {
+        if request.request_id == 0 {
             return Err(GroupMediaSessionError::ZeroRequestId);
         }
-        if sequence == 0 {
+        if request.sequence == 0 {
             return Err(GroupMediaSessionError::ZeroSequence);
         }
 
-        if presentation_id == 0 {
+        if request.presentation_id == 0 {
             return Err(GroupMediaSessionError::InvalidGrant(
                 GroupMediaControlError::InvalidPresentationId,
             ));
         }
-        if stream_id == 0 {
+        if request.stream_id == 0 {
             return Err(GroupMediaSessionError::InvalidGrant(
                 GroupMediaControlError::InvalidStreamId,
             ));
         }
-        if u32::try_from(stream_id).is_err() {
+        if u32::try_from(request.stream_id).is_err() {
             return Err(GroupMediaSessionError::InvalidGrant(
                 GroupMediaControlError::StreamIdOutOfRange,
             ));
@@ -189,8 +211,8 @@ impl BoundGroupMediaReceiverSession {
 
         let mut key_bytes = grant.copy_key_material_for_delivery();
         let mut wire_grant = PresentationKeyGrant {
-            presentation_id,
-            stream_id,
+            presentation_id: request.presentation_id,
+            stream_id: request.stream_id,
             epoch: epoch.get(),
             key_material: key_bytes.to_vec(),
         };
@@ -203,18 +225,18 @@ impl BoundGroupMediaReceiverSession {
 
         let sensitive = SensitivePresentationKeyEnvelope::new(ControlEnvelope {
             control_session_id: self.control_session_id,
-            sequence,
+            sequence: request.sequence,
             protocol_version: Some(version_to_wire(self.protocol_version)),
-            request_id,
+            request_id: request.request_id,
             payload: Some(control_envelope::Payload::PresentationKeyGrant(wire_grant)),
         });
 
         let pending = PendingPresentationKeyAck {
             principal,
             control_session_id: self.control_session_id,
-            request_id,
-            presentation_id,
-            stream_id,
+            request_id: request.request_id,
+            presentation_id: request.presentation_id,
+            stream_id: request.stream_id,
             epoch,
             acknowledged: false,
         };
