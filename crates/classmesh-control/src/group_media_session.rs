@@ -249,11 +249,6 @@ impl SensitivePresentationKeyEnvelope {
         Self { envelope }
     }
 
-    #[must_use]
-    const fn envelope(&self) -> &ControlEnvelope {
-        &self.envelope
-    }
-
     /// Sends this sensitive key grant exactly once over the authenticated control channel.
     ///
     /// The protobuf key bytes are zeroized before this method returns on both success and
@@ -658,7 +653,7 @@ mod tests {
             )
             .expect("key grant");
 
-        let envelope = sensitive.envelope();
+        let envelope = &sensitive.envelope;
         assert_eq!(envelope.control_session_id, 77);
         assert_eq!(envelope.request_id, 44);
         assert_eq!(envelope.sequence, 2);
