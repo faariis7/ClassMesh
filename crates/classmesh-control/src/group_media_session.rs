@@ -1,8 +1,7 @@
 use std::fmt;
 
 use classmesh_protocol::control_wire::{
-    ControlEnvelope, PresentationKeyGrant, ProtocolVersion as WireProtocolVersion,
-    control_envelope,
+    ControlEnvelope, PresentationKeyGrant, ProtocolVersion as WireProtocolVersion, control_envelope,
 };
 use classmesh_protocol::group_media_control::{
     GroupMediaControlError, group_media_control_available, validate_key_ack, validate_key_grant,
@@ -106,12 +105,7 @@ pub struct PresentationKeyGrantRequest {
 
 impl PresentationKeyGrantRequest {
     #[must_use]
-    pub const fn new(
-        presentation_id: u64,
-        stream_id: u64,
-        request_id: u64,
-        sequence: u64,
-    ) -> Self {
+    pub const fn new(presentation_id: u64, stream_id: u64, request_id: u64, sequence: u64) -> Self {
         Self {
             presentation_id,
             stream_id,
@@ -475,8 +469,8 @@ fn version_to_wire(version: ProtocolVersion) -> WireProtocolVersion {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use classmesh_protocol::control_wire::PresentationKeyAck;
     use classmesh_protocol::Capability;
+    use classmesh_protocol::control_wire::PresentationKeyAck;
     use classmesh_security::group_media_coordinator::GroupMediaReceiverInstallState;
     use classmesh_security::{CredentialFingerprint, CredentialRecord, Principal, PrincipalKind};
 
