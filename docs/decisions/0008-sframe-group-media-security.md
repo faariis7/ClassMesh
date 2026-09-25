@@ -66,8 +66,9 @@ The replay window is deliberately bounded. A forged frame that fails authenticat
 - Group-media base keys are exposed for delivery only through a bounded coordinator after a live `ReceivePresentation` authorization check.
 - Protocol v0.4 carries a `PresentationKeyGrant` only on the authenticated control channel and only when both `TeacherPresentation` and `SframeGroupMedia` were negotiated.
 - The grant binds presentation ID + stream ID + non-zero epoch + exactly 32 bytes of key material. The recipient PrincipalId is intentionally not serialized; runtime must bind delivery to the exact authenticated peer/session selected by the coordinator.
-- `PresentationKeyAck` binds the install acknowledgement to the same presentation/stream/epoch. Runtime integration must correlate the exchange with a non-zero control `request_id`.
-- The v0.4 wire payload is not yet mapped into the existing privileged-command dispatcher; Service direction/session semantics and live receiver authorization stay fail-closed until the next 7E slice.
+- `PresentationKeyAck` binds the install acknowledgement to the same presentation/stream/epoch. Each issued grant has exactly one bounded pending correlation containing authenticated receiver PrincipalId + control session + non-zero request ID + presentation + stream + epoch.
+- Sender-side delivery is created only from the server-side enrolled handshake result for a `StudentDevice` peer with the v0.4 group-media capability contract. ACK acceptance reuses the authenticated control guard and rechecks live `ReceivePresentation` authorization before installation.
+- The current Student Service remains fail-closed for group-key sender behavior because its authenticated peer is the Teacher. The binding layer is intended for the Teacher-side control runtime where the authenticated peer is the StudentDevice receiver.
 - Keys are never sent in multicast discovery/media packets.
 - Raw group-media key material is not logged or durably persisted. Generic control framing/QUIC buffers containing key bytes are zeroized after use.
 - Receiver-side decoded key bytes are imported through a dedicated API that zeroizes the caller-owned wire buffer on both success and failure; the control-layer installed receiver retains only derived SFrame key/replay state plus non-secret binding metadata.

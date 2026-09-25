@@ -41,6 +41,14 @@ impl GroupMediaKeyGrant {
     pub const fn epoch(&self) -> GroupMediaEpoch {
         self.epoch
     }
+
+    /// Copies the transient base key for one authenticated control-channel
+    /// delivery. Callers must zeroize the returned copy immediately after it
+    /// has been moved into a sensitive wire owner.
+    #[must_use]
+    pub fn copy_key_material_for_delivery(&self) -> [u8; GROUP_MEDIA_KEY_BYTES] {
+        self.key_bytes
+    }
 }
 
 impl Drop for GroupMediaKeyGrant {

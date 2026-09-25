@@ -52,9 +52,12 @@ Security rules:
 10. protocol v0.4 key delivery requires explicit `SframeGroupMedia` capability negotiation in addition to `TeacherPresentation`;
 11. the wire grant never carries a recipient PrincipalId: the recipient is the exact authenticated control peer/session selected by the coordinator, preventing a payload-supplied identity from redirecting a group key;
 12. serialized key bytes are sensitive transient material: the generic control framing/QUIC path zeroizes its process-owned intermediate encoded payloads and raw send/receive frame buffers; generated wire values and buffers must not be logged;
-13. receiver-side decoded `PresentationKeyGrant.key_material` is imported through a dedicated installer that zeroizes the protobuf buffer on success and failure, derives bounded SFrame receiver/replay state, and retains no raw base-key bytes in the control-layer installed-key object.
+13. receiver-side decoded `PresentationKeyGrant.key_material` is imported through a dedicated installer that zeroizes the protobuf buffer on success and failure, derives bounded SFrame receiver/replay state, and retains no raw base-key bytes in the control-layer installed-key object;
+14. sender-side delivery is bound to the server-side enrolled mTLS peer identity + exact control session, requires `StudentDevice` role and the v0.4 group-media capability contract, carries no payload-supplied recipient identity, and rechecks the authenticated credential + `ReceivePresentation` permission immediately before grant issuance;
+15. each issued key has one bounded pending ACK record keyed by authenticated PrincipalId + control session + request ID + presentation + stream + epoch; ACK acceptance rechecks the live credential and `ReceivePresentation` permission before installation;
+16. the current Student Service is not used as the grant sender because its authenticated peer is the Teacher. Production delivery must be hosted by the Teacher-side runtime where the authenticated peer is the StudentDevice receiver.
 
-The crypto/coordinator/wire-contract slices alone do not enable production multicast. Service session binding, authenticated key delivery/ack handling, production sender/receiver wiring and physical scale qualification remain separate Phase 7 gates.
+The crypto/coordinator/wire-contract/session-binding slices alone do not enable production multicast. Teacher runtime delivery, receiver ACK emission/runtime integration, production sender/receiver wiring and physical scale qualification remain separate Phase 7 gates.
 
 ## Unicast media
 
