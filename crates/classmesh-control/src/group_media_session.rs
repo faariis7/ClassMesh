@@ -17,7 +17,9 @@ use zeroize::Zeroize;
 use crate::authorization::{AuthenticatedControlGuard, CommandAuthorizationError};
 use crate::client_session::ClientControlSession;
 use crate::handshake::{EstablishedAuthenticatedPeer, EstablishedControlSession};
-use crate::peer_identity::{AuthenticatedPeerIdentity, PeerIdentityError, authenticated_peer_identity};
+use crate::peer_identity::{
+    AuthenticatedPeerIdentity, PeerIdentityError, authenticated_peer_identity,
+};
 use crate::quic::{ControlChannel, ControlTransportError};
 
 #[derive(Debug)]
@@ -171,8 +173,8 @@ impl BoundGroupMediaReceiverSession {
     ///
     /// Client-side Hello state describes the local Teacher, not the remote server. The
     /// receiver Principal therefore comes only from the verified server certificate and
-    /// the live authorization store. Keeping the connection and negotiated session inside
-    /// ClientControlSession prevents callers from pairing unrelated connection/session values.
+    /// the live authorization store. Accepting the bundled ClientControlSession also avoids
+    /// exposing separate connection/session parameters at this binding boundary.
     pub fn bind_client(
         session: &ClientControlSession,
         authorization: &AuthorizationStore,
