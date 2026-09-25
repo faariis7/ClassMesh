@@ -57,9 +57,11 @@ Security rules:
 15. each issued key has one bounded pending ACK record keyed by authenticated PrincipalId + control session + request ID + presentation + stream + epoch; ACK acceptance rechecks the live credential and `ReceivePresentation` permission before installation;
 16. sensitive sender envelopes are one-shot: sending consumes the grant wrapper and zeroizes the decoded protobuf key bytes before returning on either success or transport failure;
 17. receiver ACK construction is derived from the same already-installed grant envelope and preserves its exact control session, protocol version, request ID, presentation, stream and epoch without re-exposing raw key material;
-18. the current Student Service is not used as the grant sender because its authenticated peer is the Teacher. Production delivery must be hosted by the Teacher-side runtime where the authenticated peer is the StudentDevice receiver.
+18. the Student Service receiver accepts a key grant only when the v0.4 group-media contract was negotiated, the authenticated Teacher credential still has `StartPresentation`, and the grant matches the exact active Teacher principal + control session + presentation + stream owner tuple;
+19. within one live Student Service presentation binding, replacement key epochs must increase strictly; stale/equal epochs fail closed, and every pre-install rejection explicitly zeroizes decoded protobuf key bytes;
+20. the Student Service is not used as the grant sender because its authenticated peer is the Teacher. Production delivery must be hosted by the Teacher-side runtime where the authenticated peer is the StudentDevice receiver.
 
-The crypto/coordinator/wire-contract/session-binding slices alone do not enable production multicast. Teacher runtime delivery, receiver ACK emission/runtime integration, production sender/receiver wiring and physical scale qualification remain separate Phase 7 gates.
+The crypto/coordinator/wire-contract/session-binding/receiver-runtime slices alone do not enable production multicast. Teacher runtime delivery, production sender/receiver wiring and physical scale qualification remain separate Phase 7 gates.
 
 ## Unicast media
 
