@@ -1609,8 +1609,7 @@ impl InputDispatchState {
 }
 
 fn zeroize_presentation_key_envelope(envelope: &mut ControlEnvelope) {
-    if let Some(control_envelope::Payload::PresentationKeyGrant(grant)) =
-        envelope.payload.as_mut()
+    if let Some(control_envelope::Payload::PresentationKeyGrant(grant)) = envelope.payload.as_mut()
     {
         zeroize_received_presentation_key(grant);
     }
@@ -1872,12 +1871,7 @@ mod tests {
             90,
             2
         ));
-        assert!(presentation_key_epoch_is_fresh(
-            Some(&installed),
-            80,
-            90,
-            4
-        ));
+        assert!(presentation_key_epoch_is_fresh(Some(&installed), 80, 90, 4));
         assert!(!presentation_key_epoch_is_fresh(
             Some(&installed),
             81,
