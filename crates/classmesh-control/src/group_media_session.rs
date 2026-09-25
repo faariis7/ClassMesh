@@ -25,6 +25,7 @@ pub enum GroupMediaSessionError {
     IdentityMismatch,
     ReceiverRoleRequired,
     ContractUnavailable,
+    ReceiverUnauthorized,
     ZeroRequestId,
     ZeroSequence,
     InvalidGrant(GroupMediaControlError),
@@ -50,6 +51,9 @@ impl fmt::Display for GroupMediaSessionError {
             }
             Self::ContractUnavailable => {
                 formatter.write_str("group-media v0.4 capability contract is unavailable")
+            }
+            Self::ReceiverUnauthorized => {
+                formatter.write_str("group-media receiver credential/permission is no longer authorized")
             }
             Self::ZeroRequestId => {
                 formatter.write_str("group-media key grant request_id must be non-zero")
@@ -88,7 +92,7 @@ impl From<GroupMediaCoordinatorError> for GroupMediaSessionError {
 /// TeacherPresentation + SframeGroupMedia contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BoundGroupMediaReceiverSession {
-    principal: PrincipalId,
+    identity: crate::peer_identity::AuthenticatedPeerIdentity,
     control_session_id: u64,
     protocol_version: ProtocolVersion,
 }
@@ -123,7 +127,7 @@ impl BoundGroupMediaReceiverSession {
         }
 
         Ok(Self {
-            principal,
+            identity: peer.identity,
             control_session_id: session.control_session_id,
             protocol_version: session.negotiated.version,
         })
@@ -131,7 +135,7 @@ impl BoundGroupMediaReceiverSession {
 
     #[must_use]
     pub const fn principal(self) -> PrincipalId {
-        self.principal
+        self.identity.principal_id()
     }
 
     #[must_use]
@@ -147,6 +151,7 @@ impl BoundGroupMediaReceiverSession {
         stream_id: u64,
         request_id: u64,
         sequence: u64,
+        now_unix_ms: u64,
     ) -> Result<(SensitivePresentationKeyEnvelope, PendingPresentationKeyAck), GroupMediaSessionError>
     {
         if request_id == 0 {
@@ -156,7 +161,15 @@ impl BoundGroupMediaReceiverSession {
             return Err(GroupMediaSessionError::ZeroSequence);
         }
 
-        let grant = coordinator.issue_key(authorization, self.principal)?;
+        if !self
+            .identity
+            .authorize(authorization, Permission::ReceivePresentation, now_unix_ms)
+        {
+            return Err(GroupMediaSessionError::ReceiverUnauthorized);
+        }
+
+        let principal = self.identity.principal_id();
+        let grant = coordinator.issue_key(authorization, principal)?;
         let epoch = grant.epoch();
 
         let mut key_bytes = grant.copy_key_material_for_delivery();
@@ -182,7 +195,7 @@ impl BoundGroupMediaReceiverSession {
         });
 
         let pending = PendingPresentationKeyAck {
-            principal: self.principal,
+            principal,
             control_session_id: self.control_session_id,
             request_id,
             presentation_id,
@@ -584,7 +597,7 @@ mod tests {
     fn grant_is_exact_session_bound_sensitive_and_request_correlated() {
         let (_, _, authorization, mut coordinator, bound, _) = setup();
         let (sensitive, pending) = bound
-            .issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 2)
+            .issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 2, 10)
             .expect("key grant");
 
         let envelope = sensitive.envelope();
@@ -608,7 +621,7 @@ mod tests {
         let (receiver, _, authorization, mut coordinator, bound, _) = setup();
 
         assert!(matches!(
-            bound.issue_key_grant(&mut coordinator, &authorization, 55, 7, 0, 2),
+            bound.issue_key_grant(&mut coordinator, &authorization, 55, 7, 0, 2, 10),
             Err(GroupMediaSessionError::ZeroRequestId)
         ));
         assert_eq!(
@@ -617,8 +630,30 @@ mod tests {
         );
 
         assert!(matches!(
-            bound.issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 0),
+            bound.issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 0, 10),
             Err(GroupMediaSessionError::ZeroSequence)
+        ));
+        assert_eq!(
+            coordinator.receiver_state(receiver),
+            Some(GroupMediaReceiverInstallState::AwaitingKey)
+        );
+    }
+
+    #[test]
+    fn revoked_receiver_credential_blocks_grant_before_key_issue() {
+        let (receiver, credential, mut authorization, mut coordinator, bound, _) = setup();
+        let mut record = authorization
+            .principal(receiver)
+            .expect("receiver")
+            .clone();
+        record
+            .revoke_credential(credential, 5)
+            .expect("credential revoke");
+        authorization.upsert(record).expect("authorization update");
+
+        assert!(matches!(
+            bound.issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 2, 10),
+            Err(GroupMediaSessionError::ReceiverUnauthorized)
         ));
         assert_eq!(
             coordinator.receiver_state(receiver),
@@ -630,7 +665,7 @@ mod tests {
     fn exact_ack_rechecks_live_permission_and_marks_only_bound_receiver_installed() {
         let (receiver, _, authorization, mut coordinator, bound, identity) = setup();
         let (_sensitive, mut pending) = bound
-            .issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 2)
+            .issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 2, 10)
             .expect("key grant");
         let mut guard = AuthenticatedControlGuard::new(identity, 77, VERSION, 1);
         let ack = ack_envelope(77, 2, 44, 55, 7, pending.epoch().get());
@@ -649,7 +684,7 @@ mod tests {
     fn wrong_session_ack_is_rejected_before_sequence_consumption() {
         let (_, _, authorization, mut coordinator, bound, identity) = setup();
         let (_sensitive, mut pending) = bound
-            .issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 2)
+            .issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 2, 10)
             .expect("key grant");
         let mut guard = AuthenticatedControlGuard::new(identity, 77, VERSION, 1);
         let ack = ack_envelope(78, 2, 44, 55, 7, pending.epoch().get());
@@ -669,7 +704,7 @@ mod tests {
     fn request_mismatch_consumes_sequence_but_does_not_install_key() {
         let (receiver, _, authorization, mut coordinator, bound, identity) = setup();
         let (_sensitive, mut pending) = bound
-            .issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 2)
+            .issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 2, 10)
             .expect("key grant");
         let mut guard = AuthenticatedControlGuard::new(identity, 77, VERSION, 1);
 
@@ -699,7 +734,7 @@ mod tests {
     fn revoked_receiver_cannot_acknowledge_an_issued_key() {
         let (receiver, _, mut authorization, mut coordinator, bound, identity) = setup();
         let (_sensitive, mut pending) = bound
-            .issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 2)
+            .issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 2, 10)
             .expect("key grant");
         assert!(authorization.disable(receiver));
 
@@ -720,7 +755,7 @@ mod tests {
     fn ack_from_another_authenticated_principal_is_rejected_before_sequence_consumption() {
         let (_, _, authorization, mut coordinator, bound, _) = setup();
         let (_sensitive, mut pending) = bound
-            .issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 2)
+            .issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 2, 10)
             .expect("key grant");
 
         let other_identity = AuthenticatedPeerIdentity {
