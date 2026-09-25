@@ -16,6 +16,7 @@ use zeroize::Zeroize;
 
 use crate::authorization::{AuthenticatedControlGuard, CommandAuthorizationError};
 use crate::handshake::{EstablishedAuthenticatedPeer, EstablishedControlSession};
+use crate::quic::{ControlChannel, ControlTransportError};
 
 #[derive(Debug)]
 pub enum GroupMediaSessionError {
@@ -251,6 +252,20 @@ impl SensitivePresentationKeyEnvelope {
     #[must_use]
     pub const fn envelope(&self) -> &ControlEnvelope {
         &self.envelope
+    }
+
+    /// Sends this sensitive key grant exactly once over the authenticated control channel.
+    ///
+    /// The protobuf key bytes are zeroized before this method returns on both success and
+    /// transport failure. Consuming self also prevents accidental grant reuse or retransmission
+    /// after the correlation record has been created.
+    pub async fn send(
+        mut self,
+        channel: &mut ControlChannel,
+    ) -> Result<(), ControlTransportError> {
+        let result = channel.send(&self.envelope).await;
+        self.zeroize_key_material();
+        result
     }
 
     fn zeroize_key_material(&mut self) {
