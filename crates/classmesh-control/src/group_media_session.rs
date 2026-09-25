@@ -259,10 +259,7 @@ impl SensitivePresentationKeyEnvelope {
     /// The protobuf key bytes are zeroized before this method returns on both success and
     /// transport failure. Consuming self also prevents accidental grant reuse or retransmission
     /// after the correlation record has been created.
-    pub async fn send(
-        mut self,
-        channel: &mut ControlChannel,
-    ) -> Result<(), ControlTransportError> {
+    pub async fn send(mut self, channel: &mut ControlChannel) -> Result<(), ControlTransportError> {
         let result = channel.send(&self.envelope).await;
         self.zeroize_key_material();
         result
