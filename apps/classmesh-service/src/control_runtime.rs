@@ -1609,7 +1609,9 @@ impl InputDispatchState {
 }
 
 fn zeroize_presentation_key_envelope(envelope: &mut ControlEnvelope) {
-    if let Some(control_envelope::Payload::PresentationKeyGrant(grant)) = envelope.payload.as_mut() {
+    if let Some(control_envelope::Payload::PresentationKeyGrant(grant)) =
+        envelope.payload.as_mut()
+    {
         zeroize_received_presentation_key(grant);
     }
 }
