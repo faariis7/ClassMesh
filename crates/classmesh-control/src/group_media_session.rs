@@ -57,7 +57,9 @@ impl fmt::Display for GroupMediaSessionError {
             Self::ZeroSequence => {
                 formatter.write_str("group-media key grant sequence must be non-zero")
             }
-            Self::InvalidGrant(error) => write!(formatter, "invalid group-media key grant: {error:?}"),
+            Self::InvalidGrant(error) => {
+                write!(formatter, "invalid group-media key grant: {error:?}")
+            }
             Self::Coordinator(error) => write!(formatter, "group-media coordinator: {error}"),
         }
     }
@@ -261,7 +263,9 @@ pub enum PresentationKeyAckError {
 impl fmt::Display for PresentationKeyAckError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AlreadyAcknowledged => formatter.write_str("presentation key already acknowledged"),
+            Self::AlreadyAcknowledged => {
+                formatter.write_str("presentation key already acknowledged")
+            }
             Self::UnexpectedPayload => formatter.write_str("expected PresentationKeyAck payload"),
             Self::InvalidAck(error) => write!(formatter, "invalid PresentationKeyAck: {error:?}"),
             Self::PeerMismatch => formatter.write_str("presentation key ACK peer mismatch"),
@@ -288,7 +292,9 @@ impl fmt::Display for PresentationKeyAckError {
                 formatter,
                 "presentation key ACK epoch mismatch: expected={expected}, received={received}"
             ),
-            Self::Coordinator(error) => write!(formatter, "presentation key ACK coordinator: {error}"),
+            Self::Coordinator(error) => {
+                write!(formatter, "presentation key ACK coordinator: {error}")
+            }
         }
     }
 }
@@ -421,9 +427,7 @@ mod tests {
 
     use classmesh_protocol::Capability;
     use classmesh_security::group_media_coordinator::GroupMediaReceiverInstallState;
-    use classmesh_security::{
-        CredentialFingerprint, CredentialRecord, Principal, PrincipalKind,
-    };
+    use classmesh_security::{CredentialFingerprint, CredentialRecord, Principal, PrincipalKind};
 
     use crate::peer_identity::AuthenticatedPeerIdentity;
 
@@ -439,7 +443,10 @@ mod tests {
         CredentialFingerprint([value; 32])
     }
 
-    fn authorization(receiver: PrincipalId, credential: CredentialFingerprint) -> AuthorizationStore {
+    fn authorization(
+        receiver: PrincipalId,
+        credential: CredentialFingerprint,
+    ) -> AuthorizationStore {
         let mut credentials = BTreeMap::new();
         credentials.insert(credential, CredentialRecord::active(credential, 1));
         let mut store = AuthorizationStore::default();
@@ -455,7 +462,11 @@ mod tests {
         store
     }
 
-    fn peer(receiver: PrincipalId, credential: CredentialFingerprint, session_id: u64) -> EstablishedAuthenticatedPeer {
+    fn peer(
+        receiver: PrincipalId,
+        credential: CredentialFingerprint,
+        session_id: u64,
+    ) -> EstablishedAuthenticatedPeer {
         EstablishedAuthenticatedPeer {
             identity: AuthenticatedPeerIdentity {
                 principal_id: receiver,
