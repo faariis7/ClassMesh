@@ -1,7 +1,11 @@
 use std::fmt;
 
-use classmesh_protocol::control_wire::PresentationKeyGrant;
-use classmesh_protocol::group_media_control::{GroupMediaControlError, validate_key_grant};
+use classmesh_protocol::control_wire::{
+    ControlEnvelope, PresentationKeyAck, PresentationKeyGrant, control_envelope,
+};
+use classmesh_protocol::group_media_control::{
+    GroupMediaControlError, validate_key_ack, validate_key_grant,
+};
 use classmesh_security::group_media::{
     GroupMediaEpoch, GroupMediaError, GroupMediaKeyMaterial, GroupMediaReceiver,
 };
@@ -106,6 +110,93 @@ pub fn install_received_presentation_key(
     })
 }
 
+#[derive(Debug)]
+pub enum PresentationKeyAckBuildError {
+    UnexpectedPayload,
+    InvalidSessionId,
+    ZeroRequestId,
+    ZeroSequence,
+    MissingProtocolVersion,
+    BindingMismatch,
+    InvalidAck(GroupMediaControlError),
+}
+
+impl fmt::Display for PresentationKeyAckBuildError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnexpectedPayload => formatter.write_str("expected PresentationKeyGrant payload"),
+            Self::InvalidSessionId => {
+                formatter.write_str("presentation key grant control_session_id is zero")
+            }
+            Self::ZeroRequestId => formatter.write_str("presentation key grant request_id is zero"),
+            Self::ZeroSequence => formatter.write_str("presentation key ACK sequence is zero"),
+            Self::MissingProtocolVersion => {
+                formatter.write_str("presentation key grant is missing protocol_version")
+            }
+            Self::BindingMismatch => formatter
+                .write_str("installed presentation key does not match the received grant binding"),
+            Self::InvalidAck(error) => {
+                write!(formatter, "invalid presentation key ACK: {error:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PresentationKeyAckBuildError {}
+
+/// Builds the receiver ACK for an already-installed key grant.
+///
+/// The caller must perform authenticated-session, replay/sequence and presentation-ownership
+/// checks before installing the grant. This helper only preserves the exact wire correlation:
+/// same control session, protocol version, request ID, presentation, stream and epoch. Because
+/// installation zeroizes the raw grant bytes, constructing the ACK does not require retaining
+/// or re-exposing the group key.
+pub fn build_presentation_key_ack(
+    received: &ControlEnvelope,
+    installed: &InstalledPresentationKey,
+    sequence: u64,
+) -> Result<ControlEnvelope, PresentationKeyAckBuildError> {
+    if received.control_session_id == 0 {
+        return Err(PresentationKeyAckBuildError::InvalidSessionId);
+    }
+    if received.request_id == 0 {
+        return Err(PresentationKeyAckBuildError::ZeroRequestId);
+    }
+    if sequence == 0 {
+        return Err(PresentationKeyAckBuildError::ZeroSequence);
+    }
+    let protocol_version = received
+        .protocol_version
+        .ok_or(PresentationKeyAckBuildError::MissingProtocolVersion)?;
+
+    let Some(control_envelope::Payload::PresentationKeyGrant(grant)) = received.payload.as_ref()
+    else {
+        return Err(PresentationKeyAckBuildError::UnexpectedPayload);
+    };
+
+    if grant.presentation_id != installed.presentation_id()
+        || grant.stream_id != u64::from(installed.stream_id())
+        || grant.epoch != installed.epoch().get()
+    {
+        return Err(PresentationKeyAckBuildError::BindingMismatch);
+    }
+
+    let ack = PresentationKeyAck {
+        presentation_id: installed.presentation_id(),
+        stream_id: u64::from(installed.stream_id()),
+        epoch: installed.epoch().get(),
+    };
+    validate_key_ack(&ack).map_err(PresentationKeyAckBuildError::InvalidAck)?;
+
+    Ok(ControlEnvelope {
+        control_session_id: received.control_session_id,
+        sequence,
+        protocol_version: Some(protocol_version),
+        request_id: received.request_id,
+        payload: Some(control_envelope::Payload::PresentationKeyAck(ack)),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use classmesh_security::group_media::{GROUP_MEDIA_KEY_BYTES, GroupMediaSender};
@@ -118,6 +209,21 @@ mod tests {
             stream_id: 7,
             epoch: 3,
             key_material: vec![value; GROUP_MEDIA_KEY_BYTES],
+        }
+    }
+
+    fn grant_envelope(value: u8) -> ControlEnvelope {
+        ControlEnvelope {
+            control_session_id: 77,
+            sequence: 2,
+            protocol_version: Some(classmesh_protocol::control_wire::ProtocolVersion {
+                major: 0,
+                minor: 4,
+            }),
+            request_id: 44,
+            payload: Some(control_envelope::Payload::PresentationKeyGrant(grant(
+                value,
+            ))),
         }
     }
 
@@ -146,6 +252,91 @@ mod tests {
             ))
         ));
         assert!(grant.key_material.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn installed_key_builds_exact_correlated_ack_after_raw_key_zeroization() {
+        let mut envelope = grant_envelope(0x44);
+        let installed = match envelope.payload.as_mut() {
+            Some(control_envelope::Payload::PresentationKeyGrant(grant)) => {
+                install_received_presentation_key(grant).expect("receiver install")
+            }
+            _ => panic!("expected grant"),
+        };
+
+        let Some(control_envelope::Payload::PresentationKeyGrant(grant)) =
+            envelope.payload.as_ref()
+        else {
+            panic!("expected grant");
+        };
+        assert!(grant.key_material.iter().all(|byte| *byte == 0));
+
+        let ack = build_presentation_key_ack(&envelope, &installed, 3).expect("correlated ACK");
+        assert_eq!(ack.control_session_id, 77);
+        assert_eq!(ack.sequence, 3);
+        assert_eq!(ack.request_id, 44);
+        assert_eq!(
+            ack.protocol_version,
+            Some(classmesh_protocol::control_wire::ProtocolVersion { major: 0, minor: 4 })
+        );
+        let Some(control_envelope::Payload::PresentationKeyAck(ack_payload)) = ack.payload else {
+            panic!("expected ACK");
+        };
+        assert_eq!(ack_payload.presentation_id, 55);
+        assert_eq!(ack_payload.stream_id, 7);
+        assert_eq!(ack_payload.epoch, 3);
+    }
+
+    #[test]
+    fn ack_builder_rejects_metadata_tamper_after_install() {
+        let mut envelope = grant_envelope(0x45);
+        let installed = match envelope.payload.as_mut() {
+            Some(control_envelope::Payload::PresentationKeyGrant(grant)) => {
+                install_received_presentation_key(grant).expect("receiver install")
+            }
+            _ => panic!("expected grant"),
+        };
+
+        match envelope.payload.as_mut() {
+            Some(control_envelope::Payload::PresentationKeyGrant(grant)) => {
+                grant.stream_id = 8;
+            }
+            _ => panic!("expected grant"),
+        }
+
+        assert!(matches!(
+            build_presentation_key_ack(&envelope, &installed, 3),
+            Err(PresentationKeyAckBuildError::BindingMismatch)
+        ));
+        let Some(control_envelope::Payload::PresentationKeyGrant(grant)) =
+            envelope.payload.as_ref()
+        else {
+            panic!("expected grant");
+        };
+        assert!(grant.key_material.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn ack_builder_requires_nonzero_wire_correlation_fields() {
+        let mut envelope = grant_envelope(0x46);
+        let installed = match envelope.payload.as_mut() {
+            Some(control_envelope::Payload::PresentationKeyGrant(grant)) => {
+                install_received_presentation_key(grant).expect("receiver install")
+            }
+            _ => panic!("expected grant"),
+        };
+
+        envelope.request_id = 0;
+        assert!(matches!(
+            build_presentation_key_ack(&envelope, &installed, 3),
+            Err(PresentationKeyAckBuildError::ZeroRequestId)
+        ));
+
+        envelope.request_id = 44;
+        assert!(matches!(
+            build_presentation_key_ack(&envelope, &installed, 0),
+            Err(PresentationKeyAckBuildError::ZeroSequence)
+        ));
     }
 
     #[test]

@@ -68,6 +68,8 @@ The replay window is deliberately bounded. A forged frame that fails authenticat
 - The grant binds presentation ID + stream ID + non-zero epoch + exactly 32 bytes of key material. The recipient PrincipalId is intentionally not serialized; runtime must bind delivery to the exact authenticated peer/session selected by the coordinator.
 - `PresentationKeyAck` binds the install acknowledgement to the same presentation/stream/epoch. Each issued grant has exactly one bounded pending correlation containing authenticated receiver PrincipalId + control session + non-zero request ID + presentation + stream + epoch.
 - Sender-side delivery is created only from the server-side enrolled handshake result for a `StudentDevice` peer with the v0.4 group-media capability contract. ACK acceptance reuses the authenticated control guard and rechecks live `ReceivePresentation` authorization before installation.
+- Sensitive sender envelopes are one-shot: sending consumes the wrapper and zeroizes the protobuf grant key bytes before returning whether the QUIC write succeeds or fails.
+- Receiver ACK construction uses the same grant envelope only after successful key installation, preserving exact session/version/request/presentation/stream/epoch correlation while the raw grant key buffer remains zeroized.
 - The current Student Service remains fail-closed for group-key sender behavior because its authenticated peer is the Teacher. The binding layer is intended for the Teacher-side control runtime where the authenticated peer is the StudentDevice receiver.
 - Keys are never sent in multicast discovery/media packets.
 - Raw group-media key material is not logged or durably persisted. Generic control framing/QUIC buffers containing key bytes are zeroized after use.
