@@ -300,17 +300,22 @@ mod tests {
             _ => panic!("expected grant"),
         };
 
-        let Some(control_envelope::Payload::PresentationKeyGrant(grant)) =
-            envelope.payload.as_mut()
-        else {
-            panic!("expected grant");
-        };
-        grant.stream_id = 8;
+        match envelope.payload.as_mut() {
+            Some(control_envelope::Payload::PresentationKeyGrant(grant)) => {
+                grant.stream_id = 8;
+            }
+            _ => panic!("expected grant"),
+        }
 
         assert!(matches!(
             build_presentation_key_ack(&envelope, &installed, 3),
             Err(PresentationKeyAckBuildError::BindingMismatch)
         ));
+        let Some(control_envelope::Payload::PresentationKeyGrant(grant)) =
+            envelope.payload.as_ref()
+        else {
+            panic!("expected grant");
+        };
         assert!(grant.key_material.iter().all(|byte| *byte == 0));
     }
 
