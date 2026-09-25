@@ -160,6 +160,22 @@ impl BoundGroupMediaReceiverSession {
             return Err(GroupMediaSessionError::ZeroSequence);
         }
 
+        if presentation_id == 0 {
+            return Err(GroupMediaSessionError::InvalidGrant(
+                GroupMediaControlError::InvalidPresentationId,
+            ));
+        }
+        if stream_id == 0 {
+            return Err(GroupMediaSessionError::InvalidGrant(
+                GroupMediaControlError::InvalidStreamId,
+            ));
+        }
+        if u32::try_from(stream_id).is_err() {
+            return Err(GroupMediaSessionError::InvalidGrant(
+                GroupMediaControlError::StreamIdOutOfRange,
+            ));
+        }
+
         if !self
             .identity
             .authorize(authorization, Permission::ReceivePresentation, now_unix_ms)
@@ -631,6 +647,41 @@ mod tests {
         assert!(matches!(
             bound.issue_key_grant(&mut coordinator, &authorization, 55, 7, 44, 0, 10),
             Err(GroupMediaSessionError::ZeroSequence)
+        ));
+        assert_eq!(
+            coordinator.receiver_state(receiver),
+            Some(GroupMediaReceiverInstallState::AwaitingKey)
+        );
+    }
+
+    #[test]
+    fn invalid_presentation_binding_fails_before_key_issue_state_changes() {
+        let (receiver, _, authorization, mut coordinator, bound, _) = setup();
+
+        assert!(matches!(
+            bound.issue_key_grant(&mut coordinator, &authorization, 0, 7, 44, 2, 10),
+            Err(GroupMediaSessionError::InvalidGrant(
+                GroupMediaControlError::InvalidPresentationId
+            ))
+        ));
+        assert_eq!(
+            coordinator.receiver_state(receiver),
+            Some(GroupMediaReceiverInstallState::AwaitingKey)
+        );
+
+        assert!(matches!(
+            bound.issue_key_grant(
+                &mut coordinator,
+                &authorization,
+                55,
+                u64::from(u32::MAX) + 1,
+                44,
+                2,
+                10,
+            ),
+            Err(GroupMediaSessionError::InvalidGrant(
+                GroupMediaControlError::StreamIdOutOfRange
+            ))
         ));
         assert_eq!(
             coordinator.receiver_state(receiver),
