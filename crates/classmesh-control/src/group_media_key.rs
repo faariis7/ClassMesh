@@ -167,7 +167,6 @@ pub fn build_presentation_key_ack(
     }
     let protocol_version = received
         .protocol_version
-        .clone()
         .ok_or(PresentationKeyAckBuildError::MissingProtocolVersion)?;
 
     let Some(control_envelope::Payload::PresentationKeyGrant(grant)) = received.payload.as_ref()
