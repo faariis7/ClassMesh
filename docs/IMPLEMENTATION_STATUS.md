@@ -91,7 +91,9 @@ PR #162 merged the bounded 7E receiver/key coordinator: at most 64 receiver prin
 
 PR #163 merged the protocol v0.4 `PresentationKeyGrant`/`PresentationKeyAck` contract, exact 32-byte SFrame key validation and explicit `SframeGroupMedia` capability negotiation after CI #684 passed on Portable and Windows. PR #165 then hardened the generic control framing/QUIC path so process-owned intermediate protobuf payloads and raw send/receive frame buffers are zeroized after use.
 
-The current follow-up adds a receiver-side key-install primitive: validated `PresentationKeyGrant.key_material` is imported through `classmesh-security`, the caller-owned protobuf buffer is zeroized on success or failure, and the control-layer installed object retains only presentation/stream/epoch metadata plus derived SFrame decryption/replay state. The sensitive key payload is still not routed through Service dispatch; exact authenticated receiver/session binding and ACK correlation remain the next gate.
+PR #166 adds the receiver-side key-install primitive: validated `PresentationKeyGrant.key_material` is imported through `classmesh-security`, the caller-owned protobuf buffer is zeroized on success or failure, and the control-layer installed object retains only presentation/stream/epoch metadata plus derived SFrame decryption/replay state.
+
+The current follow-up adds authenticated sender-side session binding and ACK correlation. A grant can be built only from an enrolled server-side `StudentDevice` peer whose stable PrincipalId, exact control-session ID and v0.4 group-media capabilities agree. Each issued grant creates one bounded pending ACK record; ACK acceptance uses the authenticated control guard and live `ReceivePresentation` authorization before coordinator installation. The current Student Service is deliberately not wired as the sender because its peer is the Teacher; Teacher-side runtime delivery and receiver ACK emission remain pending.
 
 ## Remaining security/control work
 
