@@ -132,8 +132,12 @@ impl TeacherGroupMediaDeliveryManager {
             return Err(TeacherGroupMediaDeliveryError::ReceiverLimitExceeded);
         }
 
-        let bound =
-            BoundGroupMediaReceiverSession::bind_client(session, receiver, authorization, now_unix_ms)?;
+        let bound = BoundGroupMediaReceiverSession::bind_client(
+            session,
+            receiver,
+            authorization,
+            now_unix_ms,
+        )?;
 
         self.receivers.insert(
             receiver,
@@ -171,8 +175,12 @@ impl TeacherGroupMediaDeliveryManager {
             return Err(TeacherGroupMediaDeliveryError::SessionBindingMismatch);
         }
 
-        let bound =
-            BoundGroupMediaReceiverSession::bind_client(session, receiver, authorization, now_unix_ms)?;
+        let bound = BoundGroupMediaReceiverSession::bind_client(
+            session,
+            receiver,
+            authorization,
+            now_unix_ms,
+        )?;
         if bound.control_session_id() != state.control_session_id {
             return Err(TeacherGroupMediaDeliveryError::SessionBindingMismatch);
         }
