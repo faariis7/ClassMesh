@@ -59,9 +59,12 @@ Security rules:
 17. receiver ACK construction is derived from the same already-installed grant envelope and preserves its exact control session, protocol version, request ID, presentation, stream and epoch without re-exposing raw key material;
 18. the Student Service receiver accepts a key grant only when the v0.4 group-media contract was negotiated, the authenticated Teacher credential still has `StartPresentation`, and the grant matches the exact active Teacher principal + control session + presentation + stream owner tuple;
 19. within one live Student Service presentation binding, replacement key epochs must increase strictly; stale/equal epochs fail closed, and every pre-install rejection explicitly zeroizes decoded protobuf key bytes;
-20. the Student Service is not used as the grant sender because its authenticated peer is the Teacher. Production delivery must be hosted by the Teacher-side runtime where the authenticated peer is the StudentDevice receiver.
+20. the Student Service is not used as the grant sender because its authenticated peer is the Teacher. Teacher-side delivery binds the selected StudentDevice to the exact Quinn connection stable ID + control-session ID + negotiated version; the Quinn ID is transport ownership only and never PrincipalId;
+21. Teacher delivery state is capped at 64 receivers with exactly one pending ACK per receiver. The TLS credential is re-resolved to the exact expected stable PrincipalId before grant and ACK handling, and `ReceivePresentation` remains live-authorized;
+22. pending ACK state is installed before the asynchronous one-shot grant write. An ambiguous or failed transport send therefore remains fail-closed and cannot silently trigger a second key issuance; disconnect/removal drops only that receiver state;
+23. Teacher ACK acceptance reuses the caller-owned authenticated-session guard and its global monotonic sequence. A structurally valid but mis-correlated ACK may consume sequence state but cannot mark the key installed and does not clear the pending record; only an exact authorized ACK does.
 
-The crypto/coordinator/wire-contract/session-binding/receiver-runtime slices alone do not enable production multicast. Teacher runtime delivery, production sender/receiver wiring and physical scale qualification remain separate Phase 7 gates.
+Phase 7E control/security implementation is complete through PR #172, but it does not enable production multicast. Production multicast sender/receiver wiring remains 7F, physical multicast viability remains the 7D two-PC gate, and scale qualification remains 7H.
 
 ## Unicast media
 
