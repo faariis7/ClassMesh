@@ -136,8 +136,7 @@ mod tests {
     ) -> AuthorizationStore {
         let mut credentials = BTreeMap::new();
         for certificate in certificates {
-            let fingerprint =
-                CredentialFingerprint(Sha256::digest(certificate.as_ref()).into());
+            let fingerprint = CredentialFingerprint(Sha256::digest(certificate.as_ref()).into());
             credentials.insert(fingerprint, CredentialRecord::active(fingerprint, 100));
         }
 
