@@ -222,7 +222,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use classmesh_core::recovery::RecoveryPolicy;
-    use classmesh_protocol::control_wire::control_envelope;
+    use classmesh_protocol::control_wire::{\n        ControlEnvelope, PresentationKeyAck, ProtocolVersion as WireProtocolVersion,\n        control_envelope,\n    };
     use classmesh_protocol::{Capability, ControlRole, ProtocolVersion};
     use classmesh_security::group_media_coordinator::{
         GroupMediaCoordinator, GroupMediaReceiverInstallState, MAX_GROUP_MEDIA_RECEIVERS,
@@ -486,4 +486,124 @@ mod tests {
         assert!(!delivery.has_pending_ack(receiver));
         Ok(())
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_send_keeps_one_pending_ack_fail_closed() -> TestResult {
+        let receiver = principal(7);
+        let mut pair = session_pair(77).await?;
+        let authorization = authorization(receiver, &[pair.certificate.clone()]);
+        let mut coordinator = coordinator(&authorization, receiver);
+        let mut delivery = TeacherGroupMediaDeliveryManager::with_limit(2)?;
+
+        delivery.register_client_session(&pair.client, receiver, &authorization, 150)?;
+        pair._server_connection.close(0u32.into(), b"test shutdown");
+        let _ = pair.client.connection.closed().await;
+
+        assert!(matches!(
+            delivery
+                .send_key(
+                    receiver,
+                    &mut pair.client,
+                    &mut coordinator,
+                    &authorization,
+                    PresentationKeyGrantRequest::new(55, 7, 44, 2),
+                    150,
+                )
+                .await,
+            Err(TeacherGroupMediaDeliveryError::Transport(_))
+        ));
+        assert!(delivery.has_pending_ack(receiver));
+        assert!(matches!(
+            coordinator.receiver_state(receiver),
+            Some(GroupMediaReceiverInstallState::KeyIssued(_))
+        ));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ack_consumes_global_sequence_and_clears_only_on_success() -> TestResult {
+        let receiver = principal(7);
+        let mut pair = session_pair(77).await?;
+        let authorization = authorization(receiver, &[pair.certificate.clone()]);
+        let mut coordinator = coordinator(&authorization, receiver);
+        let mut delivery = TeacherGroupMediaDeliveryManager::with_limit(2)?;
+
+        delivery.register_client_session(&pair.client, receiver, &authorization, 150)?;
+        let epoch = delivery
+            .send_key(
+                receiver,
+                &mut pair.client,
+                &mut coordinator,
+                &authorization,
+                PresentationKeyGrantRequest::new(55, 7, 44, 2),
+                150,
+            )
+            .await?;
+
+        let mut grant_envelope = pair.server_channel.receive().await?;
+        let Some(control_envelope::Payload::PresentationKeyGrant(grant)) =
+            grant_envelope.payload.as_mut()
+        else {
+            return Err("expected PresentationKeyGrant".into());
+        };
+        grant.key_material.zeroize();
+
+        let identity = authenticated_peer_identity(&pair.client.connection, &authorization, 150)
+            .map_err(|error| format!("peer identity: {error:?}"))?;
+        let mut guard = AuthenticatedControlGuard::new(identity, 77, VERSION, 1);
+
+        let ack = |sequence: u64, request_id: u64| ControlEnvelope {
+            control_session_id: 77,
+            sequence,
+            protocol_version: Some(WireProtocolVersion {
+                major: u32::from(VERSION.major),
+                minor: u32::from(VERSION.minor),
+            }),
+            request_id,
+            payload: Some(control_envelope::Payload::PresentationKeyAck(
+                PresentationKeyAck {
+                    presentation_id: 55,
+                    stream_id: 7,
+                    epoch: epoch.get(),
+                },
+            )),
+        };
+
+        assert!(matches!(
+            delivery.accept_key_ack(
+                receiver,
+                &pair.client,
+                &mut guard,
+                &authorization,
+                &mut coordinator,
+                &ack(2, 999),
+                150,
+            ),
+            Err(TeacherGroupMediaDeliveryError::Ack(_))
+        ));
+        assert_eq!(guard.last_sequence(), 2);
+        assert!(delivery.has_pending_ack(receiver));
+        assert_eq!(
+            coordinator.receiver_state(receiver),
+            Some(GroupMediaReceiverInstallState::KeyIssued(epoch))
+        );
+
+        delivery.accept_key_ack(
+            receiver,
+            &pair.client,
+            &mut guard,
+            &authorization,
+            &mut coordinator,
+            &ack(3, 44),
+            150,
+        )?;
+        assert_eq!(guard.last_sequence(), 3);
+        assert!(!delivery.has_pending_ack(receiver));
+        assert_eq!(
+            coordinator.receiver_state(receiver),
+            Some(GroupMediaReceiverInstallState::Installed(epoch))
+        );
+        Ok(())
+    }
+
 }
