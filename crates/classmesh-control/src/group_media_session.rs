@@ -107,8 +107,8 @@ impl From<GroupMediaCoordinatorError> for GroupMediaSessionError {
 /// Server-side enrolled sessions bind from the authenticated handshake result. In the
 /// current Teacher -> Student Service client topology, the same binding resolves the
 /// TLS-verified Student Service certificate through the live authorization store.
-/// Both paths require a stable StudentDevice PrincipalId and the negotiated v0.4
-/// TeacherPresentation + SframeGroupMedia contract.
+/// Both paths require the exact caller-expected stable StudentDevice PrincipalId and the
+/// negotiated v0.4 TeacherPresentation + SframeGroupMedia contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BoundGroupMediaReceiverSession {
     identity: crate::peer_identity::AuthenticatedPeerIdentity,
@@ -177,21 +177,29 @@ impl BoundGroupMediaReceiverSession {
     ///
     /// Client-side Hello state describes the local Teacher, not the remote server. The
     /// receiver Principal therefore comes only from the verified server certificate and
-    /// the live authorization store. Accepting the bundled ClientControlSession also avoids
-    /// exposing separate connection/session parameters at this binding boundary.
+    /// the live authorization store, and it must match the caller-selected StudentDevice.
+    /// Accepting the bundled ClientControlSession also avoids exposing separate
+    /// connection/session parameters at this binding boundary.
     pub fn bind_client(
         session: &ClientControlSession,
+        expected_receiver: PrincipalId,
         authorization: &AuthorizationStore,
         now_unix_ms: u64,
     ) -> Result<Self, GroupMediaSessionError> {
         let identity = authenticated_peer_identity(&session.connection, authorization, now_unix_ms)
             .map_err(GroupMediaSessionError::PeerIdentity)?;
-        Self::bind_client_identity(&session.established, identity, authorization)
+        Self::bind_client_identity(
+            &session.established,
+            identity,
+            expected_receiver,
+            authorization,
+        )
     }
 
     fn bind_client_identity(
         session: &EstablishedControlSession,
         identity: AuthenticatedPeerIdentity,
+        expected_receiver: PrincipalId,
         authorization: &AuthorizationStore,
     ) -> Result<Self, GroupMediaSessionError> {
         if session.control_session_id == 0 {
@@ -208,6 +216,9 @@ impl BoundGroupMediaReceiverSession {
         }
 
         let principal = identity.principal_id();
+        if principal != expected_receiver {
+            return Err(GroupMediaSessionError::IdentityMismatch);
+        }
         if authorization.principal(principal).map(|record| record.kind)
             != Some(PrincipalKind::StudentDevice)
         {
