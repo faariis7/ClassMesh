@@ -92,6 +92,27 @@ impl From<ControlTransportError> for TeacherGroupMediaDeliveryError {
     }
 }
 
+pub struct PresentationKeyAckRequest<'a> {
+    receiver: PrincipalId,
+    session: &'a ClientControlSession,
+    envelope: &'a ControlEnvelope,
+}
+
+impl<'a> PresentationKeyAckRequest<'a> {
+    #[must_use]
+    pub const fn new(
+        receiver: PrincipalId,
+        session: &'a ClientControlSession,
+        envelope: &'a ControlEnvelope,
+    ) -> Self {
+        Self {
+            receiver,
+            session,
+            envelope,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ReceiverDeliverySession {
     connection_stable_id: usize,
@@ -201,19 +222,22 @@ impl TeacherGroupMediaDeliveryManager {
 
     pub fn accept_key_ack(
         &mut self,
-        receiver: PrincipalId,
-        session: &ClientControlSession,
+        request: PresentationKeyAckRequest<'_>,
         guard: &mut AuthenticatedControlGuard,
         authorization: &AuthorizationStore,
         coordinator: &mut GroupMediaCoordinator,
-        envelope: &ControlEnvelope,
         now_unix_ms: u64,
     ) -> Result<(), TeacherGroupMediaDeliveryError> {
-        self.bound_client(receiver, session, authorization, now_unix_ms)?;
+        self.bound_client(
+            request.receiver,
+            request.session,
+            authorization,
+            now_unix_ms,
+        )?;
 
         let state = self
             .receivers
-            .get_mut(&receiver)
+            .get_mut(&request.receiver)
             .ok_or(TeacherGroupMediaDeliveryError::ReceiverNotRegistered)?;
         {
             let pending = state
@@ -223,7 +247,13 @@ impl TeacherGroupMediaDeliveryManager {
 
             // Replay/sequence state is global to the caller-owned authenticated
             // control session; this manager never creates a feature-local counter.
-            pending.accept(guard, authorization, coordinator, envelope, now_unix_ms)?;
+            pending.accept(
+                guard,
+                authorization,
+                coordinator,
+                request.envelope,
+                now_unix_ms,
+            )?;
         }
 
         state.pending_ack = None;
@@ -640,12 +670,10 @@ mod tests {
 
         assert!(matches!(
             delivery.accept_key_ack(
-                receiver,
-                &pair.client,
+                PresentationKeyAckRequest::new(receiver, &pair.client, &ack(2, 999)),
                 &mut guard,
                 &authorization,
                 &mut coordinator,
-                &ack(2, 999),
                 150,
             ),
             Err(TeacherGroupMediaDeliveryError::Ack(_))
@@ -658,12 +686,10 @@ mod tests {
         );
 
         delivery.accept_key_ack(
-            receiver,
-            &pair.client,
+            PresentationKeyAckRequest::new(receiver, &pair.client, &ack(3, 44)),
             &mut guard,
             &authorization,
             &mut coordinator,
-            &ack(3, 44),
             150,
         )?;
         assert_eq!(guard.last_sequence(), 3);
