@@ -244,9 +244,9 @@ mod tests {
     use crate::ControlHello;
     use crate::authorization::AuthenticatedControlGuard;
     use crate::client_session::{ClientControlSession, connect_client_session_with_retries};
-    use crate::peer_identity::authenticated_peer_identity;
     use crate::group_media_session::PresentationKeyGrantRequest;
     use crate::handshake::{ServerHelloConfig, server_hello};
+    use crate::peer_identity::authenticated_peer_identity;
     use crate::quic::{
         ControlChannel, DEFAULT_IO_TIMEOUT, accept, client_config_with_roots,
         server_config_with_certificate,
@@ -610,5 +610,4 @@ mod tests {
         );
         Ok(())
     }
-
 }
