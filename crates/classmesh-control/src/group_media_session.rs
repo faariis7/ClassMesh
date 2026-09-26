@@ -736,6 +736,7 @@ mod tests {
         let bound = BoundGroupMediaReceiverSession::bind_client_identity(
             &teacher_session,
             identity,
+            receiver,
             &auth_store,
         )
         .expect("authenticated Student Service should bind");
@@ -748,6 +749,7 @@ mod tests {
             BoundGroupMediaReceiverSession::bind_client_identity(
                 &wrong_local_role,
                 identity,
+                receiver,
                 &auth_store
             ),
             Err(GroupMediaSessionError::TeacherRoleRequired)
@@ -762,6 +764,7 @@ mod tests {
             BoundGroupMediaReceiverSession::bind_client_identity(
                 &missing_contract,
                 identity,
+                receiver,
                 &auth_store
             ),
             Err(GroupMediaSessionError::ContractUnavailable)
@@ -780,9 +783,41 @@ mod tests {
             BoundGroupMediaReceiverSession::bind_client_identity(
                 &teacher_session,
                 identity,
+                receiver,
                 &wrong_kind_authorization
             ),
             Err(GroupMediaSessionError::ReceiverPrincipalRequired)
+        ));
+
+        let other_receiver = principal(10);
+        let other_credential = fingerprint(11);
+        let mut other_credentials = BTreeMap::new();
+        other_credentials.insert(
+            other_credential,
+            CredentialRecord::active(other_credential, 1),
+        );
+        let mut multiple_students = auth_store;
+        multiple_students
+            .upsert(Principal {
+                id: other_receiver,
+                kind: PrincipalKind::StudentDevice,
+                enabled: true,
+                permissions: BTreeSet::from([Permission::ReceivePresentation]),
+                credentials: other_credentials,
+            })
+            .expect("second student principal");
+        let other_identity = AuthenticatedPeerIdentity {
+            principal_id: other_receiver,
+            credential_fingerprint: other_credential,
+        };
+        assert!(matches!(
+            BoundGroupMediaReceiverSession::bind_client_identity(
+                &teacher_session,
+                other_identity,
+                receiver,
+                &multiple_students
+            ),
+            Err(GroupMediaSessionError::IdentityMismatch)
         ));
     }
 
