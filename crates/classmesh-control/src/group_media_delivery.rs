@@ -222,7 +222,10 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use classmesh_core::recovery::RecoveryPolicy;
-    use classmesh_protocol::control_wire::{\n        ControlEnvelope, PresentationKeyAck, ProtocolVersion as WireProtocolVersion,\n        control_envelope,\n    };
+    use classmesh_protocol::control_wire::{
+        ControlEnvelope, PresentationKeyAck, ProtocolVersion as WireProtocolVersion,
+        control_envelope,
+    };
     use classmesh_protocol::{Capability, ControlRole, ProtocolVersion};
     use classmesh_security::group_media_coordinator::{
         GroupMediaCoordinator, GroupMediaReceiverInstallState, MAX_GROUP_MEDIA_RECEIVERS,
@@ -239,7 +242,9 @@ mod tests {
     use zeroize::Zeroize;
 
     use crate::ControlHello;
+    use crate::authorization::AuthenticatedControlGuard;
     use crate::client_session::{ClientControlSession, connect_client_session_with_retries};
+    use crate::peer_identity::authenticated_peer_identity;
     use crate::group_media_session::PresentationKeyGrantRequest;
     use crate::handshake::{ServerHelloConfig, server_hello};
     use crate::quic::{
