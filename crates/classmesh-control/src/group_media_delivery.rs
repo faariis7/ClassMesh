@@ -223,13 +223,7 @@ impl TeacherGroupMediaDeliveryManager {
 
             // Replay/sequence state is global to the caller-owned authenticated
             // control session; this manager never creates a feature-local counter.
-            pending.accept(
-                guard,
-                authorization,
-                coordinator,
-                envelope,
-                now_unix_ms,
-            )?;
+            pending.accept(guard, authorization, coordinator, envelope, now_unix_ms)?;
         }
 
         state.pending_ack = None;
