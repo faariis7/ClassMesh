@@ -3,16 +3,18 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use classmesh_protocol::ProtocolVersion;
+use classmesh_protocol::control_wire::ControlEnvelope;
 use classmesh_security::group_media::GroupMediaEpoch;
 use classmesh_security::group_media_coordinator::{
     GroupMediaCoordinator, MAX_GROUP_MEDIA_RECEIVERS,
 };
 use classmesh_security::{AuthorizationStore, PrincipalId};
 
+use crate::authorization::AuthenticatedControlGuard;
 use crate::client_session::ClientControlSession;
 use crate::group_media_session::{
     BoundGroupMediaReceiverSession, GroupMediaSessionError, PendingPresentationKeyAck,
-    PresentationKeyGrantRequest,
+    PresentationKeyAckError, PresentationKeyGrantRequest,
 };
 use crate::quic::ControlTransportError;
 
@@ -24,7 +26,9 @@ pub enum TeacherGroupMediaDeliveryError {
     ReceiverNotRegistered,
     SessionBindingMismatch,
     PendingAckExists,
+    MissingPendingAck,
     Binding(GroupMediaSessionError),
+    Ack(PresentationKeyAckError),
     Transport(ControlTransportError),
 }
 
@@ -49,7 +53,11 @@ impl Display for TeacherGroupMediaDeliveryError {
             Self::PendingAckExists => {
                 formatter.write_str("Teacher group-media receiver already has a pending key ACK")
             }
+            Self::MissingPendingAck => {
+                formatter.write_str("Teacher group-media receiver has no pending key ACK")
+            }
             Self::Binding(error) => write!(formatter, "Teacher group-media binding: {error}"),
+            Self::Ack(error) => write!(formatter, "Teacher group-media ACK: {error}"),
             Self::Transport(error) => write!(formatter, "Teacher group-media transport: {error}"),
         }
     }
@@ -59,6 +67,7 @@ impl Error for TeacherGroupMediaDeliveryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Binding(error) => Some(error),
+            Self::Ack(error) => Some(error),
             Self::Transport(error) => Some(error),
             _ => None,
         }
@@ -68,6 +77,12 @@ impl Error for TeacherGroupMediaDeliveryError {
 impl From<GroupMediaSessionError> for TeacherGroupMediaDeliveryError {
     fn from(value: GroupMediaSessionError) -> Self {
         Self::Binding(value)
+    }
+}
+
+impl From<PresentationKeyAckError> for TeacherGroupMediaDeliveryError {
+    fn from(value: PresentationKeyAckError) -> Self {
+        Self::Ack(value)
     }
 }
 
@@ -160,14 +175,79 @@ impl TeacherGroupMediaDeliveryManager {
         request: PresentationKeyGrantRequest,
         now_unix_ms: u64,
     ) -> Result<GroupMediaEpoch, TeacherGroupMediaDeliveryError> {
+        let bound = self.bound_client(receiver, session, authorization, now_unix_ms)?;
+        if self
+            .receivers
+            .get(&receiver)
+            .is_some_and(|state| state.pending_ack.is_some())
+        {
+            return Err(TeacherGroupMediaDeliveryError::PendingAckExists);
+        }
+
+        let (sensitive, pending) =
+            bound.issue_key_grant(coordinator, authorization, request, now_unix_ms)?;
+        let epoch = pending.epoch();
+
+        // Correlate before the first await. A cancelled or ambiguous transport write
+        // must leave this receiver fail-closed rather than permitting another issuance.
+        self.receivers
+            .get_mut(&receiver)
+            .expect("receiver binding was validated above")
+            .pending_ack = Some(pending);
+
+        sensitive.send(&mut session.channel).await?;
+        Ok(epoch)
+    }
+
+    pub fn accept_key_ack(
+        &mut self,
+        receiver: PrincipalId,
+        session: &ClientControlSession,
+        guard: &mut AuthenticatedControlGuard,
+        authorization: &AuthorizationStore,
+        coordinator: &mut GroupMediaCoordinator,
+        envelope: &ControlEnvelope,
+        now_unix_ms: u64,
+    ) -> Result<(), TeacherGroupMediaDeliveryError> {
+        self.bound_client(receiver, session, authorization, now_unix_ms)?;
+
+        let state = self
+            .receivers
+            .get_mut(&receiver)
+            .ok_or(TeacherGroupMediaDeliveryError::ReceiverNotRegistered)?;
+        {
+            let pending = state
+                .pending_ack
+                .as_mut()
+                .ok_or(TeacherGroupMediaDeliveryError::MissingPendingAck)?;
+
+            // Replay/sequence state is global to the caller-owned authenticated
+            // control session; this manager never creates a feature-local counter.
+            pending.accept(
+                guard,
+                authorization,
+                coordinator,
+                envelope,
+                now_unix_ms,
+            )?;
+        }
+
+        state.pending_ack = None;
+        Ok(())
+    }
+
+    fn bound_client(
+        &self,
+        receiver: PrincipalId,
+        session: &ClientControlSession,
+        authorization: &AuthorizationStore,
+        now_unix_ms: u64,
+    ) -> Result<BoundGroupMediaReceiverSession, TeacherGroupMediaDeliveryError> {
         let state = self
             .receivers
             .get(&receiver)
             .ok_or(TeacherGroupMediaDeliveryError::ReceiverNotRegistered)?;
 
-        if state.pending_ack.is_some() {
-            return Err(TeacherGroupMediaDeliveryError::PendingAckExists);
-        }
         if state.connection_stable_id != session.connection.stable_id()
             || state.control_session_id != session.established.control_session_id
             || state.protocol_version != session.established.negotiated.version
@@ -185,17 +265,7 @@ impl TeacherGroupMediaDeliveryManager {
             return Err(TeacherGroupMediaDeliveryError::SessionBindingMismatch);
         }
 
-        let (sensitive, pending) =
-            bound.issue_key_grant(coordinator, authorization, request, now_unix_ms)?;
-        let epoch = pending.epoch();
-        sensitive.send(&mut session.channel).await?;
-
-        let state = self
-            .receivers
-            .get_mut(&receiver)
-            .ok_or(TeacherGroupMediaDeliveryError::ReceiverNotRegistered)?;
-        state.pending_ack = Some(pending);
-        Ok(epoch)
+        Ok(bound)
     }
 
     #[must_use]
