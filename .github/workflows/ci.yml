@@ -16,6 +16,8 @@ jobs:
   portable:
     name: Portable Rust
     runs-on: [self-hosted, linux, x64, synology]
+    env:
+      CARGO_TARGET_DIR: /opt/github-cache/target/classmesh
     steps:
       - name: Checkout
         uses: actions/checkout@v5
