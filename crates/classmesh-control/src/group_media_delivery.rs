@@ -1,3 +1,212 @@
+use std::collections::BTreeMap;
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+
+use classmesh_protocol::ProtocolVersion;
+use classmesh_security::group_media::GroupMediaEpoch;
+use classmesh_security::group_media_coordinator::{
+    GroupMediaCoordinator, MAX_GROUP_MEDIA_RECEIVERS,
+};
+use classmesh_security::{AuthorizationStore, PrincipalId};
+
+use crate::client_session::ClientControlSession;
+use crate::group_media_session::{
+    BoundGroupMediaReceiverSession, GroupMediaSessionError, PendingPresentationKeyAck,
+    PresentationKeyGrantRequest,
+};
+use crate::quic::ControlTransportError;
+
+#[derive(Debug)]
+pub enum TeacherGroupMediaDeliveryError {
+    InvalidReceiverLimit,
+    ReceiverLimitExceeded,
+    DuplicateReceiver,
+    ReceiverNotRegistered,
+    SessionBindingMismatch,
+    PendingAckExists,
+    Binding(GroupMediaSessionError),
+    Transport(ControlTransportError),
+}
+
+impl Display for TeacherGroupMediaDeliveryError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidReceiverLimit => {
+                formatter.write_str("invalid Teacher group-media receiver limit")
+            }
+            Self::ReceiverLimitExceeded => {
+                formatter.write_str("Teacher group-media receiver limit exceeded")
+            }
+            Self::DuplicateReceiver => {
+                formatter.write_str("Teacher group-media receiver session already registered")
+            }
+            Self::ReceiverNotRegistered => {
+                formatter.write_str("Teacher group-media receiver session is not registered")
+            }
+            Self::SessionBindingMismatch => {
+                formatter.write_str("Teacher group-media client session binding mismatch")
+            }
+            Self::PendingAckExists => {
+                formatter.write_str("Teacher group-media receiver already has a pending key ACK")
+            }
+            Self::Binding(error) => write!(formatter, "Teacher group-media binding: {error}"),
+            Self::Transport(error) => write!(formatter, "Teacher group-media transport: {error}"),
+        }
+    }
+}
+
+impl Error for TeacherGroupMediaDeliveryError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Binding(error) => Some(error),
+            Self::Transport(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<GroupMediaSessionError> for TeacherGroupMediaDeliveryError {
+    fn from(value: GroupMediaSessionError) -> Self {
+        Self::Binding(value)
+    }
+}
+
+impl From<ControlTransportError> for TeacherGroupMediaDeliveryError {
+    fn from(value: ControlTransportError) -> Self {
+        Self::Transport(value)
+    }
+}
+
+#[derive(Debug)]
+struct ReceiverDeliverySession {
+    connection_stable_id: usize,
+    control_session_id: u64,
+    protocol_version: ProtocolVersion,
+    pending_ack: Option<PendingPresentationKeyAck>,
+}
+
+/// Bounded Teacher-side Phase 7E key-delivery state.
+///
+/// Each registered receiver is pinned to the exact QUIC connection used to authenticate
+/// its StudentDevice certificate, in addition to the control-session ID and negotiated
+/// protocol version. Key grants are rebound to the live TLS peer immediately before send
+/// and are sent only through the bundled ClientControlSession channel.
+#[derive(Debug)]
+pub struct TeacherGroupMediaDeliveryManager {
+    receivers: BTreeMap<PrincipalId, ReceiverDeliverySession>,
+    max_receivers: usize,
+}
+
+impl Default for TeacherGroupMediaDeliveryManager {
+    fn default() -> Self {
+        Self {
+            receivers: BTreeMap::new(),
+            max_receivers: MAX_GROUP_MEDIA_RECEIVERS,
+        }
+    }
+}
+
+impl TeacherGroupMediaDeliveryManager {
+    pub fn with_limit(max_receivers: usize) -> Result<Self, TeacherGroupMediaDeliveryError> {
+        if max_receivers == 0 || max_receivers > MAX_GROUP_MEDIA_RECEIVERS {
+            return Err(TeacherGroupMediaDeliveryError::InvalidReceiverLimit);
+        }
+
+        Ok(Self {
+            receivers: BTreeMap::new(),
+            max_receivers,
+        })
+    }
+
+    pub fn register_client_session(
+        &mut self,
+        session: &ClientControlSession,
+        receiver: PrincipalId,
+        authorization: &AuthorizationStore,
+        now_unix_ms: u64,
+    ) -> Result<(), TeacherGroupMediaDeliveryError> {
+        if self.receivers.contains_key(&receiver) {
+            return Err(TeacherGroupMediaDeliveryError::DuplicateReceiver);
+        }
+        if self.receivers.len() >= self.max_receivers {
+            return Err(TeacherGroupMediaDeliveryError::ReceiverLimitExceeded);
+        }
+
+        let bound =
+            BoundGroupMediaReceiverSession::bind_client(session, receiver, authorization, now_unix_ms)?;
+
+        self.receivers.insert(
+            receiver,
+            ReceiverDeliverySession {
+                connection_stable_id: session.connection.stable_id(),
+                control_session_id: bound.control_session_id(),
+                protocol_version: session.established.negotiated.version,
+                pending_ack: None,
+            },
+        );
+        Ok(())
+    }
+
+    pub async fn send_key(
+        &mut self,
+        receiver: PrincipalId,
+        session: &mut ClientControlSession,
+        coordinator: &mut GroupMediaCoordinator,
+        authorization: &AuthorizationStore,
+        request: PresentationKeyGrantRequest,
+        now_unix_ms: u64,
+    ) -> Result<GroupMediaEpoch, TeacherGroupMediaDeliveryError> {
+        let state = self
+            .receivers
+            .get(&receiver)
+            .ok_or(TeacherGroupMediaDeliveryError::ReceiverNotRegistered)?;
+
+        if state.pending_ack.is_some() {
+            return Err(TeacherGroupMediaDeliveryError::PendingAckExists);
+        }
+        if state.connection_stable_id != session.connection.stable_id()
+            || state.control_session_id != session.established.control_session_id
+            || state.protocol_version != session.established.negotiated.version
+        {
+            return Err(TeacherGroupMediaDeliveryError::SessionBindingMismatch);
+        }
+
+        let bound =
+            BoundGroupMediaReceiverSession::bind_client(session, receiver, authorization, now_unix_ms)?;
+        if bound.control_session_id() != state.control_session_id {
+            return Err(TeacherGroupMediaDeliveryError::SessionBindingMismatch);
+        }
+
+        let (sensitive, pending) =
+            bound.issue_key_grant(coordinator, authorization, request, now_unix_ms)?;
+        let epoch = pending.epoch();
+        sensitive.send(&mut session.channel).await?;
+
+        let state = self
+            .receivers
+            .get_mut(&receiver)
+            .ok_or(TeacherGroupMediaDeliveryError::ReceiverNotRegistered)?;
+        state.pending_ack = Some(pending);
+        Ok(epoch)
+    }
+
+    #[must_use]
+    pub fn receiver_count(&self) -> usize {
+        self.receivers.len()
+    }
+
+    #[must_use]
+    pub fn has_pending_ack(&self, receiver: PrincipalId) -> bool {
+        self.receivers
+            .get(&receiver)
+            .is_some_and(|state| state.pending_ack.is_some())
+    }
+
+    pub fn remove_receiver(&mut self, receiver: PrincipalId) -> bool {
+        self.receivers.remove(&receiver).is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
