@@ -9,6 +9,7 @@ pub mod dispatch;
 pub mod enrollment;
 pub mod enrollment_result;
 pub mod framing;
+pub mod group_media_delivery;
 pub mod group_media_key;
 pub mod group_media_session;
 pub mod handshake;
