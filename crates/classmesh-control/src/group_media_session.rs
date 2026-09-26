@@ -714,7 +714,7 @@ mod tests {
         let receiver = principal(7);
         let teacher = principal(8);
         let credential = fingerprint(9);
-        let authorization = authorization(receiver, credential);
+        let auth_store = authorization(receiver, credential);
         let identity = AuthenticatedPeerIdentity {
             principal_id: receiver,
             credential_fingerprint: credential,
@@ -735,7 +735,7 @@ mod tests {
         let bound = BoundGroupMediaReceiverSession::bind_client_identity(
             &teacher_session,
             identity,
-            &authorization,
+            &auth_store,
         )
         .expect("authenticated Student Service should bind");
         assert_eq!(bound.principal(), receiver);
@@ -747,7 +747,7 @@ mod tests {
             BoundGroupMediaReceiverSession::bind_client_identity(
                 &wrong_local_role,
                 identity,
-                &authorization
+                &auth_store
             ),
             Err(GroupMediaSessionError::TeacherRoleRequired)
         ));
@@ -761,7 +761,7 @@ mod tests {
             BoundGroupMediaReceiverSession::bind_client_identity(
                 &missing_contract,
                 identity,
-                &authorization
+                &auth_store
             ),
             Err(GroupMediaSessionError::ContractUnavailable)
         ));
