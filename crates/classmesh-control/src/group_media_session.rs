@@ -104,9 +104,10 @@ impl From<GroupMediaCoordinatorError> for GroupMediaSessionError {
 
 /// Exact authenticated receiver/session binding for Phase 7E key delivery.
 ///
-/// This type can only be created from the server-side enrolled handshake result,
-/// where mTLS identity has already been resolved to the stable peer PrincipalId.
-/// It intentionally requires StudentDevice role and the negotiated v0.4
+/// Server-side enrolled sessions bind from the authenticated handshake result. In the
+/// current Teacher -> Student Service client topology, the same binding resolves the
+/// TLS-verified Student Service certificate through the live authorization store.
+/// Both paths require a stable StudentDevice PrincipalId and the negotiated v0.4
 /// TeacherPresentation + SframeGroupMedia contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BoundGroupMediaReceiverSession {
