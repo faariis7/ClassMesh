@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -35,6 +35,8 @@ use classmesh_core::adaptation::{
 };
 use classmesh_core::{NetworkMetrics, StreamKind};
 use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver};
+use classmesh_network::multicast::MulticastProbeOutcome;
+use classmesh_network::runtime_multicast_probe::probe_local_multicast_interface;
 use classmesh_protocol::control_wire::{
     ControlEnvelope, HeartbeatAck, InputEvent, KeyframeRequest,
     MediaTransport as WireMediaTransport, Nack, PresentationState as WirePresentationState,
@@ -646,12 +648,20 @@ pub(crate) struct ControlRuntimeState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ControlRuntimeConfig {
     pub(crate) bind_address: SocketAddr,
+    pub(crate) multicast_interface_ipv4: Option<Ipv4Addr>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PersistedControlRuntimeConfig {
     version: u32,
     bind_address: String,
+    #[serde(default)]
+    multicast_interface_ipv4: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalMulticastRuntime {
+    interface: Ipv4Addr,
 }
 
 impl ControlRuntimeConfig {
@@ -695,7 +705,30 @@ impl ControlRuntimeConfig {
             return Err("control runtime bind port must be non-zero".to_owned());
         }
 
-        Ok(Self { bind_address })
+        let multicast_interface_ipv4 = persisted
+            .multicast_interface_ipv4
+            .map(|value| {
+                let interface = value.parse::<Ipv4Addr>().map_err(|_| {
+                    "control runtime multicast_interface_ipv4 must be an IPv4 address".to_owned()
+                })?;
+                if interface.is_unspecified()
+                    || interface.is_loopback()
+                    || interface.is_multicast()
+                    || interface == Ipv4Addr::BROADCAST
+                {
+                    return Err(
+                        "control runtime multicast_interface_ipv4 must be a unicast IPv4 address"
+                            .to_owned(),
+                    );
+                }
+                Ok(interface)
+            })
+            .transpose()?;
+
+        Ok(Self {
+            bind_address,
+            multicast_interface_ipv4,
+        })
     }
 }
 
@@ -703,6 +736,7 @@ struct ControlRuntimeDispatch {
     input: InputDispatchChannels,
     media: FocusedMediaDispatchChannels,
     presentation_keys: PresentationKeyDispatchChannels,
+    multicast_runtime: Option<LocalMulticastRuntime>,
     worker_capabilities: Arc<WorkerCapabilityState>,
 }
 
@@ -722,6 +756,7 @@ impl ControlRuntime {
         presentation_keys: PresentationKeyDispatchChannels,
         worker_capabilities: Arc<WorkerCapabilityState>,
     ) -> Result<Self, String> {
+        let multicast_runtime = local_multicast_runtime(config.multicast_interface_ipv4);
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<SocketAddr, String>>(1);
         let (stop_tx, stop_rx) = oneshot::channel();
 
@@ -751,6 +786,7 @@ impl ControlRuntime {
                         input,
                         media,
                         presentation_keys,
+                        multicast_runtime,
                         worker_capabilities,
                     },
                 ));
@@ -818,6 +854,7 @@ async fn run_listener(
         input,
         media,
         presentation_keys,
+        multicast_runtime,
         worker_capabilities,
     } = dispatch;
     let endpoint = match build_endpoint(&state, config) {
@@ -883,7 +920,10 @@ async fn run_listener(
                     let session_id = next_session_id(&session_ids);
                     let hello_config = ServerHelloConfig {
                         local_version: PROTOCOL_VERSION,
-                        local_capabilities: service_hello_capabilities(&worker_capabilities),
+                        local_capabilities: service_hello_capabilities(
+                            &worker_capabilities,
+                            multicast_runtime.is_some(),
+                        ),
                         control_session_id: session_id,
                     };
                     let now_unix_ms = match unix_time_ms() {
@@ -1760,6 +1800,30 @@ impl InputDispatchState {
     }
 }
 
+fn local_multicast_runtime(interface: Option<Ipv4Addr>) -> Option<LocalMulticastRuntime> {
+    let interface = interface?;
+    match probe_local_multicast_interface(interface) {
+        Ok(MulticastProbeOutcome::Available) => {
+            eprintln!(
+                "ClassMesh local UDP multicast probe passed on interface {interface}"
+            );
+            Some(LocalMulticastRuntime { interface })
+        }
+        Ok(MulticastProbeOutcome::Unavailable(reason)) => {
+            eprintln!(
+                "ClassMesh local UDP multicast probe unavailable on interface {interface}: {reason:?}"
+            );
+            None
+        }
+        Err(error) => {
+            eprintln!(
+                "ClassMesh local UDP multicast probe failed on interface {interface}: {error}"
+            );
+            None
+        }
+    }
+}
+
 fn zeroize_presentation_key_envelope(envelope: &mut ControlEnvelope) {
     if let Some(control_envelope::Payload::PresentationKeyGrant(grant)) = envelope.payload.as_mut()
     {
@@ -1767,10 +1831,16 @@ fn zeroize_presentation_key_envelope(envelope: &mut ControlEnvelope) {
     }
 }
 
-fn service_hello_capabilities(worker_capabilities: &WorkerCapabilityState) -> BTreeSet<Capability> {
+fn service_hello_capabilities(
+    worker_capabilities: &WorkerCapabilityState,
+    multicast_available: bool,
+) -> BTreeSet<Capability> {
     let mut capabilities = worker_capabilities.hello_capabilities();
     capabilities.insert(Capability::TeacherPresentation);
     capabilities.insert(Capability::SframeGroupMedia);
+    if multicast_available {
+        capabilities.insert(Capability::UdpMulticast);
+    }
     capabilities
 }
 
@@ -1911,6 +1981,7 @@ mod tests {
             ControlRuntimeConfig::load(&path).expect("valid config"),
             ControlRuntimeConfig {
                 bind_address: "127.0.0.1:44991".parse().expect("socket"),
+                multicast_interface_ipv4: None,
             }
         );
 
@@ -1928,18 +1999,50 @@ mod tests {
     #[test]
     fn presentation_runtime_capability_is_explicit_and_transport_neutral() {
         let worker = WorkerCapabilityState::default();
-        let capabilities = service_hello_capabilities(&worker);
+        let capabilities = service_hello_capabilities(&worker, false);
         assert!(capabilities.contains(&Capability::TeacherPresentation));
         assert!(capabilities.contains(&Capability::SframeGroupMedia));
         assert!(capabilities.contains(&Capability::ServiceSessionWorker));
         assert!(!capabilities.contains(&Capability::UdpUnicast));
         assert!(!capabilities.contains(&Capability::QuicDatagram));
+        assert!(!capabilities.contains(&Capability::UdpMulticast));
         assert!(presentation_capability_negotiated(&capabilities));
         assert!(group_media_capability_negotiated(&capabilities));
         assert!(!presentation_capability_negotiated(&BTreeSet::new()));
-        assert!(!group_media_capability_negotiated(&BTreeSet::from([
-            Capability::TeacherPresentation,
-        ])));
+        let multicast_capabilities = service_hello_capabilities(&worker, true);
+        assert!(multicast_capabilities.contains(&Capability::UdpMulticast));
+        assert!(multicast_capabilities.contains(&Capability::TeacherPresentation));
+        assert!(multicast_capabilities.contains(&Capability::SframeGroupMedia));
+    }
+
+    #[test]
+    fn config_accepts_optional_unicast_multicast_interface_without_breaking_v1() {
+        let path = test_path();
+        fs::write(
+            &path,
+            r#"{"version":1,"bind_address":"127.0.0.1:44991","multicast_interface_ipv4":"192.0.2.10"}"#,
+        )
+        .expect("write multicast config");
+        assert_eq!(
+            ControlRuntimeConfig::load(&path).expect("valid multicast config"),
+            ControlRuntimeConfig {
+                bind_address: "127.0.0.1:44991".parse().expect("socket"),
+                multicast_interface_ipv4: Some("192.0.2.10".parse().expect("ipv4")),
+            }
+        );
+
+        for invalid in ["0.0.0.0", "127.0.0.1", "239.1.2.3", "255.255.255.255", "not-ip"] {
+            fs::write(
+                &path,
+                format!(
+                    r#"{{"version":1,"bind_address":"127.0.0.1:44991","multicast_interface_ipv4":"{invalid}"}}"#
+                ),
+            )
+            .expect("write invalid multicast config");
+            assert!(ControlRuntimeConfig::load(&path).is_err());
+        }
+
+        let _ = fs::remove_dir_all(path.parent().expect("test parent"));
     }
 
     #[test]
