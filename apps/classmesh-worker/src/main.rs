@@ -1,5 +1,7 @@
 #[cfg(windows)]
 const WORKER_IPC_EVENT_QUEUE_CAPACITY: usize = 128;
+#[cfg(windows)]
+const PRESENTATION_MULTICAST_DRAIN_LIMIT: usize = 8;
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -86,10 +88,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input_injector = InputInjector::default();
     let mut group_media_keys =
         classmesh_worker::group_media_receive::WorkerGroupMediaKeyState::default();
+    let mut presentation_multicast:
+        Option<classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime> =
+        None;
 
     loop {
         let now = Instant::now();
-        let wait = if capture.is_some() {
+        let mut wait = if capture.is_some() {
             capture_due
                 .saturating_duration_since(now)
                 .min(Duration::from_millis(50))
@@ -100,6 +105,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Duration::from_millis(250)
         };
+        if presentation_multicast.is_some() {
+            wait = wait.min(Duration::from_millis(10));
+        }
 
         match event_rx.recv_timeout(wait) {
             Ok(WorkerEvent::Control(command)) => match command {
@@ -258,8 +266,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            Ok(WorkerEvent::PresentationMulticastStart(start)) => {
+                use classmesh_windows_runtime::ipc::WorkerPresentationMulticastStartStatus;
+
+                let key_binding_matches = group_media_keys.binding().is_some_and(|binding| {
+                    classmesh_worker::presentation_multicast_receive::start_matches_key_binding(
+                        start, binding,
+                    )
+                });
+                let status = if !key_binding_matches {
+                    eprintln!(
+                        "ClassMesh Worker rejected multicast start: active presentation key binding mismatch"
+                    );
+                    WorkerPresentationMulticastStartStatus::Rejected
+                } else if presentation_multicast.as_mut().is_some_and(|runtime| {
+                    !runtime.failed() && runtime.adopt_retry(start)
+                }) {
+                    WorkerPresentationMulticastStartStatus::Started
+                } else {
+                    presentation_multicast = None;
+                    match classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime::start(start) {
+                        Ok(runtime) => {
+                            eprintln!(
+                                "ClassMesh Worker multicast receiver started: presentation={}, stream={}, group={}:{}, interface={}, teacher_source={}",
+                                start.presentation_id,
+                                start.stream_id,
+                                start.group,
+                                start.port,
+                                start.interface,
+                                start.teacher_source
+                            );
+                            presentation_multicast = Some(runtime);
+                            WorkerPresentationMulticastStartStatus::Started
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "ClassMesh Worker multicast receiver failed closed; control remains active: {error}"
+                            );
+                            WorkerPresentationMulticastStartStatus::Rejected
+                        }
+                    }
+                };
+                publish_worker_presentation_multicast_start_result(
+                    &pipe,
+                    std::process::id(),
+                    actual_session,
+                    start,
+                    status,
+                )?;
+                continue;
+            }
             Ok(WorkerEvent::PresentationKeyClear(clear)) => {
+                let multicast_matches_current_key = group_media_keys.binding().is_some_and(|binding| {
+                    presentation_multicast
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.matches_key_binding(binding))
+                });
                 let cleared = group_media_keys.clear_if_matches(clear);
+                if cleared && multicast_matches_current_key {
+                    presentation_multicast = None;
+                    eprintln!(
+                        "ClassMesh Worker stopped multicast receiver with exact presentation key clear"
+                    );
+                }
                 eprintln!(
                     "ClassMesh Worker presentation key clear processed: exact_match={cleared}"
                 );
@@ -267,14 +336,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(WorkerEvent::PresentationKeyInstall(install)) => {
                 let binding = install.binding();
-                let status = match group_media_keys.install(install) {
-                    Ok(installed) => {
-                        debug_assert_eq!(installed, binding);
-                        classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Installed
-                    }
-                    Err(error) => {
-                        eprintln!("ClassMesh Worker rejected presentation key install: {error}");
-                        classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Rejected
+                let status = if presentation_multicast
+                    .as_ref()
+                    .is_some_and(|runtime| !runtime.matches_key_binding(binding))
+                {
+                    drop(install);
+                    eprintln!(
+                        "ClassMesh Worker rejected presentation key install: multicast receiver binding mismatch"
+                    );
+                    classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Rejected
+                } else {
+                    match group_media_keys.install(install) {
+                        Ok(installed) => {
+                            debug_assert_eq!(installed, binding);
+                            classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Installed
+                        }
+                        Err(error) => {
+                            eprintln!("ClassMesh Worker rejected presentation key install: {error}");
+                            classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Rejected
+                        }
                     }
                 };
                 publish_worker_presentation_key_install_result(
@@ -332,6 +412,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("ClassMesh Worker IPC reader stopped unexpectedly".into());
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+
+        let mut presentation_multicast_failed = false;
+        if let Some(runtime) = presentation_multicast.as_ref() {
+            for _ in 0..PRESENTATION_MULTICAST_DRAIN_LIMIT {
+                let Some(outcome) = runtime.try_receive() else {
+                    break;
+                };
+                if let classmesh_network::multicast_receiver::ProtectedMulticastReceiveOutcome::Events(
+                    batch,
+                ) = outcome
+                {
+                    if let Some(binding) = group_media_keys.binding()
+                        && runtime.matches_key_binding(binding)
+                    {
+                        for feedback in batch.feedback {
+                            publish_worker_presentation_feedback(
+                                &pipe,
+                                std::process::id(),
+                                actual_session,
+                                binding,
+                                feedback,
+                            )?;
+                        }
+                    }
+                }
+            }
+            presentation_multicast_failed = runtime.failed();
+        }
+        if presentation_multicast_failed {
+            eprintln!(
+                "ClassMesh Worker multicast receive pump stopped after a media-local socket failure; control remains active"
+            );
+            presentation_multicast = None;
         }
 
         if capture.is_none() && capture_restart.is_due(Instant::now()) {
@@ -565,6 +679,9 @@ enum WorkerEvent {
         classmesh_windows_runtime::ipc_sensitive::SensitivePresentationKeyInstall,
     ),
     PresentationKeyClear(classmesh_windows_runtime::ipc::ServicePresentationKeyClear),
+    PresentationMulticastStart(
+        classmesh_windows_runtime::ipc::ServicePresentationMulticastStart,
+    ),
     IpcFailure(String),
 }
 
@@ -851,6 +968,53 @@ fn publish_worker_presentation_key_install_result(
 }
 
 #[cfg(windows)]
+fn publish_worker_presentation_multicast_start_result(
+    pipe: &classmesh_win32::NamedPipeClient,
+    process_id: u32,
+    session_id: u32,
+    start: classmesh_windows_runtime::ipc::ServicePresentationMulticastStart,
+    status: classmesh_windows_runtime::ipc::WorkerPresentationMulticastStartStatus,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = classmesh_windows_runtime::ipc::WorkerPresentationMulticastStartResult {
+        process_id,
+        session_id,
+        control_session_id: start.control_session_id,
+        request_id: start.request_id,
+        presentation_id: start.presentation_id,
+        stream_id: start.stream_id,
+        status,
+    };
+    let frame =
+        classmesh_windows_runtime::ipc::IpcFrame::worker_presentation_multicast_start_result(result)
+            .map_err(ipc_message_error)?;
+    pipe.write_all(&frame.encode().map_err(ipc_frame_error)?)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn publish_worker_presentation_feedback(
+    pipe: &classmesh_win32::NamedPipeClient,
+    process_id: u32,
+    session_id: u32,
+    binding: classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding,
+    feedback: classmesh_protocol::feedback::FeedbackMessage,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let report = classmesh_windows_runtime::ipc::WorkerPresentationFeedback {
+        process_id,
+        session_id,
+        control_session_id: binding.control_session_id,
+        request_id: binding.request_id,
+        presentation_id: binding.presentation_id,
+        epoch: binding.epoch,
+        feedback,
+    };
+    let frame = classmesh_windows_runtime::ipc::IpcFrame::worker_presentation_feedback(&report)
+        .map_err(ipc_message_error)?;
+    pipe.write_all(&frame.encode().map_err(ipc_frame_error)?)?;
+    Ok(())
+}
+
+#[cfg(windows)]
 fn publish_worker_capabilities(
     pipe: &classmesh_win32::NamedPipeClient,
     process_id: u32,
@@ -893,6 +1057,9 @@ fn worker_event_from_decoded_frame(
             }
             Ok(IpcMessage::ServicePresentationKeyClear(clear)) => {
                 Ok(WorkerEvent::PresentationKeyClear(clear))
+            }
+            Ok(IpcMessage::ServicePresentationMulticastStart(start)) => {
+                Ok(WorkerEvent::PresentationMulticastStart(start))
             }
             Ok(IpcMessage::ServiceEncoderCacheResult(result)) => {
                 Ok(WorkerEvent::EncoderCacheResult(result))
@@ -1077,6 +1244,64 @@ mod focused_profile_tests {
             panic!("expected presentation-key clear event");
         };
         assert_eq!(received, clear);
+    }
+
+    #[test]
+    fn presentation_multicast_start_routes_as_typed_worker_event() {
+        use std::net::Ipv4Addr;
+
+        use classmesh_windows_runtime::ipc::{
+            IpcFrame, ServicePresentationMulticastStart,
+        };
+        use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+
+        let start = ServicePresentationMulticastStart {
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 7,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+            group: Ipv4Addr::new(239, 10, 20, 30),
+            port: 49_000,
+            interface: Ipv4Addr::new(192, 0, 2, 10),
+            teacher_source: Ipv4Addr::new(192, 0, 2, 44),
+        };
+        let frame =
+            IpcFrame::service_presentation_multicast_start(start).expect("valid multicast start");
+        let event = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
+            .expect("multicast start routes");
+
+        let WorkerEvent::PresentationMulticastStart(received) = event else {
+            panic!("expected presentation multicast start event");
+        };
+        assert_eq!(received, start);
+    }
+
+    #[test]
+    fn service_cannot_send_worker_multicast_result_back_to_worker() {
+        use classmesh_windows_runtime::ipc::{
+            IpcFrame, WorkerPresentationMulticastStartResult,
+            WorkerPresentationMulticastStartStatus,
+        };
+        use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+
+        let result = WorkerPresentationMulticastStartResult {
+            process_id: 42,
+            session_id: 7,
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 7,
+            status: WorkerPresentationMulticastStartStatus::Started,
+        };
+        let frame = IpcFrame::worker_presentation_multicast_start_result(result)
+            .expect("valid multicast result");
+        let error = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
+            .expect_err("Worker-to-Service result must be rejected on Service-to-Worker path");
+        assert!(error.contains("unexpected IPC message after handshake"));
     }
 
     #[test]
