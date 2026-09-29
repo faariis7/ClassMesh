@@ -202,8 +202,8 @@ impl PresentationKeyWorkerLease {
         let Some(binding) = self.binding.take() else {
             return;
         };
-        if let Err(error) = self.clear_tx.try_send(binding) {
-            eprintln!("ClassMesh presentation-key cleanup queue rejected exact binding: {error}");
+        if let Err(error) = self.clear_tx.send(binding) {
+            eprintln!("ClassMesh presentation-key cleanup queue disconnected: {error}");
         }
     }
 }
