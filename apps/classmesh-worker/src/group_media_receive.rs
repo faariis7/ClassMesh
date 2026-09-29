@@ -154,6 +154,15 @@ impl WorkerGroupMediaKeyState {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use classmesh_network::multicast::{MulticastMembership, MulticastProbeOutcome};
+    use classmesh_network::multicast_receiver::{
+        ProtectedMulticastReceiveOutcome, ProtectedMulticastReceiveState,
+        ProtectedMulticastReceiverConfig,
+    };
+    use classmesh_network::{PacketizeMeta, packetize_frame};
+    use classmesh_protocol::PROTOCOL_VERSION;
     use classmesh_protocol::control_wire::PresentationKeyGrant;
     use classmesh_security::group_media::{GROUP_MEDIA_KEY_BYTES, GroupMediaSender};
 
@@ -213,18 +222,57 @@ mod tests {
             .expect("sealed frame")
     }
 
+    fn received_with_transport_stream(
+        sealed: &classmesh_security::group_media::SealedGroupMediaFrame,
+        transport_stream_id: u32,
+    ) -> ReceivedGroupMediaCiphertext {
+        let membership = MulticastMembership::new(
+            Ipv4Addr::new(239, 10, 20, 30),
+            Ipv4Addr::new(192, 168, 50, 10),
+        )
+        .expect("membership");
+        let teacher = Ipv4Addr::new(192, 168, 50, 20);
+        let config = ProtectedMulticastReceiverConfig::new(
+            membership,
+            50_000,
+            teacher,
+            transport_stream_id,
+            MulticastProbeOutcome::Available,
+        )
+        .expect("receiver config");
+        let mut receiver =
+            ProtectedMulticastReceiveState::new(config).expect("receiver state");
+        let binding = sealed.binding();
+        let packets = packetize_frame(
+            sealed.as_bytes(),
+            PacketizeMeta {
+                protocol_major: u8::try_from(PROTOCOL_VERSION.major).expect("protocol major"),
+                protocol_minor: u8::try_from(PROTOCOL_VERSION.minor).expect("protocol minor"),
+                stream_id: transport_stream_id,
+                frame_id: binding.frame_id(),
+                first_sequence: 1,
+                timestamp_us: binding.timestamp_us(),
+                keyframe: binding.keyframe(),
+            },
+        )
+        .expect("packetize ciphertext");
+        let source = SocketAddr::new(IpAddr::V4(teacher), 49_999);
+        let mut ready = None;
+        for packet in &packets {
+            if let ProtectedMulticastReceiveOutcome::Events(batch) =
+                receiver.push_packet(1_000, packet, source)
+                && let Some(frame) = batch.frames.into_iter().next()
+            {
+                ready = Some(frame);
+            }
+        }
+        ready.expect("reassembled ciphertext")
+    }
+
     fn received(
         sealed: &classmesh_security::group_media::SealedGroupMediaFrame,
     ) -> ReceivedGroupMediaCiphertext {
-        let binding = sealed.binding();
-        classmesh_network::multicast_receiver::ReceivedGroupMediaCiphertext::from_parts_for_worker(
-            binding.stream_id(),
-            binding.frame_id(),
-            binding.timestamp_us(),
-            binding.keyframe(),
-            sealed.as_bytes().to_vec(),
-        )
-        .expect("valid received ciphertext")
+        received_with_transport_stream(sealed, sealed.binding().stream_id())
     }
 
     #[test]
@@ -377,15 +425,7 @@ mod tests {
             false,
             b"frame",
         );
-        let binding = sealed.binding();
-        let wrong = classmesh_network::multicast_receiver::ReceivedGroupMediaCiphertext::from_parts_for_worker(
-            STREAM_ID + 1,
-            binding.frame_id(),
-            binding.timestamp_us(),
-            binding.keyframe(),
-            sealed.as_bytes().to_vec(),
-        )
-        .expect("wrong stream frame");
+        let wrong = received_with_transport_stream(&sealed, STREAM_ID + 1);
 
         assert!(matches!(
             state.open_frame(&wrong),
