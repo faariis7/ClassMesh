@@ -15,7 +15,7 @@ use classmesh_control::diagnostics::{
 };
 use classmesh_control::dispatch::{PrivilegedControlCommand, dispatch_privileged_command};
 use classmesh_control::group_media_key::{
-    InstalledPresentationKey, build_presentation_key_ack, install_received_presentation_key,
+    InstalledPresentationKeyBinding, build_presentation_key_ack_from_binding,
     zeroize_received_presentation_key,
 };
 use classmesh_control::handshake::{
@@ -45,6 +45,9 @@ use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::{AuthorizationStore, Permission, PrincipalId};
 use classmesh_windows_runtime::ipc::ServiceUdpStreamStart;
+use classmesh_windows_runtime::ipc_sensitive::{
+    PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
+};
 use quinn::Endpoint;
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
@@ -55,6 +58,7 @@ use tokio::sync::oneshot;
 const CONFIG_VERSION: u32 = 1;
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
+const PRESENTATION_KEY_INSTALL_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,6 +166,17 @@ pub(crate) struct FocusedMediaDispatchChannels {
     pub(crate) feedback_tx: mpsc::SyncSender<FocusedMediaFeedback>,
     pub(crate) released_session_floor: Arc<AtomicU64>,
     pub(crate) owner: Arc<AtomicU64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PresentationKeyInstallDispatch {
+    pub(crate) install: SensitivePresentationKeyInstall,
+    pub(crate) reply_tx: oneshot::Sender<Result<PresentationKeyInstallBinding, String>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PresentationKeyDispatchChannels {
+    pub(crate) install_tx: mpsc::SyncSender<PresentationKeyInstallDispatch>,
 }
 
 impl FocusedMediaDispatchChannels {
@@ -662,6 +677,7 @@ impl ControlRuntime {
         config: ControlRuntimeConfig,
         input: InputDispatchChannels,
         media: FocusedMediaDispatchChannels,
+        presentation_keys: PresentationKeyDispatchChannels,
         worker_capabilities: Arc<WorkerCapabilityState>,
     ) -> Result<Self, String> {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<SocketAddr, String>>(1);
@@ -691,6 +707,7 @@ impl ControlRuntime {
                     stop_rx,
                     input,
                     media,
+                    presentation_keys,
                     worker_capabilities,
                 ));
             })
@@ -753,6 +770,7 @@ async fn run_listener(
     mut stop_rx: oneshot::Receiver<()>,
     input: InputDispatchChannels,
     media: FocusedMediaDispatchChannels,
+    presentation_keys: PresentationKeyDispatchChannels,
     worker_capabilities: Arc<WorkerCapabilityState>,
 ) {
     let endpoint = match build_endpoint(&state, config) {
@@ -799,6 +817,7 @@ async fn run_listener(
                 let session_ids = Arc::clone(&session_ids);
                 let input = input.clone();
                 let media = media.clone();
+                let presentation_keys = presentation_keys.clone();
                 let presentation = presentation.clone();
                 let worker_capabilities = Arc::clone(&worker_capabilities);
                 tokio::spawn(async move {
@@ -851,6 +870,7 @@ async fn run_listener(
                                     authorization: authorization.as_ref(),
                                     input: &input,
                                     media: &media,
+                                    presentation_keys: &presentation_keys,
                                     presentation: &presentation,
                                 },
                             )
@@ -885,6 +905,7 @@ struct EstablishedSessionRuntime<'a> {
     authorization: &'a AuthorizationStore,
     input: &'a InputDispatchState,
     media: &'a FocusedMediaDispatchChannels,
+    presentation_keys: &'a PresentationKeyDispatchChannels,
     presentation: &'a PresentationDispatchState,
 }
 
@@ -900,6 +921,7 @@ async fn run_established_session(
         authorization,
         input,
         media,
+        presentation_keys,
         presentation,
     } = runtime;
 
@@ -914,7 +936,7 @@ async fn run_established_session(
     let mut last_inbound_at = Instant::now();
     let mut outbound_sequence = HELLO_SEQUENCE;
     let mut focused_adaptation = FocusedAdaptationState::new();
-    let mut installed_presentation_key: Option<InstalledPresentationKey> = None;
+    let mut installed_presentation_key: Option<InstalledPresentationKeyBinding> = None;
 
     loop {
         let mut envelope = match channel.receive().await {
@@ -1372,10 +1394,14 @@ async fn run_established_session(
                     return;
                 }
 
-                let installed = match envelope.payload.as_mut() {
+                let install = match envelope.payload.as_mut() {
                     Some(control_envelope::Payload::PresentationKeyGrant(grant)) => {
-                        match install_received_presentation_key(grant) {
-                            Ok(installed) => installed,
+                        match SensitivePresentationKeyInstall::take_from_control_grant(
+                            session.control_session_id,
+                            envelope.request_id,
+                            grant,
+                        ) {
+                            Ok(install) => install,
                             Err(_) => {
                                 eprintln!(
                                     "ClassMesh presentation key rejected: control.presentation.key_invalid"
@@ -1387,13 +1413,86 @@ async fn run_established_session(
                     }
                     _ => unreachable!("presentation key arm requires PresentationKeyGrant"),
                 };
+                let expected_binding = install.binding();
+                let (reply_tx, mut reply_rx) = oneshot::channel();
+                match presentation_keys
+                    .install_tx
+                    .try_send(PresentationKeyInstallDispatch { install, reply_tx })
+                {
+                    Ok(()) => {}
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        eprintln!(
+                            "ClassMesh presentation key rejected: control.presentation.worker_backpressure"
+                        );
+                        connection.close(0_u32.into(), b"presentation key worker busy");
+                        return;
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        eprintln!(
+                            "ClassMesh presentation key rejected: control.presentation.worker_unavailable"
+                        );
+                        connection.close(0_u32.into(), b"presentation key worker unavailable");
+                        return;
+                    }
+                }
+
+                let installed_binding = match tokio::time::timeout(
+                    PRESENTATION_KEY_INSTALL_TIMEOUT,
+                    &mut reply_rx,
+                )
+                .await
+                {
+                    Ok(Ok(Ok(binding))) if binding == expected_binding => binding,
+                    Ok(Ok(Ok(_))) => {
+                        eprintln!(
+                            "ClassMesh presentation key rejected: control.presentation.worker_binding_mismatch"
+                        );
+                        connection.close(0_u32.into(), b"presentation key worker mismatch");
+                        return;
+                    }
+                    Ok(Ok(Err(code))) => {
+                        eprintln!("ClassMesh presentation key rejected: {code}");
+                        connection.close(0_u32.into(), b"presentation key worker rejected");
+                        return;
+                    }
+                    Ok(Err(_)) => {
+                        eprintln!(
+                            "ClassMesh presentation key rejected: control.presentation.worker_reply_dropped"
+                        );
+                        connection.close(0_u32.into(), b"presentation key worker reply dropped");
+                        return;
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "ClassMesh presentation key rejected: control.presentation.worker_timeout"
+                        );
+                        connection.close(0_u32.into(), b"presentation key worker timeout");
+                        return;
+                    }
+                };
+                let installed = match InstalledPresentationKeyBinding::new(
+                    installed_binding.presentation_id,
+                    installed_binding.stream_id,
+                    installed_binding.epoch,
+                ) {
+                    Ok(installed) => installed,
+                    Err(_) => {
+                        eprintln!(
+                            "ClassMesh presentation key rejected: control.presentation.worker_binding_invalid"
+                        );
+                        connection.close(0_u32.into(), b"presentation key worker binding invalid");
+                        return;
+                    }
+                };
 
                 let Some(next_sequence) = outbound_sequence.checked_add(1) else {
                     eprintln!("ClassMesh control session closed: control.sequence.exhausted");
                     connection.close(0_u32.into(), b"control sequence exhausted");
                     return;
                 };
-                let ack = match build_presentation_key_ack(&envelope, &installed, next_sequence) {
+                let ack =
+                    match build_presentation_key_ack_from_binding(&envelope, installed, next_sequence)
+                    {
                     Ok(ack) => ack,
                     Err(_) => {
                         eprintln!(
@@ -1632,7 +1731,7 @@ fn group_media_capability_negotiated(capabilities: &BTreeSet<Capability>) -> boo
 }
 
 fn presentation_key_epoch_is_fresh(
-    current: Option<&InstalledPresentationKey>,
+    current: Option<&InstalledPresentationKeyBinding>,
     presentation_id: u64,
     stream_id: u64,
     epoch: u32,
@@ -1642,7 +1741,7 @@ fn presentation_key_epoch_is_fresh(
         Some(current) => {
             current.presentation_id() == presentation_id
                 && u64::from(current.stream_id()) == stream_id
-                && epoch > current.epoch().get()
+                && epoch > current.epoch()
         }
     }
 }
@@ -1850,14 +1949,8 @@ mod tests {
 
     #[test]
     fn presentation_key_epoch_must_increase_within_exact_live_binding() {
-        let mut grant = classmesh_protocol::control_wire::PresentationKeyGrant {
-            presentation_id: 80,
-            stream_id: 90,
-            epoch: 3,
-            key_material: vec![0x33; classmesh_security::group_media::GROUP_MEDIA_KEY_BYTES],
-        };
         let installed =
-            install_received_presentation_key(&mut grant).expect("test key should install");
+            InstalledPresentationKeyBinding::new(80, 90, 3).expect("valid test binding");
 
         assert!(!presentation_key_epoch_is_fresh(
             Some(&installed),
