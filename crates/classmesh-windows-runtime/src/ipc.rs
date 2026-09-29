@@ -28,7 +28,9 @@ pub(crate) const MESSAGE_SERVICE_PRESENTATION_KEY_INSTALL: u16 = 19;
 const MESSAGE_WORKER_PRESENTATION_KEY_INSTALL_RESULT: u16 = 20;
 const MESSAGE_SERVICE_PRESENTATION_KEY_CLEAR: u16 = 21;
 const MESSAGE_WORKER_PRESENTATION_FEEDBACK: u16 = 22;
+const MESSAGE_SERVICE_PRESENTATION_MULTICAST_START: u16 = 23;
 const SERVICE_UDP_STREAM_START_LEN: usize = 32;
+const SERVICE_PRESENTATION_MULTICAST_START_LEN: usize = 48;
 const WORKER_PRESENTATION_KEY_INSTALL_RESULT_LEN: usize = 48;
 const SERVICE_PRESENTATION_KEY_CLEAR_LEN: usize = 32;
 const WORKER_PRESENTATION_FEEDBACK_BINDING_LEN: usize = 36;
@@ -328,6 +330,52 @@ impl ServiceUdpStreamStart {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServicePresentationMulticastStart {
+    pub control_session_id: u64,
+    pub presentation_id: u64,
+    pub stream_id: u32,
+    pub width: u16,
+    pub height: u16,
+    pub fps: u8,
+    pub bitrate_kbps: u32,
+    pub group: Ipv4Addr,
+    pub port: u16,
+    pub interface: Ipv4Addr,
+    pub teacher_source: Ipv4Addr,
+}
+
+impl ServicePresentationMulticastStart {
+    fn validate(self) -> Result<(), IpcMessageError> {
+        if self.control_session_id == 0
+            || self.presentation_id == 0
+            || self.stream_id == 0
+            || self.port == 0
+            || !self.group.is_multicast()
+            || self.group.octets()[0] != 239
+            || !valid_multicast_interface(self.interface)
+            || !valid_teacher_source(self.teacher_source)
+        {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        StreamProfile::new(self.width, self.height, self.fps, self.bitrate_kbps)
+            .validate()
+            .map_err(|_| IpcMessageError::InvalidPayload)?;
+        Ok(())
+    }
+}
+
+fn valid_multicast_interface(address: Ipv4Addr) -> bool {
+    !address.is_unspecified()
+        && !address.is_loopback()
+        && !address.is_multicast()
+        && address != Ipv4Addr::BROADCAST
+}
+
+fn valid_teacher_source(address: Ipv4Addr) -> bool {
+    !address.is_unspecified() && !address.is_multicast() && address != Ipv4Addr::BROADCAST
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServicePresentationKeyClear {
     pub control_session_id: u64,
     pub request_id: u64,
@@ -443,6 +491,7 @@ pub enum IpcMessage {
     WorkerEncoderCacheQuery(WorkerEncoderCacheQuery),
     ServiceEncoderCacheResult(ServiceEncoderCacheResult),
     ServiceUdpStreamStart(ServiceUdpStreamStart),
+    ServicePresentationMulticastStart(ServicePresentationMulticastStart),
     ServiceMediaFeedback(FeedbackMessage),
     WorkerPresentationKeyInstallResult(WorkerPresentationKeyInstallResult),
     ServicePresentationKeyClear(ServicePresentationKeyClear),
@@ -652,6 +701,28 @@ impl IpcFrame {
         payload.extend_from_slice(&address);
         debug_assert_eq!(payload.len(), SERVICE_UDP_STREAM_START_LEN);
         Ok(Self::new(MESSAGE_SERVICE_UDP_STREAM_START, payload))
+    }
+
+    pub fn service_presentation_multicast_start(
+        start: ServicePresentationMulticastStart,
+    ) -> Result<Self, IpcMessageError> {
+        start.validate()?;
+        let mut payload = Vec::with_capacity(SERVICE_PRESENTATION_MULTICAST_START_LEN);
+        payload.extend_from_slice(&start.control_session_id.to_be_bytes());
+        payload.extend_from_slice(&start.presentation_id.to_be_bytes());
+        payload.extend_from_slice(&start.stream_id.to_be_bytes());
+        payload.extend_from_slice(&start.width.to_be_bytes());
+        payload.extend_from_slice(&start.height.to_be_bytes());
+        payload.push(start.fps);
+        payload.push(0);
+        payload.extend_from_slice(&start.port.to_be_bytes());
+        payload.extend_from_slice(&start.bitrate_kbps.to_be_bytes());
+        payload.extend_from_slice(&start.group.octets());
+        payload.extend_from_slice(&start.interface.octets());
+        payload.extend_from_slice(&start.teacher_source.octets());
+        payload.extend_from_slice(&[0_u8; 4]);
+        debug_assert_eq!(payload.len(), SERVICE_PRESENTATION_MULTICAST_START_LEN);
+        Ok(Self::new(MESSAGE_SERVICE_PRESENTATION_MULTICAST_START, payload))
     }
 
     pub fn service_media_feedback(feedback: &FeedbackMessage) -> Result<Self, IpcMessageError> {
@@ -1004,6 +1075,49 @@ impl IpcFrame {
                 };
                 start.validate()?;
                 Ok(IpcMessage::ServiceUdpStreamStart(start))
+            }
+            MESSAGE_SERVICE_PRESENTATION_MULTICAST_START => {
+                if self.payload.len() != SERVICE_PRESENTATION_MULTICAST_START_LEN
+                    || self.payload[25] != 0
+                    || self.payload[44..48].iter().any(|byte| *byte != 0)
+                {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let start = ServicePresentationMulticastStart {
+                    control_session_id: u64::from_be_bytes(
+                        self.payload[0..8].try_into().expect("eight bytes"),
+                    ),
+                    presentation_id: u64::from_be_bytes(
+                        self.payload[8..16].try_into().expect("eight bytes"),
+                    ),
+                    stream_id: u32::from_be_bytes(
+                        self.payload[16..20].try_into().expect("four bytes"),
+                    ),
+                    width: u16::from_be_bytes(
+                        self.payload[20..22].try_into().expect("two bytes"),
+                    ),
+                    height: u16::from_be_bytes(
+                        self.payload[22..24].try_into().expect("two bytes"),
+                    ),
+                    fps: self.payload[24],
+                    port: u16::from_be_bytes(
+                        self.payload[26..28].try_into().expect("two bytes"),
+                    ),
+                    bitrate_kbps: u32::from_be_bytes(
+                        self.payload[28..32].try_into().expect("four bytes"),
+                    ),
+                    group: Ipv4Addr::from(
+                        <[u8; 4]>::try_from(&self.payload[32..36]).expect("four bytes"),
+                    ),
+                    interface: Ipv4Addr::from(
+                        <[u8; 4]>::try_from(&self.payload[36..40]).expect("four bytes"),
+                    ),
+                    teacher_source: Ipv4Addr::from(
+                        <[u8; 4]>::try_from(&self.payload[40..44]).expect("four bytes"),
+                    ),
+                };
+                start.validate()?;
+                Ok(IpcMessage::ServicePresentationMulticastStart(start))
             }
             MESSAGE_SERVICE_MEDIA_FEEDBACK => {
                 let feedback = FeedbackMessage::decode(self.payload.as_slice())
@@ -1380,6 +1494,89 @@ mod tests {
                 IpcMessage::ServiceUdpStreamStart(start)
             );
         }
+    }
+
+    #[test]
+    fn service_presentation_multicast_start_round_trips_exact_binding() {
+        let start = ServicePresentationMulticastStart {
+            control_session_id: 77,
+            presentation_id: 55,
+            stream_id: 9,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+            group: Ipv4Addr::new(239, 10, 20, 30),
+            port: 49000,
+            interface: Ipv4Addr::new(192, 0, 2, 10),
+            teacher_source: Ipv4Addr::new(192, 0, 2, 44),
+        };
+        let frame =
+            IpcFrame::service_presentation_multicast_start(start).expect("valid multicast start");
+        assert_eq!(
+            frame.message().expect("typed multicast start"),
+            IpcMessage::ServicePresentationMulticastStart(start)
+        );
+    }
+
+    #[test]
+    fn service_presentation_multicast_start_rejects_invalid_binding_and_reserved_bytes() {
+        let valid = ServicePresentationMulticastStart {
+            control_session_id: 77,
+            presentation_id: 55,
+            stream_id: 9,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+            group: Ipv4Addr::new(239, 10, 20, 30),
+            port: 49000,
+            interface: Ipv4Addr::new(192, 0, 2, 10),
+            teacher_source: Ipv4Addr::new(192, 0, 2, 44),
+        };
+        for start in [
+            ServicePresentationMulticastStart {
+                control_session_id: 0,
+                ..valid
+            },
+            ServicePresentationMulticastStart {
+                presentation_id: 0,
+                ..valid
+            },
+            ServicePresentationMulticastStart {
+                stream_id: 0,
+                ..valid
+            },
+            ServicePresentationMulticastStart { port: 0, ..valid },
+            ServicePresentationMulticastStart {
+                group: Ipv4Addr::new(238, 10, 20, 30),
+                ..valid
+            },
+            ServicePresentationMulticastStart {
+                interface: Ipv4Addr::LOCALHOST,
+                ..valid
+            },
+            ServicePresentationMulticastStart {
+                teacher_source: Ipv4Addr::UNSPECIFIED,
+                ..valid
+            },
+            ServicePresentationMulticastStart { width: 0, ..valid },
+        ] {
+            assert_eq!(
+                IpcFrame::service_presentation_multicast_start(start),
+                Err(IpcMessageError::InvalidPayload)
+            );
+        }
+
+        let mut frame =
+            IpcFrame::service_presentation_multicast_start(valid).expect("valid multicast start");
+        frame.payload[25] = 1;
+        assert_eq!(frame.message(), Err(IpcMessageError::InvalidPayload));
+
+        let mut frame =
+            IpcFrame::service_presentation_multicast_start(valid).expect("valid multicast start");
+        frame.payload[47] = 1;
+        assert_eq!(frame.message(), Err(IpcMessageError::InvalidPayload));
     }
 
     #[test]
