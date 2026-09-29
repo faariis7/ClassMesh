@@ -26,8 +26,7 @@ mod windows_service_app {
     };
     use classmesh_windows_runtime::ipc::{
         IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage, ServiceUdpStreamStart,
-        WorkerPresentationFeedback, WorkerPresentationKeyInstallResult,
-        WorkerPresentationKeyInstallStatus,
+        WorkerPresentationKeyInstallResult, WorkerPresentationKeyInstallStatus,
     };
     use classmesh_windows_runtime::ipc_sensitive::{
         PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
