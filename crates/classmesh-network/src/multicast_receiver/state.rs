@@ -13,6 +13,7 @@ use super::config::{ProtectedMulticastReceiveError, ProtectedMulticastReceiverCo
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MulticastPacketDropReason {
+    MalformedDatagram,
     UnexpectedSource,
     UnexpectedProtocolVersion,
     WrongStream,
