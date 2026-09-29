@@ -36,7 +36,9 @@ impl Display for PresentationFeedbackError {
             Self::InvalidFeedbackStream => {
                 formatter.write_str("presentation feedback stream must be non-zero and fit u32")
             }
-            Self::EmptyNack => formatter.write_str("presentation NACK must contain missing packets"),
+            Self::EmptyNack => {
+                formatter.write_str("presentation NACK must contain missing packets")
+            }
             Self::TooManyMissingPackets => {
                 formatter.write_str("presentation NACK missing-packet list exceeds the bound")
             }
