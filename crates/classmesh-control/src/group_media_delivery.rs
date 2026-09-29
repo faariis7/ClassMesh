@@ -260,6 +260,17 @@ impl TeacherGroupMediaDeliveryManager {
         Ok(())
     }
 
+    pub(crate) fn validate_registered_client(
+        &self,
+        receiver: PrincipalId,
+        session: &ClientControlSession,
+        authorization: &AuthorizationStore,
+        now_unix_ms: u64,
+    ) -> Result<(), TeacherGroupMediaDeliveryError> {
+        self.bound_client(receiver, session, authorization, now_unix_ms)
+            .map(|_| ())
+    }
+
     fn bound_client(
         &self,
         receiver: PrincipalId,
