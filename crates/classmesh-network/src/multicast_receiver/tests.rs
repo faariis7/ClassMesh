@@ -1,3 +1,4 @@
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
@@ -6,7 +7,10 @@ use classmesh_security::group_media::MAX_GROUP_MEDIA_SEALED_BYTES;
 
 use crate::multicast::{MulticastMembership, MulticastProbeFailure, MulticastProbeOutcome};
 use crate::receiver::ReceiverEvent;
+use crate::udp::DatagramError;
 use crate::{MediaPacket, PacketizeMeta, packetize_frame};
+
+use super::runtime::{DatagramFailureDisposition, classify_datagram_failure};
 
 use super::*;
 
@@ -51,6 +55,28 @@ fn packets(frame_id: u64, keyframe: bool) -> Vec<MediaPacket> {
         },
     )
     .expect("test ciphertext packetizes")
+}
+
+#[test]
+fn malformed_datagrams_are_media_local_but_real_io_failures_are_not() {
+    assert_eq!(
+        classify_datagram_failure(&DatagramError::PayloadLengthMismatch),
+        DatagramFailureDisposition::DropMalformed
+    );
+    assert_eq!(
+        classify_datagram_failure(&DatagramError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "test timeout",
+        ))),
+        DatagramFailureDisposition::Tick
+    );
+    assert_eq!(
+        classify_datagram_failure(&DatagramError::Io(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "test reset",
+        ))),
+        DatagramFailureDisposition::Fail
+    );
 }
 
 #[test]
