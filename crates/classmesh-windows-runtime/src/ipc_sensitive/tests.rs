@@ -47,20 +47,40 @@ fn control_grant_is_taken_once_and_source_is_zeroized() {
 
 #[test]
 fn rejected_control_grant_still_zeroizes_source_key() {
-    let mut grant = grant(0x6a);
-    grant.stream_id = 0;
+    let mut invalid_binding = grant(0x6a);
+    invalid_binding.stream_id = 0;
     assert_eq!(
-        SensitivePresentationKeyInstall::take_from_control_grant(77, 44, &mut grant).err(),
+        SensitivePresentationKeyInstall::take_from_control_grant(
+            77,
+            44,
+            &mut invalid_binding,
+        )
+        .err(),
         Some(IpcMessageError::InvalidPayload)
     );
-    assert!(grant.key_material.iter().all(|byte| *byte == 0));
+    assert!(
+        invalid_binding
+            .key_material
+            .iter()
+            .all(|byte| *byte == 0)
+    );
 
-    let mut grant = grant(0x6b);
+    let mut invalid_session = grant(0x6b);
     assert_eq!(
-        SensitivePresentationKeyInstall::take_from_control_grant(0, 44, &mut grant).err(),
+        SensitivePresentationKeyInstall::take_from_control_grant(
+            0,
+            44,
+            &mut invalid_session,
+        )
+        .err(),
         Some(IpcMessageError::InvalidPayload)
     );
-    assert!(grant.key_material.iter().all(|byte| *byte == 0));
+    assert!(
+        invalid_session
+            .key_material
+            .iter()
+            .all(|byte| *byte == 0)
+    );
 }
 
 #[test]
@@ -121,10 +141,10 @@ fn malformed_sensitive_frame_zeroizes_caller_and_internal_buffer() {
     bytes.push(0x5a);
 
     let mut decoder = SensitiveIpcFrameDecoder::default();
-    assert_eq!(
+    assert!(matches!(
         decoder.push_bytes_zeroizing(bytes.as_mut_slice()),
         Err(IpcFrameError::InvalidSensitivePayload)
-    );
+    ));
     assert!(bytes.iter().all(|byte| *byte == 0));
     assert_eq!(decoder.buffered_len(), 0);
 }
@@ -135,10 +155,10 @@ fn sensitive_message_requires_exact_ipc_v06() {
     encoded[5] = IPC_VERSION_MINOR.saturating_sub(1);
     let mut decoder = SensitiveIpcFrameDecoder::default();
 
-    assert_eq!(
+    assert!(matches!(
         decoder.push_bytes_zeroizing(encoded.as_mut_slice()),
         Err(IpcFrameError::InvalidSensitivePayload)
-    );
+    ));
     assert!(encoded.iter().all(|byte| *byte == 0));
 }
 
