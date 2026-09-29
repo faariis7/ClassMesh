@@ -7,7 +7,8 @@ use classmesh_protocol::group_media_control::{
     GroupMediaControlError, validate_key_ack, validate_key_grant,
 };
 use classmesh_security::group_media::{
-    GroupMediaEpoch, GroupMediaError, GroupMediaKeyMaterial, GroupMediaReceiver,
+    GroupMediaEpoch, GroupMediaError, GroupMediaFrameBinding, GroupMediaKeyMaterial,
+    GroupMediaReceiver,
 };
 use zeroize::Zeroize;
 
@@ -45,12 +46,22 @@ impl InstalledPresentationKey {
         self.epoch
     }
 
-    pub fn open_frame(
+    pub fn open_bound_frame(
         &mut self,
         sealed: &[u8],
-        associated_data: &[u8],
+        frame_id: u64,
+        timestamp_us: u64,
+        keyframe: bool,
     ) -> Result<Vec<u8>, GroupMediaError> {
-        self.receiver.open_frame(sealed, associated_data)
+        let binding = GroupMediaFrameBinding::new(
+            self.presentation_id,
+            self.stream_id,
+            self.epoch,
+            frame_id,
+            timestamp_us,
+            keyframe,
+        )?;
+        self.receiver.open_bound_frame(sealed, binding)
     }
 }
 
@@ -352,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn installed_receiver_opens_frames_for_the_exact_epoch_key() {
+    fn installed_receiver_opens_only_the_canonical_bound_frame() {
         let mut sender_bytes = vec![0x33; GROUP_MEDIA_KEY_BYTES];
         let sender_material =
             GroupMediaKeyMaterial::import_received_wire(&mut sender_bytes).expect("sender key");
@@ -362,17 +373,41 @@ mod tests {
         let mut grant = grant(0x33);
         let mut installed =
             install_received_presentation_key(&mut grant).expect("receiver install");
-        let aad = b"presentation=55:stream=7:epoch=3";
+        let binding =
+            GroupMediaFrameBinding::new(55, 7, epoch, 91, 123_456, true).expect("binding");
         let sealed = sender
-            .seal_frame(b"presentation-frame", aad)
+            .seal_bound_frame(b"presentation-frame", binding)
             .expect("sealed frame");
 
         assert_eq!(
             installed
-                .open_frame(&sealed, aad)
+                .open_bound_frame(sealed.as_bytes(), 91, 123_456, true)
                 .expect("installed receiver decrypts"),
             b"presentation-frame"
         );
         assert!(grant.key_material.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn installed_receiver_reconstructs_expected_presentation_binding() {
+        let mut sender_bytes = vec![0x34; GROUP_MEDIA_KEY_BYTES];
+        let sender_material =
+            GroupMediaKeyMaterial::import_received_wire(&mut sender_bytes).expect("sender key");
+        let epoch = GroupMediaEpoch::new(3).expect("epoch");
+        let mut sender = GroupMediaSender::new(epoch, &sender_material).expect("sender");
+
+        let mut grant = grant(0x34);
+        let mut installed =
+            install_received_presentation_key(&mut grant).expect("receiver install");
+        let wrong_presentation =
+            GroupMediaFrameBinding::new(56, 7, epoch, 92, 123_457, false).expect("binding");
+        let sealed = sender
+            .seal_bound_frame(b"wrong-presentation", wrong_presentation)
+            .expect("sealed frame");
+
+        assert!(matches!(
+            installed.open_bound_frame(sealed.as_bytes(), 92, 123_457, false),
+            Err(GroupMediaError::Crypto(_))
+        ));
     }
 }
