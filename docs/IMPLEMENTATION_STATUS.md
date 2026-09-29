@@ -111,6 +111,8 @@ PR #176 adds a dedicated zeroizing local IPC v0.6 contract for the 32-byte prese
 
 PR #179 adds the portable Worker-owned key/decrypt state that will consume that IPC contract. Successful install retains only the derived SFrame receiver/replay state and non-secret correlation binding. Equal/stale epochs are rejected without replacing the current receiver; a control-session/presentation/stream change requires explicit clear rather than implicit replacement; and completed multicast ciphertext is opened only against the exact installed stream plus canonical frame metadata. Runtime Worker IPC integration and multicast decode/render are still pending.
 
+PR #180 wires presentation-key handling into the Windows Worker runtime. Post-handshake Service→Worker reads now use `SensitiveIpcFrameDecoder`; the Worker IPC event queue is bounded to 128 entries and applies backpressure instead of unbounded buffering or event drops; sensitive installs are processed by the Worker-owned derived SFrame state; and the Worker sends the exact non-secret `Installed`/`Rejected` result only after processing. `ClearPresentationKey` provides an explicit local lifecycle clear for presentation stop/session cleanup. Service-side forwarding and upstream Teacher ACK timing remain pending, as do multicast socket/decode/render runtime wiring.
+
 ## Remaining security/control work
 
 - Phase 6F physical interactive-control validation under Issue #108, including degraded/lost media while authenticated control remains responsive; hosted CI cannot close this gate;
