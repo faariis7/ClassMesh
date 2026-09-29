@@ -205,15 +205,16 @@ fn oversized_packet_count_is_dropped_before_receiver_window_allocation() {
 
 #[test]
 fn oversized_completed_ciphertext_is_not_exposed_to_sframe_runtime() {
-    let batch = ProtectedMulticastReceiveBatch::from_receiver_events(vec![
-        ReceiverEvent::FrameReady(crate::AssembledFrame {
-            stream_id: 800,
-            frame_id: 5,
-            timestamp_us: 5_000,
-            keyframe: false,
-            data: vec![0x5a; MAX_GROUP_MEDIA_SEALED_BYTES + 1],
-        }),
-    ]);
+    let batch =
+        ProtectedMulticastReceiveBatch::from_receiver_events(vec![ReceiverEvent::FrameReady(
+            crate::AssembledFrame {
+                stream_id: 800,
+                frame_id: 5,
+                timestamp_us: 5_000,
+                keyframe: false,
+                data: vec![0x5a; MAX_GROUP_MEDIA_SEALED_BYTES + 1],
+            },
+        )]);
 
     assert!(batch.frames.is_empty());
     assert_eq!(batch.dropped_invalid_frames, 1);
