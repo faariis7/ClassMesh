@@ -16,6 +16,8 @@ pub const MAX_GROUP_MEDIA_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_GROUP_MEDIA_SEALED_BYTES: usize = MAX_GROUP_MEDIA_FRAME_BYTES + 64;
 
 const GROUP_MEDIA_CIPHER_SUITE: CipherSuite = CipherSuite::AesGcm256Sha512;
+const GROUP_MEDIA_AAD_MAGIC: &[u8; 4] = b"CMG1";
+pub const GROUP_MEDIA_BOUND_AAD_BYTES: usize = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GroupMediaEpoch(NonZeroU32);
@@ -35,6 +37,89 @@ impl GroupMediaEpoch {
     #[must_use]
     pub const fn sframe_key_id(self) -> u64 {
         self.get() as u64
+    }
+}
+
+/// Canonical non-secret metadata authenticated alongside one SFrame-protected presentation frame.
+///
+/// The fixed-width encoding is intentionally transport-neutral: packet sequence/index fields are
+/// excluded because packetization happens after SFrame sealing. The receiver reconstructs this
+/// exact binding from its authenticated presentation state plus the assembled media frame metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupMediaFrameBinding {
+    presentation_id: u64,
+    stream_id: u32,
+    epoch: GroupMediaEpoch,
+    frame_id: u64,
+    timestamp_us: u64,
+    keyframe: bool,
+}
+
+impl GroupMediaFrameBinding {
+    pub fn new(
+        presentation_id: u64,
+        stream_id: u32,
+        epoch: GroupMediaEpoch,
+        frame_id: u64,
+        timestamp_us: u64,
+        keyframe: bool,
+    ) -> Result<Self, GroupMediaError> {
+        if presentation_id == 0 {
+            return Err(GroupMediaError::InvalidPresentationId);
+        }
+        if stream_id == 0 {
+            return Err(GroupMediaError::InvalidStreamId);
+        }
+        Ok(Self {
+            presentation_id,
+            stream_id,
+            epoch,
+            frame_id,
+            timestamp_us,
+            keyframe,
+        })
+    }
+
+    #[must_use]
+    pub const fn presentation_id(self) -> u64 {
+        self.presentation_id
+    }
+
+    #[must_use]
+    pub const fn stream_id(self) -> u32 {
+        self.stream_id
+    }
+
+    #[must_use]
+    pub const fn epoch(self) -> GroupMediaEpoch {
+        self.epoch
+    }
+
+    #[must_use]
+    pub const fn frame_id(self) -> u64 {
+        self.frame_id
+    }
+
+    #[must_use]
+    pub const fn timestamp_us(self) -> u64 {
+        self.timestamp_us
+    }
+
+    #[must_use]
+    pub const fn keyframe(self) -> bool {
+        self.keyframe
+    }
+
+    fn associated_data(self) -> [u8; GROUP_MEDIA_BOUND_AAD_BYTES] {
+        let mut aad = [0_u8; GROUP_MEDIA_BOUND_AAD_BYTES];
+        aad[0..4].copy_from_slice(GROUP_MEDIA_AAD_MAGIC);
+        aad[4..12].copy_from_slice(&self.presentation_id.to_be_bytes());
+        aad[12..16].copy_from_slice(&self.stream_id.to_be_bytes());
+        aad[16..20].copy_from_slice(&self.epoch.get().to_be_bytes());
+        aad[20..28].copy_from_slice(&self.frame_id.to_be_bytes());
+        aad[28..36].copy_from_slice(&self.timestamp_us.to_be_bytes());
+        aad[36] = u8::from(self.keyframe);
+        aad
     }
 }
 
@@ -88,6 +173,38 @@ impl Drop for GroupMediaKeyMaterial {
     }
 }
 
+/// Opaque SFrame ciphertext intended for the group-media transport path.
+///
+/// There is deliberately no public constructor from raw H.264 bytes. Production multicast code can
+/// require this type and therefore cannot accidentally accept an unprotected encoded frame.
+pub struct SealedGroupMediaFrame(Vec<u8>);
+
+impl SealedGroupMediaFrame {
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl fmt::Debug for SealedGroupMediaFrame {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SealedGroupMediaFrame")
+            .field("len", &self.0.len())
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupMediaReplayError {
     UnexpectedEpoch,
@@ -98,6 +215,9 @@ pub enum GroupMediaReplayError {
 #[derive(Debug)]
 pub enum GroupMediaError {
     InvalidEpoch,
+    InvalidPresentationId,
+    InvalidStreamId,
+    BindingEpochMismatch,
     InvalidReplayTolerance,
     InvalidKeyMaterialLength,
     KeyGenerationFailed,
@@ -113,6 +233,13 @@ impl fmt::Display for GroupMediaError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidEpoch => formatter.write_str("group-media epoch must be non-zero"),
+            Self::InvalidPresentationId => {
+                formatter.write_str("group-media presentation id must be non-zero")
+            }
+            Self::InvalidStreamId => formatter.write_str("group-media stream id must be non-zero"),
+            Self::BindingEpochMismatch => {
+                formatter.write_str("group-media frame binding epoch does not match installed key")
+            }
             Self::InvalidReplayTolerance => {
                 formatter.write_str("group-media replay tolerance is outside the bounded range")
             }
@@ -139,6 +266,9 @@ impl std::error::Error for GroupMediaError {
         match self {
             Self::Crypto(error) => Some(error),
             Self::InvalidEpoch
+            | Self::InvalidPresentationId
+            | Self::InvalidStreamId
+            | Self::BindingEpochMismatch
             | Self::InvalidReplayTolerance
             | Self::InvalidKeyMaterialLength
             | Self::KeyGenerationFailed
@@ -179,6 +309,19 @@ impl GroupMediaSender {
     #[must_use]
     pub const fn epoch(&self) -> GroupMediaEpoch {
         self.epoch
+    }
+
+    pub fn seal_bound_frame(
+        &mut self,
+        plaintext: &[u8],
+        binding: GroupMediaFrameBinding,
+    ) -> Result<SealedGroupMediaFrame, GroupMediaError> {
+        if binding.epoch() != self.epoch {
+            return Err(GroupMediaError::BindingEpochMismatch);
+        }
+        let associated_data = binding.associated_data();
+        self.seal_frame(plaintext, &associated_data)
+            .map(SealedGroupMediaFrame)
     }
 
     pub fn seal_frame(
@@ -250,6 +393,18 @@ impl GroupMediaReceiver {
     #[must_use]
     pub const fn epoch(&self) -> GroupMediaEpoch {
         self.epoch
+    }
+
+    pub fn open_bound_frame(
+        &mut self,
+        sealed: &[u8],
+        binding: GroupMediaFrameBinding,
+    ) -> Result<Vec<u8>, GroupMediaError> {
+        if binding.epoch() != self.epoch {
+            return Err(GroupMediaError::BindingEpochMismatch);
+        }
+        let associated_data = binding.associated_data();
+        self.open_frame(sealed, &associated_data)
     }
 
     pub fn open_frame(
@@ -412,6 +567,78 @@ mod tests {
             .open_frame(&sealed, aad)
             .expect("frame should decrypt");
         assert_eq!(opened, plaintext);
+    }
+
+    #[test]
+    fn bound_frame_round_trip_authenticates_presentation_metadata() {
+        let material = key(0x71);
+        let epoch = epoch(7);
+        let mut sender = GroupMediaSender::new(epoch, &material).expect("sender");
+        let mut receiver =
+            GroupMediaReceiver::with_default_replay_tolerance(epoch, &material).expect("receiver");
+        let binding = GroupMediaFrameBinding::new(10, 20, epoch, 30, 40, true)
+            .expect("valid binding");
+        let sealed = sender
+            .seal_bound_frame(b"protected presentation frame", binding)
+            .expect("sealed bound frame");
+
+        assert!(!sealed.is_empty());
+        assert_eq!(
+            receiver
+                .open_bound_frame(sealed.as_bytes(), binding)
+                .expect("matching binding opens"),
+            b"protected presentation frame"
+        );
+    }
+
+    #[test]
+    fn wrong_bound_metadata_fails_without_consuming_replay_state() {
+        let material = key(0x72);
+        let epoch = epoch(8);
+        let mut sender = GroupMediaSender::new(epoch, &material).expect("sender");
+        let mut receiver =
+            GroupMediaReceiver::with_default_replay_tolerance(epoch, &material).expect("receiver");
+        let binding = GroupMediaFrameBinding::new(11, 21, epoch, 31, 41, false)
+            .expect("valid binding");
+        let sealed = sender
+            .seal_bound_frame(b"frame", binding)
+            .expect("sealed bound frame");
+        let wrong = GroupMediaFrameBinding::new(12, 21, epoch, 31, 41, false)
+            .expect("valid wrong binding");
+
+        assert!(matches!(
+            receiver.open_bound_frame(sealed.as_bytes(), wrong),
+            Err(GroupMediaError::Crypto(_))
+        ));
+        assert_eq!(
+            receiver
+                .open_bound_frame(sealed.as_bytes(), binding)
+                .expect("failed authentication must not consume replay state"),
+            b"frame"
+        );
+    }
+
+    #[test]
+    fn bound_frame_requires_nonzero_ids_and_matching_epoch() {
+        let first = epoch(9);
+        let second = epoch(10);
+        assert!(matches!(
+            GroupMediaFrameBinding::new(0, 1, first, 1, 1, false),
+            Err(GroupMediaError::InvalidPresentationId)
+        ));
+        assert!(matches!(
+            GroupMediaFrameBinding::new(1, 0, first, 1, 1, false),
+            Err(GroupMediaError::InvalidStreamId)
+        ));
+
+        let material = key(0x73);
+        let mut sender = GroupMediaSender::new(first, &material).expect("sender");
+        let binding = GroupMediaFrameBinding::new(1, 2, second, 3, 4, false)
+            .expect("binding");
+        assert!(matches!(
+            sender.seal_bound_frame(b"frame", binding),
+            Err(GroupMediaError::BindingEpochMismatch)
+        ));
     }
 
     #[test]
