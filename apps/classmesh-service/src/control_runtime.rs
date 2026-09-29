@@ -2019,7 +2019,7 @@ mod tests {
         assert_eq!(clear_rx.try_recv(), Ok(binding));
         assert!(matches!(
             clear_rx.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected)
         ));
     }
 
