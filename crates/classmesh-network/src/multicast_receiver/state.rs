@@ -208,8 +208,7 @@ impl ProtectedMulticastReceiveState {
                 MulticastPacketDropReason::WrongStream,
             );
         }
-        let max_packets =
-            MAX_GROUP_MEDIA_SEALED_BYTES.div_ceil(MAX_PACKET_PAYLOAD);
+        let max_packets = MAX_GROUP_MEDIA_SEALED_BYTES.div_ceil(MAX_PACKET_PAYLOAD);
         if usize::from(packet.header.packet_count) > max_packets {
             return ProtectedMulticastReceiveOutcome::Dropped(
                 MulticastPacketDropReason::FrameTooLarge,
