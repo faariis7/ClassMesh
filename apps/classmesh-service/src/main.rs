@@ -214,13 +214,21 @@ mod windows_service_app {
                         Ok(reader) => {
                             let _capability_reader = spawn_worker_capability_reader(
                                 reader,
-                                Arc::clone(&self.capabilities),
-                                Arc::clone(&self.encoder_capability_cache),
-                                self.presentation_key_result_tx.clone(),
-                                self.presentation_feedback.clone(),
-                                worker_generation,
-                                process_id,
-                                session.0,
+                                WorkerCapabilityReaderRuntime {
+                                    capabilities: Arc::clone(&self.capabilities),
+                                    encoder_capability_cache: Arc::clone(
+                                        &self.encoder_capability_cache,
+                                    ),
+                                    presentation_key_result_tx: self
+                                        .presentation_key_result_tx
+                                        .clone(),
+                                    presentation_feedback: self.presentation_feedback.clone(),
+                                },
+                                WorkerCapabilityReaderIdentity {
+                                    generation: worker_generation,
+                                    process_id,
+                                    session_id: session.0,
+                                },
                             );
                         }
                         Err(error) => {
@@ -593,16 +601,37 @@ mod windows_service_app {
         }
     }
 
-    fn spawn_worker_capability_reader(
-        pipe: NamedPipeServer,
+    #[derive(Clone)]
+    struct WorkerCapabilityReaderRuntime {
         capabilities: Arc<WorkerCapabilityState>,
         encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
         presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
         presentation_feedback: PresentationFeedbackBus,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct WorkerCapabilityReaderIdentity {
         generation: u64,
-        expected_process_id: u32,
-        expected_session_id: u32,
+        process_id: u32,
+        session_id: u32,
+    }
+
+    fn spawn_worker_capability_reader(
+        pipe: NamedPipeServer,
+        runtime: WorkerCapabilityReaderRuntime,
+        identity: WorkerCapabilityReaderIdentity,
     ) -> thread::JoinHandle<()> {
+        let WorkerCapabilityReaderRuntime {
+            capabilities,
+            encoder_capability_cache,
+            presentation_key_result_tx,
+            presentation_feedback,
+        } = runtime;
+        let WorkerCapabilityReaderIdentity {
+            generation,
+            process_id: expected_process_id,
+            session_id: expected_session_id,
+        } = identity;
         thread::spawn(move || {
             let mut decoder = IpcFrameDecoder::default();
             let mut buffer = [0_u8; 4096];
