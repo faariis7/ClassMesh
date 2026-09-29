@@ -30,6 +30,8 @@ Phase 5B carries control envelopes on a long-lived reliable bidirectional QUIC s
 
 Current transport bounds:
 
+- after Hello/session establishment, the in-process control channel may be split into independently owned send/receive halves; this is a runtime ownership primitive only and does not change the single reliable QUIC stream, framing, TLS protection, or wire protocol;
+
 - ALPN: `classmesh-control/1`;
 - frame prefix: 4-byte unsigned big-endian payload length;
 - maximum encoded Protobuf payload: 256 KiB;
