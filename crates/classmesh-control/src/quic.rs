@@ -299,6 +299,18 @@ pub struct ControlChannel {
     io_timeout: Duration,
 }
 
+#[derive(Debug)]
+pub struct ControlSendHalf {
+    send: SendStream,
+    io_timeout: Duration,
+}
+
+#[derive(Debug)]
+pub struct ControlReceiveHalf {
+    recv: RecvStream,
+    io_timeout: Duration,
+}
+
 impl ControlChannel {
     pub(crate) fn validate_io_timeout(io_timeout: Duration) -> Result<(), ControlTransportError> {
         if io_timeout.is_zero() {
@@ -348,55 +360,100 @@ impl ControlChannel {
     }
 
     pub async fn send(&mut self, envelope: &ControlEnvelope) -> Result<(), ControlTransportError> {
-        // The encoded control frame may contain sensitive key material. Keep
-        // the process-owned frame zeroizing through the entire QUIC write.
-        let frame = Zeroizing::new(encode_frame(envelope)?);
-        timeout(self.io_timeout, self.send.write_all(frame.as_slice()))
-            .await
-            .map_err(|_| ControlTransportError::Timeout {
-                operation: "write control frame",
-            })?
-            .map_err(|error| ControlTransportError::Transport(error.to_string()))
+        send_control_envelope(&mut self.send, self.io_timeout, envelope).await
     }
 
     pub async fn receive(&mut self) -> Result<ControlEnvelope, ControlTransportError> {
-        let mut prefix = [0_u8; CONTROL_LENGTH_PREFIX_BYTES];
-        timeout(self.io_timeout, self.recv.read_exact(&mut prefix))
-            .await
-            .map_err(|_| ControlTransportError::Timeout {
-                operation: "read control frame length",
-            })?
-            .map_err(|error| ControlTransportError::Transport(error.to_string()))?;
+        receive_control_envelope(&mut self.recv, self.io_timeout).await
+    }
 
-        let length = declared_payload_len(prefix)?;
-        // The raw payload/frame may contain a Phase 7E key grant. Zeroize both
-        // owned receive buffers after decoding. Any sensitive bytes moved into
-        // the decoded protobuf still require payload-specific zeroization by
-        // the runtime once that payload is consumed.
-        let mut payload = Zeroizing::new(vec![0_u8; length]);
-        timeout(
-            self.io_timeout,
-            self.recv.read_exact(payload.as_mut_slice()),
+    pub fn finish(&mut self) -> Result<(), ControlTransportError> {
+        finish_control_send(&mut self.send)
+    }
+
+    #[must_use]
+    pub fn into_split(self) -> (ControlSendHalf, ControlReceiveHalf) {
+        (
+            ControlSendHalf {
+                send: self.send,
+                io_timeout: self.io_timeout,
+            },
+            ControlReceiveHalf {
+                recv: self.recv,
+                io_timeout: self.io_timeout,
+            },
         )
+    }
+}
+
+impl ControlSendHalf {
+    pub async fn send(&mut self, envelope: &ControlEnvelope) -> Result<(), ControlTransportError> {
+        send_control_envelope(&mut self.send, self.io_timeout, envelope).await
+    }
+
+    pub fn finish(&mut self) -> Result<(), ControlTransportError> {
+        finish_control_send(&mut self.send)
+    }
+}
+
+impl ControlReceiveHalf {
+    pub async fn receive(&mut self) -> Result<ControlEnvelope, ControlTransportError> {
+        receive_control_envelope(&mut self.recv, self.io_timeout).await
+    }
+}
+
+async fn send_control_envelope(
+    send: &mut SendStream,
+    io_timeout: Duration,
+    envelope: &ControlEnvelope,
+) -> Result<(), ControlTransportError> {
+    // The encoded control frame may contain sensitive key material. Keep
+    // the process-owned frame zeroizing through the entire QUIC write.
+    let frame = Zeroizing::new(encode_frame(envelope)?);
+    timeout(io_timeout, send.write_all(frame.as_slice()))
+        .await
+        .map_err(|_| ControlTransportError::Timeout {
+            operation: "write control frame",
+        })?
+        .map_err(|error| ControlTransportError::Transport(error.to_string()))
+}
+
+async fn receive_control_envelope(
+    recv: &mut RecvStream,
+    io_timeout: Duration,
+) -> Result<ControlEnvelope, ControlTransportError> {
+    let mut prefix = [0_u8; CONTROL_LENGTH_PREFIX_BYTES];
+    timeout(io_timeout, recv.read_exact(&mut prefix))
+        .await
+        .map_err(|_| ControlTransportError::Timeout {
+            operation: "read control frame length",
+        })?
+        .map_err(|error| ControlTransportError::Transport(error.to_string()))?;
+
+    let length = declared_payload_len(prefix)?;
+    // The raw payload/frame may contain a Phase 7E key grant. Zeroize both
+    // owned receive buffers after decoding. Any sensitive bytes moved into
+    // the decoded protobuf still require payload-specific zeroization by
+    // the runtime once that payload is consumed.
+    let mut payload = Zeroizing::new(vec![0_u8; length]);
+    timeout(io_timeout, recv.read_exact(payload.as_mut_slice()))
         .await
         .map_err(|_| ControlTransportError::Timeout {
             operation: "read control frame payload",
         })?
         .map_err(|error| ControlTransportError::Transport(error.to_string()))?;
 
-        let mut frame = Zeroizing::new(Vec::with_capacity(
-            CONTROL_LENGTH_PREFIX_BYTES + payload.len(),
-        ));
-        frame.extend_from_slice(&prefix);
-        frame.extend_from_slice(payload.as_slice());
-        crate::framing::decode_frame(frame.as_slice()).map_err(Into::into)
-    }
+    let mut frame = Zeroizing::new(Vec::with_capacity(
+        CONTROL_LENGTH_PREFIX_BYTES + payload.len(),
+    ));
+    frame.extend_from_slice(&prefix);
+    frame.extend_from_slice(payload.as_slice());
+    crate::framing::decode_frame(frame.as_slice()).map_err(Into::into)
+}
 
-    pub fn finish(&mut self) -> Result<(), ControlTransportError> {
-        self.send
-            .finish()
-            .map_err(|error| ControlTransportError::Transport(error.to_string()))
-    }
+fn finish_control_send(send: &mut SendStream) -> Result<(), ControlTransportError> {
+    send.finish()
+        .map_err(|error| ControlTransportError::Transport(error.to_string()))
 }
 
 #[cfg(test)]
@@ -541,6 +598,89 @@ mod tests {
             server_task.await.map_err(|error| error.to_string())??;
         server_connection.close(0_u32.into(), b"test complete");
         server.close(0_u32.into(), b"test complete");
+        client.wait_idle().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn split_control_channel_preserves_framing_and_independent_ownership() -> TestResult {
+        let certified = generate_simple_self_signed(vec!["classmesh.local".to_owned()])?;
+        let certificate = CertificateDer::from(certified.cert);
+        let private_key = PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
+
+        let server_config =
+            server_config_with_certificate(vec![certificate.clone()], private_key.into())?;
+        let server = Endpoint::server(
+            server_config,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        )?;
+        let server_address = server.local_addr()?;
+
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate)?;
+        let mut client = Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
+        client.set_default_client_config(client_config_with_roots(roots)?);
+
+        let server_task = tokio::spawn(async move {
+            let connection = accept(&server).await.map_err(|error| error.to_string())?;
+            let mut channel = ControlChannel::accept(&connection, DEFAULT_IO_TIMEOUT)
+                .await
+                .map_err(|error| error.to_string())?;
+            server_hello(
+                &mut channel,
+                &ServerHelloConfig {
+                    local_version: ProtocolVersion { major: 0, minor: 1 },
+                    local_capabilities: [Capability::UdpUnicast].into_iter().collect(),
+                    control_session_id: 77,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+            let (mut send, mut recv) = channel.into_split();
+            let receive_task =
+                tokio::spawn(
+                    async move { recv.receive().await.map_err(|error| error.to_string()) },
+                );
+            let received = receive_task.await.map_err(|error| error.to_string())??;
+            assert!(matches!(
+                received.payload,
+                Some(control_envelope::Payload::Heartbeat(_))
+            ));
+            send.send(&heartbeat_ack())
+                .await
+                .map_err(|error| error.to_string())?;
+            send.finish().map_err(|error| error.to_string())?;
+
+            Ok::<(Endpoint, Connection), String>((server, connection))
+        });
+
+        let connection = connect(&client, server_address, "classmesh.local").await?;
+        let mut channel = ControlChannel::open(&connection, DEFAULT_IO_TIMEOUT).await?;
+        let hello = ControlHello {
+            principal_id: PrincipalId([7; 32]),
+            role: ControlRole::StudentDevice,
+            version: ProtocolVersion { major: 0, minor: 1 },
+            capabilities: BTreeSet::from([Capability::UdpUnicast]),
+            hostname: "student-07".to_owned(),
+            app_version: "0.0.1".to_owned(),
+        };
+        client_hello(&mut channel, &hello).await?;
+
+        let (mut send, mut recv) = channel.into_split();
+        send.send(&heartbeat()).await?;
+        let received = recv.receive().await?;
+        assert!(matches!(
+            received.payload,
+            Some(control_envelope::Payload::HeartbeatAck(_))
+        ));
+        send.finish()?;
+
+        connection.close(0_u32.into(), b"split channel test complete");
+        let (server, server_connection) =
+            server_task.await.map_err(|error| error.to_string())??;
+        server_connection.close(0_u32.into(), b"split channel test complete");
+        server.close(0_u32.into(), b"split channel test complete");
         client.wait_idle().await;
         Ok(())
     }
