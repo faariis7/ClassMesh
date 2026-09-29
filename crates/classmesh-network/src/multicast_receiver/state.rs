@@ -1,3 +1,4 @@
+use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 
 use classmesh_protocol::PROTOCOL_VERSION;
@@ -19,13 +20,26 @@ pub enum MulticastPacketDropReason {
     Assembly(AssembleError),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct ReceivedGroupMediaCiphertext {
     stream_id: u32,
     frame_id: u64,
     timestamp_us: u64,
     keyframe: bool,
     ciphertext: Vec<u8>,
+}
+
+impl fmt::Debug for ReceivedGroupMediaCiphertext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReceivedGroupMediaCiphertext")
+            .field("stream_id", &self.stream_id)
+            .field("frame_id", &self.frame_id)
+            .field("timestamp_us", &self.timestamp_us)
+            .field("keyframe", &self.keyframe)
+            .field("ciphertext_len", &self.ciphertext.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ReceivedGroupMediaCiphertext {
@@ -70,7 +84,7 @@ impl ReceivedGroupMediaCiphertext {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct ProtectedMulticastReceiveBatch {
     pub frames: Vec<ReceivedGroupMediaCiphertext>,
     pub feedback: Vec<FeedbackMessage>,
@@ -128,7 +142,7 @@ impl ProtectedMulticastReceiveBatch {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ProtectedMulticastReceiveOutcome {
     Events(ProtectedMulticastReceiveBatch),
     Dropped(MulticastPacketDropReason),
