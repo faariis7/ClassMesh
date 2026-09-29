@@ -722,7 +722,10 @@ impl IpcFrame {
         payload.extend_from_slice(&start.teacher_source.octets());
         payload.extend_from_slice(&[0_u8; 4]);
         debug_assert_eq!(payload.len(), SERVICE_PRESENTATION_MULTICAST_START_LEN);
-        Ok(Self::new(MESSAGE_SERVICE_PRESENTATION_MULTICAST_START, payload))
+        Ok(Self::new(
+            MESSAGE_SERVICE_PRESENTATION_MULTICAST_START,
+            payload,
+        ))
     }
 
     pub fn service_media_feedback(feedback: &FeedbackMessage) -> Result<Self, IpcMessageError> {
@@ -1093,16 +1096,10 @@ impl IpcFrame {
                     stream_id: u32::from_be_bytes(
                         self.payload[16..20].try_into().expect("four bytes"),
                     ),
-                    width: u16::from_be_bytes(
-                        self.payload[20..22].try_into().expect("two bytes"),
-                    ),
-                    height: u16::from_be_bytes(
-                        self.payload[22..24].try_into().expect("two bytes"),
-                    ),
+                    width: u16::from_be_bytes(self.payload[20..22].try_into().expect("two bytes")),
+                    height: u16::from_be_bytes(self.payload[22..24].try_into().expect("two bytes")),
                     fps: self.payload[24],
-                    port: u16::from_be_bytes(
-                        self.payload[26..28].try_into().expect("two bytes"),
-                    ),
+                    port: u16::from_be_bytes(self.payload[26..28].try_into().expect("two bytes")),
                     bitrate_kbps: u32::from_be_bytes(
                         self.payload[28..32].try_into().expect("four bytes"),
                     ),
