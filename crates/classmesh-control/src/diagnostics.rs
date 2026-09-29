@@ -95,6 +95,9 @@ pub const fn stream_offer_diagnostic_code(error: &StreamOfferError) -> &'static 
         StreamOfferError::InvalidUdpUnicastParameters => {
             "control.stream.invalid_udp_unicast_parameters"
         }
+        StreamOfferError::InvalidUdpMulticastParameters => {
+            "control.stream.invalid_udp_multicast_parameters"
+        }
     }
 }
 
