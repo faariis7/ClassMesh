@@ -177,6 +177,43 @@ pub(crate) struct PresentationKeyInstallDispatch {
 #[derive(Debug, Clone)]
 pub(crate) struct PresentationKeyDispatchChannels {
     pub(crate) install_tx: mpsc::SyncSender<PresentationKeyInstallDispatch>,
+    pub(crate) clear_tx: mpsc::SyncSender<PresentationKeyInstallBinding>,
+}
+
+#[derive(Debug)]
+struct PresentationKeyWorkerLease {
+    clear_tx: mpsc::SyncSender<PresentationKeyInstallBinding>,
+    binding: Option<PresentationKeyInstallBinding>,
+}
+
+impl PresentationKeyWorkerLease {
+    fn new(clear_tx: mpsc::SyncSender<PresentationKeyInstallBinding>) -> Self {
+        Self {
+            clear_tx,
+            binding: None,
+        }
+    }
+
+    fn replace(&mut self, binding: PresentationKeyInstallBinding) {
+        self.binding = Some(binding);
+    }
+
+    fn clear_now(&mut self) {
+        let Some(binding) = self.binding.take() else {
+            return;
+        };
+        if let Err(error) = self.clear_tx.try_send(binding) {
+            eprintln!(
+                "ClassMesh presentation-key cleanup queue rejected exact binding: {error}"
+            );
+        }
+    }
+}
+
+impl Drop for PresentationKeyWorkerLease {
+    fn drop(&mut self) {
+        self.clear_now();
+    }
 }
 
 impl FocusedMediaDispatchChannels {
@@ -937,6 +974,8 @@ async fn run_established_session(
     let mut outbound_sequence = HELLO_SEQUENCE;
     let mut focused_adaptation = FocusedAdaptationState::new();
     let mut installed_presentation_key: Option<InstalledPresentationKeyBinding> = None;
+    let mut worker_key_lease =
+        PresentationKeyWorkerLease::new(presentation_keys.clear_tx.clone());
 
     loop {
         let mut envelope = match channel.receive().await {
@@ -993,6 +1032,8 @@ async fn run_established_session(
                     connection.close(0_u32.into(), b"invalid heartbeat");
                     return;
                 }
+
+                worker_key_lease.replace(installed_binding);
 
                 let Some(next_sequence) = outbound_sequence.checked_add(1) else {
                     eprintln!("ClassMesh control session closed: control.sequence.exhausted");
@@ -1565,6 +1606,7 @@ async fn run_established_session(
 
                 if status.state == WirePresentationState::Stopped as i32 {
                     installed_presentation_key = None;
+                    worker_key_lease.clear_now();
                 }
 
                 let Some(next_sequence) = outbound_sequence.checked_add(1) else {
