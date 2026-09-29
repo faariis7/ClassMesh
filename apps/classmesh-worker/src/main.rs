@@ -166,11 +166,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("ClassMesh Worker cleared focused media profile");
                     continue;
                 }
-                classmesh_windows_runtime::ipc::IpcControlCommand::ClearPresentationKey => {
-                    let cleared = group_media_keys.clear();
-                    eprintln!("ClassMesh Worker cleared presentation key state: had_key={cleared}");
-                    continue;
-                }
             },
             Ok(WorkerEvent::UdpStreamStart(start)) => {
                 let profile = FocusedWorkerProfile::from_udp_start(start);
@@ -262,6 +257,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         eprintln!("ClassMesh Worker rejected focused profile update: {code}");
                     }
                 }
+            }
+            Ok(WorkerEvent::PresentationKeyClear(clear)) => {
+                let cleared = group_media_keys.clear_if_matches(clear);
+                eprintln!(
+                    "ClassMesh Worker presentation key clear processed: exact_match={cleared}"
+                );
+                continue;
             }
             Ok(WorkerEvent::PresentationKeyInstall(install)) => {
                 let binding = install.binding();
@@ -562,6 +564,7 @@ enum WorkerEvent {
     PresentationKeyInstall(
         classmesh_windows_runtime::ipc_sensitive::SensitivePresentationKeyInstall,
     ),
+    PresentationKeyClear(classmesh_windows_runtime::ipc::ServicePresentationKeyClear),
     IpcFailure(String),
 }
 
@@ -888,6 +891,9 @@ fn worker_event_from_decoded_frame(
             Ok(IpcMessage::ServiceMediaFeedback(feedback)) => {
                 Ok(WorkerEvent::MediaFeedback(feedback))
             }
+            Ok(IpcMessage::ServicePresentationKeyClear(clear)) => {
+                Ok(WorkerEvent::PresentationKeyClear(clear))
+            }
             Ok(IpcMessage::ServiceEncoderCacheResult(result)) => {
                 Ok(WorkerEvent::EncoderCacheResult(result))
             }
@@ -1049,6 +1055,28 @@ mod focused_profile_tests {
         assert_eq!(install.binding().stream_id, 7);
         assert_eq!(install.binding().epoch, 3);
         assert!(grant.key_material.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn exact_presentation_key_clear_routes_as_typed_worker_event() {
+        use classmesh_windows_runtime::ipc::{IpcFrame, ServicePresentationKeyClear};
+        use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+
+        let clear = ServicePresentationKeyClear {
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 7,
+            epoch: 3,
+        };
+        let frame = IpcFrame::service_presentation_key_clear(clear).expect("valid clear");
+        let event = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
+            .expect("clear routes");
+
+        let WorkerEvent::PresentationKeyClear(received) = event else {
+            panic!("expected presentation-key clear event");
+        };
+        assert_eq!(received, clear);
     }
 
     #[test]
