@@ -177,22 +177,30 @@ impl Drop for GroupMediaKeyMaterial {
 ///
 /// There is deliberately no public constructor from raw H.264 bytes. Production multicast code can
 /// require this type and therefore cannot accidentally accept an unprotected encoded frame.
-pub struct SealedGroupMediaFrame(Vec<u8>);
+pub struct SealedGroupMediaFrame {
+    binding: GroupMediaFrameBinding,
+    data: Vec<u8>,
+}
 
 impl SealedGroupMediaFrame {
     #[must_use]
+    pub const fn binding(&self) -> GroupMediaFrameBinding {
+        self.binding
+    }
+
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        &self.data
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.data.len()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.data.is_empty()
     }
 }
 
@@ -200,7 +208,8 @@ impl fmt::Debug for SealedGroupMediaFrame {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SealedGroupMediaFrame")
-            .field("len", &self.0.len())
+            .field("binding", &self.binding)
+            .field("len", &self.data.len())
             .finish_non_exhaustive()
     }
 }
@@ -320,8 +329,8 @@ impl GroupMediaSender {
             return Err(GroupMediaError::BindingEpochMismatch);
         }
         let associated_data = binding.associated_data();
-        self.seal_frame(plaintext, &associated_data)
-            .map(SealedGroupMediaFrame)
+        let data = self.seal_frame(plaintext, &associated_data)?;
+        Ok(SealedGroupMediaFrame { binding, data })
     }
 
     pub fn seal_frame(
@@ -607,6 +616,7 @@ mod tests {
             .expect("sealed bound frame");
 
         assert!(!sealed.is_empty());
+        assert_eq!(sealed.binding(), binding);
         assert_eq!(
             receiver
                 .open_bound_frame(sealed.as_bytes(), binding)
