@@ -219,18 +219,19 @@ fn receiver_window_feedback_is_exposed_without_transport_retransmission() {
 fn multicast_nack_feedback_is_bounded_to_control_contract() {
     let missing: Vec<u16> =
         (0..u16::try_from(MAX_NACK_PACKET_INDICES + 5).expect("small test bound")).collect();
-    let batch = ProtectedMulticastReceiveBatch::from_receiver_events(vec![
-        ReceiverEvent::NeedNack {
+    let batch =
+        ProtectedMulticastReceiveBatch::from_receiver_events(vec![ReceiverEvent::NeedNack {
             stream_id: 800,
             frame_id: 44,
             missing_packet_indices: missing,
-        },
-    ]);
+        }]);
 
-    let [FeedbackMessage::Nack {
-        missing_packet_indices,
-        ..
-    }] = batch.feedback.as_slice()
+    let [
+        FeedbackMessage::Nack {
+            missing_packet_indices,
+            ..
+        },
+    ] = batch.feedback.as_slice()
     else {
         panic!("expected bounded NACK");
     };
@@ -248,8 +249,5 @@ fn receiver_config_binds_all_ipv4_interfaces_but_joins_selected_interface() {
         config.membership().interface(),
         Ipv4Addr::new(192, 168, 50, 10)
     );
-    assert_eq!(
-        config.membership().group(),
-        Ipv4Addr::new(239, 10, 20, 30)
-    );
+    assert_eq!(config.membership().group(), Ipv4Addr::new(239, 10, 20, 30));
 }
