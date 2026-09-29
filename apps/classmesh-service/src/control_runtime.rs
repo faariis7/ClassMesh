@@ -1133,11 +1133,11 @@ async fn run_established_session(
                     }
                 };
                 if authorization.principal_for_credential(
-                    peer.identity.credential_fingerprint,
+                    peer.identity.credential_fingerprint(),
                     now_unix_ms,
                 ) != Some(peer.identity.principal_id())
                     || !authorization.authorize_credential(
-                        peer.identity.credential_fingerprint,
+                        peer.identity.credential_fingerprint(),
                         Permission::StartPresentation,
                         now_unix_ms,
                     )
