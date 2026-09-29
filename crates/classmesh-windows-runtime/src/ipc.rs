@@ -29,8 +29,10 @@ const MESSAGE_WORKER_PRESENTATION_KEY_INSTALL_RESULT: u16 = 20;
 const MESSAGE_SERVICE_PRESENTATION_KEY_CLEAR: u16 = 21;
 const MESSAGE_WORKER_PRESENTATION_FEEDBACK: u16 = 22;
 const MESSAGE_SERVICE_PRESENTATION_MULTICAST_START: u16 = 23;
+const MESSAGE_WORKER_PRESENTATION_MULTICAST_START_RESULT: u16 = 24;
 const SERVICE_UDP_STREAM_START_LEN: usize = 32;
-const SERVICE_PRESENTATION_MULTICAST_START_LEN: usize = 48;
+const SERVICE_PRESENTATION_MULTICAST_START_LEN: usize = 56;
+const WORKER_PRESENTATION_MULTICAST_START_RESULT_LEN: usize = 40;
 const WORKER_PRESENTATION_KEY_INSTALL_RESULT_LEN: usize = 48;
 const SERVICE_PRESENTATION_KEY_CLEAR_LEN: usize = 32;
 const WORKER_PRESENTATION_FEEDBACK_BINDING_LEN: usize = 36;
@@ -332,6 +334,7 @@ impl ServiceUdpStreamStart {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServicePresentationMulticastStart {
     pub control_session_id: u64,
+    pub request_id: u64,
     pub presentation_id: u64,
     pub stream_id: u32,
     pub width: u16,
@@ -347,6 +350,7 @@ pub struct ServicePresentationMulticastStart {
 impl ServicePresentationMulticastStart {
     fn validate(self) -> Result<(), IpcMessageError> {
         if self.control_session_id == 0
+            || self.request_id == 0
             || self.presentation_id == 0
             || self.stream_id == 0
             || self.port == 0
@@ -373,6 +377,55 @@ fn valid_multicast_interface(address: Ipv4Addr) -> bool {
 
 fn valid_teacher_source(address: Ipv4Addr) -> bool {
     !address.is_unspecified() && !address.is_multicast() && address != Ipv4Addr::BROADCAST
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerPresentationMulticastStartStatus {
+    Started,
+    Rejected,
+}
+
+impl WorkerPresentationMulticastStartStatus {
+    const fn as_byte(self) -> u8 {
+        match self {
+            Self::Started => 1,
+            Self::Rejected => 2,
+        }
+    }
+
+    const fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Started),
+            2 => Some(Self::Rejected),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerPresentationMulticastStartResult {
+    pub process_id: u32,
+    pub session_id: u32,
+    pub control_session_id: u64,
+    pub request_id: u64,
+    pub presentation_id: u64,
+    pub stream_id: u32,
+    pub status: WorkerPresentationMulticastStartStatus,
+}
+
+impl WorkerPresentationMulticastStartResult {
+    fn validate(self) -> Result<(), IpcMessageError> {
+        if self.process_id == 0
+            || self.session_id == 0
+            || self.control_session_id == 0
+            || self.request_id == 0
+            || self.presentation_id == 0
+            || self.stream_id == 0
+        {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -492,6 +545,7 @@ pub enum IpcMessage {
     ServiceEncoderCacheResult(ServiceEncoderCacheResult),
     ServiceUdpStreamStart(ServiceUdpStreamStart),
     ServicePresentationMulticastStart(ServicePresentationMulticastStart),
+    WorkerPresentationMulticastStartResult(WorkerPresentationMulticastStartResult),
     ServiceMediaFeedback(FeedbackMessage),
     WorkerPresentationKeyInstallResult(WorkerPresentationKeyInstallResult),
     ServicePresentationKeyClear(ServicePresentationKeyClear),
@@ -709,6 +763,7 @@ impl IpcFrame {
         start.validate()?;
         let mut payload = Vec::with_capacity(SERVICE_PRESENTATION_MULTICAST_START_LEN);
         payload.extend_from_slice(&start.control_session_id.to_be_bytes());
+        payload.extend_from_slice(&start.request_id.to_be_bytes());
         payload.extend_from_slice(&start.presentation_id.to_be_bytes());
         payload.extend_from_slice(&start.stream_id.to_be_bytes());
         payload.extend_from_slice(&start.width.to_be_bytes());
@@ -724,6 +779,29 @@ impl IpcFrame {
         debug_assert_eq!(payload.len(), SERVICE_PRESENTATION_MULTICAST_START_LEN);
         Ok(Self::new(
             MESSAGE_SERVICE_PRESENTATION_MULTICAST_START,
+            payload,
+        ))
+    }
+
+    pub fn worker_presentation_multicast_start_result(
+        result: WorkerPresentationMulticastStartResult,
+    ) -> Result<Self, IpcMessageError> {
+        result.validate()?;
+        let mut payload = Vec::with_capacity(WORKER_PRESENTATION_MULTICAST_START_RESULT_LEN);
+        payload.extend_from_slice(&result.process_id.to_be_bytes());
+        payload.extend_from_slice(&result.session_id.to_be_bytes());
+        payload.extend_from_slice(&result.control_session_id.to_be_bytes());
+        payload.extend_from_slice(&result.request_id.to_be_bytes());
+        payload.extend_from_slice(&result.presentation_id.to_be_bytes());
+        payload.extend_from_slice(&result.stream_id.to_be_bytes());
+        payload.push(result.status.as_byte());
+        payload.extend_from_slice(&[0_u8; 3]);
+        debug_assert_eq!(
+            payload.len(),
+            WORKER_PRESENTATION_MULTICAST_START_RESULT_LEN
+        );
+        Ok(Self::new(
+            MESSAGE_WORKER_PRESENTATION_MULTICAST_START_RESULT,
             payload,
         ))
     }
@@ -1081,8 +1159,8 @@ impl IpcFrame {
             }
             MESSAGE_SERVICE_PRESENTATION_MULTICAST_START => {
                 if self.payload.len() != SERVICE_PRESENTATION_MULTICAST_START_LEN
-                    || self.payload[25] != 0
-                    || self.payload[44..48].iter().any(|byte| *byte != 0)
+                    || self.payload[33] != 0
+                    || self.payload[52..56].iter().any(|byte| *byte != 0)
                 {
                     return Err(IpcMessageError::InvalidPayload);
                 }
@@ -1090,31 +1168,66 @@ impl IpcFrame {
                     control_session_id: u64::from_be_bytes(
                         self.payload[0..8].try_into().expect("eight bytes"),
                     ),
-                    presentation_id: u64::from_be_bytes(
+                    request_id: u64::from_be_bytes(
                         self.payload[8..16].try_into().expect("eight bytes"),
                     ),
-                    stream_id: u32::from_be_bytes(
-                        self.payload[16..20].try_into().expect("four bytes"),
+                    presentation_id: u64::from_be_bytes(
+                        self.payload[16..24].try_into().expect("eight bytes"),
                     ),
-                    width: u16::from_be_bytes(self.payload[20..22].try_into().expect("two bytes")),
-                    height: u16::from_be_bytes(self.payload[22..24].try_into().expect("two bytes")),
-                    fps: self.payload[24],
-                    port: u16::from_be_bytes(self.payload[26..28].try_into().expect("two bytes")),
+                    stream_id: u32::from_be_bytes(
+                        self.payload[24..28].try_into().expect("four bytes"),
+                    ),
+                    width: u16::from_be_bytes(self.payload[28..30].try_into().expect("two bytes")),
+                    height: u16::from_be_bytes(self.payload[30..32].try_into().expect("two bytes")),
+                    fps: self.payload[32],
+                    port: u16::from_be_bytes(self.payload[34..36].try_into().expect("two bytes")),
                     bitrate_kbps: u32::from_be_bytes(
-                        self.payload[28..32].try_into().expect("four bytes"),
+                        self.payload[36..40].try_into().expect("four bytes"),
                     ),
                     group: Ipv4Addr::from(
-                        <[u8; 4]>::try_from(&self.payload[32..36]).expect("four bytes"),
+                        <[u8; 4]>::try_from(&self.payload[40..44]).expect("four bytes"),
                     ),
                     interface: Ipv4Addr::from(
-                        <[u8; 4]>::try_from(&self.payload[36..40]).expect("four bytes"),
+                        <[u8; 4]>::try_from(&self.payload[44..48]).expect("four bytes"),
                     ),
                     teacher_source: Ipv4Addr::from(
-                        <[u8; 4]>::try_from(&self.payload[40..44]).expect("four bytes"),
+                        <[u8; 4]>::try_from(&self.payload[48..52]).expect("four bytes"),
                     ),
                 };
                 start.validate()?;
                 Ok(IpcMessage::ServicePresentationMulticastStart(start))
+            }
+            MESSAGE_WORKER_PRESENTATION_MULTICAST_START_RESULT => {
+                if self.payload.len() != WORKER_PRESENTATION_MULTICAST_START_RESULT_LEN
+                    || self.payload[37..40].iter().any(|byte| *byte != 0)
+                {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let status = WorkerPresentationMulticastStartStatus::from_byte(self.payload[36])
+                    .ok_or(IpcMessageError::InvalidPayload)?;
+                let result = WorkerPresentationMulticastStartResult {
+                    process_id: u32::from_be_bytes(
+                        self.payload[0..4].try_into().expect("four bytes"),
+                    ),
+                    session_id: u32::from_be_bytes(
+                        self.payload[4..8].try_into().expect("four bytes"),
+                    ),
+                    control_session_id: u64::from_be_bytes(
+                        self.payload[8..16].try_into().expect("eight bytes"),
+                    ),
+                    request_id: u64::from_be_bytes(
+                        self.payload[16..24].try_into().expect("eight bytes"),
+                    ),
+                    presentation_id: u64::from_be_bytes(
+                        self.payload[24..32].try_into().expect("eight bytes"),
+                    ),
+                    stream_id: u32::from_be_bytes(
+                        self.payload[32..36].try_into().expect("four bytes"),
+                    ),
+                    status,
+                };
+                result.validate()?;
+                Ok(IpcMessage::WorkerPresentationMulticastStartResult(result))
             }
             MESSAGE_SERVICE_MEDIA_FEEDBACK => {
                 let feedback = FeedbackMessage::decode(self.payload.as_slice())
@@ -1497,6 +1610,7 @@ mod tests {
     fn service_presentation_multicast_start_round_trips_exact_binding() {
         let start = ServicePresentationMulticastStart {
             control_session_id: 77,
+            request_id: 44,
             presentation_id: 55,
             stream_id: 9,
             width: 1920,
@@ -1520,6 +1634,7 @@ mod tests {
     fn service_presentation_multicast_start_rejects_invalid_binding_and_reserved_bytes() {
         let valid = ServicePresentationMulticastStart {
             control_session_id: 77,
+            request_id: 44,
             presentation_id: 55,
             stream_id: 9,
             width: 1920,
@@ -1534,6 +1649,10 @@ mod tests {
         for start in [
             ServicePresentationMulticastStart {
                 control_session_id: 0,
+                ..valid
+            },
+            ServicePresentationMulticastStart {
+                request_id: 0,
                 ..valid
             },
             ServicePresentationMulticastStart {
@@ -1567,12 +1686,90 @@ mod tests {
 
         let mut frame =
             IpcFrame::service_presentation_multicast_start(valid).expect("valid multicast start");
-        frame.payload[25] = 1;
+        frame.payload[33] = 1;
         assert_eq!(frame.message(), Err(IpcMessageError::InvalidPayload));
 
         let mut frame =
             IpcFrame::service_presentation_multicast_start(valid).expect("valid multicast start");
-        frame.payload[47] = 1;
+        frame.payload[55] = 1;
+        assert_eq!(frame.message(), Err(IpcMessageError::InvalidPayload));
+    }
+
+    #[test]
+    fn worker_presentation_multicast_start_result_round_trips_exact_correlation() {
+        for status in [
+            WorkerPresentationMulticastStartStatus::Started,
+            WorkerPresentationMulticastStartStatus::Rejected,
+        ] {
+            let result = WorkerPresentationMulticastStartResult {
+                process_id: 42,
+                session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                presentation_id: 55,
+                stream_id: 9,
+                status,
+            };
+            let frame = IpcFrame::worker_presentation_multicast_start_result(result)
+                .expect("valid multicast start result");
+            assert_eq!(
+                frame.message().expect("typed multicast start result"),
+                IpcMessage::WorkerPresentationMulticastStartResult(result)
+            );
+        }
+    }
+
+    #[test]
+    fn worker_presentation_multicast_start_result_rejects_invalid_binding_and_reserved_bytes() {
+        let valid = WorkerPresentationMulticastStartResult {
+            process_id: 42,
+            session_id: 7,
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 9,
+            status: WorkerPresentationMulticastStartStatus::Started,
+        };
+        for result in [
+            WorkerPresentationMulticastStartResult {
+                process_id: 0,
+                ..valid
+            },
+            WorkerPresentationMulticastStartResult {
+                session_id: 0,
+                ..valid
+            },
+            WorkerPresentationMulticastStartResult {
+                control_session_id: 0,
+                ..valid
+            },
+            WorkerPresentationMulticastStartResult {
+                request_id: 0,
+                ..valid
+            },
+            WorkerPresentationMulticastStartResult {
+                presentation_id: 0,
+                ..valid
+            },
+            WorkerPresentationMulticastStartResult {
+                stream_id: 0,
+                ..valid
+            },
+        ] {
+            assert_eq!(
+                IpcFrame::worker_presentation_multicast_start_result(result),
+                Err(IpcMessageError::InvalidPayload)
+            );
+        }
+
+        let mut frame = IpcFrame::worker_presentation_multicast_start_result(valid)
+            .expect("valid multicast start result");
+        frame.payload[36] = 99;
+        assert_eq!(frame.message(), Err(IpcMessageError::InvalidPayload));
+
+        let mut frame = IpcFrame::worker_presentation_multicast_start_result(valid)
+            .expect("valid multicast start result");
+        frame.payload[39] = 1;
         assert_eq!(frame.message(), Err(IpcMessageError::InvalidPayload));
     }
 
