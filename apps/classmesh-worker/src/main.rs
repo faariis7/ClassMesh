@@ -88,9 +88,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input_injector = InputInjector::default();
     let mut group_media_keys =
         classmesh_worker::group_media_receive::WorkerGroupMediaKeyState::default();
-    let mut presentation_multicast:
-        Option<classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime> =
-        None;
+    let mut presentation_multicast: Option<
+        classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime,
+    > = None;
 
     loop {
         let now = Instant::now();
@@ -279,9 +279,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "ClassMesh Worker rejected multicast start: active presentation key binding mismatch"
                     );
                     WorkerPresentationMulticastStartStatus::Rejected
-                } else if presentation_multicast.as_mut().is_some_and(|runtime| {
-                    !runtime.failed() && runtime.adopt_retry(start)
-                }) {
+                } else if presentation_multicast
+                    .as_mut()
+                    .is_some_and(|runtime| !runtime.failed() && runtime.adopt_retry(start))
+                {
                     WorkerPresentationMulticastStartStatus::Started
                 } else {
                     presentation_multicast = None;
@@ -317,11 +318,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             Ok(WorkerEvent::PresentationKeyClear(clear)) => {
-                let multicast_matches_current_key = group_media_keys.binding().is_some_and(|binding| {
-                    presentation_multicast
-                        .as_ref()
-                        .is_some_and(|runtime| runtime.matches_key_binding(binding))
-                });
+                let multicast_matches_current_key =
+                    group_media_keys.binding().is_some_and(|binding| {
+                        presentation_multicast
+                            .as_ref()
+                            .is_some_and(|runtime| runtime.matches_key_binding(binding))
+                    });
                 let cleared = group_media_keys.clear_if_matches(clear);
                 if cleared && multicast_matches_current_key {
                     presentation_multicast = None;
@@ -352,7 +354,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Installed
                         }
                         Err(error) => {
-                            eprintln!("ClassMesh Worker rejected presentation key install: {error}");
+                            eprintln!(
+                                "ClassMesh Worker rejected presentation key install: {error}"
+                            );
                             classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Rejected
                         }
                     }
@@ -679,9 +683,7 @@ enum WorkerEvent {
         classmesh_windows_runtime::ipc_sensitive::SensitivePresentationKeyInstall,
     ),
     PresentationKeyClear(classmesh_windows_runtime::ipc::ServicePresentationKeyClear),
-    PresentationMulticastStart(
-        classmesh_windows_runtime::ipc::ServicePresentationMulticastStart,
-    ),
+    PresentationMulticastStart(classmesh_windows_runtime::ipc::ServicePresentationMulticastStart),
     IpcFailure(String),
 }
 
@@ -985,8 +987,10 @@ fn publish_worker_presentation_multicast_start_result(
         status,
     };
     let frame =
-        classmesh_windows_runtime::ipc::IpcFrame::worker_presentation_multicast_start_result(result)
-            .map_err(ipc_message_error)?;
+        classmesh_windows_runtime::ipc::IpcFrame::worker_presentation_multicast_start_result(
+            result,
+        )
+        .map_err(ipc_message_error)?;
     pipe.write_all(&frame.encode().map_err(ipc_frame_error)?)?;
     Ok(())
 }
@@ -1250,9 +1254,7 @@ mod focused_profile_tests {
     fn presentation_multicast_start_routes_as_typed_worker_event() {
         use std::net::Ipv4Addr;
 
-        use classmesh_windows_runtime::ipc::{
-            IpcFrame, ServicePresentationMulticastStart,
-        };
+        use classmesh_windows_runtime::ipc::{IpcFrame, ServicePresentationMulticastStart};
         use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
 
         let start = ServicePresentationMulticastStart {
