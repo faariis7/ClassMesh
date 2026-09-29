@@ -4,10 +4,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
 
 use classmesh_protocol::PROTOCOL_VERSION;
-use classmesh_protocol::feedback::FeedbackMessage;
+use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
 use classmesh_protocol::media::MediaFlags;
 
-use crate::feedback::from_receiver_events;
 use crate::multicast::{MulticastMembership, MulticastProbeOutcome};
 use crate::receiver::{ReceiverEvent, ReceiverPolicy, ReceiverWindow};
 use crate::udp::{DatagramError, UdpMediaSocket};
@@ -195,8 +194,8 @@ pub struct ProtectedMulticastReceiveBatch {
 
 impl ProtectedMulticastReceiveBatch {
     fn from_receiver_events(events: Vec<ReceiverEvent>) -> Self {
-        let feedback = from_receiver_events(&events);
         let mut frames = Vec::new();
+        let mut feedback = Vec::new();
         let mut dropped_stale_frames = 0_usize;
 
         for event in events {
@@ -204,10 +203,30 @@ impl ProtectedMulticastReceiveBatch {
                 ReceiverEvent::FrameReady(frame) => {
                     frames.push(ReceivedGroupMediaCiphertext::from_assembled(frame));
                 }
+                ReceiverEvent::NeedNack {
+                    stream_id,
+                    frame_id,
+                    mut missing_packet_indices,
+                } => {
+                    missing_packet_indices.truncate(MAX_NACK_PACKET_INDICES);
+                    if !missing_packet_indices.is_empty() {
+                        feedback.push(FeedbackMessage::Nack {
+                            stream_id,
+                            frame_id,
+                            missing_packet_indices,
+                        });
+                    }
+                }
+                ReceiverEvent::NeedKeyframe {
+                    stream_id,
+                    after_frame_id,
+                } => feedback.push(FeedbackMessage::RequestKeyframe {
+                    stream_id,
+                    after_frame_id,
+                }),
                 ReceiverEvent::DroppedStaleFrame { .. } => {
                     dropped_stale_frames = dropped_stale_frames.saturating_add(1);
                 }
-                ReceiverEvent::NeedNack { .. } | ReceiverEvent::NeedKeyframe { .. } => {}
             }
         }
 
@@ -580,6 +599,28 @@ mod tests {
         )));
         assert_eq!(expired.dropped_stale_frames, 1);
         assert_eq!(state.dropped_frames(), 1);
+    }
+
+    #[test]
+    fn multicast_nack_feedback_is_bounded_to_control_contract() {
+        let missing: Vec<u16> =
+            (0..u16::try_from(MAX_NACK_PACKET_INDICES + 5).expect("small test bound")).collect();
+        let batch = ProtectedMulticastReceiveBatch::from_receiver_events(vec![
+            ReceiverEvent::NeedNack {
+                stream_id: 800,
+                frame_id: 44,
+                missing_packet_indices: missing,
+            },
+        ]);
+
+        let [FeedbackMessage::Nack {
+            missing_packet_indices,
+            ..
+        }] = batch.feedback.as_slice()
+        else {
+            panic!("expected bounded NACK");
+        };
+        assert_eq!(missing_packet_indices.len(), MAX_NACK_PACKET_INDICES);
     }
 
     #[test]
