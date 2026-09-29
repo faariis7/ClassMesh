@@ -2,8 +2,8 @@ use std::fmt;
 use std::net::{SocketAddr, SocketAddrV4};
 use std::time::Duration;
 
-use classmesh_protocol::media::MEDIA_HEADER_LEN;
 use classmesh_protocol::PROTOCOL_VERSION;
+use classmesh_protocol::media::MEDIA_HEADER_LEN;
 use classmesh_security::group_media::{
     GroupMediaEpoch, GroupMediaFrameBinding, SealedGroupMediaFrame,
 };
@@ -11,7 +11,7 @@ use classmesh_security::group_media::{
 use crate::multicast::{MulticastMembership, MulticastProbeOutcome};
 use crate::transport::SendFrameReport;
 use crate::udp::{DatagramError, UdpMediaSocket};
-use crate::{packetize_frame, MediaPacket, PacketizeError, PacketizeMeta};
+use crate::{MediaPacket, PacketizeError, PacketizeMeta, packetize_frame};
 
 pub const MULTICAST_MEDIA_TTL: u32 = 1;
 pub const DEFAULT_MULTICAST_WRITE_TIMEOUT: Duration = Duration::from_millis(100);
@@ -116,16 +116,16 @@ impl fmt::Display for ProtectedMulticastSendError {
             Self::InvalidPresentationId => {
                 formatter.write_str("multicast presentation id must be non-zero")
             }
-            Self::InvalidStreamId => {
-                formatter.write_str("multicast stream id must be non-zero")
-            }
+            Self::InvalidStreamId => formatter.write_str("multicast stream id must be non-zero"),
             Self::ProtocolVersionOutOfRange => {
                 formatter.write_str("protocol version does not fit the media header")
             }
             Self::FrameBindingMismatch => {
                 formatter.write_str("sealed group-media frame does not match multicast sender")
             }
-            Self::Packetize(error) => write!(formatter, "multicast packetization failed: {error:?}"),
+            Self::Packetize(error) => {
+                write!(formatter, "multicast packetization failed: {error:?}")
+            }
             Self::Datagram(error) => write!(formatter, "multicast UDP send failed: {error}"),
             Self::ShortDatagramWrite => {
                 formatter.write_str("multicast UDP write did not send the complete datagram")
@@ -390,15 +390,7 @@ mod tests {
     fn packetizer_uses_authenticated_binding_and_advances_sequence() {
         let epoch = epoch(3);
         let mut packetizer = ProtectedMulticastPacketizer::new(config(epoch));
-        let first = sealed_frame(
-            700,
-            800,
-            epoch,
-            91,
-            123_456,
-            true,
-            MAX_PACKET_PAYLOAD * 2,
-        );
+        let first = sealed_frame(700, 800, epoch, 91, 123_456, true, MAX_PACKET_PAYLOAD * 2);
         let prepared = packetizer.packetize(&first).expect("packetized frame");
 
         assert!(prepared.packets.len() >= 2);
