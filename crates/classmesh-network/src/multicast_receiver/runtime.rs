@@ -6,7 +6,9 @@ use crate::multicast::MulticastMembership;
 use crate::udp::{DatagramError, UdpMediaSocket};
 
 use super::config::{ProtectedMulticastReceiveError, ProtectedMulticastReceiverConfig};
-use super::state::{ProtectedMulticastReceiveOutcome, ProtectedMulticastReceiveState};
+use super::state::{
+    MulticastPacketDropReason, ProtectedMulticastReceiveOutcome, ProtectedMulticastReceiveState,
+};
 
 pub const DEFAULT_MULTICAST_READ_TIMEOUT: Duration = Duration::from_millis(10);
 
@@ -48,6 +50,13 @@ impl ProtectedMulticastFrameReceiver {
                     self.state.tick(now_us),
                 ))
             }
+            Err(
+                DatagramError::Header(_)
+                | DatagramError::PayloadLengthMismatch
+                | DatagramError::DatagramTooLarge,
+            ) => Ok(ProtectedMulticastReceiveOutcome::Dropped(
+                MulticastPacketDropReason::MalformedDatagram,
+            )),
             Err(error) => Err(error.into()),
         }
     }
