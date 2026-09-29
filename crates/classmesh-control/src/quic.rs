@@ -299,6 +299,18 @@ pub struct ControlChannel {
     io_timeout: Duration,
 }
 
+#[derive(Debug)]
+pub struct ControlSendHalf {
+    send: SendStream,
+    io_timeout: Duration,
+}
+
+#[derive(Debug)]
+pub struct ControlReceiveHalf {
+    recv: RecvStream,
+    io_timeout: Duration,
+}
+
 impl ControlChannel {
     pub(crate) fn validate_io_timeout(io_timeout: Duration) -> Result<(), ControlTransportError> {
         if io_timeout.is_zero() {
@@ -348,55 +360,100 @@ impl ControlChannel {
     }
 
     pub async fn send(&mut self, envelope: &ControlEnvelope) -> Result<(), ControlTransportError> {
-        // The encoded control frame may contain sensitive key material. Keep
-        // the process-owned frame zeroizing through the entire QUIC write.
-        let frame = Zeroizing::new(encode_frame(envelope)?);
-        timeout(self.io_timeout, self.send.write_all(frame.as_slice()))
-            .await
-            .map_err(|_| ControlTransportError::Timeout {
-                operation: "write control frame",
-            })?
-            .map_err(|error| ControlTransportError::Transport(error.to_string()))
+        send_control_envelope(&mut self.send, self.io_timeout, envelope).await
     }
 
     pub async fn receive(&mut self) -> Result<ControlEnvelope, ControlTransportError> {
-        let mut prefix = [0_u8; CONTROL_LENGTH_PREFIX_BYTES];
-        timeout(self.io_timeout, self.recv.read_exact(&mut prefix))
-            .await
-            .map_err(|_| ControlTransportError::Timeout {
-                operation: "read control frame length",
-            })?
-            .map_err(|error| ControlTransportError::Transport(error.to_string()))?;
+        receive_control_envelope(&mut self.recv, self.io_timeout).await
+    }
 
-        let length = declared_payload_len(prefix)?;
-        // The raw payload/frame may contain a Phase 7E key grant. Zeroize both
-        // owned receive buffers after decoding. Any sensitive bytes moved into
-        // the decoded protobuf still require payload-specific zeroization by
-        // the runtime once that payload is consumed.
-        let mut payload = Zeroizing::new(vec![0_u8; length]);
-        timeout(
-            self.io_timeout,
-            self.recv.read_exact(payload.as_mut_slice()),
+    pub fn finish(&mut self) -> Result<(), ControlTransportError> {
+        finish_control_send(&mut self.send)
+    }
+
+    #[must_use]
+    pub fn into_split(self) -> (ControlSendHalf, ControlReceiveHalf) {
+        (
+            ControlSendHalf {
+                send: self.send,
+                io_timeout: self.io_timeout,
+            },
+            ControlReceiveHalf {
+                recv: self.recv,
+                io_timeout: self.io_timeout,
+            },
         )
+    }
+}
+
+impl ControlSendHalf {
+    pub async fn send(&mut self, envelope: &ControlEnvelope) -> Result<(), ControlTransportError> {
+        send_control_envelope(&mut self.send, self.io_timeout, envelope).await
+    }
+
+    pub fn finish(&mut self) -> Result<(), ControlTransportError> {
+        finish_control_send(&mut self.send)
+    }
+}
+
+impl ControlReceiveHalf {
+    pub async fn receive(&mut self) -> Result<ControlEnvelope, ControlTransportError> {
+        receive_control_envelope(&mut self.recv, self.io_timeout).await
+    }
+}
+
+async fn send_control_envelope(
+    send: &mut SendStream,
+    io_timeout: Duration,
+    envelope: &ControlEnvelope,
+) -> Result<(), ControlTransportError> {
+    // The encoded control frame may contain sensitive key material. Keep
+    // the process-owned frame zeroizing through the entire QUIC write.
+    let frame = Zeroizing::new(encode_frame(envelope)?);
+    timeout(io_timeout, send.write_all(frame.as_slice()))
+        .await
+        .map_err(|_| ControlTransportError::Timeout {
+            operation: "write control frame",
+        })?
+        .map_err(|error| ControlTransportError::Transport(error.to_string()))
+}
+
+async fn receive_control_envelope(
+    recv: &mut RecvStream,
+    io_timeout: Duration,
+) -> Result<ControlEnvelope, ControlTransportError> {
+    let mut prefix = [0_u8; CONTROL_LENGTH_PREFIX_BYTES];
+    timeout(io_timeout, recv.read_exact(&mut prefix))
+        .await
+        .map_err(|_| ControlTransportError::Timeout {
+            operation: "read control frame length",
+        })?
+        .map_err(|error| ControlTransportError::Transport(error.to_string()))?;
+
+    let length = declared_payload_len(prefix)?;
+    // The raw payload/frame may contain a Phase 7E key grant. Zeroize both
+    // owned receive buffers after decoding. Any sensitive bytes moved into
+    // the decoded protobuf still require payload-specific zeroization by
+    // the runtime once that payload is consumed.
+    let mut payload = Zeroizing::new(vec![0_u8; length]);
+    timeout(io_timeout, recv.read_exact(payload.as_mut_slice()))
         .await
         .map_err(|_| ControlTransportError::Timeout {
             operation: "read control frame payload",
         })?
         .map_err(|error| ControlTransportError::Transport(error.to_string()))?;
 
-        let mut frame = Zeroizing::new(Vec::with_capacity(
-            CONTROL_LENGTH_PREFIX_BYTES + payload.len(),
-        ));
-        frame.extend_from_slice(&prefix);
-        frame.extend_from_slice(payload.as_slice());
-        crate::framing::decode_frame(frame.as_slice()).map_err(Into::into)
-    }
+    let mut frame = Zeroizing::new(Vec::with_capacity(
+        CONTROL_LENGTH_PREFIX_BYTES + payload.len(),
+    ));
+    frame.extend_from_slice(&prefix);
+    frame.extend_from_slice(payload.as_slice());
+    crate::framing::decode_frame(frame.as_slice()).map_err(Into::into)
+}
 
-    pub fn finish(&mut self) -> Result<(), ControlTransportError> {
-        self.send
-            .finish()
-            .map_err(|error| ControlTransportError::Transport(error.to_string()))
-    }
+fn finish_control_send(send: &mut SendStream) -> Result<(), ControlTransportError> {
+    send.finish()
+        .map_err(|error| ControlTransportError::Transport(error.to_string()))
 }
 
 #[cfg(test)]
