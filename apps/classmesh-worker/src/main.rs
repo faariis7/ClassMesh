@@ -871,14 +871,43 @@ fn publish_worker_capabilities(
 }
 
 #[cfg(windows)]
+fn worker_event_from_decoded_frame(
+    frame: classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame,
+) -> Result<WorkerEvent, String> {
+    use classmesh_windows_runtime::ipc::IpcMessage;
+    use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+
+    match frame {
+        DecodedIpcFrame::PresentationKeyInstall(install) => {
+            Ok(WorkerEvent::PresentationKeyInstall(install))
+        }
+        DecodedIpcFrame::Regular(frame) => match frame.message() {
+            Ok(IpcMessage::Control(command)) => Ok(WorkerEvent::Control(command)),
+            Ok(IpcMessage::InputEvent(event)) => Ok(WorkerEvent::Input(event)),
+            Ok(IpcMessage::StreamReconfigure(reconfigure)) => {
+                Ok(WorkerEvent::StreamReconfigure(reconfigure))
+            }
+            Ok(IpcMessage::ServiceUdpStreamStart(start)) => Ok(WorkerEvent::UdpStreamStart(start)),
+            Ok(IpcMessage::ServiceMediaFeedback(feedback)) => {
+                Ok(WorkerEvent::MediaFeedback(feedback))
+            }
+            Ok(IpcMessage::ServiceEncoderCacheResult(result)) => {
+                Ok(WorkerEvent::EncoderCacheResult(result))
+            }
+            Ok(unexpected) => Err(format!(
+                "unexpected IPC message after handshake: {unexpected:?}"
+            )),
+            Err(error) => Err(format!("invalid IPC message after handshake: {error:?}")),
+        },
+    }
+}
+
+#[cfg(windows)]
 fn spawn_ipc_reader(
     pipe: classmesh_win32::NamedPipeClient,
     event_tx: std::sync::mpsc::SyncSender<WorkerEvent>,
 ) -> std::thread::JoinHandle<()> {
-    use classmesh_windows_runtime::ipc::IpcMessage;
-    use classmesh_windows_runtime::ipc_sensitive::{
-        DecodedIpcFrame, SensitiveIpcFrameDecoder,
-    };
+    use classmesh_windows_runtime::ipc_sensitive::SensitiveIpcFrameDecoder;
 
     std::thread::spawn(move || {
         let mut decoder = SensitiveIpcFrameDecoder::default();
@@ -911,40 +940,13 @@ fn spawn_ipc_reader(
             };
 
             for frame in frames {
-                let event = match frame {
-                    DecodedIpcFrame::PresentationKeyInstall(install) => {
-                        WorkerEvent::PresentationKeyInstall(install)
+                let event = match worker_event_from_decoded_frame(frame) {
+                    Ok(event) => event,
+                    Err(error) => {
+                        let _ = event_tx.send(WorkerEvent::IpcFailure(error));
+                        return;
                     }
-                    DecodedIpcFrame::Regular(frame) => match frame.message() {
-                        Ok(IpcMessage::Control(command)) => WorkerEvent::Control(command),
-                        Ok(IpcMessage::InputEvent(event)) => WorkerEvent::Input(event),
-                        Ok(IpcMessage::StreamReconfigure(reconfigure)) => {
-                            WorkerEvent::StreamReconfigure(reconfigure)
-                        }
-                        Ok(IpcMessage::ServiceUdpStreamStart(start)) => {
-                            WorkerEvent::UdpStreamStart(start)
-                        }
-                        Ok(IpcMessage::ServiceMediaFeedback(feedback)) => {
-                            WorkerEvent::MediaFeedback(feedback)
-                        }
-                        Ok(IpcMessage::ServiceEncoderCacheResult(result)) => {
-                            WorkerEvent::EncoderCacheResult(result)
-                        }
-                        Ok(unexpected) => {
-                            let _ = event_tx.send(WorkerEvent::IpcFailure(format!(
-                                "unexpected IPC message after handshake: {unexpected:?}"
-                            )));
-                            return;
-                        }
-                        Err(error) => {
-                            let _ = event_tx.send(WorkerEvent::IpcFailure(format!(
-                                "invalid IPC message after handshake: {error:?}"
-                            )));
-                            return;
-                        }
-                    },
                 };
-
                 if event_tx.send(event).is_err() {
                     return;
                 }
@@ -1020,6 +1022,63 @@ fn main() {
 #[cfg(all(test, windows))]
 mod focused_profile_tests {
     use super::*;
+
+    #[test]
+    fn sensitive_key_install_routes_to_dedicated_worker_event() {
+        use classmesh_protocol::control_wire::PresentationKeyGrant;
+        use classmesh_protocol::group_media_control::PRESENTATION_GROUP_KEY_BYTES;
+        use classmesh_windows_runtime::ipc_sensitive::{
+            DecodedIpcFrame, SensitivePresentationKeyInstall,
+        };
+
+        let mut grant = PresentationKeyGrant {
+            presentation_id: 55,
+            stream_id: 7,
+            epoch: 3,
+            key_material: vec![0x5a; PRESENTATION_GROUP_KEY_BYTES],
+        };
+        let install =
+            SensitivePresentationKeyInstall::take_from_control_grant(77, 44, &mut grant)
+                .expect("valid install");
+        let event = worker_event_from_decoded_frame(
+            DecodedIpcFrame::PresentationKeyInstall(install),
+        )
+        .expect("sensitive install routes");
+
+        let WorkerEvent::PresentationKeyInstall(install) = event else {
+            panic!("expected dedicated presentation-key event");
+        };
+        assert_eq!(install.binding().control_session_id, 77);
+        assert_eq!(install.binding().request_id, 44);
+        assert_eq!(install.binding().presentation_id, 55);
+        assert_eq!(install.binding().stream_id, 7);
+        assert_eq!(install.binding().epoch, 3);
+        assert!(grant.key_material.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn service_cannot_send_worker_install_result_back_to_worker() {
+        use classmesh_windows_runtime::ipc::{
+            IpcFrame, WorkerPresentationKeyInstallResult, WorkerPresentationKeyInstallStatus,
+        };
+        use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+
+        let result = WorkerPresentationKeyInstallResult {
+            process_id: 42,
+            session_id: 7,
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 7,
+            epoch: 3,
+            status: WorkerPresentationKeyInstallStatus::Installed,
+        };
+        let frame =
+            IpcFrame::worker_presentation_key_install_result(result).expect("valid result frame");
+        let error = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
+            .expect_err("Worker-to-Service result must be rejected on Service-to-Worker path");
+        assert!(error.contains("unexpected IPC message after handshake"));
+    }
 
     #[test]
     fn capability_snapshot_does_not_claim_h264_before_encode_validation() {
