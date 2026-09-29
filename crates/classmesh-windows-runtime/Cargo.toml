@@ -9,6 +9,7 @@ license.workspace = true
 classmesh-core = { path = "../classmesh-core" }
 classmesh-protocol = { path = "../classmesh-protocol" }
 prost = "0.14.4"
+zeroize = "1.8"
 
 [lints]
 workspace = true
