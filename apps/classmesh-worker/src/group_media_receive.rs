@@ -375,7 +375,14 @@ mod tests {
             ));
         }
 
-        assert!(state.clear());
+        let current = state.binding().expect("current binding");
+        assert!(state.clear_if_matches(ServicePresentationKeyClear {
+            control_session_id: current.control_session_id,
+            request_id: current.request_id,
+            presentation_id: current.presentation_id,
+            stream_id: current.stream_id,
+            epoch: current.epoch,
+        }));
         assert!(!state.is_installed());
         assert!(
             state
