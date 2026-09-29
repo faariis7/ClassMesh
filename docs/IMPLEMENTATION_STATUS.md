@@ -115,6 +115,8 @@ PR #180 wires presentation-key handling into the Windows Worker runtime. Post-ha
 
 PR #181 connects the authenticated Student Service to that Worker key runtime without duplicating decryption state in the Service. The control runtime hands one sensitive install through a bounded queue to the Service main loop; the Service writes the zeroizing IPC envelope to the exact live Worker and accepts only an exact PID/session/control-session/request/presentation/stream/epoch result. `Installed` is acknowledged upstream only while that same Worker is still alive. The Service retains non-secret binding metadata only, ignores stale/miscorrelated Worker results, and uses an exact-bound lease to clear the Worker key on presentation stop or control-session teardown. Multicast receive/decode/render runtime and feedback runtime wiring remain pending.
 
+The Phase 7F feedback-runtime prerequisite splits an established `ControlChannel` into independently owned send/receive halves without changing framing, zeroization or I/O timeout semantics. This permits a dedicated receive pump to own each framed QUIC read to completion while the session task independently emits authenticated receiver feedback, avoiding cancellation of a partially read control frame.
+
 The Worker→Service presentation-feedback IPC contract is exact-bound to Worker PID/session plus control-session ID, key-grant request ID, presentation ID and security epoch. The existing bounded `FeedbackMessage` supplies the stream ID. This gives the Service enough non-secret context to reject stale or miscorrelated loss feedback before wrapping it in the authenticated network control envelope.
 
 ## Remaining security/control work
