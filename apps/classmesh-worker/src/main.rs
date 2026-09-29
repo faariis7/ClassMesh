@@ -84,7 +84,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut active_focused_profile: Option<FocusedWorkerProfile> = None;
     let mut captured_frames = 0_u64;
     let mut input_injector = InputInjector::default();
-    let mut group_media_keys = classmesh_worker::group_media_receive::WorkerGroupMediaKeyState::default();
+    let mut group_media_keys =
+        classmesh_worker::group_media_receive::WorkerGroupMediaKeyState::default();
 
     loop {
         let now = Instant::now();
@@ -167,9 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 classmesh_windows_runtime::ipc::IpcControlCommand::ClearPresentationKey => {
                     let cleared = group_media_keys.clear();
-                    eprintln!(
-                        "ClassMesh Worker cleared presentation key state: had_key={cleared}"
-                    );
+                    eprintln!("ClassMesh Worker cleared presentation key state: had_key={cleared}");
                     continue;
                 }
             },
@@ -272,9 +271,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Installed
                     }
                     Err(error) => {
-                        eprintln!(
-                            "ClassMesh Worker rejected presentation key install: {error}"
-                        );
+                        eprintln!("ClassMesh Worker rejected presentation key install: {error}");
                         classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Rejected
                     }
                 };
@@ -1037,13 +1034,11 @@ mod focused_profile_tests {
             epoch: 3,
             key_material: vec![0x5a; PRESENTATION_GROUP_KEY_BYTES],
         };
-        let install =
-            SensitivePresentationKeyInstall::take_from_control_grant(77, 44, &mut grant)
-                .expect("valid install");
-        let event = worker_event_from_decoded_frame(
-            DecodedIpcFrame::PresentationKeyInstall(install),
-        )
-        .expect("sensitive install routes");
+        let install = SensitivePresentationKeyInstall::take_from_control_grant(77, 44, &mut grant)
+            .expect("valid install");
+        let event =
+            worker_event_from_decoded_frame(DecodedIpcFrame::PresentationKeyInstall(install))
+                .expect("sensitive install routes");
 
         let WorkerEvent::PresentationKeyInstall(install) = event else {
             panic!("expected dedicated presentation-key event");
