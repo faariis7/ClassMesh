@@ -1,5 +1,7 @@
 use classmesh_protocol::ProtocolVersion;
-use classmesh_protocol::control_wire::{Nack, ProtocolVersion as WireProtocolVersion, control_envelope};
+use classmesh_protocol::control_wire::{
+    Nack, ProtocolVersion as WireProtocolVersion, control_envelope,
+};
 use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
 
 use super::{PresentationFeedbackError, build_presentation_feedback_envelope};
