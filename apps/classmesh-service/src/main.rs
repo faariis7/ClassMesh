@@ -57,6 +57,7 @@ mod windows_service_app {
     const FOCUSED_MEDIA_QUEUE_CAPACITY: usize = 4;
     const FOCUSED_MEDIA_FEEDBACK_QUEUE_CAPACITY: usize = 32;
     const PRESENTATION_KEY_INSTALL_QUEUE_CAPACITY: usize = 1;
+    const PRESENTATION_KEY_CLEAR_QUEUE_CAPACITY: usize = 4;
     const WORKER_PRESENTATION_KEY_RESULT_QUEUE_CAPACITY: usize = 4;
     const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
     const MEDIA_RECONFIGURE_RETRY: Duration = Duration::from_millis(250);
@@ -1230,8 +1231,13 @@ mod windows_service_app {
             mpsc::sync_channel::<PresentationKeyInstallDispatch>(
                 PRESENTATION_KEY_INSTALL_QUEUE_CAPACITY,
             );
+        let (presentation_key_clear_tx, presentation_key_clear_rx) =
+            mpsc::sync_channel::<PresentationKeyInstallBinding>(
+                PRESENTATION_KEY_CLEAR_QUEUE_CAPACITY,
+            );
         let presentation_key_channels = PresentationKeyDispatchChannels {
             install_tx: presentation_key_install_tx,
+            clear_tx: presentation_key_clear_tx,
         };
         let (worker_presentation_key_result_tx, worker_presentation_key_result_rx) =
             mpsc::sync_channel::<WorkerPresentationKeyInstallResult>(
@@ -1302,6 +1308,14 @@ mod windows_service_app {
         let mut next_worker_poll = Instant::now();
         let mut pending_presentation_key_install: Option<PendingPresentationKeyInstall> = None;
         loop {
+            while let Ok(binding) = presentation_key_clear_rx.try_recv() {
+                if let Err(error) = workers.clear_presentation_key(binding) {
+                    eprintln!(
+                        "ClassMesh Service presentation-key lifecycle clear failed: {error}"
+                    );
+                }
+            }
+
             if pending_presentation_key_install
                 .as_ref()
                 .is_some_and(|pending| pending.reply_tx.is_closed())
