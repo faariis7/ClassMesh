@@ -7,7 +7,9 @@ license.workspace = true
 
 [dependencies]
 classmesh-protocol = { path = "../classmesh-protocol" }
+classmesh-security = { path = "../classmesh-security" }
 classmesh-video = { path = "../classmesh-video" }
+socket2 = "0.6"
 
 [lints]
 workspace = true

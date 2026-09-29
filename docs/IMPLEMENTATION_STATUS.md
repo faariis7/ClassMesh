@@ -101,6 +101,8 @@ PR #169 wires that receiver contract into the authenticated Student Service sess
 
 Phase 7F now starts at the security/data-plane boundary: production presentation frames have a canonical fixed-width `CMG1` SFrame associated-data binding over presentation/stream/epoch/frame/timestamp/keyframe metadata, and the security layer exposes an opaque sealed-frame type so multicast transport code can require protected ciphertext. Multicast socket sender/receiver integration and authenticated per-client feedback remain pending; this slice does not establish physical multicast viability or scale qualification.
 
+PR #174 adds the sender half of the production multicast transport: construction requires successful local multicast-probe evidence; the socket is bound to and explicitly routes multicast through the selected IPv4 interface; TTL is fixed to one hop; only `SealedGroupMediaFrame` is accepted; packet headers derive stream/frame/timestamp/keyframe fields from the authenticated SFrame binding; and the sender retains no multicast retransmission cache. Multicast receiver integration and authenticated per-client feedback remain pending, and this hosted-CI slice does not satisfy the Phase 7D physical multicast or 7H scale gates.
+
 ## Remaining security/control work
 
 - Phase 6F physical interactive-control validation under Issue #108, including degraded/lost media while authenticated control remains responsive; hosted CI cannot close this gate;
