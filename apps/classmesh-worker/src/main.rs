@@ -1,4 +1,7 @@
 #[cfg(windows)]
+const WORKER_IPC_EVENT_QUEUE_CAPACITY: usize = 128;
+
+#[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
@@ -45,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let (event_tx, event_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::sync_channel(WORKER_IPC_EVENT_QUEUE_CAPACITY);
     let reader_pipe = pipe.try_clone()?;
     let _ipc_thread = spawn_ipc_reader(reader_pipe, event_tx);
 
@@ -81,6 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut active_focused_profile: Option<FocusedWorkerProfile> = None;
     let mut captured_frames = 0_u64;
     let mut input_injector = InputInjector::default();
+    let mut group_media_keys = classmesh_worker::group_media_receive::WorkerGroupMediaKeyState::default();
 
     loop {
         let now = Instant::now();
@@ -159,6 +163,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     active_udp_stream = None;
                     capture_due = Instant::now();
                     eprintln!("ClassMesh Worker cleared focused media profile");
+                    continue;
+                }
+                classmesh_windows_runtime::ipc::IpcControlCommand::ClearPresentationKey => {
+                    let cleared = group_media_keys.clear();
+                    eprintln!(
+                        "ClassMesh Worker cleared presentation key state: had_key={cleared}"
+                    );
                     continue;
                 }
             },
@@ -252,6 +263,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         eprintln!("ClassMesh Worker rejected focused profile update: {code}");
                     }
                 }
+            }
+            Ok(WorkerEvent::PresentationKeyInstall(install)) => {
+                let binding = install.binding();
+                let status = match group_media_keys.install(install) {
+                    Ok(installed) => {
+                        debug_assert_eq!(installed, binding);
+                        classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Installed
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "ClassMesh Worker rejected presentation key install: {error}"
+                        );
+                        classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Rejected
+                    }
+                };
+                publish_worker_presentation_key_install_result(
+                    &pipe,
+                    std::process::id(),
+                    actual_session,
+                    binding,
+                    status,
+                )?;
+                continue;
             }
             Ok(WorkerEvent::EncoderCacheResult(result)) => {
                 if result.process_id != std::process::id() || result.session_id != actual_session {
@@ -528,6 +562,9 @@ enum WorkerEvent {
     UdpStreamStart(classmesh_windows_runtime::ipc::ServiceUdpStreamStart),
     MediaFeedback(classmesh_protocol::feedback::FeedbackMessage),
     EncoderCacheResult(classmesh_windows_runtime::ipc::ServiceEncoderCacheResult),
+    PresentationKeyInstall(
+        classmesh_windows_runtime::ipc_sensitive::SensitivePresentationKeyInstall,
+    ),
     IpcFailure(String),
 }
 
@@ -789,6 +826,31 @@ fn publish_worker_encoder_evidence(
 }
 
 #[cfg(windows)]
+fn publish_worker_presentation_key_install_result(
+    pipe: &classmesh_win32::NamedPipeClient,
+    process_id: u32,
+    session_id: u32,
+    binding: classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding,
+    status: classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallResult {
+        process_id,
+        session_id,
+        control_session_id: binding.control_session_id,
+        request_id: binding.request_id,
+        presentation_id: binding.presentation_id,
+        stream_id: binding.stream_id,
+        epoch: binding.epoch,
+        status,
+    };
+    let frame =
+        classmesh_windows_runtime::ipc::IpcFrame::worker_presentation_key_install_result(result)
+            .map_err(ipc_message_error)?;
+    pipe.write_all(&frame.encode().map_err(ipc_frame_error)?)?;
+    Ok(())
+}
+
+#[cfg(windows)]
 fn publish_worker_capabilities(
     pipe: &classmesh_win32::NamedPipeClient,
     process_id: u32,
@@ -811,12 +873,15 @@ fn publish_worker_capabilities(
 #[cfg(windows)]
 fn spawn_ipc_reader(
     pipe: classmesh_win32::NamedPipeClient,
-    event_tx: std::sync::mpsc::Sender<WorkerEvent>,
+    event_tx: std::sync::mpsc::SyncSender<WorkerEvent>,
 ) -> std::thread::JoinHandle<()> {
-    use classmesh_windows_runtime::ipc::{IpcFrameDecoder, IpcMessage};
+    use classmesh_windows_runtime::ipc::IpcMessage;
+    use classmesh_windows_runtime::ipc_sensitive::{
+        DecodedIpcFrame, SensitiveIpcFrameDecoder,
+    };
 
     std::thread::spawn(move || {
-        let mut decoder = IpcFrameDecoder::default();
+        let mut decoder = SensitiveIpcFrameDecoder::default();
         let mut buffer = [0_u8; 4096];
         loop {
             let read = match pipe.read(&mut buffer) {
@@ -835,7 +900,7 @@ fn spawn_ipc_reader(
                 }
             };
 
-            let frames = match decoder.push_bytes(&buffer[..read]) {
+            let frames = match decoder.push_bytes_zeroizing(&mut buffer[..read]) {
                 Ok(frames) => frames,
                 Err(error) => {
                     let _ = event_tx.send(WorkerEvent::IpcFailure(format!(
@@ -846,55 +911,42 @@ fn spawn_ipc_reader(
             };
 
             for frame in frames {
-                match frame.message() {
-                    Ok(IpcMessage::Control(command)) => {
-                        if event_tx.send(WorkerEvent::Control(command)).is_err() {
+                let event = match frame {
+                    DecodedIpcFrame::PresentationKeyInstall(install) => {
+                        WorkerEvent::PresentationKeyInstall(install)
+                    }
+                    DecodedIpcFrame::Regular(frame) => match frame.message() {
+                        Ok(IpcMessage::Control(command)) => WorkerEvent::Control(command),
+                        Ok(IpcMessage::InputEvent(event)) => WorkerEvent::Input(event),
+                        Ok(IpcMessage::StreamReconfigure(reconfigure)) => {
+                            WorkerEvent::StreamReconfigure(reconfigure)
+                        }
+                        Ok(IpcMessage::ServiceUdpStreamStart(start)) => {
+                            WorkerEvent::UdpStreamStart(start)
+                        }
+                        Ok(IpcMessage::ServiceMediaFeedback(feedback)) => {
+                            WorkerEvent::MediaFeedback(feedback)
+                        }
+                        Ok(IpcMessage::ServiceEncoderCacheResult(result)) => {
+                            WorkerEvent::EncoderCacheResult(result)
+                        }
+                        Ok(unexpected) => {
+                            let _ = event_tx.send(WorkerEvent::IpcFailure(format!(
+                                "unexpected IPC message after handshake: {unexpected:?}"
+                            )));
                             return;
                         }
-                    }
-                    Ok(IpcMessage::InputEvent(event)) => {
-                        if event_tx.send(WorkerEvent::Input(event)).is_err() {
+                        Err(error) => {
+                            let _ = event_tx.send(WorkerEvent::IpcFailure(format!(
+                                "invalid IPC message after handshake: {error:?}"
+                            )));
                             return;
                         }
-                    }
-                    Ok(IpcMessage::StreamReconfigure(reconfigure)) => {
-                        if event_tx
-                            .send(WorkerEvent::StreamReconfigure(reconfigure))
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Ok(IpcMessage::ServiceUdpStreamStart(start)) => {
-                        if event_tx.send(WorkerEvent::UdpStreamStart(start)).is_err() {
-                            return;
-                        }
-                    }
-                    Ok(IpcMessage::ServiceMediaFeedback(feedback)) => {
-                        if event_tx.send(WorkerEvent::MediaFeedback(feedback)).is_err() {
-                            return;
-                        }
-                    }
-                    Ok(IpcMessage::ServiceEncoderCacheResult(result)) => {
-                        if event_tx
-                            .send(WorkerEvent::EncoderCacheResult(result))
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Ok(unexpected) => {
-                        let _ = event_tx.send(WorkerEvent::IpcFailure(format!(
-                            "unexpected IPC message after handshake: {unexpected:?}"
-                        )));
-                        return;
-                    }
-                    Err(error) => {
-                        let _ = event_tx.send(WorkerEvent::IpcFailure(format!(
-                            "invalid IPC message after handshake: {error:?}"
-                        )));
-                        return;
-                    }
+                    },
+                };
+
+                if event_tx.send(event).is_err() {
+                    return;
                 }
             }
         }
