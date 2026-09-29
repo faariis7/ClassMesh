@@ -2172,6 +2172,58 @@ mod tests {
     }
 
     #[test]
+    fn presentation_feedback_requires_exact_installed_worker_key_lease() {
+        let (clear_tx, _clear_rx) = mpsc::sync_channel(1);
+        let mut lease = PresentationKeyWorkerLease::new(clear_tx);
+        let binding = PresentationKeyInstallBinding {
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 7,
+            epoch: 3,
+        };
+        lease.replace(binding);
+
+        let exact = WorkerPresentationFeedback {
+            process_id: 42,
+            session_id: 9,
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            epoch: 3,
+            feedback: FeedbackMessage::RequestKeyframe {
+                stream_id: 7,
+                after_frame_id: 10,
+            },
+        };
+        assert!(lease.accepts_feedback(&exact));
+
+        for report in [
+            WorkerPresentationFeedback {
+                request_id: 45,
+                ..exact.clone()
+            },
+            WorkerPresentationFeedback {
+                presentation_id: 56,
+                ..exact.clone()
+            },
+            WorkerPresentationFeedback {
+                epoch: 4,
+                ..exact.clone()
+            },
+            WorkerPresentationFeedback {
+                feedback: FeedbackMessage::RequestKeyframe {
+                    stream_id: 8,
+                    after_frame_id: 10,
+                },
+                ..exact.clone()
+            },
+        ] {
+            assert!(!lease.accepts_feedback(&report));
+        }
+    }
+
+    #[test]
     fn presentation_key_epoch_must_increase_within_exact_live_binding() {
         let installed =
             InstalledPresentationKeyBinding::new(80, 90, 3).expect("valid test binding");
