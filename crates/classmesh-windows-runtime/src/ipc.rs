@@ -949,9 +949,7 @@ impl IpcFrame {
                     stream_id: u32::from_be_bytes(
                         self.payload[32..36].try_into().expect("four bytes"),
                     ),
-                    epoch: u32::from_be_bytes(
-                        self.payload[36..40].try_into().expect("four bytes"),
-                    ),
+                    epoch: u32::from_be_bytes(self.payload[36..40].try_into().expect("four bytes")),
                     status: WorkerPresentationKeyInstallStatus::from_byte(self.payload[40])
                         .ok_or(IpcMessageError::InvalidPayload)?,
                 };
