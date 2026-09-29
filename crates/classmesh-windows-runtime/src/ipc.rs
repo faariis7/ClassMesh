@@ -122,6 +122,7 @@ pub enum IpcControlCommand {
     Shutdown,
     ReleaseInput,
     ClearFocusedProfile,
+    ClearPresentationKey,
 }
 
 impl IpcControlCommand {
@@ -132,6 +133,7 @@ impl IpcControlCommand {
             Self::Shutdown => 3,
             Self::ReleaseInput => 4,
             Self::ClearFocusedProfile => 5,
+            Self::ClearPresentationKey => 6,
         }
     }
 
@@ -142,6 +144,7 @@ impl IpcControlCommand {
             3 => Some(Self::Shutdown),
             4 => Some(Self::ReleaseInput),
             5 => Some(Self::ClearFocusedProfile),
+            6 => Some(Self::ClearPresentationKey),
             _ => None,
         }
     }
@@ -1095,6 +1098,7 @@ mod tests {
             IpcControlCommand::Shutdown,
             IpcControlCommand::ReleaseInput,
             IpcControlCommand::ClearFocusedProfile,
+            IpcControlCommand::ClearPresentationKey,
         ] {
             let frame = IpcFrame::control(command);
             let encoded = frame.encode().expect("control frame should encode");
