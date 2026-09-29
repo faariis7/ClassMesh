@@ -12,6 +12,47 @@ use classmesh_security::group_media::{
 };
 use zeroize::Zeroize;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstalledPresentationKeyBinding {
+    presentation_id: u64,
+    stream_id: u32,
+    epoch: u32,
+}
+
+impl InstalledPresentationKeyBinding {
+    pub fn new(
+        presentation_id: u64,
+        stream_id: u32,
+        epoch: u32,
+    ) -> Result<Self, GroupMediaControlError> {
+        validate_key_ack(&PresentationKeyAck {
+            presentation_id,
+            stream_id: u64::from(stream_id),
+            epoch,
+        })?;
+        Ok(Self {
+            presentation_id,
+            stream_id,
+            epoch,
+        })
+    }
+
+    #[must_use]
+    pub const fn presentation_id(self) -> u64 {
+        self.presentation_id
+    }
+
+    #[must_use]
+    pub const fn stream_id(self) -> u32 {
+        self.stream_id
+    }
+
+    #[must_use]
+    pub const fn epoch(self) -> u32 {
+        self.epoch
+    }
+}
+
 pub struct InstalledPresentationKey {
     presentation_id: u64,
     stream_id: u32,
@@ -44,6 +85,15 @@ impl InstalledPresentationKey {
     #[must_use]
     pub const fn epoch(&self) -> GroupMediaEpoch {
         self.epoch
+    }
+
+    #[must_use]
+    pub const fn binding(&self) -> InstalledPresentationKeyBinding {
+        InstalledPresentationKeyBinding {
+            presentation_id: self.presentation_id,
+            stream_id: self.stream_id,
+            epoch: self.epoch.get(),
+        }
     }
 
     pub fn open_bound_frame(
@@ -172,6 +222,17 @@ pub fn build_presentation_key_ack(
     installed: &InstalledPresentationKey,
     sequence: u64,
 ) -> Result<ControlEnvelope, PresentationKeyAckBuildError> {
+    build_presentation_key_ack_from_binding(received, installed.binding(), sequence)
+}
+
+/// Builds the receiver ACK from a non-secret binding that was confirmed by the actual media
+/// executor. This lets a privileged Service remain an orchestrator without deriving or retaining
+/// a duplicate SFrame receiver merely to construct the ACK.
+pub fn build_presentation_key_ack_from_binding(
+    received: &ControlEnvelope,
+    installed: InstalledPresentationKeyBinding,
+    sequence: u64,
+) -> Result<ControlEnvelope, PresentationKeyAckBuildError> {
     if received.control_session_id == 0 {
         return Err(PresentationKeyAckBuildError::InvalidSessionId);
     }
@@ -192,7 +253,7 @@ pub fn build_presentation_key_ack(
 
     if grant.presentation_id != installed.presentation_id()
         || grant.stream_id != u64::from(installed.stream_id())
-        || grant.epoch != installed.epoch().get()
+        || grant.epoch != installed.epoch()
     {
         return Err(PresentationKeyAckBuildError::BindingMismatch);
     }
@@ -200,7 +261,7 @@ pub fn build_presentation_key_ack(
     let ack = PresentationKeyAck {
         presentation_id: installed.presentation_id(),
         stream_id: u64::from(installed.stream_id()),
-        epoch: installed.epoch().get(),
+        epoch: installed.epoch(),
     };
     validate_key_ack(&ack).map_err(PresentationKeyAckBuildError::InvalidAck)?;
 
@@ -308,6 +369,39 @@ mod tests {
         assert_eq!(ack_payload.presentation_id, 55);
         assert_eq!(ack_payload.stream_id, 7);
         assert_eq!(ack_payload.epoch, 3);
+    }
+
+    #[test]
+    fn confirmed_nonsecret_binding_builds_ack_after_grant_key_is_zeroized() {
+        let mut envelope = grant_envelope(0x47);
+        let binding = InstalledPresentationKeyBinding::new(55, 7, 3).expect("valid binding");
+        match envelope.payload.as_mut() {
+            Some(control_envelope::Payload::PresentationKeyGrant(grant)) => {
+                zeroize_received_presentation_key(grant);
+            }
+            _ => panic!("expected grant"),
+        }
+
+        let ack =
+            build_presentation_key_ack_from_binding(&envelope, binding, 3).expect("binding ACK");
+        assert_eq!(ack.control_session_id, 77);
+        assert_eq!(ack.request_id, 44);
+        let Some(control_envelope::Payload::PresentationKeyAck(payload)) = ack.payload else {
+            panic!("expected ACK");
+        };
+        assert_eq!(payload.presentation_id, 55);
+        assert_eq!(payload.stream_id, 7);
+        assert_eq!(payload.epoch, 3);
+    }
+
+    #[test]
+    fn binding_ack_builder_rejects_worker_binding_mismatch() {
+        let envelope = grant_envelope(0x48);
+        let wrong = InstalledPresentationKeyBinding::new(55, 8, 3).expect("valid binding");
+        assert!(matches!(
+            build_presentation_key_ack_from_binding(&envelope, wrong, 3),
+            Err(PresentationKeyAckBuildError::BindingMismatch)
+        ));
     }
 
     #[test]
