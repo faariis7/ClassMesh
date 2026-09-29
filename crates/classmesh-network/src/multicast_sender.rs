@@ -234,6 +234,7 @@ impl ProtectedMulticastFrameSender {
     ) -> Result<Self, ProtectedMulticastSendError> {
         let socket = UdpMediaSocket::bind(config.local_bind())?;
         socket.set_write_timeout(Some(DEFAULT_MULTICAST_WRITE_TIMEOUT))?;
+        socket.set_multicast_interface_v4(config.membership().interface())?;
         socket.set_multicast_ttl_v4(MULTICAST_MEDIA_TTL)?;
 
         Ok(Self {
