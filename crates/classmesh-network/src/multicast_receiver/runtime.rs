@@ -12,6 +12,30 @@ use super::state::{
 
 pub const DEFAULT_MULTICAST_READ_TIMEOUT: Duration = Duration::from_millis(10);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DatagramFailureDisposition {
+    Tick,
+    DropMalformed,
+    Fail,
+}
+
+pub(super) fn classify_datagram_failure(error: &DatagramError) -> DatagramFailureDisposition {
+    match error {
+        DatagramError::Io(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            DatagramFailureDisposition::Tick
+        }
+        DatagramError::Header(_)
+        | DatagramError::PayloadLengthMismatch
+        | DatagramError::DatagramTooLarge => DatagramFailureDisposition::DropMalformed,
+        DatagramError::Io(_) => DatagramFailureDisposition::Fail,
+    }
+}
+
 #[derive(Debug)]
 pub struct ProtectedMulticastFrameReceiver {
     socket: UdpMediaSocket,
@@ -40,24 +64,17 @@ impl ProtectedMulticastFrameReceiver {
     ) -> Result<ProtectedMulticastReceiveOutcome, ProtectedMulticastReceiveError> {
         match self.socket.receive_packet() {
             Ok((packet, source)) => Ok(self.state.push_packet(now_us, &packet, source)),
-            Err(DatagramError::Io(error))
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                Ok(ProtectedMulticastReceiveOutcome::Events(
+            Err(error) => match classify_datagram_failure(&error) {
+                DatagramFailureDisposition::Tick => Ok(ProtectedMulticastReceiveOutcome::Events(
                     self.state.tick(now_us),
-                ))
-            }
-            Err(
-                DatagramError::Header(_)
-                | DatagramError::PayloadLengthMismatch
-                | DatagramError::DatagramTooLarge,
-            ) => Ok(ProtectedMulticastReceiveOutcome::Dropped(
-                MulticastPacketDropReason::MalformedDatagram,
-            )),
-            Err(error) => Err(error.into()),
+                )),
+                DatagramFailureDisposition::DropMalformed => {
+                    Ok(ProtectedMulticastReceiveOutcome::Dropped(
+                        MulticastPacketDropReason::MalformedDatagram,
+                    ))
+                }
+                DatagramFailureDisposition::Fail => Err(error.into()),
+            },
         }
     }
 
