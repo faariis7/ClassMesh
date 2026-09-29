@@ -417,9 +417,11 @@ mod windows_service_app {
             };
             let frame = IpcFrame::service_presentation_key_clear(clear)
                 .map_err(|error| format!("failed to build Worker key clear: {error:?}"))?;
-            pipe.write_all(&frame.encode().map_err(|error| {
-                format!("failed to encode Worker key clear: {error:?}")
-            })?)
+            pipe.write_all(
+                &frame
+                    .encode()
+                    .map_err(|error| format!("failed to encode Worker key clear: {error:?}"))?,
+            )
             .map_err(|error| format!("Worker key-clear IPC write failed: {error}"))
         }
 
@@ -1310,9 +1312,7 @@ mod windows_service_app {
         loop {
             while let Ok(binding) = presentation_key_clear_rx.try_recv() {
                 if let Err(error) = workers.clear_presentation_key(binding) {
-                    eprintln!(
-                        "ClassMesh Service presentation-key lifecycle clear failed: {error}"
-                    );
+                    eprintln!("ClassMesh Service presentation-key lifecycle clear failed: {error}");
                 }
             }
 
@@ -1341,10 +1341,9 @@ mod windows_service_app {
                     );
                     continue;
                 }
-                if !workers.is_running_worker(
-                    pending.expected_process_id,
-                    pending.expected_session_id,
-                ) {
+                if !workers
+                    .is_running_worker(pending.expected_process_id, pending.expected_session_id)
+                {
                     let pending = pending_presentation_key_install
                         .take()
                         .expect("pending install presence checked");
