@@ -638,9 +638,10 @@ mod tests {
             .map_err(|error| error.to_string())?;
 
             let (mut send, mut recv) = channel.into_split();
-            let receive_task = tokio::spawn(async move {
-                recv.receive().await.map_err(|error| error.to_string())
-            });
+            let receive_task =
+                tokio::spawn(
+                    async move { recv.receive().await.map_err(|error| error.to_string()) },
+                );
             let received = receive_task.await.map_err(|error| error.to_string())??;
             assert!(matches!(
                 received.payload,
