@@ -2,6 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
 use classmesh_protocol::media::{MAX_PACKET_PAYLOAD, MediaFlags};
+use classmesh_security::group_media::MAX_GROUP_MEDIA_SEALED_BYTES;
 
 use crate::multicast::{MulticastMembership, MulticastProbeFailure, MulticastProbeOutcome};
 use crate::receiver::ReceiverEvent;
@@ -184,6 +185,39 @@ fn unexpected_source_stream_version_and_group_retransmit_are_media_local_drops()
         );
         assert_eq!(state.dropped_frames(), 0);
     }
+}
+
+#[test]
+fn oversized_packet_count_is_dropped_before_receiver_window_allocation() {
+    let mut state = ProtectedMulticastReceiveState::new(config()).expect("receiver state");
+    let mut packet = packets(3, false).remove(0);
+    let max_packets = MAX_GROUP_MEDIA_SEALED_BYTES.div_ceil(MAX_PACKET_PAYLOAD);
+    packet.header.packet_count =
+        u16::try_from(max_packets + 1).expect("group-media packet bound fits u16");
+    packet.header.packet_index = 0;
+
+    assert_eq!(
+        state.push_packet(0, &packet, source()),
+        ProtectedMulticastReceiveOutcome::Dropped(MulticastPacketDropReason::FrameTooLarge)
+    );
+    assert_eq!(state.dropped_frames(), 0);
+}
+
+#[test]
+fn oversized_completed_ciphertext_is_not_exposed_to_sframe_runtime() {
+    let batch = ProtectedMulticastReceiveBatch::from_receiver_events(vec![
+        ReceiverEvent::FrameReady(crate::AssembledFrame {
+            stream_id: 800,
+            frame_id: 5,
+            timestamp_us: 5_000,
+            keyframe: false,
+            data: vec![0x5a; MAX_GROUP_MEDIA_SEALED_BYTES + 1],
+        }),
+    ]);
+
+    assert!(batch.frames.is_empty());
+    assert_eq!(batch.dropped_invalid_frames, 1);
+    assert!(!batch.is_empty());
 }
 
 #[test]
