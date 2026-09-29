@@ -192,7 +192,9 @@ impl ProtectedMulticastReceiveState {
             );
         }
         if packet.header.stream_id != self.config.stream_id() {
-            return ProtectedMulticastReceiveOutcome::Dropped(MulticastPacketDropReason::WrongStream);
+            return ProtectedMulticastReceiveOutcome::Dropped(
+                MulticastPacketDropReason::WrongStream,
+            );
         }
         if packet.header.flags.contains(MediaFlags::RETRANSMIT) {
             return ProtectedMulticastReceiveOutcome::Dropped(
