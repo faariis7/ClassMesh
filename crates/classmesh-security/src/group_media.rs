@@ -333,7 +333,7 @@ impl GroupMediaSender {
         Ok(SealedGroupMediaFrame { binding, data })
     }
 
-    pub fn seal_frame(
+    pub(crate) fn seal_frame(
         &mut self,
         plaintext: &[u8],
         associated_data: &[u8],
@@ -416,7 +416,7 @@ impl GroupMediaReceiver {
         self.open_frame(sealed, &associated_data)
     }
 
-    pub fn open_frame(
+    pub(crate) fn open_frame(
         &mut self,
         sealed: &[u8],
         associated_data: &[u8],
