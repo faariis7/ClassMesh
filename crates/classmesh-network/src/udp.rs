@@ -3,6 +3,8 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
+use socket2::SockRef;
+
 use classmesh_protocol::media::{
     MAX_PACKET_PAYLOAD, MEDIA_HEADER_LEN, MediaHeaderError, MediaPacketHeader,
 };
@@ -116,6 +118,14 @@ impl UdpMediaSocket {
 
     pub fn set_multicast_ttl_v4(&self, ttl: u32) -> Result<(), DatagramError> {
         self.socket.set_multicast_ttl_v4(ttl)?;
+        Ok(())
+    }
+
+    pub fn set_multicast_interface_v4(
+        &self,
+        interface: Ipv4Addr,
+    ) -> Result<(), DatagramError> {
+        SockRef::from(&self.socket).set_multicast_if_v4(&interface)?;
         Ok(())
     }
 
