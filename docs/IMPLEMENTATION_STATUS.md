@@ -113,6 +113,8 @@ PR #179 adds the portable Worker-owned key/decrypt state that will consume that 
 
 PR #180 wires presentation-key handling into the Windows Worker runtime. Post-handshake Service→Worker reads now use `SensitiveIpcFrameDecoder`; the Worker IPC event queue is bounded to 128 entries and applies backpressure instead of unbounded buffering or event drops; sensitive installs are processed by the Worker-owned derived SFrame state; and the Worker sends the exact non-secret `Installed`/`Rejected` result only after processing. The local key-clear message carries the exact control-session/request/presentation/stream/epoch and the Worker clears only when all fields match the installed binding, so a delayed cleanup cannot erase a newer presentation. Service-side forwarding and upstream Teacher ACK timing remain pending, as do multicast socket/decode/render runtime wiring.
 
+The Phase 7F feedback-runtime prerequisite now splits an established `ControlChannel` into independently owned send/receive halves without changing framing, zeroization or I/O timeout semantics. This permits a dedicated receive pump to own each framed QUIC read to completion while the session task independently emits authenticated receiver feedback, avoiding cancellation of a partially read control frame.
+
 ## Remaining security/control work
 
 - Phase 6F physical interactive-control validation under Issue #108, including degraded/lost media while authenticated control remains responsive; hosted CI cannot close this gate;
