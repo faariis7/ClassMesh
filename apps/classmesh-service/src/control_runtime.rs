@@ -738,6 +738,7 @@ struct ControlRuntimeDispatch {
     input: InputDispatchChannels,
     media: FocusedMediaDispatchChannels,
     presentation_keys: PresentationKeyDispatchChannels,
+    presentation_feedback: PresentationFeedbackBus,
     worker_capabilities: Arc<WorkerCapabilityState>,
 }
 
@@ -755,6 +756,7 @@ impl ControlRuntime {
         input: InputDispatchChannels,
         media: FocusedMediaDispatchChannels,
         presentation_keys: PresentationKeyDispatchChannels,
+        presentation_feedback: PresentationFeedbackBus,
         worker_capabilities: Arc<WorkerCapabilityState>,
     ) -> Result<Self, String> {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<SocketAddr, String>>(1);
@@ -786,6 +788,7 @@ impl ControlRuntime {
                         input,
                         media,
                         presentation_keys,
+                        presentation_feedback,
                         worker_capabilities,
                     },
                 ));
@@ -853,6 +856,7 @@ async fn run_listener(
         input,
         media,
         presentation_keys,
+        presentation_feedback,
         worker_capabilities,
     } = dispatch;
     let endpoint = match build_endpoint(&state, config) {
@@ -900,6 +904,7 @@ async fn run_listener(
                 let input = input.clone();
                 let media = media.clone();
                 let presentation_keys = presentation_keys.clone();
+                let presentation_feedback = presentation_feedback.clone();
                 let presentation = presentation.clone();
                 let worker_capabilities = Arc::clone(&worker_capabilities);
                 tokio::spawn(async move {
@@ -953,6 +958,7 @@ async fn run_listener(
                                     input: &input,
                                     media: &media,
                                     presentation_keys: &presentation_keys,
+                                    presentation_feedback: &presentation_feedback,
                                     presentation: &presentation,
                                 },
                             )
@@ -988,6 +994,7 @@ struct EstablishedSessionRuntime<'a> {
     input: &'a InputDispatchState,
     media: &'a FocusedMediaDispatchChannels,
     presentation_keys: &'a PresentationKeyDispatchChannels,
+    presentation_feedback: &'a PresentationFeedbackBus,
     presentation: &'a PresentationDispatchState,
 }
 
@@ -1004,6 +1011,7 @@ async fn run_established_session(
         input,
         media,
         presentation_keys,
+        presentation_feedback,
         presentation,
     } = runtime;
 
