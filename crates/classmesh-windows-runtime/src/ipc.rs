@@ -976,9 +976,7 @@ impl IpcFrame {
                     stream_id: u32::from_be_bytes(
                         self.payload[24..28].try_into().expect("four bytes"),
                     ),
-                    epoch: u32::from_be_bytes(
-                        self.payload[28..32].try_into().expect("four bytes"),
-                    ),
+                    epoch: u32::from_be_bytes(self.payload[28..32].try_into().expect("four bytes")),
                 };
                 clear.validate()?;
                 Ok(IpcMessage::ServicePresentationKeyClear(clear))
@@ -1342,10 +1340,22 @@ mod tests {
             epoch: 3,
         };
         for clear in [
-            ServicePresentationKeyClear { control_session_id: 0, ..valid },
-            ServicePresentationKeyClear { request_id: 0, ..valid },
-            ServicePresentationKeyClear { presentation_id: 0, ..valid },
-            ServicePresentationKeyClear { stream_id: 0, ..valid },
+            ServicePresentationKeyClear {
+                control_session_id: 0,
+                ..valid
+            },
+            ServicePresentationKeyClear {
+                request_id: 0,
+                ..valid
+            },
+            ServicePresentationKeyClear {
+                presentation_id: 0,
+                ..valid
+            },
+            ServicePresentationKeyClear {
+                stream_id: 0,
+                ..valid
+            },
             ServicePresentationKeyClear { epoch: 0, ..valid },
         ] {
             assert_eq!(
