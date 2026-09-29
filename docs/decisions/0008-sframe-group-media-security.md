@@ -44,9 +44,11 @@ The receiver set is bounded to 64 principals. A principal may enter the receiver
 
 SFrame associated data remains outside the ciphertext and is authenticated.
 
-ClassMesh runtime integration must provide a canonical bounded binding that identifies the authenticated presentation/media context, such as the presentation/session/stream/epoch metadata required by the final wire contract. A receiver must reconstruct the exact same associated data before accepting a frame.
+Phase 7F defines one canonical fixed-width 40-byte binding for production presentation frames. Bytes `0..4` are the versioned magic `CMG1`; the remaining fields are big-endian `presentation_id` (8 bytes), `stream_id` (4), security `epoch` (4), `frame_id` (8), media `timestamp_us` (8), one `keyframe` byte, and three zero-reserved bytes. Presentation and stream IDs must be non-zero, and the binding epoch must exactly match the installed SFrame sender/receiver epoch.
 
-The first crypto-core slice accepts bounded caller-provided associated-data bytes and does not yet define the control-wire serialization.
+Packet sequence and packet-index values are deliberately excluded because one encoded frame is SFrame-sealed before ClassMesh UDP packetization. A receiver reconstructs the binding from its authenticated presentation/key state and the assembled media-frame metadata; changing presentation, stream, epoch, frame ID, timestamp or keyframe state therefore fails SFrame authentication.
+
+The security API exposes an opaque `SealedGroupMediaFrame` that carries the exact non-secret binding used to seal its ciphertext, so the production multicast transport can derive packet metadata from that authenticated binding and require protected ciphertext instead of accepting arbitrary H.264 bytes. The older bounded caller-provided associated-data primitive remains available inside the security layer for lower-level tests and compatibility, but it is not the production multicast framing contract.
 
 ### Replay protection
 
