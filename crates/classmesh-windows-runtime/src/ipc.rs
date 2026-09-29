@@ -1061,9 +1061,7 @@ impl IpcFrame {
                     presentation_id: u64::from_be_bytes(
                         self.payload[24..32].try_into().expect("eight bytes"),
                     ),
-                    epoch: u32::from_be_bytes(
-                        self.payload[32..36].try_into().expect("four bytes"),
-                    ),
+                    epoch: u32::from_be_bytes(self.payload[32..36].try_into().expect("four bytes")),
                     feedback: FeedbackMessage::decode(
                         &self.payload[WORKER_PRESENTATION_FEEDBACK_BINDING_LEN..],
                     )
@@ -1547,7 +1545,8 @@ mod tests {
                 frame_id: 42,
                 missing_packet_indices: vec![
                     1;
-                    classmesh_protocol::feedback::MAX_NACK_PACKET_INDICES + 1
+                    classmesh_protocol::feedback::MAX_NACK_PACKET_INDICES
+                        + 1
                 ],
             },
             ..valid
