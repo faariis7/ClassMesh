@@ -117,6 +117,8 @@ PR #181 connects the authenticated Student Service to that Worker key runtime wi
 
 The Phase 7F feedback-runtime prerequisite splits an established `ControlChannel` into independently owned send/receive halves without changing framing, zeroization or I/O timeout semantics. This permits a dedicated receive pump to own each framed QUIC read to completion while the session task independently emits authenticated receiver feedback, avoiding cancellation of a partially read control frame.
 
+The Worker→Service presentation-feedback IPC contract is exact-bound to Worker PID/session plus control-session ID, key-grant request ID, presentation ID and security epoch. The existing bounded `FeedbackMessage` supplies the stream ID. This gives the Service enough non-secret context to reject stale or miscorrelated loss feedback before wrapping it in the authenticated network control envelope.
+
 ## Remaining security/control work
 
 - Phase 6F physical interactive-control validation under Issue #108, including degraded/lost media while authenticated control remains responsive; hosted CI cannot close this gate;

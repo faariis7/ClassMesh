@@ -27,10 +27,13 @@ const MESSAGE_SERVICE_MEDIA_FEEDBACK: u16 = 18;
 pub(crate) const MESSAGE_SERVICE_PRESENTATION_KEY_INSTALL: u16 = 19;
 const MESSAGE_WORKER_PRESENTATION_KEY_INSTALL_RESULT: u16 = 20;
 const MESSAGE_SERVICE_PRESENTATION_KEY_CLEAR: u16 = 21;
+const MESSAGE_WORKER_PRESENTATION_FEEDBACK: u16 = 22;
 const SERVICE_UDP_STREAM_START_LEN: usize = 32;
 const WORKER_PRESENTATION_KEY_INSTALL_RESULT_LEN: usize = 48;
 const SERVICE_PRESENTATION_KEY_CLEAR_LEN: usize = 32;
+const WORKER_PRESENTATION_FEEDBACK_BINDING_LEN: usize = 36;
 const PRESENTATION_KEY_INSTALL_RESULT_MIN_MINOR: u8 = 6;
+const WORKER_PRESENTATION_FEEDBACK_MIN_MINOR: u8 = 6;
 
 const MAX_EVIDENCE_ADAPTER_IDENTITY: usize = 128;
 const MAX_EVIDENCE_DRIVER_VERSION: usize = 128;
@@ -398,6 +401,36 @@ impl WorkerPresentationKeyInstallResult {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerPresentationFeedback {
+    pub process_id: u32,
+    pub session_id: u32,
+    pub control_session_id: u64,
+    pub request_id: u64,
+    pub presentation_id: u64,
+    pub epoch: u32,
+    pub feedback: FeedbackMessage,
+}
+
+impl WorkerPresentationFeedback {
+    fn validate(&self) -> Result<(), IpcMessageError> {
+        if self.process_id == 0
+            || self.session_id == 0
+            || self.control_session_id == 0
+            || self.request_id == 0
+            || self.presentation_id == 0
+            || self.epoch == 0
+            || self.feedback.stream_id() == 0
+        {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        self.feedback
+            .encode()
+            .map(|_| ())
+            .map_err(|_| IpcMessageError::InvalidPayload)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum IpcMessage {
     WorkerHello { process_id: u32, session_id: u32 },
@@ -413,6 +446,7 @@ pub enum IpcMessage {
     ServiceMediaFeedback(FeedbackMessage),
     WorkerPresentationKeyInstallResult(WorkerPresentationKeyInstallResult),
     ServicePresentationKeyClear(ServicePresentationKeyClear),
+    WorkerPresentationFeedback(WorkerPresentationFeedback),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -642,6 +676,26 @@ impl IpcFrame {
         payload.extend_from_slice(&clear.epoch.to_be_bytes());
         debug_assert_eq!(payload.len(), SERVICE_PRESENTATION_KEY_CLEAR_LEN);
         Ok(Self::new(MESSAGE_SERVICE_PRESENTATION_KEY_CLEAR, payload))
+    }
+
+    pub fn worker_presentation_feedback(
+        feedback: &WorkerPresentationFeedback,
+    ) -> Result<Self, IpcMessageError> {
+        feedback.validate()?;
+        let encoded_feedback = feedback
+            .feedback
+            .encode()
+            .map_err(|_| IpcMessageError::InvalidPayload)?;
+        let mut payload =
+            Vec::with_capacity(WORKER_PRESENTATION_FEEDBACK_BINDING_LEN + encoded_feedback.len());
+        payload.extend_from_slice(&feedback.process_id.to_be_bytes());
+        payload.extend_from_slice(&feedback.session_id.to_be_bytes());
+        payload.extend_from_slice(&feedback.control_session_id.to_be_bytes());
+        payload.extend_from_slice(&feedback.request_id.to_be_bytes());
+        payload.extend_from_slice(&feedback.presentation_id.to_be_bytes());
+        payload.extend_from_slice(&feedback.epoch.to_be_bytes());
+        payload.extend_from_slice(&encoded_feedback);
+        Ok(Self::new(MESSAGE_WORKER_PRESENTATION_FEEDBACK, payload))
     }
 
     pub fn worker_presentation_key_install_result(
@@ -980,6 +1034,41 @@ impl IpcFrame {
                 };
                 clear.validate()?;
                 Ok(IpcMessage::ServicePresentationKeyClear(clear))
+            }
+            MESSAGE_WORKER_PRESENTATION_FEEDBACK => {
+                if self.header.version_minor < WORKER_PRESENTATION_FEEDBACK_MIN_MINOR {
+                    return Err(IpcMessageError::UnsupportedVersion);
+                }
+                if self.payload.len()
+                    < WORKER_PRESENTATION_FEEDBACK_BINDING_LEN
+                        + classmesh_protocol::feedback::FEEDBACK_HEADER_LEN
+                {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let feedback = WorkerPresentationFeedback {
+                    process_id: u32::from_be_bytes(
+                        self.payload[0..4].try_into().expect("four bytes"),
+                    ),
+                    session_id: u32::from_be_bytes(
+                        self.payload[4..8].try_into().expect("four bytes"),
+                    ),
+                    control_session_id: u64::from_be_bytes(
+                        self.payload[8..16].try_into().expect("eight bytes"),
+                    ),
+                    request_id: u64::from_be_bytes(
+                        self.payload[16..24].try_into().expect("eight bytes"),
+                    ),
+                    presentation_id: u64::from_be_bytes(
+                        self.payload[24..32].try_into().expect("eight bytes"),
+                    ),
+                    epoch: u32::from_be_bytes(self.payload[32..36].try_into().expect("four bytes")),
+                    feedback: FeedbackMessage::decode(
+                        &self.payload[WORKER_PRESENTATION_FEEDBACK_BINDING_LEN..],
+                    )
+                    .map_err(|_| IpcMessageError::InvalidPayload)?,
+                };
+                feedback.validate()?;
+                Ok(IpcMessage::WorkerPresentationFeedback(feedback))
             }
             MESSAGE_WORKER_PRESENTATION_KEY_INSTALL_RESULT => {
                 if self.header.version_minor < PRESENTATION_KEY_INSTALL_RESULT_MIN_MINOR {
@@ -1363,6 +1452,109 @@ mod tests {
                 Err(IpcMessageError::InvalidPayload)
             );
         }
+    }
+
+    #[test]
+    fn worker_presentation_feedback_round_trips_exact_binding() {
+        for feedback in [
+            FeedbackMessage::Nack {
+                stream_id: 7,
+                frame_id: 42,
+                missing_packet_indices: vec![0, 3, 17],
+            },
+            FeedbackMessage::RequestKeyframe {
+                stream_id: 7,
+                after_frame_id: 42,
+            },
+        ] {
+            let report = WorkerPresentationFeedback {
+                process_id: 42,
+                session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                presentation_id: 55,
+                epoch: 3,
+                feedback,
+            };
+            let frame =
+                IpcFrame::worker_presentation_feedback(&report).expect("valid Worker feedback");
+            assert_eq!(
+                frame.message().expect("typed Worker feedback"),
+                IpcMessage::WorkerPresentationFeedback(report)
+            );
+        }
+    }
+
+    #[test]
+    fn worker_presentation_feedback_rejects_invalid_binding_and_nack_bounds() {
+        let valid = WorkerPresentationFeedback {
+            process_id: 42,
+            session_id: 7,
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            epoch: 3,
+            feedback: FeedbackMessage::RequestKeyframe {
+                stream_id: 7,
+                after_frame_id: 42,
+            },
+        };
+
+        for report in [
+            WorkerPresentationFeedback {
+                process_id: 0,
+                ..valid.clone()
+            },
+            WorkerPresentationFeedback {
+                session_id: 0,
+                ..valid.clone()
+            },
+            WorkerPresentationFeedback {
+                control_session_id: 0,
+                ..valid.clone()
+            },
+            WorkerPresentationFeedback {
+                request_id: 0,
+                ..valid.clone()
+            },
+            WorkerPresentationFeedback {
+                presentation_id: 0,
+                ..valid.clone()
+            },
+            WorkerPresentationFeedback {
+                epoch: 0,
+                ..valid.clone()
+            },
+            WorkerPresentationFeedback {
+                feedback: FeedbackMessage::RequestKeyframe {
+                    stream_id: 0,
+                    after_frame_id: 42,
+                },
+                ..valid.clone()
+            },
+        ] {
+            assert_eq!(
+                IpcFrame::worker_presentation_feedback(&report),
+                Err(IpcMessageError::InvalidPayload)
+            );
+        }
+
+        let oversized = WorkerPresentationFeedback {
+            feedback: FeedbackMessage::Nack {
+                stream_id: 7,
+                frame_id: 42,
+                missing_packet_indices: vec![
+                    1;
+                    classmesh_protocol::feedback::MAX_NACK_PACKET_INDICES
+                        + 1
+                ],
+            },
+            ..valid
+        };
+        assert_eq!(
+            IpcFrame::worker_presentation_feedback(&oversized),
+            Err(IpcMessageError::InvalidPayload)
+        );
     }
 
     #[test]
