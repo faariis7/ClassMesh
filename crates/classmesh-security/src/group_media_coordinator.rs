@@ -4,8 +4,8 @@ use std::fmt;
 use zeroize::Zeroize;
 
 use crate::group_media::{
-    GROUP_MEDIA_KEY_BYTES, GroupMediaEpoch, GroupMediaError, GroupMediaKeyMaterial,
-    GroupMediaSender,
+    GROUP_MEDIA_KEY_BYTES, GroupMediaEpoch, GroupMediaError, GroupMediaFrameBinding,
+    GroupMediaKeyMaterial, GroupMediaSender, SealedGroupMediaFrame,
 };
 use crate::{AuthorizationStore, Permission, PrincipalId};
 
@@ -291,12 +291,12 @@ impl GroupMediaCoordinator {
         }
     }
 
-    pub fn seal_frame(
+    pub fn seal_bound_frame(
         &mut self,
         authorization: &AuthorizationStore,
         plaintext: &[u8],
-        associated_data: &[u8],
-    ) -> Result<Vec<u8>, GroupMediaCoordinatorError> {
+        binding: GroupMediaFrameBinding,
+    ) -> Result<SealedGroupMediaFrame, GroupMediaCoordinatorError> {
         self.reconcile_authorization(authorization);
         if self.rotation_required {
             return Err(GroupMediaCoordinatorError::RotationRequired);
@@ -308,7 +308,7 @@ impl GroupMediaCoordinator {
             .ok_or(GroupMediaCoordinatorError::NoActiveEpoch)?;
         active
             .sender
-            .seal_frame(plaintext, associated_data)
+            .seal_bound_frame(plaintext, binding)
             .map_err(Into::into)
     }
 
@@ -356,6 +356,11 @@ mod tests {
 
     fn principal(value: u8) -> PrincipalId {
         PrincipalId([value; 32])
+    }
+
+    fn binding(epoch: GroupMediaEpoch, frame_id: u64) -> GroupMediaFrameBinding {
+        GroupMediaFrameBinding::new(700, 800, epoch, frame_id, frame_id * 33_333, frame_id == 1)
+            .expect("valid group-media frame binding")
     }
 
     fn store(entries: &[(u8, bool)]) -> AuthorizationStore {
@@ -480,7 +485,7 @@ mod tests {
 
         assert!(
             coordinator
-                .seal_frame(&authorization, b"frame", b"presentation-binding")
+                .seal_bound_frame(&authorization, b"frame", binding(first, 1))
                 .is_ok()
         );
 
@@ -489,7 +494,7 @@ mod tests {
             .expect("new receiver");
         assert!(coordinator.rotation_required());
         assert!(matches!(
-            coordinator.seal_frame(&authorization, b"blocked", b"presentation-binding"),
+            coordinator.seal_bound_frame(&authorization, b"blocked", binding(first, 2)),
             Err(GroupMediaCoordinatorError::RotationRequired)
         ));
         assert!(matches!(
@@ -529,7 +534,7 @@ mod tests {
             Some(GroupMediaReceiverInstallState::AwaitingKey)
         );
         assert!(matches!(
-            coordinator.seal_frame(&authorization, b"frame", b"binding"),
+            coordinator.seal_bound_frame(&authorization, b"frame", binding(first, 1)),
             Err(GroupMediaCoordinatorError::NoActiveEpoch)
         ));
 
@@ -562,7 +567,7 @@ mod tests {
         );
         assert!(
             coordinator
-                .seal_frame(&authorization, b"frame", b"presentation-binding")
+                .seal_bound_frame(&authorization, b"frame", binding(epoch, 1))
                 .is_ok(),
             "a slow receiver must not create a global key-install barrier"
         );
@@ -585,7 +590,7 @@ mod tests {
 
         authorization.disable(principal(1));
         assert!(matches!(
-            coordinator.seal_frame(&authorization, b"frame", b"binding"),
+            coordinator.seal_bound_frame(&authorization, b"frame", binding(epoch, 1)),
             Err(GroupMediaCoordinatorError::RotationRequired)
         ));
         assert_eq!(coordinator.receiver_count(), 0);
