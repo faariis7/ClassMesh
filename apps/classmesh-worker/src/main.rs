@@ -1070,8 +1070,8 @@ mod focused_profile_tests {
             epoch: 3,
         };
         let frame = IpcFrame::service_presentation_key_clear(clear).expect("valid clear");
-        let event = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
-            .expect("clear routes");
+        let event =
+            worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame)).expect("clear routes");
 
         let WorkerEvent::PresentationKeyClear(received) = event else {
             panic!("expected presentation-key clear event");
