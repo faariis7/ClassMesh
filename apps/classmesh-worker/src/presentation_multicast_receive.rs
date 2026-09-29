@@ -1,8 +1,8 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError, TrySendError};
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -32,8 +32,12 @@ impl Display for WorkerPresentationMulticastStartError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Membership(error) => write!(formatter, "invalid multicast membership: {error:?}"),
-            Self::Receiver(error) => write!(formatter, "multicast receiver startup failed: {error}"),
-            Self::ThreadSpawn(error) => write!(formatter, "multicast receive thread failed: {error}"),
+            Self::Receiver(error) => {
+                write!(formatter, "multicast receiver startup failed: {error}")
+            }
+            Self::ThreadSpawn(error) => {
+                write!(formatter, "multicast receive thread failed: {error}")
+            }
             Self::StartupTimeout => formatter.write_str("multicast receiver startup timed out"),
             Self::StartupChannelClosed => {
                 formatter.write_str("multicast receiver startup channel closed")
@@ -121,7 +125,8 @@ impl WorkerPresentationMulticastRuntime {
                 while !thread_stop.load(Ordering::Acquire) {
                     let now_us = u64::try_from(clock.elapsed().as_micros()).unwrap_or(u64::MAX);
                     match receiver.receive_once(now_us) {
-                        Ok(ProtectedMulticastReceiveOutcome::Events(batch)) if batch.is_empty() => {}
+                        Ok(ProtectedMulticastReceiveOutcome::Events(batch)) if batch.is_empty() => {
+                        }
                         Ok(outcome) => match receive_tx.try_send(outcome) {
                             Ok(()) => {}
                             Err(TrySendError::Full(_)) => {
