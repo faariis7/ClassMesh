@@ -14,6 +14,7 @@ use classmesh_control::diagnostics::{
     privileged_dispatch_diagnostic_code, stream_offer_diagnostic_code, transport_diagnostic_code,
 };
 use classmesh_control::dispatch::{PrivilegedControlCommand, dispatch_privileged_command};
+use classmesh_control::group_media_feedback::build_presentation_feedback_envelope;
 use classmesh_control::group_media_key::{
     InstalledPresentationKeyBinding, build_presentation_key_ack_from_binding,
     zeroize_received_presentation_key,
@@ -44,7 +45,7 @@ use classmesh_protocol::control_wire::{
 use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::{AuthorizationStore, Permission, PrincipalId};
-use classmesh_windows_runtime::ipc::ServiceUdpStreamStart;
+use classmesh_windows_runtime::ipc::{ServiceUdpStreamStart, WorkerPresentationFeedback};
 use classmesh_windows_runtime::ipc_sensitive::{
     PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
 };
@@ -53,12 +54,14 @@ use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use rustls::server::WebPkiClientVerifier;
 use serde::Deserialize;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, mpsc as tokio_mpsc, oneshot};
 
 const CONFIG_VERSION: u32 = 1;
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const PRESENTATION_KEY_INSTALL_TIMEOUT: Duration = Duration::from_secs(1);
+const PRESENTATION_FEEDBACK_BUS_CAPACITY: usize = 64;
+const CONTROL_INBOUND_QUEUE_CAPACITY: usize = 32;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +183,28 @@ pub(crate) struct PresentationKeyDispatchChannels {
     pub(crate) clear_tx: mpsc::SyncSender<PresentationKeyInstallBinding>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PresentationFeedbackBus {
+    tx: broadcast::Sender<WorkerPresentationFeedback>,
+}
+
+impl Default for PresentationFeedbackBus {
+    fn default() -> Self {
+        let (tx, _) = broadcast::channel(PRESENTATION_FEEDBACK_BUS_CAPACITY);
+        Self { tx }
+    }
+}
+
+impl PresentationFeedbackBus {
+    pub(crate) fn publish(&self, feedback: WorkerPresentationFeedback) -> bool {
+        self.tx.send(feedback).is_ok()
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<WorkerPresentationFeedback> {
+        self.tx.subscribe()
+    }
+}
+
 #[derive(Debug)]
 struct PresentationKeyWorkerLease {
     clear_tx: mpsc::SyncSender<PresentationKeyInstallBinding>,
@@ -205,6 +230,16 @@ impl PresentationKeyWorkerLease {
         if let Err(error) = self.clear_tx.send(binding) {
             eprintln!("ClassMesh presentation-key cleanup queue disconnected: {error}");
         }
+    }
+
+    fn accepts_feedback(&self, feedback: &WorkerPresentationFeedback) -> bool {
+        self.binding.is_some_and(|binding| {
+            feedback.control_session_id == binding.control_session_id
+                && feedback.request_id == binding.request_id
+                && feedback.presentation_id == binding.presentation_id
+                && feedback.feedback.stream_id() == binding.stream_id
+                && feedback.epoch == binding.epoch
+        })
     }
 }
 
