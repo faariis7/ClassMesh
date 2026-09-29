@@ -25,7 +25,10 @@ const MESSAGE_SERVICE_ENCODER_CACHE_RESULT: u16 = 16;
 const MESSAGE_SERVICE_UDP_STREAM_START: u16 = 17;
 const MESSAGE_SERVICE_MEDIA_FEEDBACK: u16 = 18;
 pub(crate) const MESSAGE_SERVICE_PRESENTATION_KEY_INSTALL: u16 = 19;
+const MESSAGE_WORKER_PRESENTATION_KEY_INSTALL_RESULT: u16 = 20;
 const SERVICE_UDP_STREAM_START_LEN: usize = 32;
+const WORKER_PRESENTATION_KEY_INSTALL_RESULT_LEN: usize = 48;
+const PRESENTATION_KEY_INSTALL_RESULT_MIN_MINOR: u8 = 6;
 
 const MAX_EVIDENCE_ADAPTER_IDENTITY: usize = 128;
 const MAX_EVIDENCE_DRIVER_VERSION: usize = 128;
@@ -319,6 +322,57 @@ impl ServiceUdpStreamStart {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerPresentationKeyInstallStatus {
+    Installed,
+    Rejected,
+}
+
+impl WorkerPresentationKeyInstallStatus {
+    const fn as_byte(self) -> u8 {
+        match self {
+            Self::Installed => 1,
+            Self::Rejected => 2,
+        }
+    }
+
+    const fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Installed),
+            2 => Some(Self::Rejected),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerPresentationKeyInstallResult {
+    pub process_id: u32,
+    pub session_id: u32,
+    pub control_session_id: u64,
+    pub request_id: u64,
+    pub presentation_id: u64,
+    pub stream_id: u32,
+    pub epoch: u32,
+    pub status: WorkerPresentationKeyInstallStatus,
+}
+
+impl WorkerPresentationKeyInstallResult {
+    fn validate(self) -> Result<(), IpcMessageError> {
+        if self.process_id == 0
+            || self.session_id == 0
+            || self.control_session_id == 0
+            || self.request_id == 0
+            || self.presentation_id == 0
+            || self.stream_id == 0
+            || self.epoch == 0
+        {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum IpcMessage {
     WorkerHello { process_id: u32, session_id: u32 },
@@ -332,6 +386,7 @@ pub enum IpcMessage {
     ServiceEncoderCacheResult(ServiceEncoderCacheResult),
     ServiceUdpStreamStart(ServiceUdpStreamStart),
     ServiceMediaFeedback(FeedbackMessage),
+    WorkerPresentationKeyInstallResult(WorkerPresentationKeyInstallResult),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -547,6 +602,27 @@ impl IpcFrame {
             .encode()
             .map_err(|_| IpcMessageError::InvalidPayload)?;
         Ok(Self::new(MESSAGE_SERVICE_MEDIA_FEEDBACK, payload))
+    }
+
+    pub fn worker_presentation_key_install_result(
+        result: WorkerPresentationKeyInstallResult,
+    ) -> Result<Self, IpcMessageError> {
+        result.validate()?;
+        let mut payload = Vec::with_capacity(WORKER_PRESENTATION_KEY_INSTALL_RESULT_LEN);
+        payload.extend_from_slice(&result.process_id.to_be_bytes());
+        payload.extend_from_slice(&result.session_id.to_be_bytes());
+        payload.extend_from_slice(&result.control_session_id.to_be_bytes());
+        payload.extend_from_slice(&result.request_id.to_be_bytes());
+        payload.extend_from_slice(&result.presentation_id.to_be_bytes());
+        payload.extend_from_slice(&result.stream_id.to_be_bytes());
+        payload.extend_from_slice(&result.epoch.to_be_bytes());
+        payload.push(result.status.as_byte());
+        payload.extend_from_slice(&[0_u8; 7]);
+        debug_assert_eq!(payload.len(), WORKER_PRESENTATION_KEY_INSTALL_RESULT_LEN);
+        Ok(Self::new(
+            MESSAGE_WORKER_PRESENTATION_KEY_INSTALL_RESULT,
+            payload,
+        ))
     }
 
     pub fn message(&self) -> Result<IpcMessage, IpcMessageError> {
@@ -843,6 +919,45 @@ impl IpcFrame {
                 }
                 Ok(IpcMessage::ServiceMediaFeedback(feedback))
             }
+            MESSAGE_WORKER_PRESENTATION_KEY_INSTALL_RESULT => {
+                if self.header.version_minor < PRESENTATION_KEY_INSTALL_RESULT_MIN_MINOR {
+                    return Err(IpcMessageError::UnsupportedVersion);
+                }
+                if self.payload.len() != WORKER_PRESENTATION_KEY_INSTALL_RESULT_LEN {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                if self.payload[41..].iter().any(|byte| *byte != 0) {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+
+                let result = WorkerPresentationKeyInstallResult {
+                    process_id: u32::from_be_bytes(
+                        self.payload[0..4].try_into().expect("four bytes"),
+                    ),
+                    session_id: u32::from_be_bytes(
+                        self.payload[4..8].try_into().expect("four bytes"),
+                    ),
+                    control_session_id: u64::from_be_bytes(
+                        self.payload[8..16].try_into().expect("eight bytes"),
+                    ),
+                    request_id: u64::from_be_bytes(
+                        self.payload[16..24].try_into().expect("eight bytes"),
+                    ),
+                    presentation_id: u64::from_be_bytes(
+                        self.payload[24..32].try_into().expect("eight bytes"),
+                    ),
+                    stream_id: u32::from_be_bytes(
+                        self.payload[32..36].try_into().expect("four bytes"),
+                    ),
+                    epoch: u32::from_be_bytes(
+                        self.payload[36..40].try_into().expect("four bytes"),
+                    ),
+                    status: WorkerPresentationKeyInstallStatus::from_byte(self.payload[40])
+                        .ok_or(IpcMessageError::InvalidPayload)?,
+                };
+                result.validate()?;
+                Ok(IpcMessage::WorkerPresentationKeyInstallResult(result))
+            }
             _ => Err(IpcMessageError::UnknownMessageType),
         }
     }
@@ -1137,6 +1252,67 @@ mod tests {
                 IpcMessage::ServiceMediaFeedback(feedback)
             );
         }
+    }
+
+    #[test]
+    fn worker_presentation_key_install_result_round_trips_success_and_rejection() {
+        for status in [
+            WorkerPresentationKeyInstallStatus::Installed,
+            WorkerPresentationKeyInstallStatus::Rejected,
+        ] {
+            let result = WorkerPresentationKeyInstallResult {
+                process_id: 42,
+                session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                presentation_id: 55,
+                stream_id: 9,
+                epoch: 3,
+                status,
+            };
+            let frame = IpcFrame::worker_presentation_key_install_result(result)
+                .expect("valid install result");
+            assert_eq!(
+                frame.message().expect("typed install result"),
+                IpcMessage::WorkerPresentationKeyInstallResult(result)
+            );
+        }
+    }
+
+    #[test]
+    fn worker_presentation_key_install_result_rejects_invalid_binding_and_wire() {
+        let valid = WorkerPresentationKeyInstallResult {
+            process_id: 42,
+            session_id: 7,
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 9,
+            epoch: 3,
+            status: WorkerPresentationKeyInstallStatus::Installed,
+        };
+
+        let mut invalid = valid;
+        invalid.control_session_id = 0;
+        assert_eq!(
+            IpcFrame::worker_presentation_key_install_result(invalid),
+            Err(IpcMessageError::InvalidPayload)
+        );
+
+        let mut frame =
+            IpcFrame::worker_presentation_key_install_result(valid).expect("valid result");
+        frame.header.version_minor = PRESENTATION_KEY_INSTALL_RESULT_MIN_MINOR - 1;
+        assert_eq!(frame.message(), Err(IpcMessageError::UnsupportedVersion));
+
+        let mut frame =
+            IpcFrame::worker_presentation_key_install_result(valid).expect("valid result");
+        frame.payload[40] = 99;
+        assert_eq!(frame.message(), Err(IpcMessageError::InvalidPayload));
+
+        let mut frame =
+            IpcFrame::worker_presentation_key_install_result(valid).expect("valid result");
+        frame.payload[47] = 1;
+        assert_eq!(frame.message(), Err(IpcMessageError::InvalidPayload));
     }
 
     #[test]
