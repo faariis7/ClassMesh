@@ -48,7 +48,7 @@ Phase 7F defines one canonical fixed-width 40-byte binding for production presen
 
 Packet sequence and packet-index values are deliberately excluded because one encoded frame is SFrame-sealed before ClassMesh UDP packetization. A receiver reconstructs the binding from its authenticated presentation/key state and the assembled media-frame metadata; changing presentation, stream, epoch, frame ID, timestamp or keyframe state therefore fails SFrame authentication.
 
-The security API exposes an opaque `SealedGroupMediaFrame` produced by the canonical binding path so the production multicast transport can require protected ciphertext instead of accepting arbitrary H.264 bytes. The older bounded caller-provided associated-data primitive remains available inside the security layer for lower-level tests and compatibility, but it is not the production multicast framing contract.
+The security API exposes an opaque `SealedGroupMediaFrame` that carries the exact non-secret binding used to seal its ciphertext, so the production multicast transport can derive packet metadata from that authenticated binding and require protected ciphertext instead of accepting arbitrary H.264 bytes. The older bounded caller-provided associated-data primitive remains available inside the security layer for lower-level tests and compatibility, but it is not the production multicast framing contract.
 
 ### Replay protection
 
