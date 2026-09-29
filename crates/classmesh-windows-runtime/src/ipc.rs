@@ -26,8 +26,10 @@ const MESSAGE_SERVICE_UDP_STREAM_START: u16 = 17;
 const MESSAGE_SERVICE_MEDIA_FEEDBACK: u16 = 18;
 pub(crate) const MESSAGE_SERVICE_PRESENTATION_KEY_INSTALL: u16 = 19;
 const MESSAGE_WORKER_PRESENTATION_KEY_INSTALL_RESULT: u16 = 20;
+const MESSAGE_SERVICE_PRESENTATION_KEY_CLEAR: u16 = 21;
 const SERVICE_UDP_STREAM_START_LEN: usize = 32;
 const WORKER_PRESENTATION_KEY_INSTALL_RESULT_LEN: usize = 48;
+const SERVICE_PRESENTATION_KEY_CLEAR_LEN: usize = 32;
 const PRESENTATION_KEY_INSTALL_RESULT_MIN_MINOR: u8 = 6;
 
 const MAX_EVIDENCE_ADAPTER_IDENTITY: usize = 128;
@@ -323,6 +325,29 @@ impl ServiceUdpStreamStart {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServicePresentationKeyClear {
+    pub control_session_id: u64,
+    pub request_id: u64,
+    pub presentation_id: u64,
+    pub stream_id: u32,
+    pub epoch: u32,
+}
+
+impl ServicePresentationKeyClear {
+    fn validate(self) -> Result<(), IpcMessageError> {
+        if self.control_session_id == 0
+            || self.request_id == 0
+            || self.presentation_id == 0
+            || self.stream_id == 0
+            || self.epoch == 0
+        {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerPresentationKeyInstallStatus {
     Installed,
     Rejected,
@@ -387,6 +412,7 @@ pub enum IpcMessage {
     ServiceUdpStreamStart(ServiceUdpStreamStart),
     ServiceMediaFeedback(FeedbackMessage),
     WorkerPresentationKeyInstallResult(WorkerPresentationKeyInstallResult),
+    ServicePresentationKeyClear(ServicePresentationKeyClear),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -602,6 +628,20 @@ impl IpcFrame {
             .encode()
             .map_err(|_| IpcMessageError::InvalidPayload)?;
         Ok(Self::new(MESSAGE_SERVICE_MEDIA_FEEDBACK, payload))
+    }
+
+    pub fn service_presentation_key_clear(
+        clear: ServicePresentationKeyClear,
+    ) -> Result<Self, IpcMessageError> {
+        clear.validate()?;
+        let mut payload = Vec::with_capacity(SERVICE_PRESENTATION_KEY_CLEAR_LEN);
+        payload.extend_from_slice(&clear.control_session_id.to_be_bytes());
+        payload.extend_from_slice(&clear.request_id.to_be_bytes());
+        payload.extend_from_slice(&clear.presentation_id.to_be_bytes());
+        payload.extend_from_slice(&clear.stream_id.to_be_bytes());
+        payload.extend_from_slice(&clear.epoch.to_be_bytes());
+        debug_assert_eq!(payload.len(), SERVICE_PRESENTATION_KEY_CLEAR_LEN);
+        Ok(Self::new(MESSAGE_SERVICE_PRESENTATION_KEY_CLEAR, payload))
     }
 
     pub fn worker_presentation_key_install_result(
@@ -918,6 +958,28 @@ impl IpcFrame {
                     return Err(IpcMessageError::InvalidPayload);
                 }
                 Ok(IpcMessage::ServiceMediaFeedback(feedback))
+            }
+            MESSAGE_SERVICE_PRESENTATION_KEY_CLEAR => {
+                if self.payload.len() != SERVICE_PRESENTATION_KEY_CLEAR_LEN {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let clear = ServicePresentationKeyClear {
+                    control_session_id: u64::from_be_bytes(
+                        self.payload[0..8].try_into().expect("eight bytes"),
+                    ),
+                    request_id: u64::from_be_bytes(
+                        self.payload[8..16].try_into().expect("eight bytes"),
+                    ),
+                    presentation_id: u64::from_be_bytes(
+                        self.payload[16..24].try_into().expect("eight bytes"),
+                    ),
+                    stream_id: u32::from_be_bytes(
+                        self.payload[24..28].try_into().expect("four bytes"),
+                    ),
+                    epoch: u32::from_be_bytes(self.payload[28..32].try_into().expect("four bytes")),
+                };
+                clear.validate()?;
+                Ok(IpcMessage::ServicePresentationKeyClear(clear))
             }
             MESSAGE_WORKER_PRESENTATION_KEY_INSTALL_RESULT => {
                 if self.header.version_minor < PRESENTATION_KEY_INSTALL_RESULT_MIN_MINOR {
@@ -1248,6 +1310,57 @@ mod tests {
             assert_eq!(
                 frame.message().expect("typed media feedback"),
                 IpcMessage::ServiceMediaFeedback(feedback)
+            );
+        }
+    }
+
+    #[test]
+    fn service_presentation_key_clear_round_trips_exact_binding() {
+        let clear = ServicePresentationKeyClear {
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 7,
+            epoch: 3,
+        };
+        let frame = IpcFrame::service_presentation_key_clear(clear).expect("valid clear");
+        assert_eq!(
+            frame.message().expect("typed clear"),
+            IpcMessage::ServicePresentationKeyClear(clear)
+        );
+    }
+
+    #[test]
+    fn service_presentation_key_clear_rejects_zero_binding_fields() {
+        let valid = ServicePresentationKeyClear {
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 7,
+            epoch: 3,
+        };
+        for clear in [
+            ServicePresentationKeyClear {
+                control_session_id: 0,
+                ..valid
+            },
+            ServicePresentationKeyClear {
+                request_id: 0,
+                ..valid
+            },
+            ServicePresentationKeyClear {
+                presentation_id: 0,
+                ..valid
+            },
+            ServicePresentationKeyClear {
+                stream_id: 0,
+                ..valid
+            },
+            ServicePresentationKeyClear { epoch: 0, ..valid },
+        ] {
+            assert_eq!(
+                IpcFrame::service_presentation_key_clear(clear),
+                Err(IpcMessageError::InvalidPayload)
             );
         }
     }
