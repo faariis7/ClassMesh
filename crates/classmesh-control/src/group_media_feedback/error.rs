@@ -60,7 +60,7 @@ impl Display for PresentationFeedbackError {
             ),
             Self::Delivery(error) => write!(formatter, "presentation feedback delivery: {error}"),
             Self::Authorization(error) => {
-                write!(formatter, "presentation feedback authorization: {error}")
+                write!(formatter, "presentation feedback authorization: {error:?}")
             }
         }
     }
@@ -70,7 +70,6 @@ impl Error for PresentationFeedbackError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Delivery(error) => Some(error),
-            Self::Authorization(error) => Some(error),
             _ => None,
         }
     }
