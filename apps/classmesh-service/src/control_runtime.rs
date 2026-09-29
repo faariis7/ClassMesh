@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -36,6 +36,7 @@ use classmesh_core::adaptation::{
 };
 use classmesh_core::{NetworkMetrics, StreamKind};
 use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver};
+use classmesh_network::runtime_multicast_probe::probe_local_multicast_interface;
 use classmesh_protocol::control_wire::{
     ControlEnvelope, HeartbeatAck, InputEvent, KeyframeRequest,
     MediaTransport as WireMediaTransport, Nack, PresentationState as WirePresentationState,
@@ -681,12 +682,14 @@ pub(crate) struct ControlRuntimeState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ControlRuntimeConfig {
     pub(crate) bind_address: SocketAddr,
+    pub(crate) multicast_interface: Option<Ipv4Addr>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PersistedControlRuntimeConfig {
     version: u32,
     bind_address: String,
+    multicast_interface: Option<String>,
 }
 
 impl ControlRuntimeConfig {
@@ -730,7 +733,19 @@ impl ControlRuntimeConfig {
             return Err("control runtime bind port must be non-zero".to_owned());
         }
 
-        Ok(Self { bind_address })
+        let multicast_interface = persisted
+            .multicast_interface
+            .map(|value| {
+                value.parse::<Ipv4Addr>().map_err(|_| {
+                    "control runtime multicast_interface must be an IPv4 address".to_owned()
+                })
+            })
+            .transpose()?;
+
+        Ok(Self {
+            bind_address,
+            multicast_interface,
+        })
     }
 }
 
@@ -859,6 +874,7 @@ async fn run_listener(
         presentation_feedback,
         worker_capabilities,
     } = dispatch;
+    let udp_multicast_available = local_udp_multicast_capability(config.multicast_interface);
     let endpoint = match build_endpoint(&state, config) {
         Ok(endpoint) => endpoint,
         Err(error) => {
@@ -923,7 +939,10 @@ async fn run_listener(
                     let session_id = next_session_id(&session_ids);
                     let hello_config = ServerHelloConfig {
                         local_version: PROTOCOL_VERSION,
-                        local_capabilities: service_hello_capabilities(&worker_capabilities),
+                        local_capabilities: service_hello_capabilities(
+                            &worker_capabilities,
+                            udp_multicast_available,
+                        ),
                         control_session_id: session_id,
                     };
                     let now_unix_ms = match unix_time_ms() {
@@ -1942,11 +1961,43 @@ fn zeroize_presentation_key_envelope(envelope: &mut ControlEnvelope) {
     }
 }
 
-fn service_hello_capabilities(worker_capabilities: &WorkerCapabilityState) -> BTreeSet<Capability> {
+fn service_hello_capabilities(
+    worker_capabilities: &WorkerCapabilityState,
+    udp_multicast_available: bool,
+) -> BTreeSet<Capability> {
     let mut capabilities = worker_capabilities.hello_capabilities();
     capabilities.insert(Capability::TeacherPresentation);
     capabilities.insert(Capability::SframeGroupMedia);
+    if udp_multicast_available {
+        capabilities.insert(Capability::UdpMulticast);
+    }
     capabilities
+}
+
+fn local_udp_multicast_capability(interface: Option<Ipv4Addr>) -> bool {
+    let Some(interface) = interface else {
+        return false;
+    };
+    match probe_local_multicast_interface(interface) {
+        Ok(outcome) if outcome.can_advertise_udp_multicast() => {
+            eprintln!(
+                "ClassMesh local UDP multicast probe passed on interface {interface}; capability enabled"
+            );
+            true
+        }
+        Ok(outcome) => {
+            eprintln!(
+                "ClassMesh local UDP multicast probe unavailable on interface {interface}: {outcome:?}"
+            );
+            false
+        }
+        Err(error) => {
+            eprintln!(
+                "ClassMesh local UDP multicast probe failed closed on interface {interface}: {error}"
+            );
+            false
+        }
+    }
 }
 
 fn presentation_capability_negotiated(capabilities: &BTreeSet<Capability>) -> bool {
@@ -2086,6 +2137,7 @@ mod tests {
             ControlRuntimeConfig::load(&path).expect("valid config"),
             ControlRuntimeConfig {
                 bind_address: "127.0.0.1:44991".parse().expect("socket"),
+                multicast_interface: None,
             }
         );
 
@@ -2097,18 +2149,44 @@ mod tests {
             .expect("write invalid version");
         assert!(ControlRuntimeConfig::load(&path).is_err());
 
+        fs::write(
+            &path,
+            r#"{"version":1,"bind_address":"127.0.0.1:44991","multicast_interface":"192.0.2.10"}"#,
+        )
+        .expect("write multicast config");
+        assert_eq!(
+            ControlRuntimeConfig::load(&path)
+                .expect("valid multicast config")
+                .multicast_interface,
+            Some(Ipv4Addr::new(192, 0, 2, 10))
+        );
+
+        fs::write(
+            &path,
+            r#"{"version":1,"bind_address":"127.0.0.1:44991","multicast_interface":"not-an-ip"}"#,
+        )
+        .expect("write invalid multicast interface");
+        assert!(ControlRuntimeConfig::load(&path).is_err());
+
         let _ = fs::remove_dir_all(path.parent().expect("test parent"));
     }
 
     #[test]
-    fn presentation_runtime_capability_is_explicit_and_transport_neutral() {
+    fn presentation_runtime_capability_is_explicit_and_probe_gated() {
         let worker = WorkerCapabilityState::default();
-        let capabilities = service_hello_capabilities(&worker);
+        let capabilities = service_hello_capabilities(&worker, false);
         assert!(capabilities.contains(&Capability::TeacherPresentation));
         assert!(capabilities.contains(&Capability::SframeGroupMedia));
         assert!(capabilities.contains(&Capability::ServiceSessionWorker));
         assert!(!capabilities.contains(&Capability::UdpUnicast));
         assert!(!capabilities.contains(&Capability::QuicDatagram));
+        assert!(!capabilities.contains(&Capability::UdpMulticast));
+
+        let probed = service_hello_capabilities(&worker, true);
+        assert!(probed.contains(&Capability::TeacherPresentation));
+        assert!(probed.contains(&Capability::SframeGroupMedia));
+        assert!(probed.contains(&Capability::UdpMulticast));
+
         assert!(presentation_capability_negotiated(&capabilities));
         assert!(group_media_capability_negotiated(&capabilities));
         assert!(!presentation_capability_negotiated(&BTreeSet::new()));
