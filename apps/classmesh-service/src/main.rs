@@ -1853,7 +1853,7 @@ mod windows_service_app {
         }
 
         #[test]
-        fn Worker_key_result_requires_exact_process_session_and_install_binding() {
+        fn worker_key_result_requires_exact_process_session_and_install_binding() {
             let binding = PresentationKeyInstallBinding {
                 control_session_id: 77,
                 request_id: 44,
