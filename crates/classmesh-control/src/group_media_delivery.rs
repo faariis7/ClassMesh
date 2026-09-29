@@ -720,7 +720,7 @@ mod tests {
     async fn presentation_feedback_is_authenticated_sequence_and_stream_bound() -> TestResult {
         let receiver = principal(7);
         let pair = session_pair(77).await?;
-        let authorization = authorization(receiver, &[pair.certificate.clone()]);
+        let authorization = authorization(receiver, std::slice::from_ref(&pair.certificate));
         let mut delivery = TeacherGroupMediaDeliveryManager::with_limit(2)?;
         delivery.register_client_session(&pair.client, receiver, &authorization, 150)?;
 
