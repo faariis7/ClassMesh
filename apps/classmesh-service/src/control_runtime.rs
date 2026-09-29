@@ -950,7 +950,7 @@ async fn run_listener(
                             );
                             run_established_session(
                                 &connection,
-                                &mut channel,
+                                channel,
                                 &session,
                                 peer,
                                 EstablishedSessionRuntime {
@@ -998,9 +998,25 @@ struct EstablishedSessionRuntime<'a> {
     presentation: &'a PresentationDispatchState,
 }
 
+#[derive(Debug)]
+enum ControlInboundEvent {
+    Envelope(ControlEnvelope),
+    Timeout,
+    Failed(String),
+}
+
+#[derive(Debug)]
+struct ReceivePumpGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for ReceivePumpGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 async fn run_established_session(
     connection: &quinn::Connection,
-    channel: &mut ControlChannel,
+    channel: ControlChannel,
     session: &EstablishedControlSession,
     peer: EstablishedAuthenticatedPeer,
     runtime: EstablishedSessionRuntime<'_>,
@@ -1028,25 +1044,114 @@ async fn run_established_session(
     let mut focused_adaptation = FocusedAdaptationState::new();
     let mut installed_presentation_key: Option<InstalledPresentationKeyBinding> = None;
     let mut worker_key_lease = PresentationKeyWorkerLease::new(presentation_keys.clear_tx.clone());
+    let mut presentation_feedback_rx = presentation_feedback.subscribe();
+    let (mut send, mut receive) = channel.into_split();
+    let (inbound_tx, mut inbound_rx) =
+        tokio_mpsc::channel::<ControlInboundEvent>(CONTROL_INBOUND_QUEUE_CAPACITY);
+    let receive_pump = tokio::spawn(async move {
+        loop {
+            let (event, terminal) = match receive.receive().await {
+                Ok(envelope) => (ControlInboundEvent::Envelope(envelope), false),
+                Err(ControlTransportError::Timeout { .. }) => (ControlInboundEvent::Timeout, false),
+                Err(error) => (
+                    ControlInboundEvent::Failed(transport_diagnostic_code(&error).to_owned()),
+                    true,
+                ),
+            };
+            if inbound_tx.send(event).await.is_err() || terminal {
+                return;
+            }
+        }
+    });
+    let _receive_pump = ReceivePumpGuard(receive_pump);
 
     loop {
-        let mut envelope = match channel.receive().await {
-            Ok(envelope) => envelope,
-            Err(ControlTransportError::Timeout { .. }) => {
-                if last_inbound_at.elapsed() >= DEFAULT_OFFLINE_AFTER {
-                    eprintln!("ClassMesh control session closed: control.heartbeat.offline");
-                    connection.close(0_u32.into(), b"control peer offline");
+        let mut envelope = tokio::select! {
+            inbound = inbound_rx.recv() => {
+                match inbound {
+                    Some(ControlInboundEvent::Envelope(envelope)) => envelope,
+                    Some(ControlInboundEvent::Timeout) => {
+                        if last_inbound_at.elapsed() >= DEFAULT_OFFLINE_AFTER {
+                            eprintln!("ClassMesh control session closed: control.heartbeat.offline");
+                            connection.close(0_u32.into(), b"control peer offline");
+                            return;
+                        }
+                        continue;
+                    }
+                    Some(ControlInboundEvent::Failed(code)) => {
+                        eprintln!("ClassMesh control session transport failed: {code}");
+                        connection.close(0_u32.into(), b"control transport failed");
+                        return;
+                    }
+                    None => {
+                        connection.close(0_u32.into(), b"control receive pump stopped");
+                        return;
+                    }
+                }
+            }
+            feedback = presentation_feedback_rx.recv() => {
+                let report = match feedback {
+                    Ok(report) => report,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        eprintln!(
+                            "ClassMesh presentation feedback dropped under bounded backpressure: skipped={skipped}"
+                        );
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        connection.close(0_u32.into(), b"presentation feedback bus closed");
+                        return;
+                    }
+                };
+
+                if report.control_session_id != session.control_session_id
+                    || !worker_key_lease.accepts_feedback(&report)
+                {
+                    continue;
+                }
+                let Some(installed) = installed_presentation_key else {
+                    continue;
+                };
+                if report.presentation_id != installed.presentation_id()
+                    || report.feedback.stream_id() != installed.stream_id()
+                    || report.epoch != installed.epoch()
+                    || !presentation.matches_owner(
+                        peer.identity.principal_id(),
+                        session.control_session_id,
+                        report.presentation_id,
+                        u64::from(report.feedback.stream_id()),
+                    )
+                {
+                    continue;
+                }
+
+                let Some(next_sequence) = outbound_sequence.checked_add(1) else {
+                    eprintln!("ClassMesh control session closed: control.sequence.exhausted");
+                    connection.close(0_u32.into(), b"control sequence exhausted");
+                    return;
+                };
+                let feedback_envelope = match build_presentation_feedback_envelope(
+                    session.control_session_id,
+                    session.negotiated.version,
+                    next_sequence,
+                    &report.feedback,
+                ) {
+                    Ok(envelope) => envelope,
+                    Err(error) => {
+                        eprintln!("ClassMesh presentation feedback rejected locally: {error}");
+                        continue;
+                    }
+                };
+                if let Err(error) = send.send(&feedback_envelope).await {
+                    eprintln!(
+                        "ClassMesh presentation feedback send failed: {}",
+                        transport_diagnostic_code(&error)
+                    );
+                    connection.close(0_u32.into(), b"presentation feedback send failed");
                     return;
                 }
+                outbound_sequence = next_sequence;
                 continue;
-            }
-            Err(error) => {
-                eprintln!(
-                    "ClassMesh control session transport failed: {}",
-                    transport_diagnostic_code(&error)
-                );
-                connection.close(0_u32.into(), b"control transport failed");
-                return;
             }
         };
         last_inbound_at = Instant::now();
@@ -1104,7 +1209,7 @@ async fn run_established_session(
                         monotonic_time_us: duration_micros_u64(session_clock.elapsed()),
                     })),
                 };
-                if let Err(error) = channel.send(&ack).await {
+                if let Err(error) = send.send(&ack).await {
                     eprintln!(
                         "ClassMesh heartbeat ack failed: {}",
                         transport_diagnostic_code(&error)
@@ -1263,7 +1368,7 @@ async fn run_established_session(
                     request_id: envelope.request_id,
                     payload: Some(control_envelope::Payload::StreamAnswer(answer)),
                 };
-                if let Err(error) = channel.send(&response).await {
+                if let Err(error) = send.send(&response).await {
                     eprintln!(
                         "ClassMesh stream answer failed: {}",
                         transport_diagnostic_code(&error)
@@ -1350,7 +1455,7 @@ async fn run_established_session(
                     request_id: envelope.request_id,
                     payload: Some(control_envelope::Payload::StreamReconfigure(reconfigure)),
                 };
-                if let Err(error) = channel.send(&response).await {
+                if let Err(error) = send.send(&response).await {
                     eprintln!(
                         "ClassMesh stream reconfigure failed: {}",
                         transport_diagnostic_code(&error)
@@ -1597,7 +1702,7 @@ async fn run_established_session(
                         return;
                     }
                 };
-                if let Err(error) = channel.send(&ack).await {
+                if let Err(error) = send.send(&ack).await {
                     eprintln!(
                         "ClassMesh presentation key ACK failed: {}",
                         transport_diagnostic_code(&error)
@@ -1679,7 +1784,7 @@ async fn run_established_session(
                     request_id: envelope.request_id,
                     payload: Some(control_envelope::Payload::PresentationStatus(status)),
                 };
-                if let Err(error) = channel.send(&response).await {
+                if let Err(error) = send.send(&response).await {
                     eprintln!(
                         "ClassMesh presentation status failed: {}",
                         transport_diagnostic_code(&error)
