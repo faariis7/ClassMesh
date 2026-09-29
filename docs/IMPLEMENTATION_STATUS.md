@@ -109,6 +109,8 @@ PR #177 adds the authenticated per-receiver presentation-feedback control contra
 
 PR #176 adds a dedicated zeroizing local IPC v0.6 contract for the 32-byte presentation group key. Sensitive key bytes are kept out of the generic clonable IPC frame path, caller/input/internal buffers are wiped on success/error/drop, and the existing per-generation ACL/PID/session-validated Worker pipe remains the trust boundary. PR #178 adds the corresponding non-sensitive Worker install result with exact PID/session/control-session/request/presentation/stream/epoch correlation and `Installed`/`Rejected` status. Runtime forwarding and Worker installation are still pending; an upstream Teacher `PresentationKeyAck` must not be emitted merely because the Service wrote bytes to the pipe.
 
+PR #179 adds the portable Worker-owned key/decrypt state that will consume that IPC contract. Successful install retains only the derived SFrame receiver/replay state and non-secret correlation binding. Equal/stale epochs are rejected without replacing the current receiver; a control-session/presentation/stream change requires explicit clear rather than implicit replacement; and completed multicast ciphertext is opened only against the exact installed stream plus canonical frame metadata. Runtime Worker IPC integration and multicast decode/render are still pending.
+
 ## Remaining security/control work
 
 - Phase 6F physical interactive-control validation under Issue #108, including degraded/lost media while authenticated control remains responsive; hosted CI cannot close this gate;
