@@ -1,5 +1,5 @@
 use std::fmt;
-use std::net::{IpAddr, SocketAddr, SocketAddrV4};
+use std::net::{SocketAddr, SocketAddrV4};
 use std::time::Duration;
 
 use classmesh_protocol::media::MEDIA_HEADER_LEN;
@@ -9,6 +9,7 @@ use classmesh_security::group_media::{
 };
 
 use crate::multicast::{MulticastMembership, MulticastProbeOutcome};
+use crate::transport::SendFrameReport;
 use crate::udp::{DatagramError, UdpMediaSocket};
 use crate::{packetize_frame, MediaPacket, PacketizeError, PacketizeMeta};
 
@@ -161,11 +162,11 @@ impl From<DatagramError> for ProtectedMulticastSendError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProtectedMulticastSendReport {
-    pub frame_id: u64,
-    pub packets_sent: u16,
-    pub ciphertext_bytes: usize,
+#[derive(Debug)]
+struct PreparedMulticastFrame {
+    packets: Vec<MediaPacket>,
+    first_sequence: u32,
+    next_sequence: u32,
 }
 
 #[derive(Debug)]
@@ -185,7 +186,7 @@ impl ProtectedMulticastPacketizer {
     fn packetize(
         &mut self,
         frame: &SealedGroupMediaFrame,
-    ) -> Result<Vec<MediaPacket>, ProtectedMulticastSendError> {
+    ) -> Result<PreparedMulticastFrame, ProtectedMulticastSendError> {
         let binding = frame.binding();
         if !self.config.accepts_binding(binding) {
             return Err(ProtectedMulticastSendError::FrameBindingMismatch);
@@ -210,8 +211,13 @@ impl ProtectedMulticastPacketizer {
         )?;
         let packet_count = u32::try_from(packets.len())
             .map_err(|_| ProtectedMulticastSendError::Packetize(PacketizeError::TooManyPackets))?;
-        self.next_sequence = first_sequence.wrapping_add(packet_count);
-        Ok(packets)
+        let next_sequence = first_sequence.wrapping_add(packet_count);
+        self.next_sequence = next_sequence;
+        Ok(PreparedMulticastFrame {
+            packets,
+            first_sequence,
+            next_sequence,
+        })
     }
 }
 
@@ -240,13 +246,11 @@ impl ProtectedMulticastFrameSender {
     pub fn send_frame(
         &mut self,
         frame: &SealedGroupMediaFrame,
-    ) -> Result<ProtectedMulticastSendReport, ProtectedMulticastSendError> {
+    ) -> Result<SendFrameReport, ProtectedMulticastSendError> {
         let binding = frame.binding();
-        let packets = self.packetizer.packetize(frame)?;
-        let packets_sent = u16::try_from(packets.len())
-            .map_err(|_| ProtectedMulticastSendError::Packetize(PacketizeError::TooManyPackets))?;
+        let prepared = self.packetizer.packetize(frame)?;
 
-        for packet in &packets {
+        for packet in &prepared.packets {
             let expected = MEDIA_HEADER_LEN + packet.payload.len();
             let written = self.socket.send_packet_to(packet, self.destination)?;
             if written != expected {
@@ -254,10 +258,12 @@ impl ProtectedMulticastFrameSender {
             }
         }
 
-        Ok(ProtectedMulticastSendReport {
+        Ok(SendFrameReport {
             frame_id: binding.frame_id(),
-            packets_sent,
-            ciphertext_bytes: frame.len(),
+            packets: prepared.packets.len(),
+            payload_bytes: frame.len(),
+            first_sequence: prepared.first_sequence,
+            next_sequence: prepared.next_sequence,
         })
     }
 
@@ -273,7 +279,7 @@ impl ProtectedMulticastFrameSender {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr};
 
     use classmesh_protocol::media::{MAX_PACKET_PAYLOAD, MediaFlags};
     use classmesh_security::group_media::{GroupMediaKeyMaterial, GroupMediaSender};
@@ -392,24 +398,31 @@ mod tests {
             true,
             MAX_PACKET_PAYLOAD * 2,
         );
-        let packets = packetizer.packetize(&first).expect("packetized frame");
+        let prepared = packetizer.packetize(&first).expect("packetized frame");
 
-        assert!(packets.len() >= 2);
-        assert_eq!(packets[0].header.protocol_major, 0);
-        assert_eq!(packets[0].header.protocol_minor, 4);
-        assert_eq!(packets[0].header.stream_id, 800);
-        assert_eq!(packets[0].header.frame_id, 91);
-        assert_eq!(packets[0].header.sequence, 0);
-        assert_eq!(packets[0].header.timestamp_us, 123_456);
-        assert!(packets[0].header.flags.contains(MediaFlags::KEYFRAME));
+        assert!(prepared.packets.len() >= 2);
+        assert_eq!(prepared.first_sequence, 0);
+        assert_eq!(
+            prepared.next_sequence,
+            u32::try_from(prepared.packets.len()).expect("bounded packet count")
+        );
+        assert_eq!(prepared.packets[0].header.protocol_major, 0);
+        assert_eq!(prepared.packets[0].header.protocol_minor, 4);
+        assert_eq!(prepared.packets[0].header.stream_id, 800);
+        assert_eq!(prepared.packets[0].header.frame_id, 91);
+        assert_eq!(prepared.packets[0].header.sequence, 0);
+        assert_eq!(prepared.packets[0].header.timestamp_us, 123_456);
+        assert!(
+            prepared.packets[0]
+                .header
+                .flags
+                .contains(MediaFlags::KEYFRAME)
+        );
 
         let second = sealed_frame(700, 800, epoch, 92, 156_789, false, 32);
         let next = packetizer.packetize(&second).expect("second frame");
-        assert_eq!(
-            next[0].header.sequence,
-            u32::try_from(packets.len()).expect("bounded packet count")
-        );
-        assert!(!next[0].header.flags.contains(MediaFlags::KEYFRAME));
+        assert_eq!(next.packets[0].header.sequence, prepared.next_sequence);
+        assert!(!next.packets[0].header.flags.contains(MediaFlags::KEYFRAME));
     }
 
     #[test]
@@ -424,8 +437,8 @@ mod tests {
         ));
 
         let valid = sealed_frame(700, 800, epoch, 2, 2_000, false, 32);
-        let packets = packetizer.packetize(&valid).expect("valid frame");
-        assert_eq!(packets[0].header.sequence, 0);
+        let prepared = packetizer.packetize(&valid).expect("valid frame");
+        assert_eq!(prepared.packets[0].header.sequence, 0);
     }
 
     #[test]
