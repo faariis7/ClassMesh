@@ -570,6 +570,30 @@ mod tests {
     }
 
     #[test]
+    fn bound_frame_aad_is_fixed_width_big_endian_and_versioned() {
+        let binding = GroupMediaFrameBinding::new(
+            0x0102_0304_0506_0708,
+            0x1112_1314,
+            epoch(0x2122_2324),
+            0x3132_3334_3536_3738,
+            0x4142_4344_4546_4748,
+            true,
+        )
+        .expect("valid binding");
+        let aad = binding.associated_data();
+
+        assert_eq!(aad.len(), GROUP_MEDIA_BOUND_AAD_BYTES);
+        assert_eq!(&aad[0..4], b"CMG1");
+        assert_eq!(&aad[4..12], &0x0102_0304_0506_0708_u64.to_be_bytes());
+        assert_eq!(&aad[12..16], &0x1112_1314_u32.to_be_bytes());
+        assert_eq!(&aad[16..20], &0x2122_2324_u32.to_be_bytes());
+        assert_eq!(&aad[20..28], &0x3132_3334_3536_3738_u64.to_be_bytes());
+        assert_eq!(&aad[28..36], &0x4142_4344_4546_4748_u64.to_be_bytes());
+        assert_eq!(aad[36], 1);
+        assert_eq!(&aad[37..40], &[0, 0, 0]);
+    }
+
+    #[test]
     fn bound_frame_round_trip_authenticates_presentation_metadata() {
         let material = key(0x71);
         let epoch = epoch(7);
