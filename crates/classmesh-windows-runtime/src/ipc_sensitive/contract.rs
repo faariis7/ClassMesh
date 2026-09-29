@@ -47,8 +47,7 @@ impl SensitivePresentationKeyInstall {
             if control_session_id == 0 || request_id == 0 {
                 return Err(crate::ipc::IpcMessageError::InvalidPayload);
             }
-            validate_key_grant(grant)
-                .map_err(|_| crate::ipc::IpcMessageError::InvalidPayload)?;
+            validate_key_grant(grant).map_err(|_| crate::ipc::IpcMessageError::InvalidPayload)?;
 
             let stream_id = u32::try_from(grant.stream_id)
                 .map_err(|_| crate::ipc::IpcMessageError::InvalidPayload)?;
@@ -96,8 +95,9 @@ impl SensitivePresentationKeyInstall {
         }
         .encode()?;
 
-        let mut output =
-            Zeroizing::new(Vec::with_capacity(IPC_HEADER_LEN + PRESENTATION_KEY_INSTALL_PAYLOAD_LEN));
+        let mut output = Zeroizing::new(Vec::with_capacity(
+            IPC_HEADER_LEN + PRESENTATION_KEY_INSTALL_PAYLOAD_LEN,
+        ));
         output.extend_from_slice(&header);
         output.extend_from_slice(&self.binding.control_session_id.to_be_bytes());
         output.extend_from_slice(&self.binding.request_id.to_be_bytes());
@@ -112,18 +112,14 @@ impl SensitivePresentationKeyInstall {
         Ok(output)
     }
 
-    pub(super) fn decode_payload(
-        payload: Zeroizing<Vec<u8>>,
-    ) -> Result<Self, IpcFrameError> {
+    pub(super) fn decode_payload(payload: Zeroizing<Vec<u8>>) -> Result<Self, IpcFrameError> {
         if payload.len() != PRESENTATION_KEY_INSTALL_PAYLOAD_LEN {
             return Err(IpcFrameError::InvalidSensitivePayload);
         }
 
-        let control_session_id =
-            u64::from_be_bytes(payload[0..8].try_into().expect("eight bytes"));
+        let control_session_id = u64::from_be_bytes(payload[0..8].try_into().expect("eight bytes"));
         let request_id = u64::from_be_bytes(payload[8..16].try_into().expect("eight bytes"));
-        let presentation_id =
-            u64::from_be_bytes(payload[16..24].try_into().expect("eight bytes"));
+        let presentation_id = u64::from_be_bytes(payload[16..24].try_into().expect("eight bytes"));
         let stream_id = u32::from_be_bytes(payload[24..28].try_into().expect("four bytes"));
         let epoch = u32::from_be_bytes(payload[28..32].try_into().expect("four bytes"));
 
