@@ -699,6 +699,13 @@ impl ControlRuntimeConfig {
     }
 }
 
+struct ControlRuntimeDispatch {
+    input: InputDispatchChannels,
+    media: FocusedMediaDispatchChannels,
+    presentation_keys: PresentationKeyDispatchChannels,
+    worker_capabilities: Arc<WorkerCapabilityState>,
+}
+
 #[derive(Debug)]
 pub(crate) struct ControlRuntime {
     stop_tx: Option<oneshot::Sender<()>>,
@@ -740,10 +747,12 @@ impl ControlRuntime {
                     config,
                     ready_tx,
                     stop_rx,
-                    input,
-                    media,
-                    presentation_keys,
-                    worker_capabilities,
+                    ControlRuntimeDispatch {
+                        input,
+                        media,
+                        presentation_keys,
+                        worker_capabilities,
+                    },
                 ));
             })
             .map_err(|error| format!("control runtime thread creation failed: {error}"))?;
@@ -803,11 +812,14 @@ async fn run_listener(
     config: ControlRuntimeConfig,
     ready_tx: mpsc::SyncSender<Result<SocketAddr, String>>,
     mut stop_rx: oneshot::Receiver<()>,
-    input: InputDispatchChannels,
-    media: FocusedMediaDispatchChannels,
-    presentation_keys: PresentationKeyDispatchChannels,
-    worker_capabilities: Arc<WorkerCapabilityState>,
+    dispatch: ControlRuntimeDispatch,
 ) {
+    let ControlRuntimeDispatch {
+        input,
+        media,
+        presentation_keys,
+        worker_capabilities,
+    } = dispatch;
     let endpoint = match build_endpoint(&state, config) {
         Ok(endpoint) => endpoint,
         Err(error) => {
