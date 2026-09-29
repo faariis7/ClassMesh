@@ -811,5 +811,4 @@ mod tests {
         assert_eq!(guard.last_sequence(), 1);
         Ok(())
     }
-
 }
