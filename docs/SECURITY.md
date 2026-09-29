@@ -64,8 +64,9 @@ Security rules:
 22. pending ACK state is installed before the asynchronous one-shot grant write. An ambiguous or failed transport send therefore remains fail-closed and cannot silently trigger a second key issuance; disconnect/removal drops only that receiver state;
 23. Teacher ACK acceptance reuses the caller-owned authenticated-session guard and its global monotonic sequence. A structurally valid but mis-correlated ACK may consume sequence state but cannot mark the key installed and does not clear the pending record; only an exact authorized ACK does.
 24. Phase 7F production frames use the canonical fixed-width `CMG1` SFrame binding for presentation/stream/epoch/frame/timestamp/keyframe metadata. The security layer exposes an opaque sealed-frame type that carries that exact non-secret binding, so multicast transport integration can derive packet metadata from the authenticated binding and require ciphertext rather than arbitrary encoded video bytes.
+25. The Phase 7F multicast sender is fail-closed behind successful local multicast-probe evidence, binds and explicitly selects the configured IPv4 egress interface, keeps multicast TTL at one hop, and accepts only sealed frames matching its exact presentation/stream/epoch. It intentionally keeps no group retransmission cache: one receiver's loss report must never cause NACK-driven retransmission to every healthy multicast receiver.
 
-Phase 7E control/security implementation is complete through PR #172. Phase 7F has started at the protected-frame boundary, but multicast sender/receiver socket wiring and authenticated per-client media feedback remain incomplete. Physical multicast viability remains the 7D two-PC gate, and scale qualification remains 7H.
+Phase 7E control/security implementation is complete through PR #172. Phase 7F now includes the protected-frame boundary and the sender-side multicast transport in PR #174; multicast receiver wiring and authenticated per-client media feedback remain incomplete. Physical multicast viability remains the 7D two-PC gate, and scale qualification remains 7H.
 
 ## Unicast media
 
