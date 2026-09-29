@@ -1125,6 +1125,33 @@ async fn run_established_session(
                     continue;
                 }
 
+                let now_unix_ms = match unix_time_ms() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"invalid service clock");
+                        return;
+                    }
+                };
+                if authorization.principal_for_credential(
+                    peer.identity.credential_fingerprint,
+                    now_unix_ms,
+                ) != Some(peer.identity.principal_id())
+                    || !authorization.authorize_credential(
+                        peer.identity.credential_fingerprint,
+                        Permission::StartPresentation,
+                        now_unix_ms,
+                    )
+                {
+                    eprintln!(
+                        "ClassMesh presentation feedback stopped: control.presentation.peer_no_longer_authorized"
+                    );
+                    connection.close(
+                        0_u32.into(),
+                        b"presentation feedback peer unauthorized",
+                    );
+                    return;
+                }
+
                 let Some(next_sequence) = outbound_sequence.checked_add(1) else {
                     eprintln!("ClassMesh control session closed: control.sequence.exhausted");
                     connection.close(0_u32.into(), b"control sequence exhausted");
