@@ -1989,6 +1989,29 @@ mod tests {
     }
 
     #[test]
+    fn worker_key_lease_schedules_exact_binding_once() {
+        let (clear_tx, clear_rx) = mpsc::sync_channel(1);
+        let binding = PresentationKeyInstallBinding {
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 7,
+            epoch: 3,
+        };
+        {
+            let mut lease = PresentationKeyWorkerLease::new(clear_tx);
+            lease.replace(binding);
+            lease.clear_now();
+        }
+
+        assert_eq!(clear_rx.try_recv(), Ok(binding));
+        assert!(matches!(
+            clear_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
     fn presentation_key_epoch_must_increase_within_exact_live_binding() {
         let installed =
             InstalledPresentationKeyBinding::new(80, 90, 3).expect("valid test binding");
