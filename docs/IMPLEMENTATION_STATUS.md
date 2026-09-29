@@ -121,6 +121,8 @@ The Phase 7F feedback-runtime prerequisite splits an established `ControlChannel
 
 The Worker→Service presentation-feedback IPC contract is exact-bound to Worker PID/session plus control-session ID, key-grant request ID, presentation ID and security epoch. The existing bounded `FeedbackMessage` supplies the stream ID. This gives the Service enough non-secret context to reject stale or miscorrelated loss feedback before wrapping it in the authenticated network control envelope.
 
+PR #184 wires that feedback into the established Student control session. The exact PID/session/generation-validated Worker reader publishes into a bounded 64-entry in-process bus; each session filters against its exact installed Worker key lease and live presentation ownership, rechecks the Teacher credential plus `StartPresentation` permission, and emits the existing uncorrelated v0.4 NACK/keyframe envelope using the session-global outbound sequence. The QUIC receive half runs in a dedicated pump so outbound feedback never cancels a partially read framed control message. Per-session lag drops only feedback and does not stall healthy sessions or control liveness.
+
 ## Remaining security/control work
 
 - Phase 6F physical interactive-control validation under Issue #108, including degraded/lost media while authenticated control remains responsive; hosted CI cannot close this gate;

@@ -14,6 +14,7 @@ use classmesh_control::diagnostics::{
     privileged_dispatch_diagnostic_code, stream_offer_diagnostic_code, transport_diagnostic_code,
 };
 use classmesh_control::dispatch::{PrivilegedControlCommand, dispatch_privileged_command};
+use classmesh_control::group_media_feedback::build_presentation_feedback_envelope;
 use classmesh_control::group_media_key::{
     InstalledPresentationKeyBinding, build_presentation_key_ack_from_binding,
     zeroize_received_presentation_key,
@@ -44,7 +45,7 @@ use classmesh_protocol::control_wire::{
 use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::{AuthorizationStore, Permission, PrincipalId};
-use classmesh_windows_runtime::ipc::ServiceUdpStreamStart;
+use classmesh_windows_runtime::ipc::{ServiceUdpStreamStart, WorkerPresentationFeedback};
 use classmesh_windows_runtime::ipc_sensitive::{
     PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
 };
@@ -53,12 +54,14 @@ use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use rustls::server::WebPkiClientVerifier;
 use serde::Deserialize;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, mpsc as tokio_mpsc, oneshot};
 
 const CONFIG_VERSION: u32 = 1;
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const PRESENTATION_KEY_INSTALL_TIMEOUT: Duration = Duration::from_secs(1);
+const PRESENTATION_FEEDBACK_BUS_CAPACITY: usize = 64;
+const CONTROL_INBOUND_QUEUE_CAPACITY: usize = 32;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +183,28 @@ pub(crate) struct PresentationKeyDispatchChannels {
     pub(crate) clear_tx: mpsc::SyncSender<PresentationKeyInstallBinding>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PresentationFeedbackBus {
+    tx: broadcast::Sender<WorkerPresentationFeedback>,
+}
+
+impl Default for PresentationFeedbackBus {
+    fn default() -> Self {
+        let (tx, _) = broadcast::channel(PRESENTATION_FEEDBACK_BUS_CAPACITY);
+        Self { tx }
+    }
+}
+
+impl PresentationFeedbackBus {
+    pub(crate) fn publish(&self, feedback: WorkerPresentationFeedback) -> bool {
+        self.tx.send(feedback).is_ok()
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<WorkerPresentationFeedback> {
+        self.tx.subscribe()
+    }
+}
+
 #[derive(Debug)]
 struct PresentationKeyWorkerLease {
     clear_tx: mpsc::SyncSender<PresentationKeyInstallBinding>,
@@ -205,6 +230,16 @@ impl PresentationKeyWorkerLease {
         if let Err(error) = self.clear_tx.send(binding) {
             eprintln!("ClassMesh presentation-key cleanup queue disconnected: {error}");
         }
+    }
+
+    fn accepts_feedback(&self, feedback: &WorkerPresentationFeedback) -> bool {
+        self.binding.is_some_and(|binding| {
+            feedback.control_session_id == binding.control_session_id
+                && feedback.request_id == binding.request_id
+                && feedback.presentation_id == binding.presentation_id
+                && feedback.feedback.stream_id() == binding.stream_id
+                && feedback.epoch == binding.epoch
+        })
     }
 }
 
@@ -703,6 +738,7 @@ struct ControlRuntimeDispatch {
     input: InputDispatchChannels,
     media: FocusedMediaDispatchChannels,
     presentation_keys: PresentationKeyDispatchChannels,
+    presentation_feedback: PresentationFeedbackBus,
     worker_capabilities: Arc<WorkerCapabilityState>,
 }
 
@@ -720,6 +756,7 @@ impl ControlRuntime {
         input: InputDispatchChannels,
         media: FocusedMediaDispatchChannels,
         presentation_keys: PresentationKeyDispatchChannels,
+        presentation_feedback: PresentationFeedbackBus,
         worker_capabilities: Arc<WorkerCapabilityState>,
     ) -> Result<Self, String> {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<SocketAddr, String>>(1);
@@ -751,6 +788,7 @@ impl ControlRuntime {
                         input,
                         media,
                         presentation_keys,
+                        presentation_feedback,
                         worker_capabilities,
                     },
                 ));
@@ -818,6 +856,7 @@ async fn run_listener(
         input,
         media,
         presentation_keys,
+        presentation_feedback,
         worker_capabilities,
     } = dispatch;
     let endpoint = match build_endpoint(&state, config) {
@@ -865,6 +904,7 @@ async fn run_listener(
                 let input = input.clone();
                 let media = media.clone();
                 let presentation_keys = presentation_keys.clone();
+                let presentation_feedback = presentation_feedback.clone();
                 let presentation = presentation.clone();
                 let worker_capabilities = Arc::clone(&worker_capabilities);
                 tokio::spawn(async move {
@@ -910,7 +950,7 @@ async fn run_listener(
                             );
                             run_established_session(
                                 &connection,
-                                &mut channel,
+                                channel,
                                 &session,
                                 peer,
                                 EstablishedSessionRuntime {
@@ -918,6 +958,7 @@ async fn run_listener(
                                     input: &input,
                                     media: &media,
                                     presentation_keys: &presentation_keys,
+                                    presentation_feedback: &presentation_feedback,
                                     presentation: &presentation,
                                 },
                             )
@@ -953,12 +994,29 @@ struct EstablishedSessionRuntime<'a> {
     input: &'a InputDispatchState,
     media: &'a FocusedMediaDispatchChannels,
     presentation_keys: &'a PresentationKeyDispatchChannels,
+    presentation_feedback: &'a PresentationFeedbackBus,
     presentation: &'a PresentationDispatchState,
+}
+
+#[derive(Debug)]
+enum ControlInboundEvent {
+    Envelope(ControlEnvelope),
+    Timeout,
+    Failed(String),
+}
+
+#[derive(Debug)]
+struct ReceivePumpGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for ReceivePumpGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 async fn run_established_session(
     connection: &quinn::Connection,
-    channel: &mut ControlChannel,
+    channel: ControlChannel,
     session: &EstablishedControlSession,
     peer: EstablishedAuthenticatedPeer,
     runtime: EstablishedSessionRuntime<'_>,
@@ -969,6 +1027,7 @@ async fn run_established_session(
         input,
         media,
         presentation_keys,
+        presentation_feedback,
         presentation,
     } = runtime;
 
@@ -985,25 +1044,141 @@ async fn run_established_session(
     let mut focused_adaptation = FocusedAdaptationState::new();
     let mut installed_presentation_key: Option<InstalledPresentationKeyBinding> = None;
     let mut worker_key_lease = PresentationKeyWorkerLease::new(presentation_keys.clear_tx.clone());
+    let mut presentation_feedback_rx = presentation_feedback.subscribe();
+    let (mut send, mut receive) = channel.into_split();
+    let (inbound_tx, mut inbound_rx) =
+        tokio_mpsc::channel::<ControlInboundEvent>(CONTROL_INBOUND_QUEUE_CAPACITY);
+    let receive_pump = tokio::spawn(async move {
+        loop {
+            let (event, terminal) = match receive.receive().await {
+                Ok(envelope) => (ControlInboundEvent::Envelope(envelope), false),
+                Err(ControlTransportError::Timeout { .. }) => (ControlInboundEvent::Timeout, false),
+                Err(error) => (
+                    ControlInboundEvent::Failed(transport_diagnostic_code(&error).to_owned()),
+                    true,
+                ),
+            };
+            if inbound_tx.send(event).await.is_err() || terminal {
+                return;
+            }
+        }
+    });
+    let _receive_pump = ReceivePumpGuard(receive_pump);
 
     loop {
-        let mut envelope = match channel.receive().await {
-            Ok(envelope) => envelope,
-            Err(ControlTransportError::Timeout { .. }) => {
-                if last_inbound_at.elapsed() >= DEFAULT_OFFLINE_AFTER {
-                    eprintln!("ClassMesh control session closed: control.heartbeat.offline");
-                    connection.close(0_u32.into(), b"control peer offline");
+        let mut envelope = tokio::select! {
+            inbound = inbound_rx.recv() => {
+                match inbound {
+                    Some(ControlInboundEvent::Envelope(envelope)) => envelope,
+                    Some(ControlInboundEvent::Timeout) => {
+                        if last_inbound_at.elapsed() >= DEFAULT_OFFLINE_AFTER {
+                            eprintln!("ClassMesh control session closed: control.heartbeat.offline");
+                            connection.close(0_u32.into(), b"control peer offline");
+                            return;
+                        }
+                        continue;
+                    }
+                    Some(ControlInboundEvent::Failed(code)) => {
+                        eprintln!("ClassMesh control session transport failed: {code}");
+                        connection.close(0_u32.into(), b"control transport failed");
+                        return;
+                    }
+                    None => {
+                        connection.close(0_u32.into(), b"control receive pump stopped");
+                        return;
+                    }
+                }
+            }
+            feedback = presentation_feedback_rx.recv() => {
+                let report = match feedback {
+                    Ok(report) => report,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        eprintln!(
+                            "ClassMesh presentation feedback dropped under bounded backpressure: skipped={skipped}"
+                        );
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        connection.close(0_u32.into(), b"presentation feedback bus closed");
+                        return;
+                    }
+                };
+
+                if report.control_session_id != session.control_session_id
+                    || !worker_key_lease.accepts_feedback(&report)
+                {
+                    continue;
+                }
+                let Some(installed) = installed_presentation_key else {
+                    continue;
+                };
+                if report.presentation_id != installed.presentation_id()
+                    || report.feedback.stream_id() != installed.stream_id()
+                    || report.epoch != installed.epoch()
+                    || !presentation.matches_owner(
+                        peer.identity.principal_id(),
+                        session.control_session_id,
+                        report.presentation_id,
+                        u64::from(report.feedback.stream_id()),
+                    )
+                {
+                    continue;
+                }
+
+                let now_unix_ms = match unix_time_ms() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"invalid service clock");
+                        return;
+                    }
+                };
+                if authorization.principal_for_credential(
+                    peer.identity.credential_fingerprint(),
+                    now_unix_ms,
+                ) != Some(peer.identity.principal_id())
+                    || !authorization.authorize_credential(
+                        peer.identity.credential_fingerprint(),
+                        Permission::StartPresentation,
+                        now_unix_ms,
+                    )
+                {
+                    eprintln!(
+                        "ClassMesh presentation feedback stopped: control.presentation.peer_no_longer_authorized"
+                    );
+                    connection.close(
+                        0_u32.into(),
+                        b"presentation feedback peer unauthorized",
+                    );
                     return;
                 }
+
+                let Some(next_sequence) = outbound_sequence.checked_add(1) else {
+                    eprintln!("ClassMesh control session closed: control.sequence.exhausted");
+                    connection.close(0_u32.into(), b"control sequence exhausted");
+                    return;
+                };
+                let feedback_envelope = match build_presentation_feedback_envelope(
+                    session.control_session_id,
+                    session.negotiated.version,
+                    next_sequence,
+                    &report.feedback,
+                ) {
+                    Ok(envelope) => envelope,
+                    Err(error) => {
+                        eprintln!("ClassMesh presentation feedback rejected locally: {error}");
+                        continue;
+                    }
+                };
+                if let Err(error) = send.send(&feedback_envelope).await {
+                    eprintln!(
+                        "ClassMesh presentation feedback send failed: {}",
+                        transport_diagnostic_code(&error)
+                    );
+                    connection.close(0_u32.into(), b"presentation feedback send failed");
+                    return;
+                }
+                outbound_sequence = next_sequence;
                 continue;
-            }
-            Err(error) => {
-                eprintln!(
-                    "ClassMesh control session transport failed: {}",
-                    transport_diagnostic_code(&error)
-                );
-                connection.close(0_u32.into(), b"control transport failed");
-                return;
             }
         };
         last_inbound_at = Instant::now();
@@ -1061,7 +1236,7 @@ async fn run_established_session(
                         monotonic_time_us: duration_micros_u64(session_clock.elapsed()),
                     })),
                 };
-                if let Err(error) = channel.send(&ack).await {
+                if let Err(error) = send.send(&ack).await {
                     eprintln!(
                         "ClassMesh heartbeat ack failed: {}",
                         transport_diagnostic_code(&error)
@@ -1220,7 +1395,7 @@ async fn run_established_session(
                     request_id: envelope.request_id,
                     payload: Some(control_envelope::Payload::StreamAnswer(answer)),
                 };
-                if let Err(error) = channel.send(&response).await {
+                if let Err(error) = send.send(&response).await {
                     eprintln!(
                         "ClassMesh stream answer failed: {}",
                         transport_diagnostic_code(&error)
@@ -1307,7 +1482,7 @@ async fn run_established_session(
                     request_id: envelope.request_id,
                     payload: Some(control_envelope::Payload::StreamReconfigure(reconfigure)),
                 };
-                if let Err(error) = channel.send(&response).await {
+                if let Err(error) = send.send(&response).await {
                     eprintln!(
                         "ClassMesh stream reconfigure failed: {}",
                         transport_diagnostic_code(&error)
@@ -1554,7 +1729,7 @@ async fn run_established_session(
                         return;
                     }
                 };
-                if let Err(error) = channel.send(&ack).await {
+                if let Err(error) = send.send(&ack).await {
                     eprintln!(
                         "ClassMesh presentation key ACK failed: {}",
                         transport_diagnostic_code(&error)
@@ -1636,7 +1811,7 @@ async fn run_established_session(
                     request_id: envelope.request_id,
                     payload: Some(control_envelope::Payload::PresentationStatus(status)),
                 };
-                if let Err(error) = channel.send(&response).await {
+                if let Err(error) = send.send(&response).await {
                     eprintln!(
                         "ClassMesh presentation status failed: {}",
                         transport_diagnostic_code(&error)
@@ -2021,6 +2196,58 @@ mod tests {
             clear_rx.try_recv(),
             Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn presentation_feedback_requires_exact_installed_worker_key_lease() {
+        let (clear_tx, _clear_rx) = mpsc::sync_channel(1);
+        let mut lease = PresentationKeyWorkerLease::new(clear_tx);
+        let binding = PresentationKeyInstallBinding {
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 7,
+            epoch: 3,
+        };
+        lease.replace(binding);
+
+        let exact = WorkerPresentationFeedback {
+            process_id: 42,
+            session_id: 9,
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            epoch: 3,
+            feedback: FeedbackMessage::RequestKeyframe {
+                stream_id: 7,
+                after_frame_id: 10,
+            },
+        };
+        assert!(lease.accepts_feedback(&exact));
+
+        for report in [
+            WorkerPresentationFeedback {
+                request_id: 45,
+                ..exact.clone()
+            },
+            WorkerPresentationFeedback {
+                presentation_id: 56,
+                ..exact.clone()
+            },
+            WorkerPresentationFeedback {
+                epoch: 4,
+                ..exact.clone()
+            },
+            WorkerPresentationFeedback {
+                feedback: FeedbackMessage::RequestKeyframe {
+                    stream_id: 8,
+                    after_frame_id: 10,
+                },
+                ..exact.clone()
+            },
+        ] {
+            assert!(!lease.accepts_feedback(&report));
+        }
     }
 
     #[test]
