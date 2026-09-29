@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use classmesh_core::adaptation::{StreamProfile, StreamProfileError};
 use classmesh_protocol::Capability;
@@ -10,6 +10,8 @@ use classmesh_protocol::control_wire::{
 pub const MAX_STREAM_TRANSPORT_PARAMETERS: usize = 4 * 1024;
 pub const UDP_UNICAST_PARAMETERS_VERSION: u8 = 1;
 pub const UDP_UNICAST_PARAMETERS_LEN: usize = 3;
+pub const UDP_MULTICAST_PARAMETERS_VERSION: u8 = 1;
+pub const UDP_MULTICAST_PARAMETERS_LEN: usize = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamOfferError {
@@ -24,6 +26,7 @@ pub enum StreamOfferError {
     TransportCapabilityNotNegotiated,
     TransportParametersTooLarge,
     InvalidUdpUnicastParameters,
+    InvalidUdpMulticastParameters,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +35,19 @@ pub struct ValidatedInteractiveStreamOffer {
     pub profile: StreamProfile,
     pub transport: WireMediaTransport,
     pub transport_parameters: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UdpMulticastParameters {
+    pub group: Ipv4Addr,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedPresentationStreamOffer {
+    pub stream_id: u64,
+    pub profile: StreamProfile,
+    pub multicast: UdpMulticastParameters,
 }
 
 pub fn udp_unicast_port(parameters: &[u8]) -> Result<u16, StreamOfferError> {
@@ -46,6 +62,46 @@ pub fn udp_unicast_port(parameters: &[u8]) -> Result<u16, StreamOfferError> {
         return Err(StreamOfferError::InvalidUdpUnicastParameters);
     }
     Ok(port)
+}
+
+pub fn udp_multicast_parameters(
+    parameters: &[u8],
+) -> Result<UdpMulticastParameters, StreamOfferError> {
+    let [version, a, b, c, d, high, low] = parameters else {
+        return Err(StreamOfferError::InvalidUdpMulticastParameters);
+    };
+    if *version != UDP_MULTICAST_PARAMETERS_VERSION {
+        return Err(StreamOfferError::InvalidUdpMulticastParameters);
+    }
+    let group = Ipv4Addr::new(*a, *b, *c, *d);
+    if group.octets()[0] != 239 {
+        return Err(StreamOfferError::InvalidUdpMulticastParameters);
+    }
+    let port = u16::from_be_bytes([*high, *low]);
+    if port == 0 {
+        return Err(StreamOfferError::InvalidUdpMulticastParameters);
+    }
+    Ok(UdpMulticastParameters { group, port })
+}
+
+pub fn udp_multicast_transport_parameters(
+    group: Ipv4Addr,
+    port: u16,
+) -> Result<[u8; UDP_MULTICAST_PARAMETERS_LEN], StreamOfferError> {
+    if group.octets()[0] != 239 || port == 0 {
+        return Err(StreamOfferError::InvalidUdpMulticastParameters);
+    }
+    let [high, low] = port.to_be_bytes();
+    let [a, b, c, d] = group.octets();
+    Ok([
+        UDP_MULTICAST_PARAMETERS_VERSION,
+        a,
+        b,
+        c,
+        d,
+        high,
+        low,
+    ])
 }
 
 pub fn peer_bound_udp_unicast_destination(
@@ -132,6 +188,48 @@ pub fn validate_interactive_stream_offer(
     })
 }
 
+pub fn validate_presentation_stream_offer(
+    offer: &StreamOffer,
+    negotiated_capabilities: &std::collections::BTreeSet<Capability>,
+) -> Result<ValidatedPresentationStreamOffer, StreamOfferError> {
+    if offer.stream_id == 0 {
+        return Err(StreamOfferError::InvalidStreamId);
+    }
+    if u32::try_from(offer.stream_id).is_err() {
+        return Err(StreamOfferError::StreamIdOutOfRange);
+    }
+    if offer.kind != WireStreamKind::TeacherPresentation as i32 {
+        return Err(StreamOfferError::UnsupportedKind);
+    }
+    if offer.transport_parameters.len() > MAX_STREAM_TRANSPORT_PARAMETERS {
+        return Err(StreamOfferError::TransportParametersTooLarge);
+    }
+    if !negotiated_capabilities.contains(&Capability::TeacherPresentation)
+        || !negotiated_capabilities.contains(&Capability::SframeGroupMedia)
+        || !negotiated_capabilities.contains(&Capability::UdpMulticast)
+    {
+        return Err(StreamOfferError::TransportCapabilityNotNegotiated);
+    }
+
+    let profile = offer
+        .profile
+        .as_ref()
+        .ok_or(StreamOfferError::MissingProfile)
+        .and_then(stream_profile_from_wire)?;
+    let transport = WireMediaTransport::try_from(offer.transport)
+        .map_err(|_| StreamOfferError::UnsupportedTransport)?;
+    if transport != WireMediaTransport::UdpMulticast {
+        return Err(StreamOfferError::UnsupportedTransport);
+    }
+    let multicast = udp_multicast_parameters(&offer.transport_parameters)?;
+
+    Ok(ValidatedPresentationStreamOffer {
+        stream_id: offer.stream_id,
+        profile,
+        multicast,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -152,6 +250,124 @@ mod tests {
             }),
             transport_parameters: vec![1, 2, 3],
         }
+    }
+
+    fn presentation_offer() -> StreamOffer {
+        StreamOffer {
+            stream_id: 9,
+            kind: WireStreamKind::TeacherPresentation as i32,
+            transport: WireMediaTransport::UdpMulticast as i32,
+            profile: Some(VideoProfile {
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                bitrate_kbps: 5_000,
+                codec: VideoCodec::H264 as i32,
+            }),
+            transport_parameters: udp_multicast_transport_parameters(
+                Ipv4Addr::new(239, 10, 20, 30),
+                50_000,
+            )
+            .expect("valid multicast parameters")
+            .to_vec(),
+        }
+    }
+
+    fn presentation_caps() -> BTreeSet<Capability> {
+        BTreeSet::from([
+            Capability::TeacherPresentation,
+            Capability::SframeGroupMedia,
+            Capability::UdpMulticast,
+        ])
+    }
+
+    #[test]
+    fn presentation_multicast_offer_requires_exact_capability_contract() {
+        let offer = presentation_offer();
+        for missing in [
+            Capability::TeacherPresentation,
+            Capability::SframeGroupMedia,
+            Capability::UdpMulticast,
+        ] {
+            let mut capabilities = presentation_caps();
+            capabilities.remove(&missing);
+            assert_eq!(
+                validate_presentation_stream_offer(&offer, &capabilities),
+                Err(StreamOfferError::TransportCapabilityNotNegotiated)
+            );
+        }
+
+        let validated =
+            validate_presentation_stream_offer(&offer, &presentation_caps()).expect("valid offer");
+        assert_eq!(validated.stream_id, 9);
+        assert_eq!(
+            validated.multicast,
+            UdpMulticastParameters {
+                group: Ipv4Addr::new(239, 10, 20, 30),
+                port: 50_000,
+            }
+        );
+    }
+
+    #[test]
+    fn presentation_multicast_parameters_are_versioned_group_and_port_only() {
+        let encoded =
+            udp_multicast_transport_parameters(Ipv4Addr::new(239, 1, 2, 3), 50_000)
+                .expect("valid parameters");
+        assert_eq!(encoded.len(), UDP_MULTICAST_PARAMETERS_LEN);
+        assert_eq!(
+            udp_multicast_parameters(&encoded),
+            Ok(UdpMulticastParameters {
+                group: Ipv4Addr::new(239, 1, 2, 3),
+                port: 50_000,
+            })
+        );
+
+        for invalid in [
+            vec![2, 239, 1, 2, 3, 0xc3, 0x50],
+            vec![1, 224, 1, 2, 3, 0xc3, 0x50],
+            vec![1, 239, 1, 2, 3, 0, 0],
+            vec![1, 239, 1, 2, 3, 0xc3],
+        ] {
+            assert_eq!(
+                udp_multicast_parameters(&invalid),
+                Err(StreamOfferError::InvalidUdpMulticastParameters)
+            );
+        }
+    }
+
+    #[test]
+    fn presentation_offer_does_not_accept_sender_or_receiver_interface_in_parameters() {
+        let mut offer = presentation_offer();
+        offer.transport_parameters.push(192);
+        assert_eq!(
+            validate_presentation_stream_offer(&offer, &presentation_caps()),
+            Err(StreamOfferError::InvalidUdpMulticastParameters)
+        );
+    }
+
+    #[test]
+    fn presentation_offer_rejects_wrong_kind_transport_or_stream_range() {
+        let mut wrong_kind = presentation_offer();
+        wrong_kind.kind = WireStreamKind::Interactive as i32;
+        assert_eq!(
+            validate_presentation_stream_offer(&wrong_kind, &presentation_caps()),
+            Err(StreamOfferError::UnsupportedKind)
+        );
+
+        let mut wrong_transport = presentation_offer();
+        wrong_transport.transport = WireMediaTransport::UdpUnicast as i32;
+        assert_eq!(
+            validate_presentation_stream_offer(&wrong_transport, &presentation_caps()),
+            Err(StreamOfferError::UnsupportedTransport)
+        );
+
+        let mut too_large = presentation_offer();
+        too_large.stream_id = u64::from(u32::MAX) + 1;
+        assert_eq!(
+            validate_presentation_stream_offer(&too_large, &presentation_caps()),
+            Err(StreamOfferError::StreamIdOutOfRange)
+        );
     }
 
     #[test]
