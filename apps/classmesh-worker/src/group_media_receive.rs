@@ -6,6 +6,7 @@ use classmesh_security::group_media::{
     GroupMediaEpoch, GroupMediaError, GroupMediaFrameBinding, GroupMediaKeyMaterial,
     GroupMediaReceiver,
 };
+use classmesh_windows_runtime::ipc::ServicePresentationKeyClear;
 use classmesh_windows_runtime::ipc_sensitive::{
     PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
 };
@@ -146,7 +147,18 @@ impl WorkerGroupMediaKeyState {
             .map_err(Into::into)
     }
 
-    pub fn clear(&mut self) -> bool {
+    pub fn clear_if_matches(&mut self, clear: ServicePresentationKeyClear) -> bool {
+        let Some(current) = self.binding() else {
+            return false;
+        };
+        if current.control_session_id != clear.control_session_id
+            || current.request_id != clear.request_id
+            || current.presentation_id != clear.presentation_id
+            || current.stream_id != clear.stream_id
+            || current.epoch != clear.epoch
+        {
+            return false;
+        }
         self.installed.take().is_some()
     }
 }
@@ -377,6 +389,30 @@ mod tests {
                 ))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn presentation_key_clear_requires_exact_installed_binding() {
+        let mut state = WorkerGroupMediaKeyState::default();
+        let installed = state
+            .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x45))
+            .expect("install");
+
+        let exact = ServicePresentationKeyClear {
+            control_session_id: installed.control_session_id,
+            request_id: installed.request_id,
+            presentation_id: installed.presentation_id,
+            stream_id: installed.stream_id,
+            epoch: installed.epoch,
+        };
+        let mut stale = exact;
+        stale.request_id = stale.request_id.saturating_add(1);
+
+        assert!(!state.clear_if_matches(stale));
+        assert!(state.is_installed());
+        assert!(state.clear_if_matches(exact));
+        assert!(!state.is_installed());
+        assert!(!state.clear_if_matches(exact));
     }
 
     #[test]
