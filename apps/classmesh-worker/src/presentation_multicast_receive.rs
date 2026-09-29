@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, TryRecvError, TrySendError};
+use std::sync::mpsc::{self, Receiver, TrySendError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -185,10 +185,7 @@ impl WorkerPresentationMulticastRuntime {
     }
 
     pub fn try_receive(&self) -> Option<ProtectedMulticastReceiveOutcome> {
-        match self.receive_rx.try_recv() {
-            Ok(outcome) => Some(outcome),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
-        }
+        self.receive_rx.try_recv().ok()
     }
 
     #[must_use]
