@@ -3,7 +3,8 @@ use std::net::{IpAddr, SocketAddr};
 
 use classmesh_protocol::PROTOCOL_VERSION;
 use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
-use classmesh_protocol::media::MediaFlags;
+use classmesh_protocol::media::{MAX_PACKET_PAYLOAD, MediaFlags};
+use classmesh_security::group_media::MAX_GROUP_MEDIA_SEALED_BYTES;
 
 use crate::receiver::{ReceiverEvent, ReceiverPolicy, ReceiverWindow};
 use crate::{AssembleError, AssembledFrame, MediaPacket};
@@ -15,6 +16,7 @@ pub enum MulticastPacketDropReason {
     UnexpectedSource,
     UnexpectedProtocolVersion,
     WrongStream,
+    FrameTooLarge,
     RetransmitUnsupported,
     FecUnsupported,
     Assembly(AssembleError),
@@ -89,6 +91,7 @@ pub struct ProtectedMulticastReceiveBatch {
     pub frames: Vec<ReceivedGroupMediaCiphertext>,
     pub feedback: Vec<FeedbackMessage>,
     pub dropped_stale_frames: usize,
+    pub dropped_invalid_frames: usize,
 }
 
 impl ProtectedMulticastReceiveBatch {
@@ -96,11 +99,16 @@ impl ProtectedMulticastReceiveBatch {
         let mut frames = Vec::new();
         let mut feedback = Vec::new();
         let mut dropped_stale_frames = 0_usize;
+        let mut dropped_invalid_frames = 0_usize;
 
         for event in events {
             match event {
                 ReceiverEvent::FrameReady(frame) => {
-                    frames.push(ReceivedGroupMediaCiphertext::from_assembled(frame));
+                    if frame.data.len() <= MAX_GROUP_MEDIA_SEALED_BYTES {
+                        frames.push(ReceivedGroupMediaCiphertext::from_assembled(frame));
+                    } else {
+                        dropped_invalid_frames = dropped_invalid_frames.saturating_add(1);
+                    }
                 }
                 ReceiverEvent::NeedNack {
                     stream_id,
@@ -133,12 +141,16 @@ impl ProtectedMulticastReceiveBatch {
             frames,
             feedback,
             dropped_stale_frames,
+            dropped_invalid_frames,
         }
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.frames.is_empty() && self.feedback.is_empty() && self.dropped_stale_frames == 0
+        self.frames.is_empty()
+            && self.feedback.is_empty()
+            && self.dropped_stale_frames == 0
+            && self.dropped_invalid_frames == 0
     }
 }
 
@@ -194,6 +206,13 @@ impl ProtectedMulticastReceiveState {
         if packet.header.stream_id != self.config.stream_id() {
             return ProtectedMulticastReceiveOutcome::Dropped(
                 MulticastPacketDropReason::WrongStream,
+            );
+        }
+        let max_packets =
+            MAX_GROUP_MEDIA_SEALED_BYTES.div_ceil(MAX_PACKET_PAYLOAD);
+        if usize::from(packet.header.packet_count) > max_packets {
+            return ProtectedMulticastReceiveOutcome::Dropped(
+                MulticastPacketDropReason::FrameTooLarge,
             );
         }
         if packet.header.flags.contains(MediaFlags::RETRANSMIT) {
