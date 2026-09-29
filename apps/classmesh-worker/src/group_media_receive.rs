@@ -193,8 +193,6 @@ mod tests {
     }
 
     fn sealed(
-        presentation_id: u64,
-        stream_id: u32,
         epoch_value: u32,
         key: u8,
         frame_id: u64,
@@ -207,8 +205,8 @@ mod tests {
         let epoch = GroupMediaEpoch::new(epoch_value).expect("epoch");
         let mut sender = GroupMediaSender::new(epoch, &material).expect("sender");
         let binding = GroupMediaFrameBinding::new(
-            presentation_id,
-            stream_id,
+            PRESENTATION_ID,
+            STREAM_ID,
             epoch,
             frame_id,
             timestamp_us,
@@ -297,8 +295,6 @@ mod tests {
             .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x34))
             .expect("install");
         let sealed = sealed(
-            PRESENTATION_ID,
-            STREAM_ID,
             3,
             0x34,
             91,
@@ -329,8 +325,6 @@ mod tests {
         ));
 
         let sealed = sealed(
-            PRESENTATION_ID,
-            STREAM_ID,
             3,
             0x35,
             92,
@@ -359,8 +353,6 @@ mod tests {
         assert_eq!(rotated.request_id, 45);
 
         let sealed = sealed(
-            PRESENTATION_ID,
-            STREAM_ID,
             4,
             0x38,
             93,
@@ -415,8 +407,6 @@ mod tests {
             .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x44))
             .expect("install");
         let sealed = sealed(
-            PRESENTATION_ID,
-            STREAM_ID,
             3,
             0x44,
             94,
