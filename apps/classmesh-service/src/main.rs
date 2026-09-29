@@ -26,6 +26,10 @@ mod windows_service_app {
     };
     use classmesh_windows_runtime::ipc::{
         IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage, ServiceUdpStreamStart,
+        WorkerPresentationKeyInstallResult, WorkerPresentationKeyInstallStatus,
+    };
+    use classmesh_windows_runtime::ipc_sensitive::{
+        PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
     };
     use classmesh_windows_runtime::worker::{
         WorkerProcess, WorkerRestartDecision, WorkerRestartPolicy, WorkerWatchdog,
@@ -52,6 +56,8 @@ mod windows_service_app {
     const INPUT_CLEANUP_QUEUE_CAPACITY: usize = 1;
     const FOCUSED_MEDIA_QUEUE_CAPACITY: usize = 4;
     const FOCUSED_MEDIA_FEEDBACK_QUEUE_CAPACITY: usize = 32;
+    const PRESENTATION_KEY_INSTALL_QUEUE_CAPACITY: usize = 1;
+    const WORKER_PRESENTATION_KEY_RESULT_QUEUE_CAPACITY: usize = 4;
     const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
     const MEDIA_RECONFIGURE_RETRY: Duration = Duration::from_millis(250);
     const MAX_MEDIA_RECONFIGURE_ATTEMPTS: u8 = 4;
@@ -59,7 +65,8 @@ mod windows_service_app {
     use crate::control_runtime::{
         ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, FocusedMediaDispatchChannels,
         FocusedMediaFeedback, FocusedMediaReconfigure, FocusedMediaStart, InputAvailability,
-        InputDispatchChannels, WorkerCapabilityState,
+        InputDispatchChannels, PresentationKeyDispatchChannels, PresentationKeyInstallDispatch,
+        WorkerCapabilityState,
     };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -79,12 +86,33 @@ mod windows_service_app {
     }
 
     #[derive(Debug)]
+    struct PendingPresentationKeyInstall {
+        expected_process_id: u32,
+        expected_session_id: u32,
+        binding: PresentationKeyInstallBinding,
+        reply_tx: tokio::sync::oneshot::Sender<Result<PresentationKeyInstallBinding, String>>,
+    }
+
+    impl PendingPresentationKeyInstall {
+        fn matches(&self, result: &WorkerPresentationKeyInstallResult) -> bool {
+            result.process_id == self.expected_process_id
+                && result.session_id == self.expected_session_id
+                && result.control_session_id == self.binding.control_session_id
+                && result.request_id == self.binding.request_id
+                && result.presentation_id == self.binding.presentation_id
+                && result.stream_id == self.binding.stream_id
+                && result.epoch == self.binding.epoch
+        }
+    }
+
+    #[derive(Debug)]
     struct WorkerManager {
         executable: Option<PathBuf>,
         process: Option<SessionProcess>,
         pipe: Option<NamedPipeServer>,
         capabilities: Arc<WorkerCapabilityState>,
         encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
+        presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
         watchdog: WorkerWatchdog,
         pending_restart: Option<(SessionId, Instant)>,
         generation: u64,
@@ -95,6 +123,7 @@ mod windows_service_app {
         fn new(
             capabilities: Arc<WorkerCapabilityState>,
             encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
+            presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
         ) -> Self {
             let executable = std::env::current_exe().ok().map(|service| {
                 service.parent().map_or_else(
@@ -108,6 +137,7 @@ mod windows_service_app {
                 pipe: None,
                 capabilities,
                 encoder_capability_cache,
+                presentation_key_result_tx,
                 watchdog: WorkerWatchdog::new(WorkerRestartPolicy::default()),
                 pending_restart: None,
                 generation: 0,
@@ -182,6 +212,7 @@ mod windows_service_app {
                                 reader,
                                 Arc::clone(&self.capabilities),
                                 Arc::clone(&self.encoder_capability_cache),
+                                self.presentation_key_result_tx.clone(),
                                 worker_generation,
                                 process_id,
                                 session.0,
@@ -321,6 +352,66 @@ mod windows_service_app {
 
         fn current_process_id(&self) -> Option<u32> {
             self.process.as_ref().map(SessionProcess::process_id)
+        }
+
+        fn send_presentation_key_install(
+            &self,
+            install: SensitivePresentationKeyInstall,
+        ) -> Result<(u32, u32, PresentationKeyInstallBinding), String> {
+            let binding = install.binding();
+            let process = self
+                .process
+                .as_ref()
+                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
+            if !process
+                .is_running()
+                .map_err(|error| format!("Worker key-install liveness probe failed: {error}"))?
+            {
+                return Err("interactive Worker exited before key install".to_owned());
+            }
+            let pipe = self
+                .pipe
+                .as_ref()
+                .ok_or_else(|| "Worker IPC pipe is unavailable for key install".to_owned())?;
+            let encoded = install
+                .encode()
+                .map_err(|error| format!("failed to encode Worker key install: {error:?}"))?;
+            pipe.write_all(&encoded)
+                .map_err(|error| format!("Worker key-install IPC write failed: {error}"))?;
+            Ok((process.process_id(), process.session_id(), binding))
+        }
+
+        fn clear_presentation_key(
+            &self,
+            binding: PresentationKeyInstallBinding,
+        ) -> Result<(), String> {
+            let process = self
+                .process
+                .as_ref()
+                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
+            if !process
+                .is_running()
+                .map_err(|error| format!("Worker key-clear liveness probe failed: {error}"))?
+            {
+                return Err("interactive Worker exited before key clear".to_owned());
+            }
+            let pipe = self
+                .pipe
+                .as_ref()
+                .ok_or_else(|| "Worker IPC pipe is unavailable for key clear".to_owned())?;
+            let clear = classmesh_windows_runtime::ipc::ServicePresentationKeyClear {
+                control_session_id: binding.control_session_id,
+                request_id: binding.request_id,
+                presentation_id: binding.presentation_id,
+                stream_id: binding.stream_id,
+                epoch: binding.epoch,
+            };
+            let frame = IpcFrame::service_presentation_key_clear(clear)
+                .map_err(|error| format!("failed to build Worker key clear: {error:?}"))?;
+            pipe.write_all(&frame.encode().map_err(|error| {
+                format!("failed to encode Worker key clear: {error:?}")
+            })?)
+            .map_err(|error| format!("Worker key-clear IPC write failed: {error}"))
         }
 
         fn clear_focused_profile(&self) -> Result<(), String> {
@@ -491,6 +582,7 @@ mod windows_service_app {
         pipe: NamedPipeServer,
         capabilities: Arc<WorkerCapabilityState>,
         encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
+        presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
         generation: u64,
         expected_process_id: u32,
         expected_session_id: u32,
@@ -753,6 +845,40 @@ mod windows_service_app {
                                 expected_session_id,
                                 evidence.process_id,
                                 evidence.session_id
+                            );
+                            return;
+                        }
+                        Ok(IpcMessage::WorkerPresentationKeyInstallResult(result))
+                            if result.process_id == expected_process_id
+                                && result.session_id == expected_session_id =>
+                        {
+                            if !capabilities.is_current(
+                                generation,
+                                result.process_id,
+                                result.session_id,
+                            ) {
+                                eprintln!(
+                                    "Stale Worker presentation-key result ignored for pid {} session {}",
+                                    result.process_id, result.session_id
+                                );
+                                return;
+                            }
+                            if presentation_key_result_tx.send(result).is_err() {
+                                return;
+                            }
+                        }
+                        Ok(IpcMessage::WorkerPresentationKeyInstallResult(result)) => {
+                            let _ = capabilities.clear_report_if_current(
+                                generation,
+                                expected_process_id,
+                                expected_session_id,
+                            );
+                            eprintln!(
+                                "Worker presentation-key result identity mismatch: expected pid {} session {}, received pid {} session {}",
+                                expected_process_id,
+                                expected_session_id,
+                                result.process_id,
+                                result.session_id
                             );
                             return;
                         }
