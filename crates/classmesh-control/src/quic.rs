@@ -603,6 +603,88 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn split_control_channel_preserves_framing_and_independent_ownership() -> TestResult {
+        let certified = generate_simple_self_signed(vec!["classmesh.local".to_owned()])?;
+        let certificate = CertificateDer::from(certified.cert);
+        let private_key = PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
+
+        let server_config =
+            server_config_with_certificate(vec![certificate.clone()], private_key.into())?;
+        let server = Endpoint::server(
+            server_config,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        )?;
+        let server_address = server.local_addr()?;
+
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate)?;
+        let mut client = Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
+        client.set_default_client_config(client_config_with_roots(roots)?);
+
+        let server_task = tokio::spawn(async move {
+            let connection = accept(&server).await.map_err(|error| error.to_string())?;
+            let mut channel = ControlChannel::accept(&connection, DEFAULT_IO_TIMEOUT)
+                .await
+                .map_err(|error| error.to_string())?;
+            server_hello(
+                &mut channel,
+                &ServerHelloConfig {
+                    local_version: ProtocolVersion { major: 0, minor: 1 },
+                    local_capabilities: [Capability::UdpUnicast].into_iter().collect(),
+                    control_session_id: 77,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+            let (mut send, mut recv) = channel.into_split();
+            let receive_task = tokio::spawn(async move {
+                recv.receive().await.map_err(|error| error.to_string())
+            });
+            let received = receive_task.await.map_err(|error| error.to_string())??;
+            assert!(matches!(
+                received.payload,
+                Some(control_envelope::Payload::Heartbeat(_))
+            ));
+            send.send(&heartbeat_ack())
+                .await
+                .map_err(|error| error.to_string())?;
+            send.finish().map_err(|error| error.to_string())?;
+
+            Ok::<(Endpoint, Connection), String>((server, connection))
+        });
+
+        let connection = connect(&client, server_address, "classmesh.local").await?;
+        let mut channel = ControlChannel::open(&connection, DEFAULT_IO_TIMEOUT).await?;
+        let hello = ControlHello {
+            principal_id: PrincipalId([7; 32]),
+            role: ControlRole::StudentDevice,
+            version: ProtocolVersion { major: 0, minor: 1 },
+            capabilities: BTreeSet::from([Capability::UdpUnicast]),
+            hostname: "student-07".to_owned(),
+            app_version: "0.0.1".to_owned(),
+        };
+        client_hello(&mut channel, &hello).await?;
+
+        let (mut send, mut recv) = channel.into_split();
+        send.send(&heartbeat()).await?;
+        let received = recv.receive().await?;
+        assert!(matches!(
+            received.payload,
+            Some(control_envelope::Payload::HeartbeatAck(_))
+        ));
+        send.finish()?;
+
+        connection.close(0_u32.into(), b"split channel test complete");
+        let (server, server_connection) =
+            server_task.await.map_err(|error| error.to_string())??;
+        server_connection.close(0_u32.into(), b"split channel test complete");
+        server.close(0_u32.into(), b"split channel test complete");
+        client.wait_idle().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn authenticated_hello_rejects_claimed_principal_mismatch() -> TestResult {
         let server_identity = generate_simple_self_signed(vec!["classmesh.local".to_owned()])?;
         let server_certificate = CertificateDer::from(server_identity.cert);
