@@ -6,12 +6,12 @@ use std::time::{Duration, Instant};
 use classmesh_protocol::PROTOCOL_VERSION;
 use classmesh_protocol::media::{MediaFlags, MediaPacketHeader};
 
+use crate::MediaPacket;
 use crate::multicast::{
     MulticastContractError, MulticastMembership, MulticastProbeObservation, MulticastProbeOutcome,
     evaluate_multicast_probe,
 };
 use crate::udp::{DatagramError, UdpMediaSocket};
-use crate::MediaPacket;
 
 const RUNTIME_PROBE_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 67, 77);
 const RUNTIME_PROBE_TAG: &[u8; 8] = b"CMRTPR01";
@@ -91,10 +91,8 @@ pub fn probe_local_multicast_interface_with_timeout(
 
     let membership = MulticastMembership::new(RUNTIME_PROBE_GROUP, interface)
         .map_err(RuntimeMulticastProbeError::InvalidInterface)?;
-    let receiver = UdpMediaSocket::bind(SocketAddr::V4(SocketAddrV4::new(
-        Ipv4Addr::UNSPECIFIED,
-        0,
-    )))?;
+    let receiver =
+        UdpMediaSocket::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)))?;
     receiver.set_read_timeout(Some(RUNTIME_PROBE_READ_SLICE))?;
     let receiver_port = receiver.local_addr()?.port();
 
@@ -113,13 +111,7 @@ pub fn probe_local_multicast_interface_with_timeout(
         return Err(RuntimeMulticastProbeError::TokenGeneration);
     }
 
-    let observed = send_and_observe(
-        &receiver,
-        membership,
-        receiver_port,
-        token,
-        timeout,
-    );
+    let observed = send_and_observe(&receiver, membership, receiver_port, token, timeout);
     let left_cleanly = receiver
         .leave_multicast_v4(membership.group(), membership.interface())
         .is_ok();
@@ -138,13 +130,11 @@ fn send_and_observe(
     token: [u8; RUNTIME_PROBE_TOKEN_BYTES],
     timeout: Duration,
 ) -> bool {
-    let sender = match UdpMediaSocket::bind(SocketAddr::V4(SocketAddrV4::new(
-        membership.interface(),
-        0,
-    ))) {
-        Ok(sender) => sender,
-        Err(_) => return false,
-    };
+    let sender =
+        match UdpMediaSocket::bind(SocketAddr::V4(SocketAddrV4::new(membership.interface(), 0))) {
+            Ok(sender) => sender,
+            Err(_) => return false,
+        };
     if sender
         .set_write_timeout(Some(RUNTIME_PROBE_READ_SLICE))
         .and_then(|_| sender.set_multicast_interface_v4(membership.interface()))
@@ -178,7 +168,10 @@ fn send_and_observe(
             }
             Ok(_) => {}
             Err(DatagramError::Io(error))
-                if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
             Err(_) => {}
         }
     }
