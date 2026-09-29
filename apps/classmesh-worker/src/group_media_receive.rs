@@ -110,8 +110,7 @@ impl WorkerGroupMediaKeyState {
         let (binding, mut key_bytes) = install.into_parts();
         let epoch = GroupMediaEpoch::new(binding.epoch)?;
         let key_material = GroupMediaKeyMaterial::import_received_wire(&mut key_bytes[..])?;
-        let receiver =
-            GroupMediaReceiver::with_default_replay_tolerance(epoch, &key_material)?;
+        let receiver = GroupMediaReceiver::with_default_replay_tolerance(epoch, &key_material)?;
 
         self.installed = Some(InstalledWorkerGroupMediaKey { binding, receiver });
         Ok(binding)
@@ -204,8 +203,7 @@ mod tests {
         plaintext: &[u8],
     ) -> classmesh_security::group_media::SealedGroupMediaFrame {
         let mut bytes = vec![key; GROUP_MEDIA_KEY_BYTES];
-        let material =
-            GroupMediaKeyMaterial::import_received_wire(&mut bytes).expect("sender key");
+        let material = GroupMediaKeyMaterial::import_received_wire(&mut bytes).expect("sender key");
         let epoch = GroupMediaEpoch::new(epoch_value).expect("epoch");
         let mut sender = GroupMediaSender::new(epoch, &material).expect("sender");
         let binding = GroupMediaFrameBinding::new(
@@ -240,8 +238,7 @@ mod tests {
             MulticastProbeOutcome::Available,
         )
         .expect("receiver config");
-        let mut receiver =
-            ProtectedMulticastReceiveState::new(config).expect("receiver state");
+        let mut receiver = ProtectedMulticastReceiveState::new(config).expect("receiver state");
         let binding = sealed.binding();
         let packets = packetize_frame(
             sealed.as_bytes(),
@@ -397,16 +394,18 @@ mod tests {
 
         assert!(state.clear());
         assert!(!state.is_installed());
-        assert!(state
-            .install(sensitive(
-                78,
-                50,
-                PRESENTATION_ID + 1,
-                STREAM_ID + 1,
-                1,
-                0x43,
-            ))
-            .is_ok());
+        assert!(
+            state
+                .install(sensitive(
+                    78,
+                    50,
+                    PRESENTATION_ID + 1,
+                    STREAM_ID + 1,
+                    1,
+                    0x43,
+                ))
+                .is_ok()
+        );
     }
 
     #[test]
