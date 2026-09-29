@@ -1825,6 +1825,69 @@ mod windows_service_app {
     mod tests {
         use super::*;
 
+        fn pending_key_install(
+            binding: PresentationKeyInstallBinding,
+        ) -> PendingPresentationKeyInstall {
+            let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+            PendingPresentationKeyInstall {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                binding,
+                reply_tx,
+            }
+        }
+
+        fn key_result(
+            binding: PresentationKeyInstallBinding,
+        ) -> WorkerPresentationKeyInstallResult {
+            WorkerPresentationKeyInstallResult {
+                process_id: 42,
+                session_id: 7,
+                control_session_id: binding.control_session_id,
+                request_id: binding.request_id,
+                presentation_id: binding.presentation_id,
+                stream_id: binding.stream_id,
+                epoch: binding.epoch,
+                status: WorkerPresentationKeyInstallStatus::Installed,
+            }
+        }
+
+        #[test]
+        fn Worker_key_result_requires_exact_process_session_and_install_binding() {
+            let binding = PresentationKeyInstallBinding {
+                control_session_id: 77,
+                request_id: 44,
+                presentation_id: 55,
+                stream_id: 7,
+                epoch: 3,
+            };
+            let pending = pending_key_install(binding);
+            let exact = key_result(binding);
+            assert!(pending.matches(&exact));
+
+            let mut wrong = exact;
+            wrong.process_id = 43;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.session_id = 8;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.control_session_id = 78;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.request_id = 45;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.presentation_id = 56;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.stream_id = 8;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.epoch = 4;
+            assert!(!pending.matches(&wrong));
+        }
+
         #[test]
         fn released_session_floor_rejects_stale_profile_updates() {
             assert!(focused_reconfigure_is_stale(7, 7, None));
