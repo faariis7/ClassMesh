@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ipc;
+pub mod ipc_sensitive;
 pub mod worker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -5,12 +5,13 @@ use classmesh_core::adaptation::StreamProfile;
 use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure};
 use classmesh_protocol::feedback::FeedbackMessage;
 use prost::Message;
+use zeroize::Zeroize;
 
 pub const IPC_MAGIC: u32 = 0x434D_4950; // "CMIP"
 pub const IPC_HEADER_LEN: usize = 12;
 pub const MAX_IPC_MESSAGE: usize = 1_048_576;
 pub const IPC_VERSION_MAJOR: u8 = 0;
-pub const IPC_VERSION_MINOR: u8 = 5;
+pub const IPC_VERSION_MINOR: u8 = 6;
 
 const MESSAGE_WORKER_HELLO: u16 = 1;
 const MESSAGE_SERVICE_READY: u16 = 2;
@@ -23,6 +24,7 @@ const MESSAGE_WORKER_ENCODER_CACHE_QUERY: u16 = 15;
 const MESSAGE_SERVICE_ENCODER_CACHE_RESULT: u16 = 16;
 const MESSAGE_SERVICE_UDP_STREAM_START: u16 = 17;
 const MESSAGE_SERVICE_MEDIA_FEEDBACK: u16 = 18;
+pub(crate) const MESSAGE_SERVICE_PRESENTATION_KEY_INSTALL: u16 = 19;
 const SERVICE_UDP_STREAM_START_LEN: usize = 32;
 
 const MAX_EVIDENCE_ADAPTER_IDENTITY: usize = 128;
@@ -106,6 +108,8 @@ pub enum IpcFrameError {
     BadMagic,
     PayloadTooLarge,
     LengthMismatch,
+    SensitiveMessageRequiresZeroizingDecoder,
+    InvalidSensitivePayload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -874,6 +878,7 @@ impl Default for IpcFrameDecoder {
 impl IpcFrameDecoder {
     pub fn push_bytes(&mut self, bytes: &[u8]) -> Result<Vec<IpcFrame>, IpcFrameError> {
         if self.buffer.len().saturating_add(bytes.len()) > MAX_IPC_MESSAGE + IPC_HEADER_LEN {
+            self.zeroize_buffer();
             return Err(IpcFrameError::PayloadTooLarge);
         }
         self.buffer.extend(bytes.iter().copied());
@@ -884,7 +889,17 @@ impl IpcFrameDecoder {
                 break;
             }
             let header_bytes: Vec<u8> = self.buffer.iter().take(IPC_HEADER_LEN).copied().collect();
-            let header = IpcHeader::decode(&header_bytes)?;
+            let header = match IpcHeader::decode(&header_bytes) {
+                Ok(header) => header,
+                Err(error) => {
+                    self.zeroize_buffer();
+                    return Err(error);
+                }
+            };
+            if header.message_type == MESSAGE_SERVICE_PRESENTATION_KEY_INSTALL {
+                self.zeroize_buffer();
+                return Err(IpcFrameError::SensitiveMessageRequiresZeroizingDecoder);
+            }
             let payload_len =
                 usize::try_from(header.payload_len).map_err(|_| IpcFrameError::PayloadTooLarge)?;
             let frame_len = IPC_HEADER_LEN.saturating_add(payload_len);
@@ -902,6 +917,19 @@ impl IpcFrameDecoder {
         }
 
         Ok(frames)
+    }
+
+    fn zeroize_buffer(&mut self) {
+        for byte in &mut self.buffer {
+            byte.zeroize();
+        }
+        self.buffer.clear();
+    }
+}
+
+impl Drop for IpcFrameDecoder {
+    fn drop(&mut self) {
+        self.zeroize_buffer();
     }
 }
 
