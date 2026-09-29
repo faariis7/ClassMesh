@@ -93,15 +93,7 @@ pub fn udp_multicast_transport_parameters(
     }
     let [high, low] = port.to_be_bytes();
     let [a, b, c, d] = group.octets();
-    Ok([
-        UDP_MULTICAST_PARAMETERS_VERSION,
-        a,
-        b,
-        c,
-        d,
-        high,
-        low,
-    ])
+    Ok([UDP_MULTICAST_PARAMETERS_VERSION, a, b, c, d, high, low])
 }
 
 pub fn peer_bound_udp_unicast_destination(
@@ -311,9 +303,8 @@ mod tests {
 
     #[test]
     fn presentation_multicast_parameters_are_versioned_group_and_port_only() {
-        let encoded =
-            udp_multicast_transport_parameters(Ipv4Addr::new(239, 1, 2, 3), 50_000)
-                .expect("valid parameters");
+        let encoded = udp_multicast_transport_parameters(Ipv4Addr::new(239, 1, 2, 3), 50_000)
+            .expect("valid parameters");
         assert_eq!(encoded.len(), UDP_MULTICAST_PARAMETERS_LEN);
         assert_eq!(
             udp_multicast_parameters(&encoded),
