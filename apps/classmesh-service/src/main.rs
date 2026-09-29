@@ -57,7 +57,7 @@ mod windows_service_app {
     const FOCUSED_MEDIA_QUEUE_CAPACITY: usize = 4;
     const FOCUSED_MEDIA_FEEDBACK_QUEUE_CAPACITY: usize = 32;
     const PRESENTATION_KEY_INSTALL_QUEUE_CAPACITY: usize = 1;
-    const PRESENTATION_KEY_CLEAR_QUEUE_CAPACITY: usize = 4;
+    const PRESENTATION_KEY_CLEAR_QUEUE_CAPACITY: usize = 1;
     const WORKER_PRESENTATION_KEY_RESULT_QUEUE_CAPACITY: usize = 4;
     const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
     const MEDIA_RECONFIGURE_RETRY: Duration = Duration::from_millis(250);
