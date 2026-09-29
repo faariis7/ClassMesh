@@ -26,7 +26,8 @@ mod windows_service_app {
     };
     use classmesh_windows_runtime::ipc::{
         IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage, ServiceUdpStreamStart,
-        WorkerPresentationKeyInstallResult, WorkerPresentationKeyInstallStatus,
+        WorkerPresentationFeedback, WorkerPresentationKeyInstallResult,
+        WorkerPresentationKeyInstallStatus,
     };
     use classmesh_windows_runtime::ipc_sensitive::{
         PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
@@ -66,8 +67,8 @@ mod windows_service_app {
     use crate::control_runtime::{
         ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, FocusedMediaDispatchChannels,
         FocusedMediaFeedback, FocusedMediaReconfigure, FocusedMediaStart, InputAvailability,
-        InputDispatchChannels, PresentationKeyDispatchChannels, PresentationKeyInstallDispatch,
-        WorkerCapabilityState,
+        InputDispatchChannels, PresentationFeedbackBus, PresentationKeyDispatchChannels,
+        PresentationKeyInstallDispatch, WorkerCapabilityState,
     };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -114,6 +115,7 @@ mod windows_service_app {
         capabilities: Arc<WorkerCapabilityState>,
         encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
         presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
+        presentation_feedback: PresentationFeedbackBus,
         watchdog: WorkerWatchdog,
         pending_restart: Option<(SessionId, Instant)>,
         generation: u64,
@@ -125,6 +127,7 @@ mod windows_service_app {
             capabilities: Arc<WorkerCapabilityState>,
             encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
             presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
+            presentation_feedback: PresentationFeedbackBus,
         ) -> Self {
             let executable = std::env::current_exe().ok().map(|service| {
                 service.parent().map_or_else(
@@ -139,6 +142,7 @@ mod windows_service_app {
                 capabilities,
                 encoder_capability_cache,
                 presentation_key_result_tx,
+                presentation_feedback,
                 watchdog: WorkerWatchdog::new(WorkerRestartPolicy::default()),
                 pending_restart: None,
                 generation: 0,
@@ -214,6 +218,7 @@ mod windows_service_app {
                                 Arc::clone(&self.capabilities),
                                 Arc::clone(&self.encoder_capability_cache),
                                 self.presentation_key_result_tx.clone(),
+                                self.presentation_feedback.clone(),
                                 worker_generation,
                                 process_id,
                                 session.0,
@@ -594,6 +599,7 @@ mod windows_service_app {
         capabilities: Arc<WorkerCapabilityState>,
         encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
         presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
+        presentation_feedback: PresentationFeedbackBus,
         generation: u64,
         expected_process_id: u32,
         expected_session_id: u32,
@@ -890,6 +896,38 @@ mod windows_service_app {
                                 expected_session_id,
                                 result.process_id,
                                 result.session_id
+                            );
+                            return;
+                        }
+                        Ok(IpcMessage::WorkerPresentationFeedback(report))
+                            if report.process_id == expected_process_id
+                                && report.session_id == expected_session_id =>
+                        {
+                            if !capabilities.is_current(
+                                generation,
+                                report.process_id,
+                                report.session_id,
+                            ) {
+                                eprintln!(
+                                    "Stale Worker presentation feedback ignored for pid {} session {}",
+                                    report.process_id, report.session_id
+                                );
+                                return;
+                            }
+                            let _ = presentation_feedback.publish(report);
+                        }
+                        Ok(IpcMessage::WorkerPresentationFeedback(report)) => {
+                            let _ = capabilities.clear_report_if_current(
+                                generation,
+                                expected_process_id,
+                                expected_session_id,
+                            );
+                            eprintln!(
+                                "Worker presentation feedback identity mismatch: expected pid {} session {}, received pid {} session {}",
+                                expected_process_id,
+                                expected_session_id,
+                                report.process_id,
+                                report.session_id
                             );
                             return;
                         }
@@ -1268,12 +1306,14 @@ mod windows_service_app {
         );
 
         let worker_capabilities = Arc::new(WorkerCapabilityState::default());
+        let presentation_feedback = PresentationFeedbackBus::default();
         let mut control_runtime = match ControlRuntime::start(
             control_state,
             control_config,
             input_channels,
             media_channels,
             presentation_key_channels,
+            presentation_feedback.clone(),
             Arc::clone(&worker_capabilities),
         ) {
             Ok(runtime) => runtime,
@@ -1294,6 +1334,7 @@ mod windows_service_app {
             Arc::clone(&worker_capabilities),
             Arc::clone(&encoder_capability_cache),
             worker_presentation_key_result_tx,
+            presentation_feedback,
         );
         let mut desired_focused_start: Option<ServiceUdpStreamStart> = None;
         let mut desired_focused_reconfigure: Option<StreamReconfigure> = None;
