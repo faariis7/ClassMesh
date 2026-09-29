@@ -121,10 +121,7 @@ impl UdpMediaSocket {
         Ok(())
     }
 
-    pub fn set_multicast_interface_v4(
-        &self,
-        interface: Ipv4Addr,
-    ) -> Result<(), DatagramError> {
+    pub fn set_multicast_interface_v4(&self, interface: Ipv4Addr) -> Result<(), DatagramError> {
         SockRef::from(&self.socket).set_multicast_if_v4(&interface)?;
         Ok(())
     }
