@@ -39,7 +39,10 @@ impl ProtectedMulticastFrameReceiver {
         match self.socket.receive_packet() {
             Ok((packet, source)) => Ok(self.state.push_packet(now_us, &packet, source)),
             Err(DatagramError::Io(error))
-                if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) =>
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
             {
                 Ok(ProtectedMulticastReceiveOutcome::Events(
                     self.state.tick(now_us),
