@@ -203,9 +203,7 @@ impl PresentationKeyWorkerLease {
             return;
         };
         if let Err(error) = self.clear_tx.try_send(binding) {
-            eprintln!(
-                "ClassMesh presentation-key cleanup queue rejected exact binding: {error}"
-            );
+            eprintln!("ClassMesh presentation-key cleanup queue rejected exact binding: {error}");
         }
     }
 }
@@ -974,8 +972,7 @@ async fn run_established_session(
     let mut outbound_sequence = HELLO_SEQUENCE;
     let mut focused_adaptation = FocusedAdaptationState::new();
     let mut installed_presentation_key: Option<InstalledPresentationKeyBinding> = None;
-    let mut worker_key_lease =
-        PresentationKeyWorkerLease::new(presentation_keys.clear_tx.clone());
+    let mut worker_key_lease = PresentationKeyWorkerLease::new(presentation_keys.clear_tx.clone());
 
     loop {
         let mut envelope = match channel.receive().await {
@@ -1531,9 +1528,11 @@ async fn run_established_session(
                     connection.close(0_u32.into(), b"control sequence exhausted");
                     return;
                 };
-                let ack =
-                    match build_presentation_key_ack_from_binding(&envelope, installed, next_sequence)
-                    {
+                let ack = match build_presentation_key_ack_from_binding(
+                    &envelope,
+                    installed,
+                    next_sequence,
+                ) {
                     Ok(ack) => ack,
                     Err(_) => {
                         eprintln!(
