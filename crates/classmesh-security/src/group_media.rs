@@ -609,8 +609,8 @@ mod tests {
         let mut sender = GroupMediaSender::new(epoch, &material).expect("sender");
         let mut receiver =
             GroupMediaReceiver::with_default_replay_tolerance(epoch, &material).expect("receiver");
-        let binding = GroupMediaFrameBinding::new(10, 20, epoch, 30, 40, true)
-            .expect("valid binding");
+        let binding =
+            GroupMediaFrameBinding::new(10, 20, epoch, 30, 40, true).expect("valid binding");
         let sealed = sender
             .seal_bound_frame(b"protected presentation frame", binding)
             .expect("sealed bound frame");
@@ -632,13 +632,13 @@ mod tests {
         let mut sender = GroupMediaSender::new(epoch, &material).expect("sender");
         let mut receiver =
             GroupMediaReceiver::with_default_replay_tolerance(epoch, &material).expect("receiver");
-        let binding = GroupMediaFrameBinding::new(11, 21, epoch, 31, 41, false)
-            .expect("valid binding");
+        let binding =
+            GroupMediaFrameBinding::new(11, 21, epoch, 31, 41, false).expect("valid binding");
         let sealed = sender
             .seal_bound_frame(b"frame", binding)
             .expect("sealed bound frame");
-        let wrong = GroupMediaFrameBinding::new(12, 21, epoch, 31, 41, false)
-            .expect("valid wrong binding");
+        let wrong =
+            GroupMediaFrameBinding::new(12, 21, epoch, 31, 41, false).expect("valid wrong binding");
 
         assert!(matches!(
             receiver.open_bound_frame(sealed.as_bytes(), wrong),
@@ -667,8 +667,7 @@ mod tests {
 
         let material = key(0x73);
         let mut sender = GroupMediaSender::new(first, &material).expect("sender");
-        let binding = GroupMediaFrameBinding::new(1, 2, second, 3, 4, false)
-            .expect("binding");
+        let binding = GroupMediaFrameBinding::new(1, 2, second, 3, 4, false).expect("binding");
         assert!(matches!(
             sender.seal_bound_frame(b"frame", binding),
             Err(GroupMediaError::BindingEpochMismatch)
