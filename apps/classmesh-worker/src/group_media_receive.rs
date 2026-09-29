@@ -294,14 +294,7 @@ mod tests {
         state
             .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x34))
             .expect("install");
-        let sealed = sealed(
-            3,
-            0x34,
-            91,
-            123_456,
-            true,
-            b"worker-presentation-frame",
-        );
+        let sealed = sealed(3, 0x34, 91, 123_456, true, b"worker-presentation-frame");
         let frame = received(&sealed);
 
         assert_eq!(
@@ -324,14 +317,7 @@ mod tests {
             })
         ));
 
-        let sealed = sealed(
-            3,
-            0x35,
-            92,
-            123_457,
-            false,
-            b"still-current",
-        );
+        let sealed = sealed(3, 0x35, 92, 123_457, false, b"still-current");
         assert_eq!(
             state
                 .open_frame(&received(&sealed))
@@ -352,14 +338,7 @@ mod tests {
         assert_eq!(rotated.epoch, 4);
         assert_eq!(rotated.request_id, 45);
 
-        let sealed = sealed(
-            4,
-            0x38,
-            93,
-            123_458,
-            true,
-            b"rotated",
-        );
+        let sealed = sealed(4, 0x38, 93, 123_458, true, b"rotated");
         assert_eq!(
             state.open_frame(&received(&sealed)).expect("rotated key"),
             b"rotated"
@@ -406,14 +385,7 @@ mod tests {
         state
             .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x44))
             .expect("install");
-        let sealed = sealed(
-            3,
-            0x44,
-            94,
-            123_459,
-            false,
-            b"frame",
-        );
+        let sealed = sealed(3, 0x44, 94, 123_459, false, b"frame");
         let wrong = received_with_transport_stream(&sealed, STREAM_ID + 1);
 
         assert!(matches!(
