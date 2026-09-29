@@ -1033,8 +1033,6 @@ async fn run_established_session(
                     return;
                 }
 
-                worker_key_lease.replace(installed_binding);
-
                 let Some(next_sequence) = outbound_sequence.checked_add(1) else {
                     eprintln!("ClassMesh control session closed: control.sequence.exhausted");
                     connection.close(0_u32.into(), b"control sequence exhausted");
@@ -1525,6 +1523,8 @@ async fn run_established_session(
                         return;
                     }
                 };
+
+                worker_key_lease.replace(installed_binding);
 
                 let Some(next_sequence) = outbound_sequence.checked_add(1) else {
                     eprintln!("ClassMesh control session closed: control.sequence.exhausted");
