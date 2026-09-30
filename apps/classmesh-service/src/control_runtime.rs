@@ -2617,7 +2617,7 @@ mod tests {
             stream_id: 9,
             kind: WireStreamKind::TeacherPresentation as i32,
             transport: WireMediaTransport::UdpMulticast as i32,
-            profile: profile.clone(),
+            profile,
             transport_parameters: vec![
                 UDP_MULTICAST_PARAMETERS_VERSION,
                 239,
