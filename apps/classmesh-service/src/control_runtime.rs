@@ -125,9 +125,9 @@ const MEDIA_START_COMMITTED: u8 = 1;
 const MEDIA_START_CANCELLED: u8 = 2;
 
 #[derive(Debug, Clone)]
-pub(crate) struct FocusedMediaStartCommit(Arc<AtomicU8>);
+pub(crate) struct MediaStartCommit(Arc<AtomicU8>);
 
-impl FocusedMediaStartCommit {
+impl MediaStartCommit {
     fn pending() -> Self {
         Self(Arc::new(AtomicU8::new(MEDIA_START_PENDING)))
     }
@@ -163,7 +163,7 @@ impl FocusedMediaStartCommit {
 pub(crate) struct FocusedMediaStart {
     pub(crate) control_session_id: u64,
     pub(crate) start: ServiceUdpStreamStart,
-    pub(crate) commit: FocusedMediaStartCommit,
+    pub(crate) commit: MediaStartCommit,
     pub(crate) reply_tx: oneshot::Sender<Result<(), String>>,
 }
 
@@ -191,6 +191,7 @@ pub(crate) struct PresentationKeyDispatchChannels {
 #[derive(Debug)]
 pub(crate) struct PresentationMulticastStartDispatch {
     pub(crate) start: ServicePresentationMulticastStart,
+    pub(crate) commit: MediaStartCommit,
     pub(crate) reply_tx: oneshot::Sender<Result<(), String>>,
 }
 
@@ -1427,8 +1428,13 @@ async fn run_established_session(
                                         teacher_source,
                                     };
                                     let (reply_tx, mut reply_rx) = oneshot::channel();
+                                    let commit = MediaStartCommit::pending();
                                     match presentation_multicast.start_tx.try_send(
-                                        PresentationMulticastStartDispatch { start, reply_tx },
+                                        PresentationMulticastStartDispatch {
+                                            start,
+                                            commit: commit.clone(),
+                                            reply_tx,
+                                        },
                                     ) {
                                         Ok(()) => match tokio::time::timeout(
                                             PRESENTATION_MULTICAST_START_TIMEOUT,
@@ -1441,8 +1447,17 @@ async fn run_established_session(
                                                 Err("control.presentation.start_reply_dropped"
                                                     .to_owned())
                                             }
-                                            Err(_) => {
+                                            Err(_) if commit.cancel() => {
                                                 Err("control.presentation.start_timeout".to_owned())
+                                            }
+                                            Err(_) if commit.is_committed() => {
+                                                reply_rx.await.unwrap_or_else(|_| {
+                                                    Err("control.presentation.start_reply_dropped"
+                                                        .to_owned())
+                                                })
+                                            }
+                                            Err(_) => {
+                                                Err("control.presentation.start_cancelled".to_owned())
                                             }
                                         },
                                         Err(mpsc::TrySendError::Full(_)) => {
@@ -1513,7 +1528,7 @@ async fn run_established_session(
                                             bitrate_kbps: validated.profile.bitrate_kbps,
                                         };
                                         let (reply_tx, mut reply_rx) = oneshot::channel();
-                                        let commit = FocusedMediaStartCommit::pending();
+                                        let commit = MediaStartCommit::pending();
                                         match media.start_tx.try_send(FocusedMediaStart {
                                             control_session_id: session.control_session_id,
                                             start,
@@ -2646,12 +2661,12 @@ mod tests {
 
     #[test]
     fn focused_media_start_commit_is_single_winner() {
-        let cancelled = FocusedMediaStartCommit::pending();
+        let cancelled = MediaStartCommit::pending();
         assert!(cancelled.cancel());
         assert!(!cancelled.try_commit());
         assert!(!cancelled.is_committed());
 
-        let committed = FocusedMediaStartCommit::pending();
+        let committed = MediaStartCommit::pending();
         assert!(committed.try_commit());
         assert!(committed.is_committed());
         assert!(!committed.cancel());
