@@ -18,6 +18,7 @@ pub mod issuance;
 pub mod peer_identity;
 pub mod presentation_fallback;
 pub mod presentation_recovery;
+pub mod presentation_sender_plan;
 pub mod presentation_state;
 pub mod quic;
 pub mod stream;
