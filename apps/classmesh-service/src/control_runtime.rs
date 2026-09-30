@@ -29,6 +29,7 @@ use classmesh_control::quic::{
 };
 use classmesh_control::stream::{
     peer_bound_udp_unicast_destination, stream_profile_to_wire, validate_interactive_stream_offer,
+    validate_presentation_stream_offer,
 };
 use classmesh_control::{DEFAULT_OFFLINE_AFTER, HeartbeatSample, HeartbeatTracker};
 use classmesh_core::adaptation::{
@@ -41,12 +42,14 @@ use classmesh_protocol::control_wire::{
     ControlEnvelope, HeartbeatAck, InputEvent, KeyframeRequest,
     MediaTransport as WireMediaTransport, Nack, PresentationState as WirePresentationState,
     PresentationStatus, ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamAnswer,
-    StreamReconfigure, control_envelope,
+    StreamKind as WireStreamKind, StreamReconfigure, control_envelope,
 };
 use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::{AuthorizationStore, Permission, PrincipalId};
-use classmesh_windows_runtime::ipc::{ServiceUdpStreamStart, WorkerPresentationFeedback};
+use classmesh_windows_runtime::ipc::{
+    ServicePresentationMulticastStart, ServiceUdpStreamStart, WorkerPresentationFeedback,
+};
 use classmesh_windows_runtime::ipc_sensitive::{
     PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
 };
@@ -121,9 +124,9 @@ const MEDIA_START_COMMITTED: u8 = 1;
 const MEDIA_START_CANCELLED: u8 = 2;
 
 #[derive(Debug, Clone)]
-pub(crate) struct FocusedMediaStartCommit(Arc<AtomicU8>);
+pub(crate) struct MediaStartCommit(Arc<AtomicU8>);
 
-impl FocusedMediaStartCommit {
+impl MediaStartCommit {
     fn pending() -> Self {
         Self(Arc::new(AtomicU8::new(MEDIA_START_PENDING)))
     }
@@ -159,7 +162,7 @@ impl FocusedMediaStartCommit {
 pub(crate) struct FocusedMediaStart {
     pub(crate) control_session_id: u64,
     pub(crate) start: ServiceUdpStreamStart,
-    pub(crate) commit: FocusedMediaStartCommit,
+    pub(crate) commit: MediaStartCommit,
     pub(crate) reply_tx: oneshot::Sender<Result<(), String>>,
 }
 
@@ -170,6 +173,18 @@ pub(crate) struct FocusedMediaDispatchChannels {
     pub(crate) feedback_tx: mpsc::SyncSender<FocusedMediaFeedback>,
     pub(crate) released_session_floor: Arc<AtomicU64>,
     pub(crate) owner: Arc<AtomicU64>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PresentationMulticastStartDispatch {
+    pub(crate) start: ServicePresentationMulticastStart,
+    pub(crate) commit: MediaStartCommit,
+    pub(crate) reply_tx: oneshot::Sender<Result<(), String>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PresentationMulticastDispatchChannels {
+    pub(crate) start_tx: mpsc::SyncSender<PresentationMulticastStartDispatch>,
 }
 
 #[derive(Debug)]
@@ -240,6 +255,19 @@ impl PresentationKeyWorkerLease {
                 && feedback.presentation_id == binding.presentation_id
                 && feedback.feedback.stream_id() == binding.stream_id
                 && feedback.epoch == binding.epoch
+        })
+    }
+
+    fn matches_presentation(
+        &self,
+        control_session_id: u64,
+        presentation_id: u64,
+        stream_id: u64,
+    ) -> bool {
+        self.binding.is_some_and(|binding| {
+            binding.control_session_id == control_session_id
+                && binding.presentation_id == presentation_id
+                && u64::from(binding.stream_id) == stream_id
         })
     }
 }
@@ -509,6 +537,24 @@ impl PresentationDispatchState {
             })
     }
 
+    fn owned_presentation_id(
+        &self,
+        principal_id: PrincipalId,
+        control_session_id: u64,
+        stream_id: u64,
+    ) -> Option<u64> {
+        self.ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .owner()
+            .filter(|owner| {
+                owner.principal_id == principal_id
+                    && owner.control_session_id == control_session_id
+                    && owner.stream_id == stream_id
+            })
+            .map(|owner| owner.presentation_id)
+    }
+
     fn release_session(&self, principal_id: PrincipalId, control_session_id: u64) -> bool {
         self.ownership
             .lock()
@@ -752,6 +798,7 @@ impl ControlRuntimeConfig {
 struct ControlRuntimeDispatch {
     input: InputDispatchChannels,
     media: FocusedMediaDispatchChannels,
+    presentation_multicast: PresentationMulticastDispatchChannels,
     presentation_keys: PresentationKeyDispatchChannels,
     presentation_feedback: PresentationFeedbackBus,
     worker_capabilities: Arc<WorkerCapabilityState>,
@@ -770,6 +817,7 @@ impl ControlRuntime {
         config: ControlRuntimeConfig,
         input: InputDispatchChannels,
         media: FocusedMediaDispatchChannels,
+        presentation_multicast: PresentationMulticastDispatchChannels,
         presentation_keys: PresentationKeyDispatchChannels,
         presentation_feedback: PresentationFeedbackBus,
         worker_capabilities: Arc<WorkerCapabilityState>,
@@ -802,6 +850,7 @@ impl ControlRuntime {
                     ControlRuntimeDispatch {
                         input,
                         media,
+                        presentation_multicast,
                         presentation_keys,
                         presentation_feedback,
                         worker_capabilities,
@@ -870,11 +919,13 @@ async fn run_listener(
     let ControlRuntimeDispatch {
         input,
         media,
+        presentation_multicast,
         presentation_keys,
         presentation_feedback,
         worker_capabilities,
     } = dispatch;
-    let udp_multicast_available = local_udp_multicast_capability(config.multicast_interface);
+    let multicast_interface = config.multicast_interface;
+    let udp_multicast_available = local_udp_multicast_capability(multicast_interface);
     let endpoint = match build_endpoint(&state, config) {
         Ok(endpoint) => endpoint,
         Err(error) => {
@@ -919,6 +970,7 @@ async fn run_listener(
                 let session_ids = Arc::clone(&session_ids);
                 let input = input.clone();
                 let media = media.clone();
+                let presentation_multicast = presentation_multicast.clone();
                 let presentation_keys = presentation_keys.clone();
                 let presentation_feedback = presentation_feedback.clone();
                 let presentation = presentation.clone();
@@ -976,9 +1028,11 @@ async fn run_listener(
                                     authorization: authorization.as_ref(),
                                     input: &input,
                                     media: &media,
+                                    presentation_multicast: &presentation_multicast,
                                     presentation_keys: &presentation_keys,
                                     presentation_feedback: &presentation_feedback,
                                     presentation: &presentation,
+                                    multicast_interface,
                                 },
                             )
                             .await;
@@ -1012,9 +1066,11 @@ struct EstablishedSessionRuntime<'a> {
     authorization: &'a AuthorizationStore,
     input: &'a InputDispatchState,
     media: &'a FocusedMediaDispatchChannels,
+    presentation_multicast: &'a PresentationMulticastDispatchChannels,
     presentation_keys: &'a PresentationKeyDispatchChannels,
     presentation_feedback: &'a PresentationFeedbackBus,
     presentation: &'a PresentationDispatchState,
+    multicast_interface: Option<Ipv4Addr>,
 }
 
 #[derive(Debug)]
@@ -1045,9 +1101,11 @@ async fn run_established_session(
         authorization,
         input,
         media,
+        presentation_multicast,
         presentation_keys,
         presentation_feedback,
         presentation,
+        multicast_interface,
     } = runtime;
 
     let mut guard = AuthenticatedControlGuard::new(
@@ -1326,7 +1384,7 @@ async fn run_established_session(
                                         bitrate_kbps: validated.profile.bitrate_kbps,
                                     };
                                     let (reply_tx, mut reply_rx) = oneshot::channel();
-                                    let commit = FocusedMediaStartCommit::pending();
+                                    let commit = MediaStartCommit::pending();
                                     match media.start_tx.try_send(FocusedMediaStart {
                                         control_session_id: session.control_session_id,
                                         start,
@@ -2376,12 +2434,12 @@ mod tests {
 
     #[test]
     fn focused_media_start_commit_is_single_winner() {
-        let cancelled = FocusedMediaStartCommit::pending();
+        let cancelled = MediaStartCommit::pending();
         assert!(cancelled.cancel());
         assert!(!cancelled.try_commit());
         assert!(!cancelled.is_committed());
 
-        let committed = FocusedMediaStartCommit::pending();
+        let committed = MediaStartCommit::pending();
         assert!(committed.try_commit());
         assert!(committed.is_committed());
         assert!(!committed.cancel());
