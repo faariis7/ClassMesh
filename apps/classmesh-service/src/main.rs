@@ -138,8 +138,7 @@ mod windows_service_app {
         capabilities: Arc<WorkerCapabilityState>,
         encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
         presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
-        presentation_multicast_result_tx:
-            mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
+        presentation_multicast_result_tx: mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
         presentation_feedback: PresentationFeedbackBus,
         watchdog: WorkerWatchdog,
         pending_restart: Option<(SessionId, Instant)>,
@@ -152,8 +151,9 @@ mod windows_service_app {
             capabilities: Arc<WorkerCapabilityState>,
             encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
             presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
-            presentation_multicast_result_tx:
-                mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
+            presentation_multicast_result_tx: mpsc::SyncSender<
+                WorkerPresentationMulticastStartResult,
+            >,
             presentation_feedback: PresentationFeedbackBus,
         ) -> Self {
             let executable = std::env::current_exe().ok().map(|service| {
@@ -477,12 +477,9 @@ mod windows_service_app {
                 .process
                 .as_ref()
                 .ok_or_else(|| "no interactive Worker is running".to_owned())?;
-            if !process
-                .is_running()
-                .map_err(|error| {
-                    format!("Worker presentation multicast liveness probe failed: {error}")
-                })?
-            {
+            if !process.is_running().map_err(|error| {
+                format!("Worker presentation multicast liveness probe failed: {error}")
+            })? {
                 return Err(
                     "interactive Worker exited before presentation multicast start".to_owned(),
                 );
@@ -663,8 +660,7 @@ mod windows_service_app {
         capabilities: Arc<WorkerCapabilityState>,
         encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
         presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
-        presentation_multicast_result_tx:
-            mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
+        presentation_multicast_result_tx: mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
         presentation_feedback: PresentationFeedbackBus,
     }
 
@@ -1428,12 +1424,10 @@ mod windows_service_app {
             mpsc::sync_channel::<WorkerPresentationKeyInstallResult>(
                 WORKER_PRESENTATION_KEY_RESULT_QUEUE_CAPACITY,
             );
-        let (
-            worker_presentation_multicast_result_tx,
-            worker_presentation_multicast_result_rx,
-        ) = mpsc::sync_channel::<WorkerPresentationMulticastStartResult>(
-            WORKER_PRESENTATION_MULTICAST_RESULT_QUEUE_CAPACITY,
-        );
+        let (worker_presentation_multicast_result_tx, worker_presentation_multicast_result_rx) =
+            mpsc::sync_channel::<WorkerPresentationMulticastStartResult>(
+                WORKER_PRESENTATION_MULTICAST_RESULT_QUEUE_CAPACITY,
+            );
         let released_media_session_floor = Arc::new(AtomicU64::new(0));
         let media_owner = Arc::new(AtomicU64::new(0));
         let media_channels = FocusedMediaDispatchChannels {
@@ -1503,8 +1497,8 @@ mod windows_service_app {
         let mut next_media_reconfigure_attempt = Instant::now();
         let mut next_worker_poll = Instant::now();
         let mut pending_presentation_key_install: Option<PendingPresentationKeyInstall> = None;
-        let mut pending_presentation_multicast_start:
-            Option<PendingPresentationMulticastStart> = None;
+        let mut pending_presentation_multicast_start: Option<PendingPresentationMulticastStart> =
+            None;
         loop {
             while let Ok(binding) = presentation_key_clear_rx.try_recv() {
                 if let Err(error) = workers.clear_presentation_key(binding) {
@@ -1596,12 +1590,13 @@ mod windows_service_app {
                 pending_presentation_multicast_start = None;
             }
 
-            if pending_presentation_multicast_start.as_ref().is_some_and(|pending| {
-                !workers.is_running_worker(
-                    pending.expected_process_id,
-                    pending.expected_session_id,
-                )
-            }) && let Some(pending) = pending_presentation_multicast_start.take()
+            if pending_presentation_multicast_start
+                .as_ref()
+                .is_some_and(|pending| {
+                    !workers
+                        .is_running_worker(pending.expected_process_id, pending.expected_session_id)
+                })
+                && let Some(pending) = pending_presentation_multicast_start.take()
             {
                 let _ = pending
                     .reply_tx
