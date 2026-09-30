@@ -1,5 +1,58 @@
 #![forbid(unsafe_code)]
 
+/// Internal, sanitized request to force the active presentation encoder to emit an IDR.
+///
+/// This type carries no receiver identity, authentication state, or raw feedback. It is intended to
+/// be constructed only after higher layers have authenticated feedback and applied their shared
+/// recovery throttle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationKeyframeRequest {
+    presentation_id: u64,
+    stream_id: u32,
+    after_frame_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationKeyframeRequestError {
+    InvalidPresentationId,
+    InvalidStreamId,
+}
+
+impl PresentationKeyframeRequest {
+    pub const fn new(
+        presentation_id: u64,
+        stream_id: u32,
+        after_frame_id: u64,
+    ) -> Result<Self, PresentationKeyframeRequestError> {
+        if presentation_id == 0 {
+            return Err(PresentationKeyframeRequestError::InvalidPresentationId);
+        }
+        if stream_id == 0 {
+            return Err(PresentationKeyframeRequestError::InvalidStreamId);
+        }
+        Ok(Self {
+            presentation_id,
+            stream_id,
+            after_frame_id,
+        })
+    }
+
+    #[must_use]
+    pub const fn presentation_id(self) -> u64 {
+        self.presentation_id
+    }
+
+    #[must_use]
+    pub const fn stream_id(self) -> u32 {
+        self.stream_id
+    }
+
+    #[must_use]
+    pub const fn after_frame_id(self) -> u64 {
+        self.after_frame_id
+    }
+}
+
 /// Coalesces receiver keyframe requests so one unhealthy client cannot force the encoder to emit an
 /// unbounded IDR storm. Time is supplied by the caller in a monotonic microsecond domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
