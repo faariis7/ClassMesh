@@ -262,6 +262,9 @@ mod tests {
 
     use classmesh_network::multicast::{MulticastMembership, MulticastProbeOutcome};
     use classmesh_security::group_media::GroupMediaEpoch;
+    use classmesh_windows_runtime::ipc::{
+        ServicePresentationSenderUnicastAction, ServicePresentationSenderUnicastActionKind,
+    };
     use classmesh_video::distributor::DistributorError;
 
     use crate::presentation::PresentationError;
@@ -377,6 +380,123 @@ mod tests {
 
         let _ =
             assert_api as fn(&mut PresentationMulticastSendRuntime, PresentationKeyframeRequest);
+    }
+
+    fn sender_action(
+        kind: ServicePresentationSenderUnicastActionKind,
+        slot_id: u64,
+        destination: &str,
+    ) -> ServicePresentationSenderUnicastAction {
+        let config = sender_config();
+        ServicePresentationSenderUnicastAction {
+            kind,
+            slot_id,
+            presentation_id: config.presentation_id(),
+            stream_id: config.stream_id(),
+            epoch: config.epoch().get(),
+            destination: destination.parse().expect("valid destination"),
+        }
+    }
+
+    #[test]
+    fn sender_unicast_action_requires_exact_live_presentation_binding() {
+        let config = sender_config();
+        let exact = sender_action(
+            ServicePresentationSenderUnicastActionKind::Attach,
+            11,
+            "192.0.2.44:49001",
+        );
+        assert!(presentation_sender_unicast_action_matches(config, exact));
+
+        let mut wrong_presentation = exact;
+        wrong_presentation.presentation_id += 1;
+        assert!(!presentation_sender_unicast_action_matches(
+            config,
+            wrong_presentation
+        ));
+
+        let mut wrong_stream = exact;
+        wrong_stream.stream_id += 1;
+        assert!(!presentation_sender_unicast_action_matches(
+            config,
+            wrong_stream
+        ));
+
+        let mut wrong_epoch = exact;
+        wrong_epoch.epoch += 1;
+        assert!(!presentation_sender_unicast_action_matches(
+            config,
+            wrong_epoch
+        ));
+    }
+
+    #[test]
+    fn sender_unicast_binding_state_is_idempotent_and_rejects_stale_detach() {
+        let config = sender_config();
+        let mut bindings = PresentationUnicastActionBindings::default();
+        let first = sender_action(
+            ServicePresentationSenderUnicastActionKind::Attach,
+            11,
+            "192.0.2.44:49001",
+        );
+
+        assert_eq!(
+            bindings.classify(config, first).expect("first attach"),
+            PresentationUnicastActionDecision::Attach(SinkId(11))
+        );
+        bindings.record_attach(first);
+        assert_eq!(
+            bindings.classify(config, first).expect("retry attach"),
+            PresentationUnicastActionDecision::Noop
+        );
+
+        let detach_first = ServicePresentationSenderUnicastAction {
+            kind: ServicePresentationSenderUnicastActionKind::Detach,
+            ..first
+        };
+        assert_eq!(
+            bindings
+                .classify(config, detach_first)
+                .expect("exact detach"),
+            PresentationUnicastActionDecision::Detach(SinkId(11))
+        );
+        bindings.record_detach(detach_first);
+
+        let replacement = sender_action(
+            ServicePresentationSenderUnicastActionKind::Attach,
+            11,
+            "192.0.2.44:49002",
+        );
+        assert_eq!(
+            bindings
+                .classify(config, replacement)
+                .expect("replacement attach"),
+            PresentationUnicastActionDecision::Attach(SinkId(11))
+        );
+        bindings.record_attach(replacement);
+
+        assert_eq!(
+            bindings.classify(config, detach_first),
+            Err(PresentationMulticastSendRuntimeError::StaleUnicastDetach)
+        );
+        assert_eq!(bindings.current(SinkId(11)), Some(replacement));
+    }
+
+    #[test]
+    fn runtime_contract_applies_typed_sender_unicast_actions() {
+        fn assert_api(
+            runtime: &mut PresentationMulticastSendRuntime,
+            action: ServicePresentationSenderUnicastAction,
+        ) {
+            let _: Result<bool, PresentationMulticastSendRuntimeError> =
+                runtime.apply_unicast_sender_action(action, 2);
+        }
+
+        let _ = assert_api
+            as fn(
+                &mut PresentationMulticastSendRuntime,
+                ServicePresentationSenderUnicastAction,
+            );
     }
 
     #[test]
