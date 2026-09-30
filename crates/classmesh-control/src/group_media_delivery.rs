@@ -351,12 +351,16 @@ mod tests {
     use crate::authorization::AuthenticatedControlGuard;
     use crate::client_session::{ClientControlSession, connect_client_session_with_retries};
     use crate::group_media_feedback::{
-        PresentationFeedbackError, PresentationFeedbackRequest, accept_presentation_feedback,
+        PresentationFeedbackError, PresentationFeedbackRequest,
+        accept_and_coordinate_presentation_feedback, accept_presentation_feedback,
         build_presentation_feedback_envelope,
     };
     use crate::group_media_session::PresentationKeyGrantRequest;
     use crate::handshake::{ServerHelloConfig, server_hello};
     use crate::peer_identity::authenticated_peer_identity;
+    use crate::presentation_recovery::{
+        PresentationRecoveryCoordinator, PresentationRecoveryOutcome,
+    };
     use crate::quic::{
         ControlChannel, DEFAULT_IO_TIMEOUT, accept, client_config_with_roots,
         server_config_with_certificate,
@@ -767,6 +771,96 @@ mod tests {
             })
         ));
         assert_eq!(guard.last_sequence(), 3);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authenticated_feedback_enters_one_stream_wide_recovery_throttle() -> TestResult {
+        let receiver = principal(7);
+        let pair = session_pair(77).await?;
+        let authorization = authorization(receiver, std::slice::from_ref(&pair.certificate));
+        let mut delivery = TeacherGroupMediaDeliveryManager::with_limit(2)?;
+        delivery.register_client_session(&pair.client, receiver, &authorization, 150)?;
+
+        let identity = authenticated_peer_identity(&pair.client.connection, &authorization, 150)
+            .map_err(|error| format!("peer identity: {error:?}"))?;
+        let mut guard = AuthenticatedControlGuard::new(identity, 77, VERSION, 1);
+        let mut recovery =
+            PresentationRecoveryCoordinator::new(7, 250_000).expect("valid recovery coordinator");
+
+        let nack = build_presentation_feedback_envelope(
+            77,
+            VERSION,
+            2,
+            &FeedbackMessage::Nack {
+                stream_id: 7,
+                frame_id: 90,
+                missing_packet_indices: vec![1, 4],
+            },
+        )?;
+        assert_eq!(
+            accept_and_coordinate_presentation_feedback(
+                &delivery,
+                PresentationFeedbackRequest::new(receiver, &pair.client, &nack, 7),
+                &mut guard,
+                &authorization,
+                150,
+                &mut recovery,
+                1_000_000,
+            )?,
+            PresentationRecoveryOutcome::NackObserved {
+                frame_id: 90,
+                missing_packets: 2,
+            }
+        );
+        assert_eq!(recovery.granted_keyframes(), 0);
+
+        let first = build_presentation_feedback_envelope(
+            77,
+            VERSION,
+            3,
+            &FeedbackMessage::RequestKeyframe {
+                stream_id: 7,
+                after_frame_id: 91,
+            },
+        )?;
+        assert_eq!(
+            accept_and_coordinate_presentation_feedback(
+                &delivery,
+                PresentationFeedbackRequest::new(receiver, &pair.client, &first, 7),
+                &mut guard,
+                &authorization,
+                150,
+                &mut recovery,
+                1_010_000,
+            )?,
+            PresentationRecoveryOutcome::KeyframeGranted { after_frame_id: 91 }
+        );
+
+        let simultaneous = build_presentation_feedback_envelope(
+            77,
+            VERSION,
+            4,
+            &FeedbackMessage::RequestKeyframe {
+                stream_id: 7,
+                after_frame_id: 92,
+            },
+        )?;
+        assert_eq!(
+            accept_and_coordinate_presentation_feedback(
+                &delivery,
+                PresentationFeedbackRequest::new(receiver, &pair.client, &simultaneous, 7),
+                &mut guard,
+                &authorization,
+                150,
+                &mut recovery,
+                1_020_000,
+            )?,
+            PresentationRecoveryOutcome::KeyframeSuppressed { after_frame_id: 92 }
+        );
+        assert_eq!(recovery.granted_keyframes(), 1);
+        assert_eq!(recovery.suppressed_keyframes(), 1);
+        assert_eq!(guard.last_sequence(), 4);
         Ok(())
     }
 
