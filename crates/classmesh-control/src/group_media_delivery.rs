@@ -397,7 +397,9 @@ impl TeacherGroupMediaDeliveryManager {
         if presentation_id == 0 {
             return Err(PresentationSenderTargetError::InvalidPresentationId.into());
         }
-        let profile = profile.validate().map_err(PresentationSenderTargetError::from)?;
+        let profile = profile
+            .validate()
+            .map_err(PresentationSenderTargetError::from)?;
         let stream_id = u32::try_from(offer.stream_id).map_err(|_| {
             PresentationSenderTargetError::StreamMismatch {
                 expected: fallback.stream_id(),
