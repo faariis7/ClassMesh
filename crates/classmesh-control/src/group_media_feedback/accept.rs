@@ -124,8 +124,13 @@ pub fn accept_and_plan_presentation_feedback(
     now_unix_ms: u64,
     recovery: &mut PresentationRecoveryCoordinator,
 ) -> Result<PresentationRecoveryDecision, PresentationFeedbackError> {
-    let feedback =
-        accept_presentation_feedback(delivery, request.feedback, guard, authorization, now_unix_ms)?;
+    let feedback = accept_presentation_feedback(
+        delivery,
+        request.feedback,
+        guard,
+        authorization,
+        now_unix_ms,
+    )?;
     recovery
         .observe_and_plan(request.presentation_id, request.recovery_now_us, &feedback)
         .map_err(Into::into)
