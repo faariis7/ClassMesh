@@ -12,6 +12,7 @@ use classmesh_security::group_media_coordinator::{
     GroupMediaCoordinator, GroupMediaCoordinatorError,
 };
 use classmesh_video::Codec;
+use classmesh_video::concurrent_distributor::ConcurrentFrameDistributor;
 use classmesh_video::distributor::{
     DistributorError, FrameDistributor, SharedEncodedFrame, SinkId, SinkMode, SinkStats,
 };
@@ -253,6 +254,15 @@ impl ProtectedMulticastDistributorSink {
         Ok(Self { id })
     }
 
+    pub fn attach_concurrent(
+        distributor: &ConcurrentFrameDistributor,
+        id: SinkId,
+        capacity: usize,
+    ) -> Result<Self, ProtectedMulticastSinkError> {
+        distributor.add_sink(id, SinkMode::Multicast, capacity)?;
+        Ok(Self { id })
+    }
+
     #[must_use]
     pub const fn id(self) -> SinkId {
         self.id
@@ -265,6 +275,14 @@ impl ProtectedMulticastDistributorSink {
 
     pub fn take_latest(self, distributor: &mut FrameDistributor) -> Option<SharedEncodedFrame> {
         distributor.pop_latest(self.id)
+    }
+
+    pub fn wait_latest_concurrent(
+        self,
+        distributor: &ConcurrentFrameDistributor,
+        timeout: Duration,
+    ) -> Option<SharedEncodedFrame> {
+        distributor.wait_latest(self.id, timeout)
     }
 
     pub fn send_latest(
@@ -283,7 +301,28 @@ impl ProtectedMulticastDistributorSink {
             .map_err(Into::into)
     }
 
+    pub fn wait_and_send_latest_concurrent(
+        self,
+        distributor: &ConcurrentFrameDistributor,
+        timeout: Duration,
+        sender: &mut ProtectedMulticastFrameSender,
+        coordinator: &mut GroupMediaCoordinator,
+        authorization: &AuthorizationStore,
+    ) -> Result<Option<SendFrameReport>, ProtectedMulticastSinkError> {
+        let Some(frame) = self.wait_latest_concurrent(distributor, timeout) else {
+            return Ok(None);
+        };
+        sender
+            .send_shared_h264_frame(coordinator, authorization, &frame)
+            .map(Some)
+            .map_err(Into::into)
+    }
+
     pub fn detach(self, distributor: &mut FrameDistributor) -> bool {
+        distributor.remove_sink(self.id)
+    }
+
+    pub fn detach_concurrent(self, distributor: &ConcurrentFrameDistributor) -> bool {
         distributor.remove_sink(self.id)
     }
 }
@@ -577,6 +616,37 @@ mod tests {
         assert_eq!(after.dropped, 2);
         assert!(sink.detach(&mut distributor));
         assert!(sink.stats(&distributor).is_none());
+    }
+
+    #[test]
+    fn concurrent_multicast_sink_waits_for_latest_shared_frame() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let distributor = ConcurrentFrameDistributor::default();
+        let sink = ProtectedMulticastDistributorSink::attach_concurrent(
+            &distributor,
+            SinkId(100),
+            DEFAULT_PROTECTED_MULTICAST_SINK_QUEUE_CAPACITY,
+        )
+        .expect("concurrent multicast sink attaches");
+
+        let producer = distributor.clone();
+        let thread = thread::spawn(move || {
+            producer.publish(shared_frame(Codec::H264, 10, false));
+            let latest = shared_frame(Codec::H264, 11, false);
+            let pointer = Arc::as_ptr(&latest.data);
+            producer.publish(latest);
+            pointer
+        });
+
+        let received = sink
+            .wait_latest_concurrent(&distributor, Duration::from_secs(1))
+            .expect("latest shared frame");
+        let pointer = thread.join().expect("producer");
+        assert_eq!(received.meta.frame_id, 11);
+        assert_eq!(Arc::as_ptr(&received.data), pointer);
+        assert!(sink.detach_concurrent(&distributor));
     }
 
     #[test]
