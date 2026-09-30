@@ -1403,9 +1403,13 @@ async fn run_established_session(
                                 (_, _, _, _, None) => {
                                     Err("control.presentation.multicast_peer_not_ipv4".to_owned())
                                 }
-                                (Some(owner), Some(_), true, Some(interface), Some(teacher_source))
-                                    if envelope.request_id != 0 =>
-                                {
+                                (
+                                    Some(owner),
+                                    Some(_),
+                                    true,
+                                    Some(interface),
+                                    Some(teacher_source),
+                                ) if envelope.request_id != 0 => {
                                     let stream_id = u32::try_from(validated.stream_id)
                                         .expect("validated stream id fits media header");
                                     let start = ServicePresentationMulticastStart {
@@ -1433,20 +1437,22 @@ async fn run_established_session(
                                         .await
                                         {
                                             Ok(Ok(result)) => result,
-                                            Ok(Err(_)) => Err(
-                                                "control.presentation.start_reply_dropped"
-                                                    .to_owned(),
-                                            ),
+                                            Ok(Err(_)) => {
+                                                Err("control.presentation.start_reply_dropped"
+                                                    .to_owned())
+                                            }
                                             Err(_) => {
                                                 Err("control.presentation.start_timeout".to_owned())
                                             }
                                         },
-                                        Err(mpsc::TrySendError::Full(_)) => Err(
-                                            "control.presentation.start_backpressure".to_owned(),
-                                        ),
-                                        Err(mpsc::TrySendError::Disconnected(_)) => Err(
-                                            "control.presentation.start_disconnected".to_owned(),
-                                        ),
+                                        Err(mpsc::TrySendError::Full(_)) => {
+                                            Err("control.presentation.start_backpressure"
+                                                .to_owned())
+                                        }
+                                        Err(mpsc::TrySendError::Disconnected(_)) => {
+                                            Err("control.presentation.start_disconnected"
+                                                .to_owned())
+                                        }
                                     }
                                 }
                                 _ => Err("control.presentation.invalid_request_id".to_owned()),
@@ -1469,10 +1475,8 @@ async fn run_established_session(
                         }
                     }
                 } else {
-                    match validate_interactive_stream_offer(
-                        offer,
-                        &session.negotiated.capabilities,
-                    ) {
+                    match validate_interactive_stream_offer(offer, &session.negotiated.capabilities)
+                    {
                         Err(error) => StreamAnswer {
                             stream_id: offer.stream_id,
                             accepted: false,
@@ -1523,18 +1527,17 @@ async fn run_established_session(
                                             .await
                                             {
                                                 Ok(Ok(result)) => result,
-                                                Ok(Err(_)) => Err(
-                                                    "control.media.start_reply_dropped".to_owned(),
-                                                ),
+                                                Ok(Err(_)) => {
+                                                    Err("control.media.start_reply_dropped"
+                                                        .to_owned())
+                                                }
                                                 Err(_) if commit.cancel() => {
                                                     Err("control.media.start_timeout".to_owned())
                                                 }
                                                 Err(_) if commit.is_committed() => {
                                                     reply_rx.await.unwrap_or_else(|_| {
-                                                        Err(
-                                                            "control.media.start_reply_dropped"
-                                                                .to_owned(),
-                                                        )
+                                                        Err("control.media.start_reply_dropped"
+                                                            .to_owned())
                                                     })
                                                 }
                                                 Err(_) => {
