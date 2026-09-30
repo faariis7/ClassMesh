@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use classmesh_protocol::Capability;
-use classmesh_security::group_media_coordinator::MAX_GROUP_MEDIA_RECEIVERS;
 use classmesh_security::PrincipalId;
+use classmesh_security::group_media_coordinator::MAX_GROUP_MEDIA_RECEIVERS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresentationFallbackError {
@@ -160,7 +160,9 @@ mod tests {
 
             assert_eq!(
                 coordinator.request_unicast(receiver, &capabilities),
-                Err(PresentationFallbackError::RequiredCapabilityMissing(missing))
+                Err(PresentationFallbackError::RequiredCapabilityMissing(
+                    missing
+                ))
             );
             assert_eq!(coordinator.unicast_receiver_count(), 0);
         }
