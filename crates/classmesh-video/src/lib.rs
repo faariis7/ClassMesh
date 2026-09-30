@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod concurrent_distributor;
 pub mod distributor;
 pub mod rendition;
 
