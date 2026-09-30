@@ -469,6 +469,31 @@ mod windows_service_app {
             .map_err(|error| format!("Worker key-clear IPC write failed: {error}"))
         }
 
+        fn send_presentation_multicast_start(
+            &self,
+            start: ServicePresentationMulticastStart,
+        ) -> Result<(u32, u32), String> {
+            let process = self
+                .process
+                .as_ref()
+                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
+            if !process
+                .is_running()
+                .map_err(|error| {
+                    format!("Worker presentation multicast liveness probe failed: {error}")
+                })?
+            {
+                return Err(
+                    "interactive Worker exited before presentation multicast start".to_owned(),
+                );
+            }
+            let pipe = self.pipe.as_ref().ok_or_else(|| {
+                "Worker IPC pipe is unavailable for presentation multicast start".to_owned()
+            })?;
+            send_presentation_multicast_start(pipe, start)?;
+            Ok((process.process_id(), process.session_id()))
+        }
+
         fn clear_focused_profile(&self) -> Result<(), String> {
             let process = self
                 .process
@@ -1129,6 +1154,22 @@ mod windows_service_app {
             .map_err(|error| format!("failed to encode Worker UDP media frame: {error:?}"))?;
         pipe.write_all(&bytes)
             .map_err(|error| format!("Worker UDP media IPC write failed: {error}"))
+    }
+
+    fn send_presentation_multicast_start(
+        pipe: &NamedPipeServer,
+        start: ServicePresentationMulticastStart,
+    ) -> Result<(), String> {
+        let bytes = IpcFrame::service_presentation_multicast_start(start)
+            .map_err(|error| {
+                format!("failed to build Worker presentation multicast frame: {error:?}")
+            })?
+            .encode()
+            .map_err(|error| {
+                format!("failed to encode Worker presentation multicast frame: {error:?}")
+            })?;
+        pipe.write_all(&bytes)
+            .map_err(|error| format!("Worker presentation multicast IPC write failed: {error}"))
     }
 
     fn send_media_feedback(
