@@ -1,10 +1,7 @@
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use classmesh_core::adaptation::StreamProfile;
 use classmesh_core::keyframe::PresentationKeyframeRequest;
 use classmesh_security::PrincipalId;
-use classmesh_security::group_media::GroupMediaEpoch;
 use classmesh_security::group_media_coordinator::MAX_GROUP_MEDIA_RECEIVERS;
 
 use crate::group_media_delivery::PresentationUnicastSenderTarget;
@@ -108,13 +105,18 @@ impl TeacherPresentationSenderPlan {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use classmesh_core::adaptation::StreamProfile;
+    use classmesh_security::group_media::GroupMediaEpoch;
+
     use super::*;
 
     fn principal(value: u8) -> PrincipalId {
         PrincipalId([value; 32])
     }
 
-    fn target(receiver: u8, port: u16, epoch: u64) -> PresentationUnicastSenderTarget {
+    fn target(receiver: u8, port: u16, epoch: u32) -> PresentationUnicastSenderTarget {
         PresentationUnicastSenderTarget {
             receiver: principal(receiver),
             destination: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, receiver)), port),
