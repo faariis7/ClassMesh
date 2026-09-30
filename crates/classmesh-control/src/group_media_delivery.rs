@@ -821,14 +821,14 @@ mod tests {
                     &coordinator,
                     &authorization,
                     PresentationUnicastSenderTargetRequest::new(
-                    receiver,
-                    &pair.client,
-                    150,
-                    55,
-                    profile,
-                    epoch,
-                    &drifted,
-                ),
+                        receiver,
+                        &pair.client,
+                        150,
+                        55,
+                        profile,
+                        epoch,
+                        &drifted,
+                    ),
                 )
                 .is_err()
         );
@@ -845,14 +845,14 @@ mod tests {
                     &coordinator,
                     &authorization,
                     PresentationUnicastSenderTargetRequest::new(
-                    receiver,
-                    &pair.client,
-                    150,
-                    55,
-                    profile,
-                    epoch,
-                    &exact,
-                ),
+                        receiver,
+                        &pair.client,
+                        150,
+                        55,
+                        profile,
+                        epoch,
+                        &exact,
+                    ),
                 )
                 .is_err(),
             "receiver must install the exact active epoch before sender attachment"
