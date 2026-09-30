@@ -638,6 +638,8 @@ mod windows_service_app {
         capabilities: Arc<WorkerCapabilityState>,
         encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
         presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
+        presentation_multicast_result_tx:
+            mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
         presentation_feedback: PresentationFeedbackBus,
     }
 
@@ -657,6 +659,7 @@ mod windows_service_app {
             capabilities,
             encoder_capability_cache,
             presentation_key_result_tx,
+            presentation_multicast_result_tx,
             presentation_feedback,
         } = runtime;
         let WorkerCapabilityReaderIdentity {
@@ -952,6 +955,40 @@ mod windows_service_app {
                             );
                             eprintln!(
                                 "Worker presentation-key result identity mismatch: expected pid {} session {}, received pid {} session {}",
+                                expected_process_id,
+                                expected_session_id,
+                                result.process_id,
+                                result.session_id
+                            );
+                            return;
+                        }
+                        Ok(IpcMessage::WorkerPresentationMulticastStartResult(result))
+                            if result.process_id == expected_process_id
+                                && result.session_id == expected_session_id =>
+                        {
+                            if !capabilities.is_current(
+                                generation,
+                                result.process_id,
+                                result.session_id,
+                            ) {
+                                eprintln!(
+                                    "Stale Worker presentation-multicast result ignored for pid {} session {}",
+                                    result.process_id, result.session_id
+                                );
+                                return;
+                            }
+                            if presentation_multicast_result_tx.send(result).is_err() {
+                                return;
+                            }
+                        }
+                        Ok(IpcMessage::WorkerPresentationMulticastStartResult(result)) => {
+                            let _ = capabilities.clear_report_if_current(
+                                generation,
+                                expected_process_id,
+                                expected_session_id,
+                            );
+                            eprintln!(
+                                "Worker presentation-multicast result identity mismatch: expected pid {} session {}, received pid {} session {}",
                                 expected_process_id,
                                 expected_session_id,
                                 result.process_id,
