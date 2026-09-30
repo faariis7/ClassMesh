@@ -1865,6 +1865,82 @@ mod tests {
     }
 
     #[test]
+    fn service_presentation_sender_unicast_action_round_trips_ipv4_and_ipv6() {
+        for (kind, destination) in [
+            (
+                ServicePresentationSenderUnicastActionKind::Attach,
+                "192.0.2.44:49000".parse().expect("ipv4 destination"),
+            ),
+            (
+                ServicePresentationSenderUnicastActionKind::Detach,
+                "[2001:db8::44]:49001".parse().expect("ipv6 destination"),
+            ),
+        ] {
+            let action = ServicePresentationSenderUnicastAction {
+                kind,
+                slot_id: 7,
+                presentation_id: 55,
+                stream_id: 9,
+                epoch: 3,
+                destination,
+            };
+            let frame = IpcFrame::service_presentation_sender_unicast_action(action)
+                .expect("valid sender action");
+            assert_eq!(
+                frame.message().expect("typed sender action"),
+                IpcMessage::ServicePresentationSenderUnicastAction(action)
+            );
+        }
+    }
+
+    #[test]
+    fn service_presentation_sender_unicast_action_rejects_invalid_binding_and_downgrade() {
+        let valid = ServicePresentationSenderUnicastAction {
+            kind: ServicePresentationSenderUnicastActionKind::Attach,
+            slot_id: 7,
+            presentation_id: 55,
+            stream_id: 9,
+            epoch: 3,
+            destination: "192.0.2.44:49000".parse().expect("destination"),
+        };
+
+        for action in [
+            ServicePresentationSenderUnicastAction { slot_id: 0, ..valid },
+            ServicePresentationSenderUnicastAction {
+                presentation_id: 0,
+                ..valid
+            },
+            ServicePresentationSenderUnicastAction { stream_id: 0, ..valid },
+            ServicePresentationSenderUnicastAction { epoch: 0, ..valid },
+            ServicePresentationSenderUnicastAction {
+                destination: "192.0.2.44:0".parse().expect("zero port"),
+                ..valid
+            },
+            ServicePresentationSenderUnicastAction {
+                destination: "239.10.20.30:49000".parse().expect("multicast"),
+                ..valid
+            },
+            ServicePresentationSenderUnicastAction {
+                destination: "0.0.0.0:49000".parse().expect("unspecified"),
+                ..valid
+            },
+        ] {
+            assert_eq!(
+                IpcFrame::service_presentation_sender_unicast_action(action),
+                Err(IpcMessageError::InvalidPayload)
+            );
+        }
+
+        let mut downgraded =
+            IpcFrame::service_presentation_sender_unicast_action(valid).expect("valid action");
+        downgraded.header.version_minor = 7;
+        assert_eq!(
+            downgraded.message(),
+            Err(IpcMessageError::UnsupportedVersion)
+        );
+    }
+
+    #[test]
     fn service_presentation_multicast_start_round_trips_exact_binding() {
         let start = ServicePresentationMulticastStart {
             control_session_id: 77,
