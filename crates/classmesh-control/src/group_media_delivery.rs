@@ -16,6 +16,9 @@ use crate::group_media_session::{
     BoundGroupMediaReceiverSession, GroupMediaSessionError, PendingPresentationKeyAck,
     PresentationKeyAckError, PresentationKeyGrantRequest,
 };
+use crate::presentation_fallback::{
+    PresentationFallbackChange, PresentationFallbackCoordinator, PresentationFallbackError,
+};
 use crate::quic::ControlTransportError;
 
 #[derive(Debug)]
@@ -27,6 +30,7 @@ pub enum TeacherGroupMediaDeliveryError {
     SessionBindingMismatch,
     PendingAckExists,
     MissingPendingAck,
+    Fallback(PresentationFallbackError),
     Binding(GroupMediaSessionError),
     Ack(PresentationKeyAckError),
     Transport(ControlTransportError),
@@ -55,6 +59,9 @@ impl Display for TeacherGroupMediaDeliveryError {
             }
             Self::MissingPendingAck => {
                 formatter.write_str("Teacher group-media receiver has no pending key ACK")
+            }
+            Self::Fallback(error) => {
+                write!(formatter, "Teacher presentation fallback: {error:?}")
             }
             Self::Binding(error) => write!(formatter, "Teacher group-media binding: {error}"),
             Self::Ack(error) => write!(formatter, "Teacher group-media ACK: {error}"),
@@ -89,6 +96,12 @@ impl From<PresentationKeyAckError> for TeacherGroupMediaDeliveryError {
 impl From<ControlTransportError> for TeacherGroupMediaDeliveryError {
     fn from(value: ControlTransportError) -> Self {
         Self::Transport(value)
+    }
+}
+
+impl From<PresentationFallbackError> for TeacherGroupMediaDeliveryError {
+    fn from(value: PresentationFallbackError) -> Self {
+        Self::Fallback(value)
     }
 }
 
@@ -301,6 +314,29 @@ impl TeacherGroupMediaDeliveryManager {
         }
 
         Ok(bound)
+    }
+
+    pub fn request_unicast_fallback(
+        &self,
+        fallback: &mut PresentationFallbackCoordinator,
+        receiver: PrincipalId,
+        session: &ClientControlSession,
+        authorization: &AuthorizationStore,
+        now_unix_ms: u64,
+    ) -> Result<PresentationFallbackChange, TeacherGroupMediaDeliveryError> {
+        self.validate_registered_client(receiver, session, authorization, now_unix_ms)?;
+        fallback
+            .request_unicast(receiver, &session.established.negotiated.capabilities)
+            .map_err(Into::into)
+    }
+
+    pub fn remove_receiver_with_fallback(
+        &mut self,
+        fallback: &mut PresentationFallbackCoordinator,
+        receiver: PrincipalId,
+    ) -> bool {
+        fallback.restore_multicast(receiver);
+        self.remove_receiver(receiver)
     }
 
     #[must_use]
