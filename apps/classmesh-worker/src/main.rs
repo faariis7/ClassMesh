@@ -283,15 +283,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     WorkerPresentationMulticastStartStatus::Rejected
                 } else {
-                    let retry_started =
-                        match (presentation_multicast.as_mut(), presentation_decode.as_mut()) {
-                            (Some(receiver), Some(decoder))
-                                if !receiver.failed() && decoder.pump_window() =>
-                            {
-                                receiver.adopt_retry(start)
-                            }
-                            _ => false,
-                        };
+                    let retry_started = match (
+                        presentation_multicast.as_mut(),
+                        presentation_decode.as_mut(),
+                    ) {
+                        (Some(receiver), Some(decoder))
+                            if !receiver.failed() && decoder.pump_window() =>
+                        {
+                            receiver.adopt_retry(start)
+                        }
+                        _ => false,
+                    };
                     if retry_started {
                         WorkerPresentationMulticastStartStatus::Started
                     } else {
@@ -439,9 +441,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let mut presentation_pipeline_failed = false;
-        if let (Some(receiver), Some(decoder)) =
-            (presentation_multicast.as_ref(), presentation_decode.as_mut())
-        {
+        if let (Some(receiver), Some(decoder)) = (
+            presentation_multicast.as_ref(),
+            presentation_decode.as_mut(),
+        ) {
             for _ in 0..PRESENTATION_MULTICAST_DRAIN_LIMIT {
                 let Some(outcome) = receiver.try_receive() else {
                     break;
