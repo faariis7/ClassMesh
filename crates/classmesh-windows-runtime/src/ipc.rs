@@ -1905,12 +1905,18 @@ mod tests {
         };
 
         for action in [
-            ServicePresentationSenderUnicastAction { slot_id: 0, ..valid },
+            ServicePresentationSenderUnicastAction {
+                slot_id: 0,
+                ..valid
+            },
             ServicePresentationSenderUnicastAction {
                 presentation_id: 0,
                 ..valid
             },
-            ServicePresentationSenderUnicastAction { stream_id: 0, ..valid },
+            ServicePresentationSenderUnicastAction {
+                stream_id: 0,
+                ..valid
+            },
             ServicePresentationSenderUnicastAction { epoch: 0, ..valid },
             ServicePresentationSenderUnicastAction {
                 destination: "192.0.2.44:0".parse().expect("zero port"),
