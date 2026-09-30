@@ -944,10 +944,7 @@ impl IpcFrame {
         payload.extend_from_slice(&result.stream_id.to_be_bytes());
         payload.push(result.status.as_byte());
         payload.extend_from_slice(&[0_u8; 3]);
-        debug_assert_eq!(
-            payload.len(),
-            WORKER_PRESENTATION_UNICAST_START_RESULT_LEN
-        );
+        debug_assert_eq!(payload.len(), WORKER_PRESENTATION_UNICAST_START_RESULT_LEN);
         Ok(Self::new(
             MESSAGE_WORKER_PRESENTATION_UNICAST_START_RESULT,
             payload,
@@ -2056,10 +2053,7 @@ mod tests {
                 ..valid
             },
             ServicePresentationUnicastStart { port: 0, ..valid },
-            ServicePresentationUnicastStart {
-                width: 0,
-                ..valid
-            },
+            ServicePresentationUnicastStart { width: 0, ..valid },
             ServicePresentationUnicastStart {
                 teacher_source: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 ..valid
