@@ -81,6 +81,31 @@ mod tests {
     }
 
     #[test]
+    fn runtime_binds_reserved_loopback_port_and_adopts_request_only_retry() {
+        let reservation = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .expect("reserve loopback port");
+        let port = reservation.local_addr().expect("reserved address").port();
+        drop(reservation);
+
+        let first = ServicePresentationUnicastStart {
+            port,
+            teacher_source: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ..start(44, IpAddr::V4(Ipv4Addr::LOCALHOST))
+        };
+        let mut runtime =
+            WorkerPresentationUnicastRuntime::start(first).expect("unicast runtime starts");
+        assert_eq!(runtime.binding(), first);
+        assert!(!runtime.failed());
+
+        let retry = ServicePresentationUnicastStart {
+            request_id: 45,
+            ..first
+        };
+        assert!(runtime.adopt_retry(retry));
+        assert_eq!(runtime.binding().request_id, 45);
+    }
+
+    #[test]
     fn key_binding_requires_exact_control_presentation_and_stream() {
         let start = start(44, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44)));
         let exact = PresentationKeyInstallBinding {
