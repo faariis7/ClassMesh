@@ -25,8 +25,10 @@ mod windows_service_app {
         worker_pipe_name,
     };
     use classmesh_windows_runtime::ipc::{
-        IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage, ServiceUdpStreamStart,
+        IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage,
+        ServicePresentationMulticastStart, ServiceUdpStreamStart,
         WorkerPresentationKeyInstallResult, WorkerPresentationKeyInstallStatus,
+        WorkerPresentationMulticastStartResult, WorkerPresentationMulticastStartStatus,
     };
     use classmesh_windows_runtime::ipc_sensitive::{
         PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
@@ -58,7 +60,9 @@ mod windows_service_app {
     const FOCUSED_MEDIA_FEEDBACK_QUEUE_CAPACITY: usize = 32;
     const PRESENTATION_KEY_INSTALL_QUEUE_CAPACITY: usize = 1;
     const PRESENTATION_KEY_CLEAR_QUEUE_CAPACITY: usize = 1;
+    const PRESENTATION_MULTICAST_START_QUEUE_CAPACITY: usize = 1;
     const WORKER_PRESENTATION_KEY_RESULT_QUEUE_CAPACITY: usize = 4;
+    const WORKER_PRESENTATION_MULTICAST_RESULT_QUEUE_CAPACITY: usize = 4;
     const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
     const MEDIA_RECONFIGURE_RETRY: Duration = Duration::from_millis(250);
     const MAX_MEDIA_RECONFIGURE_ATTEMPTS: u8 = 4;
@@ -67,7 +71,8 @@ mod windows_service_app {
         ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, FocusedMediaDispatchChannels,
         FocusedMediaFeedback, FocusedMediaReconfigure, FocusedMediaStart, InputAvailability,
         InputDispatchChannels, PresentationFeedbackBus, PresentationKeyDispatchChannels,
-        PresentationKeyInstallDispatch, WorkerCapabilityState,
+        PresentationKeyInstallDispatch, PresentationMulticastDispatchChannels,
+        PresentationMulticastStartDispatch, WorkerCapabilityState,
     };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -103,6 +108,25 @@ mod windows_service_app {
                 && result.presentation_id == self.binding.presentation_id
                 && result.stream_id == self.binding.stream_id
                 && result.epoch == self.binding.epoch
+        }
+    }
+
+    #[derive(Debug)]
+    struct PendingPresentationMulticastStart {
+        expected_process_id: u32,
+        expected_session_id: u32,
+        start: ServicePresentationMulticastStart,
+        reply_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+    }
+
+    impl PendingPresentationMulticastStart {
+        fn matches(&self, result: &WorkerPresentationMulticastStartResult) -> bool {
+            result.process_id == self.expected_process_id
+                && result.session_id == self.expected_session_id
+                && result.control_session_id == self.start.control_session_id
+                && result.request_id == self.start.request_id
+                && result.presentation_id == self.start.presentation_id
+                && result.stream_id == self.start.stream_id
         }
     }
 
