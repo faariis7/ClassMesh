@@ -5,9 +5,7 @@ use classmesh_security::{AuthorizationStore, Permission, PrincipalId};
 use crate::authorization::AuthenticatedControlGuard;
 use crate::client_session::ClientControlSession;
 use crate::group_media_delivery::TeacherGroupMediaDeliveryManager;
-use crate::presentation_recovery::{
-    PresentationRecoveryCoordinator, PresentationRecoveryOutcome,
-};
+use crate::presentation_recovery::{PresentationRecoveryCoordinator, PresentationRecoveryOutcome};
 
 use super::PresentationFeedbackError;
 use super::wire::feedback_from_envelope;
@@ -79,7 +77,6 @@ pub fn accept_presentation_feedback(
     Ok(feedback)
 }
 
-
 pub fn accept_and_coordinate_presentation_feedback(
     delivery: &TeacherGroupMediaDeliveryManager,
     request: PresentationFeedbackRequest<'_>,
@@ -89,12 +86,9 @@ pub fn accept_and_coordinate_presentation_feedback(
     recovery: &mut PresentationRecoveryCoordinator,
     recovery_now_us: u64,
 ) -> Result<PresentationRecoveryOutcome, PresentationFeedbackError> {
-    let feedback = accept_presentation_feedback(
-        delivery,
-        request,
-        guard,
-        authorization,
-        now_unix_ms,
-    )?;
-    recovery.observe(recovery_now_us, &feedback).map_err(Into::into)
+    let feedback =
+        accept_presentation_feedback(delivery, request, guard, authorization, now_unix_ms)?;
+    recovery
+        .observe(recovery_now_us, &feedback)
+        .map_err(Into::into)
 }
