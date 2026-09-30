@@ -1,7 +1,7 @@
 #[cfg(windows)]
 const WORKER_IPC_EVENT_QUEUE_CAPACITY: usize = 128;
 #[cfg(windows)]
-const PRESENTATION_MULTICAST_DRAIN_LIMIT: usize = 8;
+const PRESENTATION_RECEIVE_DRAIN_LIMIT: usize = 8;
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -91,6 +91,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut presentation_multicast: Option<
         classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime,
     > = None;
+    let mut presentation_unicast: Option<
+        classmesh_worker::presentation_unicast_receive::WorkerPresentationUnicastRuntime,
+    > = None;
     let mut presentation_decode: Option<
         classmesh_worker::presentation_decode_render::PresentationDecodeRuntime,
     > = None;
@@ -109,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Duration::from_millis(250)
         };
-        if presentation_multicast.is_some() {
+        if presentation_multicast.is_some() || presentation_unicast.is_some() {
             wait = wait.min(Duration::from_millis(10));
         }
 
@@ -781,6 +784,7 @@ enum WorkerEvent {
     ),
     PresentationKeyClear(classmesh_windows_runtime::ipc::ServicePresentationKeyClear),
     PresentationMulticastStart(classmesh_windows_runtime::ipc::ServicePresentationMulticastStart),
+    PresentationUnicastStart(classmesh_windows_runtime::ipc::ServicePresentationUnicastStart),
     IpcFailure(String),
 }
 
@@ -1187,6 +1191,9 @@ fn worker_event_from_decoded_frame(
             }
             Ok(IpcMessage::ServicePresentationMulticastStart(start)) => {
                 Ok(WorkerEvent::PresentationMulticastStart(start))
+            }
+            Ok(IpcMessage::ServicePresentationUnicastStart(start)) => {
+                Ok(WorkerEvent::PresentationUnicastStart(start))
             }
             Ok(IpcMessage::ServiceEncoderCacheResult(result)) => {
                 Ok(WorkerEvent::EncoderCacheResult(result))
