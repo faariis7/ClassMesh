@@ -12,8 +12,7 @@ use crate::udp::{DatagramError, UdpMediaSocket};
 pub use crate::protected_media_receive::{
     ProtectedMediaPacketDropReason as ProtectedUnicastPacketDropReason,
     ProtectedMediaReceiveBatch as ProtectedUnicastReceiveBatch,
-    ProtectedMediaReceiveOutcome as ProtectedUnicastReceiveOutcome,
-    ReceivedGroupMediaCiphertext,
+    ProtectedMediaReceiveOutcome as ProtectedUnicastReceiveOutcome, ReceivedGroupMediaCiphertext,
 };
 
 pub const DEFAULT_UNICAST_READ_TIMEOUT: Duration = Duration::from_millis(10);
@@ -93,7 +92,9 @@ pub enum ProtectedUnicastReceiveError {
 impl fmt::Display for ProtectedUnicastReceiveError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidPort => formatter.write_str("protected unicast receive port must be non-zero"),
+            Self::InvalidPort => {
+                formatter.write_str("protected unicast receive port must be non-zero")
+            }
             Self::InvalidExpectedSender => formatter
                 .write_str("protected unicast expected sender must be a unicast IP address"),
             Self::InvalidStreamId => {
@@ -102,7 +103,9 @@ impl fmt::Display for ProtectedUnicastReceiveError {
             Self::ProtocolVersionOutOfRange => {
                 formatter.write_str("protocol version does not fit the media header")
             }
-            Self::Datagram(error) => write!(formatter, "protected unicast UDP receive failed: {error}"),
+            Self::Datagram(error) => {
+                write!(formatter, "protected unicast UDP receive failed: {error}")
+            }
         }
     }
 }
@@ -134,11 +137,8 @@ impl ProtectedUnicastReceiveState {
     pub fn new(
         config: ProtectedUnicastReceiverConfig,
     ) -> Result<Self, ProtectedUnicastReceiveError> {
-        let inner = ProtectedMediaReceiveState::new(
-            config.expected_sender(),
-            config.stream_id(),
-        )
-        .map_err(map_core_error)?;
+        let inner = ProtectedMediaReceiveState::new(config.expected_sender(), config.stream_id())
+            .map_err(map_core_error)?;
 
         Ok(Self { inner })
     }
@@ -200,9 +200,9 @@ impl ProtectedUnicastFrameReceiver {
         match self.socket.receive_packet() {
             Ok((packet, source)) => Ok(self.state.push_packet(now_us, &packet, source)),
             Err(error) => match classify_datagram_failure(&error) {
-                DatagramFailureDisposition::Tick => {
-                    Ok(ProtectedUnicastReceiveOutcome::Events(self.state.tick(now_us)))
-                }
+                DatagramFailureDisposition::Tick => Ok(ProtectedUnicastReceiveOutcome::Events(
+                    self.state.tick(now_us),
+                )),
                 DatagramFailureDisposition::DropMalformed => {
                     Ok(ProtectedUnicastReceiveOutcome::Dropped(
                         ProtectedUnicastPacketDropReason::MalformedDatagram,
@@ -260,11 +260,7 @@ mod tests {
     #[test]
     fn config_rejects_invalid_port_sender_and_stream() {
         assert!(matches!(
-            ProtectedUnicastReceiverConfig::new(
-                0,
-                IpAddr::V4(Ipv4Addr::LOCALHOST),
-                STREAM_ID
-            ),
+            ProtectedUnicastReceiverConfig::new(0, IpAddr::V4(Ipv4Addr::LOCALHOST), STREAM_ID),
             Err(ProtectedUnicastReceiveError::InvalidPort)
         ));
 
@@ -282,11 +278,7 @@ mod tests {
         }
 
         assert!(matches!(
-            ProtectedUnicastReceiverConfig::new(
-                50_000,
-                IpAddr::V4(Ipv4Addr::LOCALHOST),
-                0
-            ),
+            ProtectedUnicastReceiverConfig::new(50_000, IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             Err(ProtectedUnicastReceiveError::InvalidStreamId)
         ));
     }
@@ -349,21 +341,17 @@ mod tests {
 
     #[test]
     fn loopback_runtime_reassembles_ciphertext_without_exposing_plaintext() {
-        let reservation = UdpSocket::bind(SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::LOCALHOST,
-            0,
-        )))
-        .expect("reserve test port");
+        let reservation =
+            UdpSocket::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
+                .expect("reserve test port");
         let port = reservation.local_addr().expect("reserved address").port();
         drop(reservation);
 
         let mut receiver =
             ProtectedUnicastFrameReceiver::bind(ipv4_config(port)).expect("receiver binds");
-        let sender = UdpMediaSocket::bind(SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::LOCALHOST,
-            0,
-        )))
-        .expect("sender binds");
+        let sender =
+            UdpMediaSocket::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
+                .expect("sender binds");
         let destination = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
         let frame = packets(1);
         let expected: Vec<u8> = frame
