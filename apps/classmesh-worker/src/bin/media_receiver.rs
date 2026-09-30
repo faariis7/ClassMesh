@@ -318,7 +318,6 @@ fn apply_decode_batch(counters: &mut ReceiverCounters, batch: DecodeBatch) {
         .saturating_add(u64::try_from(batch.present_errors).unwrap_or(u64::MAX));
 }
 
-
 fn parse_socket_arg(
     args: &[String],
     name: &str,
