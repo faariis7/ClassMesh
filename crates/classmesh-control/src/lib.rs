@@ -16,6 +16,7 @@ pub mod group_media_session;
 pub mod handshake;
 pub mod issuance;
 pub mod peer_identity;
+pub mod presentation_recovery;
 pub mod presentation_state;
 pub mod quic;
 pub mod stream;
