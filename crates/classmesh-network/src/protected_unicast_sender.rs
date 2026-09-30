@@ -545,8 +545,8 @@ mod tests {
             CredentialFingerprint, CredentialRecord, Permission, Principal, PrincipalId,
             PrincipalKind,
         };
-        use classmesh_video::{Codec, EncodedFrameMeta};
         use classmesh_video::distributor::{FrameDistributor, SharedEncodedFrame, SinkId};
+        use classmesh_video::{Codec, EncodedFrameMeta};
 
         let receiver_one = UdpMediaSocket::bind(loopback(0)).expect("receiver one");
         let receiver_two = UdpMediaSocket::bind(loopback(0)).expect("receiver two");
@@ -615,10 +615,11 @@ mod tests {
             .drain(&mut distributor, &mut coordinator, &authorization)
             .expect("fanout drain");
         assert_eq!(deliveries.len(), 2);
-        assert!(deliveries.iter().all(|delivery| matches!(
-            delivery,
-            ProtectedUnicastFanoutDelivery::Sent { .. }
-        )));
+        assert!(
+            deliveries
+                .iter()
+                .all(|delivery| matches!(delivery, ProtectedUnicastFanoutDelivery::Sent { .. }))
+        );
 
         fn ciphertext(socket: &UdpMediaSocket, packets: usize) -> Vec<u8> {
             let mut bytes = Vec::new();
