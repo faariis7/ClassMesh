@@ -168,6 +168,16 @@ impl FrameDistributor {
         self.sinks.get_mut(&id)?.pop_latest()
     }
 
+    pub fn discard_queued(&mut self) {
+        for sink in self.sinks.values_mut() {
+            let queued = sink.frames.len();
+            sink.frames.clear();
+            sink.dropped = sink
+                .dropped
+                .saturating_add(u64::try_from(queued).unwrap_or(u64::MAX));
+        }
+    }
+
     #[must_use]
     pub fn stats(&self, id: SinkId) -> Option<SinkStats> {
         let sink = self.sinks.get(&id)?;
@@ -279,6 +289,41 @@ mod tests {
             Err(DistributorError::SinkLimitReached)
         );
         assert_eq!(distributor.sink_count(), 2);
+    }
+
+    #[test]
+    fn discard_queued_preserves_sink_registration_and_counts_stale_frames() {
+        let mut distributor = FrameDistributor::default();
+        distributor
+            .add_sink(SinkId(1), SinkMode::Multicast, 3)
+            .expect("multicast sink");
+        distributor
+            .add_sink(SinkId(2), SinkMode::Unicast, 3)
+            .expect("unicast sink");
+
+        distributor.publish(frame(1));
+        distributor.publish(frame(2));
+
+        distributor.discard_queued();
+
+        let multicast = distributor.stats(SinkId(1)).expect("multicast stats");
+        let unicast = distributor.stats(SinkId(2)).expect("unicast stats");
+        assert_eq!(multicast.queued, 0);
+        assert_eq!(unicast.queued, 0);
+        assert_eq!(multicast.dropped, 2);
+        assert_eq!(unicast.dropped, 2);
+        assert_eq!(distributor.sink_count(), 2);
+        assert!(distributor.pop_latest(SinkId(1)).is_none());
+
+        distributor.publish(frame(3));
+        assert_eq!(
+            distributor
+                .pop_latest(SinkId(1))
+                .expect("sink remains registered")
+                .meta
+                .frame_id,
+            3
+        );
     }
 
     #[test]
