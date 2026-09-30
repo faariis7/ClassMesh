@@ -9,21 +9,52 @@ use crate::presentation_recovery::{PresentationRecoveryDecision, PresentationRec
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeacherPresentationSenderAction {
-    AttachUnicast(PresentationUnicastSenderTarget),
-    DetachUnicast(PresentationUnicastSenderTarget),
+    AttachUnicast(TeacherPresentationOutlierBinding),
+    DetachUnicast(TeacherPresentationOutlierBinding),
     RequestKeyframe(PresentationKeyframeRequest),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TeacherPresentationOutlierBinding {
+    slot_id: u64,
+    target: PresentationUnicastSenderTarget,
+}
+
+impl TeacherPresentationOutlierBinding {
+    pub const fn new(
+        slot_id: u64,
+        target: PresentationUnicastSenderTarget,
+    ) -> Result<Self, TeacherPresentationSenderPlanError> {
+        if slot_id == 0 {
+            return Err(TeacherPresentationSenderPlanError::InvalidRuntimeSlot);
+        }
+        Ok(Self { slot_id, target })
+    }
+
+    #[must_use]
+    pub const fn slot_id(self) -> u64 {
+        self.slot_id
+    }
+
+    #[must_use]
+    pub const fn target(self) -> PresentationUnicastSenderTarget {
+        self.target
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeacherPresentationSenderPlanError {
     InvalidReceiverLimit,
+    InvalidRuntimeSlot,
     ReceiverLimitReached,
+    RuntimeSlotExhausted,
 }
 
 #[derive(Debug)]
 pub struct TeacherPresentationSenderPlan {
-    targets: BTreeMap<PrincipalId, PresentationUnicastSenderTarget>,
+    targets: BTreeMap<PrincipalId, TeacherPresentationOutlierBinding>,
     max_receivers: usize,
+    next_slot_id: u64,
 }
 
 impl Default for TeacherPresentationSenderPlan {
@@ -31,6 +62,7 @@ impl Default for TeacherPresentationSenderPlan {
         Self {
             targets: BTreeMap::new(),
             max_receivers: MAX_GROUP_MEDIA_RECEIVERS,
+            next_slot_id: 1,
         }
     }
 }
@@ -43,6 +75,7 @@ impl TeacherPresentationSenderPlan {
         Ok(Self {
             targets: BTreeMap::new(),
             max_receivers,
+            next_slot_id: 1,
         })
     }
 
@@ -61,20 +94,28 @@ impl TeacherPresentationSenderPlan {
         target: PresentationUnicastSenderTarget,
     ) -> Result<Vec<TeacherPresentationSenderAction>, TeacherPresentationSenderPlanError> {
         match self.targets.get(&target.receiver).copied() {
-            Some(previous) if previous == target => Ok(Vec::new()),
+            Some(previous) if previous.target == target => Ok(Vec::new()),
             Some(previous) => {
-                self.targets.insert(target.receiver, target);
+                let replacement =
+                    TeacherPresentationOutlierBinding::new(previous.slot_id, target)?;
+                self.targets.insert(target.receiver, replacement);
                 Ok(vec![
                     TeacherPresentationSenderAction::DetachUnicast(previous),
-                    TeacherPresentationSenderAction::AttachUnicast(target),
+                    TeacherPresentationSenderAction::AttachUnicast(replacement),
                 ])
             }
             None => {
                 if self.targets.len() >= self.max_receivers {
                     return Err(TeacherPresentationSenderPlanError::ReceiverLimitReached);
                 }
-                self.targets.insert(target.receiver, target);
-                Ok(vec![TeacherPresentationSenderAction::AttachUnicast(target)])
+                let slot_id = self.next_slot_id;
+                let next_slot_id = slot_id
+                    .checked_add(1)
+                    .ok_or(TeacherPresentationSenderPlanError::RuntimeSlotExhausted)?;
+                let binding = TeacherPresentationOutlierBinding::new(slot_id, target)?;
+                self.next_slot_id = next_slot_id;
+                self.targets.insert(target.receiver, binding);
+                Ok(vec![TeacherPresentationSenderAction::AttachUnicast(binding)])
             }
         }
     }
