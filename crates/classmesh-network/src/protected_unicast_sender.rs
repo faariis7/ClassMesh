@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -270,6 +271,204 @@ impl ProtectedUnicastDistributorSink {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProtectedUnicastFanoutBinding {
+    presentation_id: u64,
+    stream_id: u32,
+    epoch: GroupMediaEpoch,
+}
+
+impl From<ProtectedUnicastSenderConfig> for ProtectedUnicastFanoutBinding {
+    fn from(config: ProtectedUnicastSenderConfig) -> Self {
+        Self {
+            presentation_id: config.presentation_id(),
+            stream_id: config.stream_id(),
+            epoch: config.epoch(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ProtectedUnicastFanoutEntry {
+    sink: ProtectedUnicastDistributorSink,
+    sender: ProtectedUnicastFrameSender,
+    config: ProtectedUnicastSenderConfig,
+}
+
+#[derive(Debug)]
+pub enum ProtectedUnicastFanoutError {
+    BindingMismatch,
+    Distributor(DistributorError),
+    Sender(ProtectedUnicastSendError),
+    Seal(ProtectedUnicastSendError),
+}
+
+impl fmt::Display for ProtectedUnicastFanoutError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BindingMismatch => formatter.write_str(
+                "protected unicast fanout requires one presentation/stream/epoch binding",
+            ),
+            Self::Distributor(error) => {
+                write!(formatter, "protected unicast fanout distributor: {error:?}")
+            }
+            Self::Sender(error) => write!(formatter, "protected unicast fanout sender: {error}"),
+            Self::Seal(error) => write!(formatter, "protected unicast fanout seal: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ProtectedUnicastFanoutError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Sender(error) | Self::Seal(error) => Some(error),
+            Self::BindingMismatch | Self::Distributor(_) => None,
+        }
+    }
+}
+
+impl From<DistributorError> for ProtectedUnicastFanoutError {
+    fn from(value: DistributorError) -> Self {
+        Self::Distributor(value)
+    }
+}
+
+#[derive(Debug)]
+pub enum ProtectedUnicastFanoutDelivery {
+    Sent {
+        sink_id: SinkId,
+        report: SendFrameReport,
+    },
+    DroppedBackpressure {
+        sink_id: SinkId,
+        drop: ProtectedUnicastBackpressureDrop,
+    },
+    Failed {
+        sink_id: SinkId,
+        error: ProtectedUnicastSendError,
+    },
+}
+
+#[derive(Debug, Default)]
+pub struct ProtectedUnicastFanout {
+    entries: BTreeMap<SinkId, ProtectedUnicastFanoutEntry>,
+    binding: Option<ProtectedUnicastFanoutBinding>,
+}
+
+impl ProtectedUnicastFanout {
+    pub fn attach(
+        &mut self,
+        distributor: &mut FrameDistributor,
+        sink_id: SinkId,
+        config: ProtectedUnicastSenderConfig,
+        capacity: usize,
+    ) -> Result<(), ProtectedUnicastFanoutError> {
+        let binding = ProtectedUnicastFanoutBinding::from(config);
+        if self.binding.is_some_and(|current| current != binding) {
+            return Err(ProtectedUnicastFanoutError::BindingMismatch);
+        }
+        if self.entries.contains_key(&sink_id) {
+            return Err(ProtectedUnicastFanoutError::Distributor(
+                DistributorError::DuplicateSink,
+            ));
+        }
+
+        let sender = ProtectedUnicastFrameSender::bind_nonblocking(config)
+            .map_err(ProtectedUnicastFanoutError::Sender)?;
+        let sink = ProtectedUnicastDistributorSink::attach(distributor, sink_id, capacity)?;
+        self.entries.insert(
+            sink_id,
+            ProtectedUnicastFanoutEntry {
+                sink,
+                sender,
+                config,
+            },
+        );
+        self.binding = Some(binding);
+        Ok(())
+    }
+
+    pub fn detach(&mut self, distributor: &mut FrameDistributor, sink_id: SinkId) -> bool {
+        let Some(entry) = self.entries.remove(&sink_id) else {
+            return false;
+        };
+        let removed = entry.sink.detach(distributor);
+        if self.entries.is_empty() {
+            self.binding = None;
+        }
+        removed
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn drain(
+        &mut self,
+        distributor: &mut FrameDistributor,
+        coordinator: &mut GroupMediaCoordinator,
+        authorization: &AuthorizationStore,
+    ) -> Result<Vec<ProtectedUnicastFanoutDelivery>, ProtectedUnicastFanoutError> {
+        let mut groups: Vec<(SharedEncodedFrame, Vec<SinkId>)> = Vec::new();
+
+        for (&sink_id, entry) in &self.entries {
+            let Some(frame) = entry.sink.take_next_decodable(distributor) else {
+                continue;
+            };
+            if let Some((_, sink_ids)) = groups.iter_mut().find(|(existing, _)| {
+                existing.meta.frame_id == frame.meta.frame_id
+                    && existing.meta.timestamp_us == frame.meta.timestamp_us
+                    && existing.meta.keyframe == frame.meta.keyframe
+            }) {
+                sink_ids.push(sink_id);
+            } else {
+                groups.push((frame, vec![sink_id]));
+            }
+        }
+
+        let mut deliveries = Vec::new();
+        for (frame, sink_ids) in groups {
+            let config = self
+                .entries
+                .get(&sink_ids[0])
+                .expect("fanout group references registered sink")
+                .config;
+            let sealed =
+                seal_shared_h264_frame_for_unicast(config, coordinator, authorization, &frame)
+                    .map_err(ProtectedUnicastFanoutError::Seal)?;
+
+            for sink_id in sink_ids {
+                let entry = self
+                    .entries
+                    .get_mut(&sink_id)
+                    .expect("fanout group references registered sink");
+                match entry.sender.try_send_frame(&sealed) {
+                    Ok(ProtectedUnicastTrySendOutcome::Sent(report)) => {
+                        deliveries.push(ProtectedUnicastFanoutDelivery::Sent { sink_id, report });
+                    }
+                    Ok(ProtectedUnicastTrySendOutcome::DroppedBackpressure(drop)) => {
+                        deliveries.push(ProtectedUnicastFanoutDelivery::DroppedBackpressure {
+                            sink_id,
+                            drop,
+                        });
+                    }
+                    Err(error) => {
+                        deliveries.push(ProtectedUnicastFanoutDelivery::Failed { sink_id, error });
+                    }
+                }
+            }
+        }
+
+        Ok(deliveries)
+    }
+}
+
 /// Seals one shared H.264 access unit with the authoritative group-media sender state.
 ///
 /// The destination in `config` is intentionally not part of the cryptographic binding. Callers may
@@ -534,6 +733,146 @@ mod tests {
             Ok(ProtectedUnicastTrySendOutcome::Sent(_))
         ));
         assert_eq!(sealed.binding().frame_id(), frame.meta.frame_id);
+    }
+
+    #[test]
+    fn protected_unicast_fanout_seals_once_and_delivers_same_ciphertext_to_two_outliers() {
+        use std::collections::{BTreeMap, BTreeSet};
+        use std::time::Duration;
+
+        use classmesh_security::{
+            CredentialFingerprint, CredentialRecord, Permission, Principal, PrincipalId,
+            PrincipalKind,
+        };
+        use classmesh_video::distributor::{FrameDistributor, SharedEncodedFrame, SinkId};
+        use classmesh_video::{Codec, EncodedFrameMeta};
+
+        let receiver_one = UdpMediaSocket::bind(loopback(0)).expect("receiver one");
+        let receiver_two = UdpMediaSocket::bind(loopback(0)).expect("receiver two");
+        receiver_one
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("receiver one timeout");
+        receiver_two
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("receiver two timeout");
+        let destination_one = receiver_one.local_addr().expect("receiver one address");
+        let destination_two = receiver_two.local_addr().expect("receiver two address");
+
+        let principal_id = PrincipalId([8; 32]);
+        let fingerprint = CredentialFingerprint([18; 32]);
+        let mut permissions = BTreeSet::new();
+        permissions.insert(Permission::ReceivePresentation);
+        let mut credentials = BTreeMap::new();
+        credentials.insert(fingerprint, CredentialRecord::active(fingerprint, 1));
+        let mut authorization = AuthorizationStore::default();
+        authorization
+            .upsert(Principal {
+                id: principal_id,
+                kind: PrincipalKind::StudentDevice,
+                enabled: true,
+                permissions,
+                credentials,
+            })
+            .expect("authorized receiver");
+
+        let mut coordinator = GroupMediaCoordinator::default();
+        coordinator
+            .register_receiver(&authorization, principal_id)
+            .expect("receiver registers");
+        let epoch = coordinator.begin_epoch().expect("epoch starts");
+
+        let mut distributor = FrameDistributor::default();
+        let mut fanout = ProtectedUnicastFanout::default();
+        fanout
+            .attach(
+                &mut distributor,
+                SinkId(41),
+                config(destination_one, epoch),
+                2,
+            )
+            .expect("first outlier");
+        fanout
+            .attach(
+                &mut distributor,
+                SinkId(42),
+                config(destination_two, epoch),
+                2,
+            )
+            .expect("second outlier");
+
+        distributor.publish(SharedEncodedFrame::new(
+            EncodedFrameMeta {
+                frame_id: 91,
+                timestamp_us: 3_033_303,
+                keyframe: true,
+            },
+            Codec::H264,
+            vec![0x5a; 2_048],
+        ));
+
+        let deliveries = fanout
+            .drain(&mut distributor, &mut coordinator, &authorization)
+            .expect("fanout drain");
+        assert_eq!(deliveries.len(), 2);
+        assert!(
+            deliveries
+                .iter()
+                .all(|delivery| matches!(delivery, ProtectedUnicastFanoutDelivery::Sent { .. }))
+        );
+
+        fn ciphertext(socket: &UdpMediaSocket, packets: usize) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            for _ in 0..packets {
+                let (packet, _) = socket.receive_packet().expect("loopback packet");
+                bytes.extend(packet.payload);
+            }
+            bytes
+        }
+
+        let first_packets = match &deliveries[0] {
+            ProtectedUnicastFanoutDelivery::Sent { report, .. } => report.packets,
+            _ => unreachable!("all deliveries asserted sent"),
+        };
+        let second_packets = match &deliveries[1] {
+            ProtectedUnicastFanoutDelivery::Sent { report, .. } => report.packets,
+            _ => unreachable!("all deliveries asserted sent"),
+        };
+        assert_eq!(
+            ciphertext(&receiver_one, first_packets),
+            ciphertext(&receiver_two, second_packets),
+            "all admitted outliers must receive the same once-sealed ciphertext"
+        );
+    }
+
+    #[test]
+    fn protected_unicast_fanout_rejects_binding_drift_before_registering_sink() {
+        use classmesh_video::distributor::{FrameDistributor, SinkId};
+
+        let receiver_one = UdpMediaSocket::bind(loopback(0)).expect("receiver one");
+        let receiver_two = UdpMediaSocket::bind(loopback(0)).expect("receiver two");
+        let destination_one = receiver_one.local_addr().expect("receiver one address");
+        let destination_two = receiver_two.local_addr().expect("receiver two address");
+        let epoch = epoch(7);
+
+        let mut distributor = FrameDistributor::default();
+        let mut fanout = ProtectedUnicastFanout::default();
+        fanout
+            .attach(
+                &mut distributor,
+                SinkId(1),
+                config(destination_one, epoch),
+                2,
+            )
+            .expect("first outlier");
+
+        let drift = ProtectedUnicastSenderConfig::new(destination_two, 700, 801, epoch)
+            .expect("individually valid drifted config");
+        assert!(matches!(
+            fanout.attach(&mut distributor, SinkId(2), drift, 2),
+            Err(ProtectedUnicastFanoutError::BindingMismatch)
+        ));
+        assert_eq!(fanout.len(), 1);
+        assert_eq!(distributor.sink_count(), 1);
     }
 
     #[test]
