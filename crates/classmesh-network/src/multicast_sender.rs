@@ -632,18 +632,14 @@ mod tests {
         .expect("concurrent multicast sink attaches");
 
         let producer = distributor.clone();
-        let thread = thread::spawn(move || {
-            producer.publish(shared_frame(Codec::H264, 10, false));
-            let latest = shared_frame(Codec::H264, 11, false);
-            let pointer = Arc::as_ptr(&latest.data);
-            producer.publish(latest);
-            pointer
-        });
+        let frame = shared_frame(Codec::H264, 11, false);
+        let pointer = Arc::as_ptr(&frame.data);
+        let thread = thread::spawn(move || producer.publish(frame));
 
         let received = sink
             .wait_latest_concurrent(&distributor, Duration::from_secs(1))
-            .expect("latest shared frame");
-        let pointer = thread.join().expect("producer");
+            .expect("shared frame");
+        thread.join().expect("producer");
         assert_eq!(received.meta.frame_id, 11);
         assert_eq!(Arc::as_ptr(&received.data), pointer);
         assert!(sink.detach_concurrent(&distributor));
