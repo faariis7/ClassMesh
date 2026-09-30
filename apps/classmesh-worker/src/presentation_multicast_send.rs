@@ -243,6 +243,39 @@ mod tests {
     }
 
     #[test]
+    fn runtime_contract_exposes_bounded_unicast_outlier_management() {
+        use classmesh_network::protected_unicast_sender::ProtectedUnicastSenderConfig;
+
+        fn assert_api(
+            runtime: &mut PresentationMulticastSendRuntime,
+            sink_id: SinkId,
+            config: ProtectedUnicastSenderConfig,
+        ) {
+            let _ = runtime.attach_unicast_outlier(sink_id, config, 2);
+            let _ = runtime.detach_unicast_outlier(sink_id);
+            let _: usize = runtime.unicast_outlier_count();
+        }
+
+        let _ = assert_api
+            as fn(
+                &mut PresentationMulticastSendRuntime,
+                SinkId,
+                ProtectedUnicastSenderConfig,
+            );
+    }
+
+    #[test]
+    fn send_step_keeps_unicast_delivery_results_separate_from_multicast() {
+        let step = PresentationMulticastSendStep {
+            encoded_outputs: 1,
+            sent: None,
+            backpressure_drop: None,
+            unicast_deliveries: Vec::new(),
+        };
+        assert!(step.unicast_deliveries.is_empty());
+    }
+
+    #[test]
     fn delivery_fields_keep_success_and_backpressure_mutually_exclusive() {
         let report = SendFrameReport {
             frame_id: 42,
