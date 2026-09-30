@@ -239,6 +239,7 @@ impl PresentationMulticastSendRuntime {
 mod tests {
     use std::net::Ipv4Addr;
 
+    use classmesh_core::keyframe::PresentationKeyframeRequest;
     use classmesh_network::multicast::{MulticastMembership, MulticastProbeOutcome};
     use classmesh_security::group_media::GroupMediaEpoch;
     use classmesh_video::distributor::DistributorError;
@@ -320,6 +321,41 @@ mod tests {
             unicast_deliveries: Vec::new(),
         };
         assert!(step.unicast_deliveries.is_empty());
+    }
+
+    #[test]
+    fn presentation_keyframe_directive_must_match_exact_sender_binding() {
+        let config = sender_config();
+        let exact =
+            PresentationKeyframeRequest::new(config.presentation_id(), config.stream_id(), 42)
+                .expect("valid exact directive");
+        assert!(presentation_keyframe_request_matches(config, exact));
+
+        let wrong_presentation =
+            PresentationKeyframeRequest::new(config.presentation_id() + 1, config.stream_id(), 42)
+                .expect("valid drifted directive");
+        assert!(!presentation_keyframe_request_matches(
+            config,
+            wrong_presentation
+        ));
+
+        let wrong_stream =
+            PresentationKeyframeRequest::new(config.presentation_id(), config.stream_id() + 1, 42)
+                .expect("valid drifted directive");
+        assert!(!presentation_keyframe_request_matches(config, wrong_stream));
+    }
+
+    #[test]
+    fn runtime_contract_accepts_only_sanitized_keyframe_directive() {
+        fn assert_api(
+            runtime: &mut PresentationMulticastSendRuntime,
+            request: PresentationKeyframeRequest,
+        ) {
+            let _ = runtime.apply_keyframe_request(request);
+        }
+
+        let _ = assert_api
+            as fn(&mut PresentationMulticastSendRuntime, PresentationKeyframeRequest);
     }
 
     #[test]
