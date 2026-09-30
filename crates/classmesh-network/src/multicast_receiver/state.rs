@@ -1,17 +1,14 @@
 use std::net::{IpAddr, SocketAddr};
 
 use crate::MediaPacket;
-use crate::protected_media_receive::{
-    ProtectedMediaReceiveCoreError, ProtectedMediaReceiveState,
-};
+use crate::protected_media_receive::{ProtectedMediaReceiveCoreError, ProtectedMediaReceiveState};
 
 use super::config::{ProtectedMulticastReceiveError, ProtectedMulticastReceiverConfig};
 
 pub use crate::protected_media_receive::{
     ProtectedMediaPacketDropReason as MulticastPacketDropReason,
     ProtectedMediaReceiveBatch as ProtectedMulticastReceiveBatch,
-    ProtectedMediaReceiveOutcome as ProtectedMulticastReceiveOutcome,
-    ReceivedGroupMediaCiphertext,
+    ProtectedMediaReceiveOutcome as ProtectedMulticastReceiveOutcome, ReceivedGroupMediaCiphertext,
 };
 
 #[derive(Debug)]
