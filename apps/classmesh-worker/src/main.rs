@@ -94,6 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut presentation_decode: Option<
         classmesh_worker::presentation_decode_render::PresentationDecodeRuntime,
     > = None;
+    let mut presentation_keyframe_request_pending = false;
 
     loop {
         let now = Instant::now();
@@ -299,12 +300,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         presentation_multicast = None;
                         presentation_decode = None;
-                        match classmesh_worker::presentation_decode_render::PresentationDecodeRuntime::new(
-                            true, None,
-                        ) {
-                            Ok(decoder) => {
-                                match classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime::start(start) {
-                                    Ok(receiver) => {
+                        presentation_keyframe_request_pending = false;
+                        match classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime::start(start) {
+                            Ok(receiver) => {
+                                match classmesh_worker::presentation_decode_render::PresentationDecodeRuntime::new(
+                                    true, None,
+                                ) {
+                                    Ok(decoder) => {
                                         eprintln!(
                                             "ClassMesh Worker multicast presentation ready: presentation={}, stream={}, group={}:{}, interface={}, teacher_source={}",
                                             start.presentation_id,
@@ -314,13 +316,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             start.interface,
                                             start.teacher_source
                                         );
-                                        presentation_decode = Some(decoder);
                                         presentation_multicast = Some(receiver);
+                                        presentation_decode = Some(decoder);
                                         WorkerPresentationMulticastStartStatus::Started
                                     }
                                     Err(error) => {
                                         eprintln!(
-                                            "ClassMesh Worker multicast receiver failed closed; control remains active: {error}"
+                                            "ClassMesh Worker presentation decoder failed closed after multicast bind/join; start rejected: {error}"
                                         );
                                         WorkerPresentationMulticastStartStatus::Rejected
                                     }
@@ -328,7 +330,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             Err(error) => {
                                 eprintln!(
-                                    "ClassMesh Worker presentation decoder failed closed; multicast start rejected: {error}"
+                                    "ClassMesh Worker multicast receiver failed closed; control remains active: {error}"
                                 );
                                 WorkerPresentationMulticastStartStatus::Rejected
                             }
@@ -349,6 +351,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if cleared {
                     presentation_multicast = None;
                     presentation_decode = None;
+                    presentation_keyframe_request_pending = false;
                     eprintln!(
                         "ClassMesh Worker stopped multicast presentation with exact key clear"
                     );
@@ -466,28 +469,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )?;
                         }
                         for frame in batch.frames {
+                            let frame_id = frame.frame_id();
                             match group_media_keys.open_access_unit(frame) {
-                                Ok(access_unit) => match decoder.submit(&access_unit) {
-                                    Ok(classmesh_worker::presentation_decode_render::PresentationDecodeStep::Decoded(batch)) => {
-                                        if batch.present_errors > 0 {
+                                Ok(access_unit) => {
+                                    if access_unit.keyframe {
+                                        presentation_keyframe_request_pending = false;
+                                    }
+                                    match decoder.submit(&access_unit) {
+                                        Ok(classmesh_worker::presentation_decode_render::PresentationDecodeStep::Decoded(batch)) => {
+                                            if batch.present_errors > 0 {
+                                                eprintln!(
+                                                    "ClassMesh Worker presentation render reported {} media-local errors",
+                                                    batch.present_errors
+                                                );
+                                            }
+                                            if decoder.waiting_for_keyframe() {
+                                                request_worker_presentation_keyframe_once(
+                                                    &pipe,
+                                                    std::process::id(),
+                                                    actual_session,
+                                                    binding,
+                                                    access_unit.frame_id,
+                                                    &mut presentation_keyframe_request_pending,
+                                                )?;
+                                            } else {
+                                                presentation_keyframe_request_pending = false;
+                                            }
+                                        }
+                                        Ok(classmesh_worker::presentation_decode_render::PresentationDecodeStep::WaitingForKeyframe) => {
+                                            request_worker_presentation_keyframe_once(
+                                                &pipe,
+                                                std::process::id(),
+                                                actual_session,
+                                                binding,
+                                                access_unit.frame_id,
+                                                &mut presentation_keyframe_request_pending,
+                                            )?;
+                                        }
+                                        Err(error) => {
                                             eprintln!(
-                                                "ClassMesh Worker presentation render reported {} media-local errors",
-                                                batch.present_errors
+                                                "ClassMesh Worker presentation decode failed on frame={}: {error}; waiting for a new keyframe",
+                                                access_unit.frame_id
                                             );
+                                            decoder.recover_after_loss();
+                                            request_worker_presentation_keyframe_once(
+                                                &pipe,
+                                                std::process::id(),
+                                                actual_session,
+                                                binding,
+                                                access_unit.frame_id,
+                                                &mut presentation_keyframe_request_pending,
+                                            )?;
                                         }
                                     }
-                                    Ok(classmesh_worker::presentation_decode_render::PresentationDecodeStep::WaitingForKeyframe) => {}
-                                    Err(error) => {
-                                        eprintln!(
-                                            "ClassMesh Worker presentation decode failed; waiting for a new keyframe: {error}"
-                                        );
-                                        decoder.recover_after_loss();
-                                    }
-                                },
+                                }
                                 Err(error) => {
                                     eprintln!(
-                                        "ClassMesh Worker dropped unauthenticated multicast frame before decode: {error}"
+                                        "ClassMesh Worker dropped multicast ciphertext before decode on frame={frame_id}: {error}"
                                     );
+                                    if error.disrupts_decode_continuity() {
+                                        decoder.recover_after_loss();
+                                        request_worker_presentation_keyframe_once(
+                                            &pipe,
+                                            std::process::id(),
+                                            actual_session,
+                                            binding,
+                                            frame_id,
+                                            &mut presentation_keyframe_request_pending,
+                                        )?;
+                                    }
                                 }
                             }
                         }
@@ -507,6 +557,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             presentation_multicast = None;
             presentation_decode = None;
+            presentation_keyframe_request_pending = false;
         }
 
         if capture.is_none() && capture_restart.is_due(Instant::now()) {
@@ -1049,6 +1100,32 @@ fn publish_worker_presentation_multicast_start_result(
         )
         .map_err(ipc_message_error)?;
     pipe.write_all(&frame.encode().map_err(ipc_frame_error)?)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn request_worker_presentation_keyframe_once(
+    pipe: &classmesh_win32::NamedPipeClient,
+    process_id: u32,
+    session_id: u32,
+    binding: classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding,
+    after_frame_id: u64,
+    pending: &mut bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if *pending {
+        return Ok(());
+    }
+    publish_worker_presentation_feedback(
+        pipe,
+        process_id,
+        session_id,
+        binding,
+        classmesh_protocol::feedback::FeedbackMessage::RequestKeyframe {
+            stream_id: binding.stream_id,
+            after_frame_id,
+        },
+    )?;
+    *pending = true;
     Ok(())
 }
 
