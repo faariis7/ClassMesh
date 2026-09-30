@@ -1,7 +1,7 @@
 #[cfg(windows)]
 const WORKER_IPC_EVENT_QUEUE_CAPACITY: usize = 128;
 #[cfg(windows)]
-const PRESENTATION_MULTICAST_DRAIN_LIMIT: usize = 8;
+const PRESENTATION_RECEIVE_DRAIN_LIMIT: usize = 8;
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -91,6 +91,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut presentation_multicast: Option<
         classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime,
     > = None;
+    let mut presentation_unicast: Option<
+        classmesh_worker::presentation_unicast_receive::WorkerPresentationUnicastRuntime,
+    > = None;
     let mut presentation_decode: Option<
         classmesh_worker::presentation_decode_render::PresentationDecodeRuntime,
     > = None;
@@ -109,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Duration::from_millis(250)
         };
-        if presentation_multicast.is_some() {
+        if presentation_multicast.is_some() || presentation_unicast.is_some() {
             wait = wait.min(Duration::from_millis(10));
         }
 
@@ -284,21 +287,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     WorkerPresentationMulticastStartStatus::Rejected
                 } else {
-                    let retry_started = match (
-                        presentation_multicast.as_mut(),
-                        presentation_decode.as_mut(),
-                    ) {
-                        (Some(receiver), Some(decoder)) => {
-                            !receiver.failed()
-                                && decoder.pump_window()
-                                && receiver.adopt_retry(start)
-                        }
-                        _ => false,
-                    };
+                    let retry_started = presentation_unicast.is_none()
+                        && match (
+                            presentation_multicast.as_mut(),
+                            presentation_decode.as_mut(),
+                        ) {
+                            (Some(receiver), Some(decoder)) => {
+                                !receiver.failed()
+                                    && decoder.pump_window()
+                                    && receiver.adopt_retry(start)
+                            }
+                            _ => false,
+                        };
                     if retry_started {
                         WorkerPresentationMulticastStartStatus::Started
                     } else {
                         presentation_multicast = None;
+                        presentation_unicast = None;
                         presentation_decode = None;
                         presentation_keyframe_request_pending = false;
                         match classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime::start(start) {
@@ -346,14 +351,88 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )?;
                 continue;
             }
+            Ok(WorkerEvent::PresentationUnicastStart(start)) => {
+                use classmesh_windows_runtime::ipc::WorkerPresentationUnicastStartStatus;
+
+                let key_binding_matches = group_media_keys.binding().is_some_and(|binding| {
+                    classmesh_worker::presentation_unicast_receive::start_matches_key_binding(
+                        start, binding,
+                    )
+                });
+                let status = if !key_binding_matches {
+                    eprintln!(
+                        "ClassMesh Worker rejected unicast start: active presentation key binding mismatch"
+                    );
+                    WorkerPresentationUnicastStartStatus::Rejected
+                } else {
+                    let retry_started = presentation_multicast.is_none()
+                        && match (presentation_unicast.as_mut(), presentation_decode.as_mut()) {
+                            (Some(receiver), Some(decoder)) => {
+                                !receiver.failed()
+                                    && decoder.pump_window()
+                                    && receiver.adopt_retry(start)
+                            }
+                            _ => false,
+                        };
+                    if retry_started {
+                        WorkerPresentationUnicastStartStatus::Started
+                    } else {
+                        presentation_multicast = None;
+                        presentation_unicast = None;
+                        presentation_decode = None;
+                        presentation_keyframe_request_pending = false;
+                        match classmesh_worker::presentation_unicast_receive::WorkerPresentationUnicastRuntime::start(start) {
+                            Ok(receiver) => {
+                                match classmesh_worker::presentation_decode_render::PresentationDecodeRuntime::new(
+                                    true, None,
+                                ) {
+                                    Ok(decoder) => {
+                                        eprintln!(
+                                            "ClassMesh Worker unicast presentation ready: presentation={}, stream={}, port={}, teacher_source={}",
+                                            start.presentation_id,
+                                            start.stream_id,
+                                            start.port,
+                                            start.teacher_source
+                                        );
+                                        presentation_unicast = Some(receiver);
+                                        presentation_decode = Some(decoder);
+                                        WorkerPresentationUnicastStartStatus::Started
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "ClassMesh Worker presentation decoder failed closed after unicast bind; start rejected: {error}"
+                                        );
+                                        WorkerPresentationUnicastStartStatus::Rejected
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "ClassMesh Worker unicast receiver failed closed; control remains active: {error}"
+                                );
+                                WorkerPresentationUnicastStartStatus::Rejected
+                            }
+                        }
+                    }
+                };
+                publish_worker_presentation_unicast_start_result(
+                    &pipe,
+                    std::process::id(),
+                    actual_session,
+                    start,
+                    status,
+                )?;
+                continue;
+            }
             Ok(WorkerEvent::PresentationKeyClear(clear)) => {
                 let cleared = group_media_keys.clear_if_matches(clear);
                 if cleared {
                     presentation_multicast = None;
+                    presentation_unicast = None;
                     presentation_decode = None;
                     presentation_keyframe_request_pending = false;
                     eprintln!(
-                        "ClassMesh Worker stopped multicast presentation with exact key clear"
+                        "ClassMesh Worker stopped presentation receive runtime with exact key clear"
                     );
                 }
                 eprintln!(
@@ -363,13 +442,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(WorkerEvent::PresentationKeyInstall(install)) => {
                 let binding = install.binding();
-                let status = if presentation_multicast
+                let receive_binding_mismatch = presentation_multicast
                     .as_ref()
                     .is_some_and(|runtime| !runtime.matches_key_binding(binding))
-                {
+                    || presentation_unicast
+                        .as_ref()
+                        .is_some_and(|runtime| !runtime.matches_key_binding(binding));
+                let status = if receive_binding_mismatch {
                     drop(install);
                     eprintln!(
-                        "ClassMesh Worker rejected presentation key install: multicast receiver binding mismatch"
+                        "ClassMesh Worker rejected presentation key install: active receiver binding mismatch"
                     );
                     classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Rejected
                 } else {
@@ -444,46 +526,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let mut presentation_pipeline_failed = false;
-        if let (Some(receiver), Some(decoder)) = (
-            presentation_multicast.as_ref(),
-            presentation_decode.as_mut(),
-        ) {
-            for _ in 0..PRESENTATION_MULTICAST_DRAIN_LIMIT {
-                let Some(outcome) = receiver.try_receive() else {
-                    break;
-                };
-                if let classmesh_network::multicast_receiver::ProtectedMulticastReceiveOutcome::Events(
-                    batch,
-                ) = outcome
-                {
-                    if let Some(binding) = group_media_keys.binding()
-                        && receiver.matches_key_binding(binding)
+        let multicast_active = presentation_multicast.is_some();
+        let unicast_active = presentation_unicast.is_some();
+        if multicast_active ^ unicast_active {
+            if let Some(decoder) = presentation_decode.as_mut() {
+                let receiver_failed = presentation_multicast
+                    .as_ref()
+                    .is_some_and(|receiver| receiver.failed())
+                    || presentation_unicast
+                        .as_ref()
+                        .is_some_and(|receiver| receiver.failed());
+                for _ in 0..PRESENTATION_RECEIVE_DRAIN_LIMIT {
+                    let outcome = if let Some(receiver) = presentation_multicast.as_ref() {
+                        receiver.try_receive()
+                    } else {
+                        presentation_unicast
+                            .as_ref()
+                            .and_then(|receiver| receiver.try_receive())
+                    };
+                    let Some(outcome) = outcome else {
+                        break;
+                    };
+                    if let classmesh_network::multicast_receiver::ProtectedMulticastReceiveOutcome::Events(
+                        batch,
+                    ) = outcome
                     {
-                        for feedback in batch.feedback {
-                            publish_worker_presentation_feedback(
-                                &pipe,
-                                std::process::id(),
-                                actual_session,
-                                binding,
-                                feedback,
-                            )?;
-                        }
-                        for frame in batch.frames {
-                            let frame_id = frame.frame_id();
-                            match group_media_keys.open_access_unit(frame) {
-                                Ok(access_unit) => {
-                                    if access_unit.keyframe {
-                                        presentation_keyframe_request_pending = false;
-                                    }
-                                    match decoder.submit(&access_unit) {
-                                        Ok(classmesh_worker::presentation_decode_render::PresentationDecodeStep::Decoded(batch)) => {
-                                            if batch.present_errors > 0 {
-                                                eprintln!(
-                                                    "ClassMesh Worker presentation render reported {} media-local errors",
-                                                    batch.present_errors
-                                                );
+                        if let Some(binding) = group_media_keys.binding() {
+                            let receiver_matches_binding = presentation_multicast
+                                .as_ref()
+                                .is_some_and(|receiver| receiver.matches_key_binding(binding))
+                                || presentation_unicast
+                                    .as_ref()
+                                    .is_some_and(|receiver| receiver.matches_key_binding(binding));
+                            if !receiver_matches_binding {
+                                continue;
+                            }
+                            for feedback in batch.feedback {
+                                publish_worker_presentation_feedback(
+                                    &pipe,
+                                    std::process::id(),
+                                    actual_session,
+                                    binding,
+                                    feedback,
+                                )?;
+                            }
+                            for frame in batch.frames {
+                                let frame_id = frame.frame_id();
+                                match group_media_keys.open_access_unit(frame) {
+                                    Ok(access_unit) => {
+                                        if access_unit.keyframe {
+                                            presentation_keyframe_request_pending = false;
+                                        }
+                                        match decoder.submit(&access_unit) {
+                                            Ok(classmesh_worker::presentation_decode_render::PresentationDecodeStep::Decoded(batch)) => {
+                                                if batch.present_errors > 0 {
+                                                    eprintln!(
+                                                        "ClassMesh Worker presentation render reported {} media-local errors",
+                                                        batch.present_errors
+                                                    );
+                                                }
+                                                if decoder.waiting_for_keyframe() {
+                                                    request_worker_presentation_keyframe_once(
+                                                        &pipe,
+                                                        std::process::id(),
+                                                        actual_session,
+                                                        binding,
+                                                        access_unit.frame_id,
+                                                        &mut presentation_keyframe_request_pending,
+                                                    )?;
+                                                } else {
+                                                    presentation_keyframe_request_pending = false;
+                                                }
                                             }
-                                            if decoder.waiting_for_keyframe() {
+                                            Ok(classmesh_worker::presentation_decode_render::PresentationDecodeStep::WaitingForKeyframe) => {
                                                 request_worker_presentation_keyframe_once(
                                                     &pipe,
                                                     std::process::id(),
@@ -492,59 +607,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     access_unit.frame_id,
                                                     &mut presentation_keyframe_request_pending,
                                                 )?;
-                                            } else {
-                                                presentation_keyframe_request_pending = false;
+                                            }
+                                            Err(error) => {
+                                                eprintln!(
+                                                    "ClassMesh Worker presentation decode failed on frame={}: {error}; waiting for a new keyframe",
+                                                    access_unit.frame_id
+                                                );
+                                                decoder.recover_after_loss();
+                                                request_worker_presentation_keyframe_once(
+                                                    &pipe,
+                                                    std::process::id(),
+                                                    actual_session,
+                                                    binding,
+                                                    access_unit.frame_id,
+                                                    &mut presentation_keyframe_request_pending,
+                                                )?;
                                             }
                                         }
-                                        Ok(classmesh_worker::presentation_decode_render::PresentationDecodeStep::WaitingForKeyframe) => {
-                                            request_worker_presentation_keyframe_once(
-                                                &pipe,
-                                                std::process::id(),
-                                                actual_session,
-                                                binding,
-                                                access_unit.frame_id,
-                                                &mut presentation_keyframe_request_pending,
-                                            )?;
-                                        }
-                                        Err(error) => {
-                                            eprintln!(
-                                                "ClassMesh Worker presentation decode failed on frame={}: {error}; waiting for a new keyframe",
-                                                access_unit.frame_id
-                                            );
-                                            decoder.recover_after_loss();
-                                            request_worker_presentation_keyframe_once(
-                                                &pipe,
-                                                std::process::id(),
-                                                actual_session,
-                                                binding,
-                                                access_unit.frame_id,
-                                                &mut presentation_keyframe_request_pending,
-                                            )?;
-                                        }
                                     }
-                                }
-                                Err(error) => {
-                                    eprintln!(
-                                        "ClassMesh Worker dropped unauthenticated multicast ciphertext before decode on frame={frame_id}: {error}"
-                                    );
+                                    Err(error) => {
+                                        eprintln!(
+                                            "ClassMesh Worker dropped unauthenticated presentation ciphertext before decode on frame={frame_id}: {error}"
+                                        );
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                presentation_pipeline_failed = receiver_failed || !decoder.pump_window();
+            } else {
+                presentation_pipeline_failed = true;
+                eprintln!(
+                    "ClassMesh Worker presentation pipeline invariant failed; active receiver has no decoder"
+                );
             }
-            presentation_pipeline_failed = receiver.failed() || !decoder.pump_window();
-        } else if presentation_multicast.is_some() || presentation_decode.is_some() {
+        } else if multicast_active || unicast_active || presentation_decode.is_some() {
             presentation_pipeline_failed = true;
             eprintln!(
-                "ClassMesh Worker presentation pipeline invariant failed; tearing down partial runtime"
+                "ClassMesh Worker presentation pipeline invariant failed; tearing down partial or conflicting runtime"
             );
         }
         if presentation_pipeline_failed {
             eprintln!(
-                "ClassMesh Worker multicast presentation stopped after media-local runtime failure; control remains active"
+                "ClassMesh Worker presentation receive path stopped after media-local runtime failure; control remains active"
             );
             presentation_multicast = None;
+            presentation_unicast = None;
             presentation_decode = None;
             presentation_keyframe_request_pending = false;
         }
@@ -781,6 +890,7 @@ enum WorkerEvent {
     ),
     PresentationKeyClear(classmesh_windows_runtime::ipc::ServicePresentationKeyClear),
     PresentationMulticastStart(classmesh_windows_runtime::ipc::ServicePresentationMulticastStart),
+    PresentationUnicastStart(classmesh_windows_runtime::ipc::ServicePresentationUnicastStart),
     IpcFailure(String),
 }
 
@@ -1093,6 +1203,30 @@ fn publish_worker_presentation_multicast_start_result(
 }
 
 #[cfg(windows)]
+fn publish_worker_presentation_unicast_start_result(
+    pipe: &classmesh_win32::NamedPipeClient,
+    process_id: u32,
+    session_id: u32,
+    start: classmesh_windows_runtime::ipc::ServicePresentationUnicastStart,
+    status: classmesh_windows_runtime::ipc::WorkerPresentationUnicastStartStatus,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = classmesh_windows_runtime::ipc::WorkerPresentationUnicastStartResult {
+        process_id,
+        session_id,
+        control_session_id: start.control_session_id,
+        request_id: start.request_id,
+        presentation_id: start.presentation_id,
+        stream_id: start.stream_id,
+        status,
+    };
+    let frame =
+        classmesh_windows_runtime::ipc::IpcFrame::worker_presentation_unicast_start_result(result)
+            .map_err(ipc_message_error)?;
+    pipe.write_all(&frame.encode().map_err(ipc_frame_error)?)?;
+    Ok(())
+}
+
+#[cfg(windows)]
 fn request_worker_presentation_keyframe_once(
     pipe: &classmesh_win32::NamedPipeClient,
     process_id: u32,
@@ -1187,6 +1321,9 @@ fn worker_event_from_decoded_frame(
             }
             Ok(IpcMessage::ServicePresentationMulticastStart(start)) => {
                 Ok(WorkerEvent::PresentationMulticastStart(start))
+            }
+            Ok(IpcMessage::ServicePresentationUnicastStart(start)) => {
+                Ok(WorkerEvent::PresentationUnicastStart(start))
             }
             Ok(IpcMessage::ServiceEncoderCacheResult(result)) => {
                 Ok(WorkerEvent::EncoderCacheResult(result))
@@ -1403,6 +1540,59 @@ mod focused_profile_tests {
             panic!("expected presentation multicast start event");
         };
         assert_eq!(received, start);
+    }
+
+    #[test]
+    fn presentation_unicast_start_routes_as_typed_worker_event() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        use classmesh_windows_runtime::ipc::{IpcFrame, ServicePresentationUnicastStart};
+        use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+
+        let start = ServicePresentationUnicastStart {
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 7,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+            port: 49_000,
+            teacher_source: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44)),
+        };
+        let frame =
+            IpcFrame::service_presentation_unicast_start(start).expect("valid unicast start");
+        let event = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
+            .expect("unicast start routes");
+
+        let WorkerEvent::PresentationUnicastStart(received) = event else {
+            panic!("expected presentation unicast start event");
+        };
+        assert_eq!(received, start);
+    }
+
+    #[test]
+    fn service_cannot_send_worker_unicast_result_back_to_worker() {
+        use classmesh_windows_runtime::ipc::{
+            IpcFrame, WorkerPresentationUnicastStartResult, WorkerPresentationUnicastStartStatus,
+        };
+        use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+
+        let result = WorkerPresentationUnicastStartResult {
+            process_id: 42,
+            session_id: 7,
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 7,
+            status: WorkerPresentationUnicastStartStatus::Started,
+        };
+        let frame = IpcFrame::worker_presentation_unicast_start_result(result)
+            .expect("valid unicast result");
+        let error = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
+            .expect_err("Worker-to-Service result must be rejected on Service-to-Worker path");
+        assert!(error.contains("unexpected IPC message after handshake"));
     }
 
     #[test]
