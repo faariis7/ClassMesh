@@ -212,6 +212,25 @@ mod tests {
     }
 
     #[test]
+    fn invalid_presentation_binding_does_not_consume_keyframe_throttle() {
+        let mut recovery =
+            PresentationRecoveryCoordinator::new(7, 250_000).expect("valid recovery coordinator");
+
+        assert_eq!(
+            recovery.observe_and_plan(0, 1_000_000, &keyframe(7, 40)),
+            Err(PresentationRecoveryError::InvalidPresentationId)
+        );
+        assert_eq!(recovery.granted_keyframes(), 0);
+        assert_eq!(recovery.suppressed_keyframes(), 0);
+
+        let granted = recovery
+            .observe_and_plan(55, 1_000_000, &keyframe(7, 40))
+            .expect("valid binding should still receive first grant");
+        assert!(granted.keyframe_request.is_some());
+        assert_eq!(recovery.granted_keyframes(), 1);
+    }
+
+    #[test]
     fn multicast_nack_never_requests_a_group_retransmit_or_implicit_idr() {
         let mut recovery =
             PresentationRecoveryCoordinator::for_stream(7).expect("valid recovery coordinator");
