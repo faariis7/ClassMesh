@@ -29,6 +29,7 @@ use classmesh_control::quic::{
 };
 use classmesh_control::stream::{
     peer_bound_udp_unicast_destination, stream_profile_to_wire, validate_interactive_stream_offer,
+    validate_presentation_stream_offer,
 };
 use classmesh_control::{DEFAULT_OFFLINE_AFTER, HeartbeatSample, HeartbeatTracker};
 use classmesh_core::adaptation::{
@@ -41,12 +42,14 @@ use classmesh_protocol::control_wire::{
     ControlEnvelope, HeartbeatAck, InputEvent, KeyframeRequest,
     MediaTransport as WireMediaTransport, Nack, PresentationState as WirePresentationState,
     PresentationStatus, ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamAnswer,
-    StreamReconfigure, control_envelope,
+    StreamKind as WireStreamKind, StreamReconfigure, control_envelope,
 };
 use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::{AuthorizationStore, Permission, PrincipalId};
-use classmesh_windows_runtime::ipc::{ServiceUdpStreamStart, WorkerPresentationFeedback};
+use classmesh_windows_runtime::ipc::{
+    ServicePresentationMulticastStart, ServiceUdpStreamStart, WorkerPresentationFeedback,
+};
 use classmesh_windows_runtime::ipc_sensitive::{
     PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
 };
@@ -61,6 +64,7 @@ const CONFIG_VERSION: u32 = 1;
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const PRESENTATION_KEY_INSTALL_TIMEOUT: Duration = Duration::from_secs(1);
+const PRESENTATION_MULTICAST_START_TIMEOUT: Duration = Duration::from_secs(1);
 const PRESENTATION_FEEDBACK_BUS_CAPACITY: usize = 64;
 const CONTROL_INBOUND_QUEUE_CAPACITY: usize = 32;
 
@@ -121,9 +125,9 @@ const MEDIA_START_COMMITTED: u8 = 1;
 const MEDIA_START_CANCELLED: u8 = 2;
 
 #[derive(Debug, Clone)]
-pub(crate) struct FocusedMediaStartCommit(Arc<AtomicU8>);
+pub(crate) struct MediaStartCommit(Arc<AtomicU8>);
 
-impl FocusedMediaStartCommit {
+impl MediaStartCommit {
     fn pending() -> Self {
         Self(Arc::new(AtomicU8::new(MEDIA_START_PENDING)))
     }
@@ -159,7 +163,7 @@ impl FocusedMediaStartCommit {
 pub(crate) struct FocusedMediaStart {
     pub(crate) control_session_id: u64,
     pub(crate) start: ServiceUdpStreamStart,
-    pub(crate) commit: FocusedMediaStartCommit,
+    pub(crate) commit: MediaStartCommit,
     pub(crate) reply_tx: oneshot::Sender<Result<(), String>>,
 }
 
@@ -178,10 +182,18 @@ pub(crate) struct PresentationKeyInstallDispatch {
     pub(crate) reply_tx: oneshot::Sender<Result<PresentationKeyInstallBinding, String>>,
 }
 
+#[derive(Debug)]
+pub(crate) struct PresentationMulticastStartDispatch {
+    pub(crate) start: ServicePresentationMulticastStart,
+    pub(crate) commit: MediaStartCommit,
+    pub(crate) reply_tx: oneshot::Sender<Result<(), String>>,
+}
+
 #[derive(Debug, Clone)]
-pub(crate) struct PresentationKeyDispatchChannels {
-    pub(crate) install_tx: mpsc::SyncSender<PresentationKeyInstallDispatch>,
-    pub(crate) clear_tx: mpsc::SyncSender<PresentationKeyInstallBinding>,
+pub(crate) struct PresentationDispatchChannels {
+    pub(crate) key_install_tx: mpsc::SyncSender<PresentationKeyInstallDispatch>,
+    pub(crate) key_clear_tx: mpsc::SyncSender<PresentationKeyInstallBinding>,
+    pub(crate) multicast_start_tx: mpsc::SyncSender<PresentationMulticastStartDispatch>,
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +252,19 @@ impl PresentationKeyWorkerLease {
                 && feedback.presentation_id == binding.presentation_id
                 && feedback.feedback.stream_id() == binding.stream_id
                 && feedback.epoch == binding.epoch
+        })
+    }
+
+    fn matches_installed(
+        &self,
+        control_session_id: u64,
+        installed: InstalledPresentationKeyBinding,
+    ) -> bool {
+        self.binding.is_some_and(|binding| {
+            binding.control_session_id == control_session_id
+                && binding.presentation_id == installed.presentation_id()
+                && binding.stream_id == installed.stream_id()
+                && binding.epoch == installed.epoch()
         })
     }
 }
@@ -509,6 +534,23 @@ impl PresentationDispatchState {
             })
     }
 
+    fn owner_for_stream(
+        &self,
+        principal_id: PrincipalId,
+        control_session_id: u64,
+        stream_id: u64,
+    ) -> Option<classmesh_control::presentation_state::PresentationOwner> {
+        self.ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .owner()
+            .filter(|owner| {
+                owner.principal_id == principal_id
+                    && owner.control_session_id == control_session_id
+                    && owner.stream_id == stream_id
+            })
+    }
+
     fn release_session(&self, principal_id: PrincipalId, control_session_id: u64) -> bool {
         self.ownership
             .lock()
@@ -752,7 +794,7 @@ impl ControlRuntimeConfig {
 struct ControlRuntimeDispatch {
     input: InputDispatchChannels,
     media: FocusedMediaDispatchChannels,
-    presentation_keys: PresentationKeyDispatchChannels,
+    presentation_dispatch: PresentationDispatchChannels,
     presentation_feedback: PresentationFeedbackBus,
     worker_capabilities: Arc<WorkerCapabilityState>,
 }
@@ -770,7 +812,7 @@ impl ControlRuntime {
         config: ControlRuntimeConfig,
         input: InputDispatchChannels,
         media: FocusedMediaDispatchChannels,
-        presentation_keys: PresentationKeyDispatchChannels,
+        presentation_dispatch: PresentationDispatchChannels,
         presentation_feedback: PresentationFeedbackBus,
         worker_capabilities: Arc<WorkerCapabilityState>,
     ) -> Result<Self, String> {
@@ -802,7 +844,7 @@ impl ControlRuntime {
                     ControlRuntimeDispatch {
                         input,
                         media,
-                        presentation_keys,
+                        presentation_dispatch,
                         presentation_feedback,
                         worker_capabilities,
                     },
@@ -870,11 +912,16 @@ async fn run_listener(
     let ControlRuntimeDispatch {
         input,
         media,
-        presentation_keys,
+        presentation_dispatch,
         presentation_feedback,
         worker_capabilities,
     } = dispatch;
     let udp_multicast_available = local_udp_multicast_capability(config.multicast_interface);
+    let multicast_interface = if udp_multicast_available {
+        config.multicast_interface
+    } else {
+        None
+    };
     let endpoint = match build_endpoint(&state, config) {
         Ok(endpoint) => endpoint,
         Err(error) => {
@@ -919,7 +966,7 @@ async fn run_listener(
                 let session_ids = Arc::clone(&session_ids);
                 let input = input.clone();
                 let media = media.clone();
-                let presentation_keys = presentation_keys.clone();
+                let presentation_dispatch = presentation_dispatch.clone();
                 let presentation_feedback = presentation_feedback.clone();
                 let presentation = presentation.clone();
                 let worker_capabilities = Arc::clone(&worker_capabilities);
@@ -976,9 +1023,10 @@ async fn run_listener(
                                     authorization: authorization.as_ref(),
                                     input: &input,
                                     media: &media,
-                                    presentation_keys: &presentation_keys,
+                                    presentation_dispatch: &presentation_dispatch,
                                     presentation_feedback: &presentation_feedback,
                                     presentation: &presentation,
+                                    multicast_interface,
                                 },
                             )
                             .await;
@@ -1012,9 +1060,10 @@ struct EstablishedSessionRuntime<'a> {
     authorization: &'a AuthorizationStore,
     input: &'a InputDispatchState,
     media: &'a FocusedMediaDispatchChannels,
-    presentation_keys: &'a PresentationKeyDispatchChannels,
+    presentation_dispatch: &'a PresentationDispatchChannels,
     presentation_feedback: &'a PresentationFeedbackBus,
     presentation: &'a PresentationDispatchState,
+    multicast_interface: Option<Ipv4Addr>,
 }
 
 #[derive(Debug)]
@@ -1045,9 +1094,10 @@ async fn run_established_session(
         authorization,
         input,
         media,
-        presentation_keys,
+        presentation_dispatch,
         presentation_feedback,
         presentation,
+        multicast_interface,
     } = runtime;
 
     let mut guard = AuthenticatedControlGuard::new(
@@ -1062,7 +1112,8 @@ async fn run_established_session(
     let mut outbound_sequence = HELLO_SEQUENCE;
     let mut focused_adaptation = FocusedAdaptationState::new();
     let mut installed_presentation_key: Option<InstalledPresentationKeyBinding> = None;
-    let mut worker_key_lease = PresentationKeyWorkerLease::new(presentation_keys.clear_tx.clone());
+    let mut worker_key_lease =
+        PresentationKeyWorkerLease::new(presentation_dispatch.key_clear_tx.clone());
     let mut presentation_feedback_rx = presentation_feedback.subscribe();
     let (mut send, mut receive) = channel.into_split();
     let (inbound_tx, mut inbound_rx) =
@@ -1272,12 +1323,15 @@ async fn run_established_session(
                         return;
                     }
                 };
-                if let Err(error) = guard.authorize(
-                    authorization,
-                    &envelope,
-                    Permission::ViewInteractive,
-                    now_unix_ms,
-                ) {
+                let presentation_offer = offer.kind == WireStreamKind::TeacherPresentation as i32;
+                let required_permission = if presentation_offer {
+                    Permission::StartPresentation
+                } else {
+                    Permission::ViewInteractive
+                };
+                if let Err(error) =
+                    guard.authorize(authorization, &envelope, required_permission, now_unix_ms)
+                {
                     eprintln!(
                         "ClassMesh stream offer rejected: {}",
                         command_authorization_diagnostic_code(&error)
@@ -1286,117 +1340,259 @@ async fn run_established_session(
                     return;
                 }
 
-                let answer = match validate_interactive_stream_offer(
-                    offer,
-                    &session.negotiated.capabilities,
-                ) {
-                    Err(error) => StreamAnswer {
-                        stream_id: offer.stream_id,
-                        accepted: false,
-                        rejection_reason: stream_offer_diagnostic_code(&error).to_owned(),
-                        supported_transports: negotiated_interactive_transports(
-                            &session.negotiated.capabilities,
-                        ),
-                    },
-                    Ok(validated) if validated.transport == WireMediaTransport::UdpUnicast => {
-                        if !media.try_acquire_owner(session.control_session_id) {
-                            StreamAnswer {
-                                stream_id: offer.stream_id,
-                                accepted: false,
-                                rejection_reason: "control.media.focused_busy".to_owned(),
-                                supported_transports: negotiated_interactive_transports(
-                                    &session.negotiated.capabilities,
-                                ),
-                            }
-                        } else {
-                            let destination = peer_bound_udp_unicast_destination(
-                                connection.remote_address().ip(),
-                                &validated.transport_parameters,
+                let answer = if presentation_offer {
+                    let supported =
+                        negotiated_presentation_transports(&session.negotiated.capabilities);
+                    match validate_presentation_stream_offer(
+                        offer,
+                        &session.negotiated.capabilities,
+                    ) {
+                        Err(error) => StreamAnswer {
+                            stream_id: offer.stream_id,
+                            accepted: false,
+                            rejection_reason: stream_offer_diagnostic_code(&error).to_owned(),
+                            supported_transports: supported,
+                        },
+                        Ok(validated) => {
+                            let owner = presentation.owner_for_stream(
+                                peer.identity.principal_id(),
+                                session.control_session_id,
+                                validated.stream_id,
                             );
-                            let dispatch_result = match destination {
-                                Ok(destination) => {
+                            let installed = installed_presentation_key.filter(|installed| {
+                                owner.is_some_and(|owner| {
+                                    installed.presentation_id() == owner.presentation_id
+                                        && u64::from(installed.stream_id()) == owner.stream_id
+                                })
+                            });
+                            let worker_ready = installed.is_some_and(|installed| {
+                                worker_key_lease
+                                    .matches_installed(session.control_session_id, installed)
+                            });
+                            let teacher_source = match connection.remote_address().ip() {
+                                std::net::IpAddr::V4(address) => Some(address),
+                                std::net::IpAddr::V6(_) => None,
+                            };
+
+                            let dispatch_result = match (
+                                owner,
+                                installed,
+                                worker_ready,
+                                multicast_interface,
+                                teacher_source,
+                            ) {
+                                (None, _, _, _, _) => {
+                                    Err("control.presentation.stream_not_owner".to_owned())
+                                }
+                                (_, None, _, _, _) | (_, _, false, _, _) => {
+                                    Err("control.presentation.worker_key_not_installed".to_owned())
+                                }
+                                (_, _, _, None, _) => {
+                                    Err("control.presentation.multicast_unavailable".to_owned())
+                                }
+                                (_, _, _, _, None) => {
+                                    Err("control.presentation.multicast_peer_not_ipv4".to_owned())
+                                }
+                                (
+                                    Some(owner),
+                                    Some(_),
+                                    true,
+                                    Some(interface),
+                                    Some(teacher_source),
+                                ) if envelope.request_id != 0 => {
                                     let stream_id = u32::try_from(validated.stream_id)
                                         .expect("validated stream id fits media header");
-                                    let start = ServiceUdpStreamStart {
+                                    let start = ServicePresentationMulticastStart {
+                                        control_session_id: session.control_session_id,
+                                        request_id: envelope.request_id,
+                                        presentation_id: owner.presentation_id,
                                         stream_id,
-                                        destination,
                                         width: validated.profile.width,
                                         height: validated.profile.height,
                                         fps: validated.profile.fps,
                                         bitrate_kbps: validated.profile.bitrate_kbps,
+                                        group: validated.multicast.group,
+                                        port: validated.multicast.port,
+                                        interface,
+                                        teacher_source,
                                     };
                                     let (reply_tx, mut reply_rx) = oneshot::channel();
-                                    let commit = FocusedMediaStartCommit::pending();
-                                    match media.start_tx.try_send(FocusedMediaStart {
-                                        control_session_id: session.control_session_id,
-                                        start,
-                                        commit: commit.clone(),
-                                        reply_tx,
-                                    }) {
+                                    let commit = MediaStartCommit::pending();
+                                    match presentation_dispatch.multicast_start_tx.try_send(
+                                        PresentationMulticastStartDispatch {
+                                            start,
+                                            commit: commit.clone(),
+                                            reply_tx,
+                                        },
+                                    ) {
                                         Ok(()) => match tokio::time::timeout(
-                                            Duration::from_secs(1),
+                                            PRESENTATION_MULTICAST_START_TIMEOUT,
                                             &mut reply_rx,
                                         )
                                         .await
                                         {
                                             Ok(Ok(result)) => result,
                                             Ok(Err(_)) => {
-                                                Err("control.media.start_reply_dropped".to_owned())
+                                                Err("control.presentation.start_reply_dropped"
+                                                    .to_owned())
                                             }
                                             Err(_) if commit.cancel() => {
-                                                Err("control.media.start_timeout".to_owned())
+                                                Err("control.presentation.start_timeout".to_owned())
                                             }
                                             Err(_) if commit.is_committed() => {
                                                 reply_rx.await.unwrap_or_else(|_| {
-                                                    Err("control.media.start_reply_dropped"
+                                                    Err("control.presentation.start_reply_dropped"
                                                         .to_owned())
                                                 })
                                             }
                                             Err(_) => {
-                                                Err("control.media.start_cancelled".to_owned())
+                                                Err("control.presentation.start_cancelled"
+                                                    .to_owned())
                                             }
                                         },
                                         Err(mpsc::TrySendError::Full(_)) => {
-                                            Err("control.media.start_backpressure".to_owned())
+                                            Err("control.presentation.start_backpressure"
+                                                .to_owned())
                                         }
                                         Err(mpsc::TrySendError::Disconnected(_)) => {
-                                            Err("control.media.start_disconnected".to_owned())
+                                            Err("control.presentation.start_disconnected"
+                                                .to_owned())
                                         }
                                     }
                                 }
-                                Err(error) => Err(stream_offer_diagnostic_code(&error).to_owned()),
+                                _ => Err("control.presentation.invalid_request_id".to_owned()),
                             };
+
                             match dispatch_result {
                                 Ok(()) => StreamAnswer {
                                     stream_id: offer.stream_id,
                                     accepted: true,
                                     rejection_reason: String::new(),
+                                    supported_transports: supported,
+                                },
+                                Err(code) => StreamAnswer {
+                                    stream_id: offer.stream_id,
+                                    accepted: false,
+                                    rejection_reason: code,
+                                    supported_transports: supported,
+                                },
+                            }
+                        }
+                    }
+                } else {
+                    match validate_interactive_stream_offer(offer, &session.negotiated.capabilities)
+                    {
+                        Err(error) => StreamAnswer {
+                            stream_id: offer.stream_id,
+                            accepted: false,
+                            rejection_reason: stream_offer_diagnostic_code(&error).to_owned(),
+                            supported_transports: negotiated_interactive_transports(
+                                &session.negotiated.capabilities,
+                            ),
+                        },
+                        Ok(validated) if validated.transport == WireMediaTransport::UdpUnicast => {
+                            if !media.try_acquire_owner(session.control_session_id) {
+                                StreamAnswer {
+                                    stream_id: offer.stream_id,
+                                    accepted: false,
+                                    rejection_reason: "control.media.focused_busy".to_owned(),
                                     supported_transports: negotiated_interactive_transports(
                                         &session.negotiated.capabilities,
                                     ),
-                                },
-                                Err(code) => {
-                                    let _ = media.release_owner(session.control_session_id);
-                                    StreamAnswer {
+                                }
+                            } else {
+                                let destination = peer_bound_udp_unicast_destination(
+                                    connection.remote_address().ip(),
+                                    &validated.transport_parameters,
+                                );
+                                let dispatch_result = match destination {
+                                    Ok(destination) => {
+                                        let stream_id = u32::try_from(validated.stream_id)
+                                            .expect("validated stream id fits media header");
+                                        let start = ServiceUdpStreamStart {
+                                            stream_id,
+                                            destination,
+                                            width: validated.profile.width,
+                                            height: validated.profile.height,
+                                            fps: validated.profile.fps,
+                                            bitrate_kbps: validated.profile.bitrate_kbps,
+                                        };
+                                        let (reply_tx, mut reply_rx) = oneshot::channel();
+                                        let commit = MediaStartCommit::pending();
+                                        match media.start_tx.try_send(FocusedMediaStart {
+                                            control_session_id: session.control_session_id,
+                                            start,
+                                            commit: commit.clone(),
+                                            reply_tx,
+                                        }) {
+                                            Ok(()) => match tokio::time::timeout(
+                                                Duration::from_secs(1),
+                                                &mut reply_rx,
+                                            )
+                                            .await
+                                            {
+                                                Ok(Ok(result)) => result,
+                                                Ok(Err(_)) => {
+                                                    Err("control.media.start_reply_dropped"
+                                                        .to_owned())
+                                                }
+                                                Err(_) if commit.cancel() => {
+                                                    Err("control.media.start_timeout".to_owned())
+                                                }
+                                                Err(_) if commit.is_committed() => {
+                                                    reply_rx.await.unwrap_or_else(|_| {
+                                                        Err("control.media.start_reply_dropped"
+                                                            .to_owned())
+                                                    })
+                                                }
+                                                Err(_) => {
+                                                    Err("control.media.start_cancelled".to_owned())
+                                                }
+                                            },
+                                            Err(mpsc::TrySendError::Full(_)) => {
+                                                Err("control.media.start_backpressure".to_owned())
+                                            }
+                                            Err(mpsc::TrySendError::Disconnected(_)) => {
+                                                Err("control.media.start_disconnected".to_owned())
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        Err(stream_offer_diagnostic_code(&error).to_owned())
+                                    }
+                                };
+                                match dispatch_result {
+                                    Ok(()) => StreamAnswer {
                                         stream_id: offer.stream_id,
-                                        accepted: false,
-                                        rejection_reason: code,
+                                        accepted: true,
+                                        rejection_reason: String::new(),
                                         supported_transports: negotiated_interactive_transports(
                                             &session.negotiated.capabilities,
                                         ),
+                                    },
+                                    Err(code) => {
+                                        let _ = media.release_owner(session.control_session_id);
+                                        StreamAnswer {
+                                            stream_id: offer.stream_id,
+                                            accepted: false,
+                                            rejection_reason: code,
+                                            supported_transports: negotiated_interactive_transports(
+                                                &session.negotiated.capabilities,
+                                            ),
+                                        }
                                     }
                                 }
                             }
                         }
+                        Ok(_) => StreamAnswer {
+                            stream_id: offer.stream_id,
+                            accepted: false,
+                            rejection_reason: "control.stream.runtime_not_ready".to_owned(),
+                            supported_transports: negotiated_interactive_transports(
+                                &session.negotiated.capabilities,
+                            ),
+                        },
                     }
-                    Ok(_) => StreamAnswer {
-                        stream_id: offer.stream_id,
-                        accepted: false,
-                        rejection_reason: "control.stream.runtime_not_ready".to_owned(),
-                        supported_transports: negotiated_interactive_transports(
-                            &session.negotiated.capabilities,
-                        ),
-                    },
                 };
                 let Some(next_sequence) = outbound_sequence.checked_add(1) else {
                     eprintln!("ClassMesh control session closed: control.sequence.exhausted");
@@ -1657,8 +1853,8 @@ async fn run_established_session(
                 };
                 let expected_binding = install.binding();
                 let (reply_tx, mut reply_rx) = oneshot::channel();
-                match presentation_keys
-                    .install_tx
+                match presentation_dispatch
+                    .key_install_tx
                     .try_send(PresentationKeyInstallDispatch { install, reply_tx })
                 {
                     Ok(()) => {}
@@ -2025,6 +2221,17 @@ fn presentation_key_epoch_is_fresh(
     }
 }
 
+fn negotiated_presentation_transports(capabilities: &BTreeSet<Capability>) -> Vec<i32> {
+    if capabilities.contains(&Capability::TeacherPresentation)
+        && capabilities.contains(&Capability::SframeGroupMedia)
+        && capabilities.contains(&Capability::UdpMulticast)
+    {
+        vec![WireMediaTransport::UdpMulticast as i32]
+    } else {
+        Vec::new()
+    }
+}
+
 fn negotiated_interactive_transports(capabilities: &BTreeSet<Capability>) -> Vec<i32> {
     let mut transports = Vec::with_capacity(3);
     if capabilities.contains(&Capability::UdpUnicast) {
@@ -2193,6 +2400,74 @@ mod tests {
         assert!(!group_media_capability_negotiated(&BTreeSet::from([
             Capability::TeacherPresentation,
         ])));
+    }
+
+    #[test]
+    fn presentation_runtime_resolves_only_exact_owner_stream() {
+        let presentation = PresentationDispatchState::default();
+        let owner = PrincipalId([9; 32]);
+        let other = PrincipalId([8; 32]);
+        let _ = presentation.start(owner, 10, 20, 30);
+
+        assert_eq!(
+            presentation
+                .owner_for_stream(owner, 10, 30)
+                .map(|value| value.presentation_id),
+            Some(20)
+        );
+        assert!(presentation.owner_for_stream(owner, 10, 31).is_none());
+        assert!(presentation.owner_for_stream(owner, 11, 30).is_none());
+        assert!(presentation.owner_for_stream(other, 10, 30).is_none());
+    }
+
+    #[test]
+    fn worker_key_lease_matches_only_exact_confirmed_media_binding() {
+        let (clear_tx, _clear_rx) = mpsc::sync_channel(1);
+        let mut lease = PresentationKeyWorkerLease::new(clear_tx);
+        let binding = PresentationKeyInstallBinding {
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 7,
+            epoch: 3,
+        };
+        lease.replace(binding);
+        let installed =
+            InstalledPresentationKeyBinding::new(55, 7, 3).expect("valid installed key");
+
+        assert!(lease.matches_installed(77, installed));
+        assert!(!lease.matches_installed(78, installed));
+        assert!(!lease.matches_installed(
+            77,
+            InstalledPresentationKeyBinding::new(56, 7, 3).expect("valid alternate key"),
+        ));
+        assert!(!lease.matches_installed(
+            77,
+            InstalledPresentationKeyBinding::new(55, 7, 4).expect("valid newer key"),
+        ));
+    }
+
+    #[test]
+    fn presentation_transport_answer_advertises_only_full_multicast_contract() {
+        let full = BTreeSet::from([
+            Capability::TeacherPresentation,
+            Capability::SframeGroupMedia,
+            Capability::UdpMulticast,
+        ]);
+        assert_eq!(
+            negotiated_presentation_transports(&full),
+            vec![WireMediaTransport::UdpMulticast as i32]
+        );
+
+        for missing in [
+            Capability::TeacherPresentation,
+            Capability::SframeGroupMedia,
+            Capability::UdpMulticast,
+        ] {
+            let mut partial = full.clone();
+            partial.remove(&missing);
+            assert!(negotiated_presentation_transports(&partial).is_empty());
+        }
     }
 
     #[test]
@@ -2376,12 +2651,12 @@ mod tests {
 
     #[test]
     fn focused_media_start_commit_is_single_winner() {
-        let cancelled = FocusedMediaStartCommit::pending();
+        let cancelled = MediaStartCommit::pending();
         assert!(cancelled.cancel());
         assert!(!cancelled.try_commit());
         assert!(!cancelled.is_committed());
 
-        let committed = FocusedMediaStartCommit::pending();
+        let committed = MediaStartCommit::pending();
         assert!(committed.try_commit());
         assert!(committed.is_committed());
         assert!(!committed.cancel());

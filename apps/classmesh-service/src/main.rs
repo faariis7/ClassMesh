@@ -25,8 +25,10 @@ mod windows_service_app {
         worker_pipe_name,
     };
     use classmesh_windows_runtime::ipc::{
-        IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage, ServiceUdpStreamStart,
+        IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage,
+        ServicePresentationMulticastStart, ServiceUdpStreamStart,
         WorkerPresentationKeyInstallResult, WorkerPresentationKeyInstallStatus,
+        WorkerPresentationMulticastStartResult, WorkerPresentationMulticastStartStatus,
     };
     use classmesh_windows_runtime::ipc_sensitive::{
         PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
@@ -58,7 +60,9 @@ mod windows_service_app {
     const FOCUSED_MEDIA_FEEDBACK_QUEUE_CAPACITY: usize = 32;
     const PRESENTATION_KEY_INSTALL_QUEUE_CAPACITY: usize = 1;
     const PRESENTATION_KEY_CLEAR_QUEUE_CAPACITY: usize = 1;
+    const PRESENTATION_MULTICAST_START_QUEUE_CAPACITY: usize = 1;
     const WORKER_PRESENTATION_KEY_RESULT_QUEUE_CAPACITY: usize = 4;
+    const WORKER_PRESENTATION_MULTICAST_RESULT_QUEUE_CAPACITY: usize = 4;
     const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
     const MEDIA_RECONFIGURE_RETRY: Duration = Duration::from_millis(250);
     const MAX_MEDIA_RECONFIGURE_ATTEMPTS: u8 = 4;
@@ -66,8 +70,8 @@ mod windows_service_app {
     use crate::control_runtime::{
         ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, FocusedMediaDispatchChannels,
         FocusedMediaFeedback, FocusedMediaReconfigure, FocusedMediaStart, InputAvailability,
-        InputDispatchChannels, PresentationFeedbackBus, PresentationKeyDispatchChannels,
-        PresentationKeyInstallDispatch, WorkerCapabilityState,
+        InputDispatchChannels, PresentationDispatchChannels, PresentationFeedbackBus,
+        PresentationKeyInstallDispatch, PresentationMulticastStartDispatch, WorkerCapabilityState,
     };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -107,6 +111,31 @@ mod windows_service_app {
     }
 
     #[derive(Debug)]
+    struct PendingPresentationMulticastStart {
+        expected_process_id: u32,
+        expected_session_id: u32,
+        start: ServicePresentationMulticastStart,
+        reply_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+    }
+
+    impl PendingPresentationMulticastStart {
+        fn matches(&self, result: &WorkerPresentationMulticastStartResult) -> bool {
+            result.process_id == self.expected_process_id
+                && result.session_id == self.expected_session_id
+                && result.control_session_id == self.start.control_session_id
+                && result.request_id == self.start.request_id
+                && result.presentation_id == self.start.presentation_id
+                && result.stream_id == self.start.stream_id
+        }
+
+        fn matches_key_binding(&self, binding: PresentationKeyInstallBinding) -> bool {
+            binding.control_session_id == self.start.control_session_id
+                && binding.presentation_id == self.start.presentation_id
+                && binding.stream_id == self.start.stream_id
+        }
+    }
+
+    #[derive(Debug)]
     struct WorkerManager {
         executable: Option<PathBuf>,
         process: Option<SessionProcess>,
@@ -114,6 +143,7 @@ mod windows_service_app {
         capabilities: Arc<WorkerCapabilityState>,
         encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
         presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
+        presentation_multicast_result_tx: mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
         presentation_feedback: PresentationFeedbackBus,
         watchdog: WorkerWatchdog,
         pending_restart: Option<(SessionId, Instant)>,
@@ -126,6 +156,9 @@ mod windows_service_app {
             capabilities: Arc<WorkerCapabilityState>,
             encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
             presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
+            presentation_multicast_result_tx: mpsc::SyncSender<
+                WorkerPresentationMulticastStartResult,
+            >,
             presentation_feedback: PresentationFeedbackBus,
         ) -> Self {
             let executable = std::env::current_exe().ok().map(|service| {
@@ -141,6 +174,7 @@ mod windows_service_app {
                 capabilities,
                 encoder_capability_cache,
                 presentation_key_result_tx,
+                presentation_multicast_result_tx,
                 presentation_feedback,
                 watchdog: WorkerWatchdog::new(WorkerRestartPolicy::default()),
                 pending_restart: None,
@@ -221,6 +255,9 @@ mod windows_service_app {
                                     ),
                                     presentation_key_result_tx: self
                                         .presentation_key_result_tx
+                                        .clone(),
+                                    presentation_multicast_result_tx: self
+                                        .presentation_multicast_result_tx
                                         .clone(),
                                     presentation_feedback: self.presentation_feedback.clone(),
                                 },
@@ -437,6 +474,28 @@ mod windows_service_app {
             .map_err(|error| format!("Worker key-clear IPC write failed: {error}"))
         }
 
+        fn send_presentation_multicast_start(
+            &self,
+            start: ServicePresentationMulticastStart,
+        ) -> Result<(u32, u32), String> {
+            let process = self
+                .process
+                .as_ref()
+                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
+            if !process.is_running().map_err(|error| {
+                format!("Worker presentation multicast liveness probe failed: {error}")
+            })? {
+                return Err(
+                    "interactive Worker exited before presentation multicast start".to_owned(),
+                );
+            }
+            let pipe = self.pipe.as_ref().ok_or_else(|| {
+                "Worker IPC pipe is unavailable for presentation multicast start".to_owned()
+            })?;
+            send_presentation_multicast_start(pipe, start)?;
+            Ok((process.process_id(), process.session_id()))
+        }
+
         fn clear_focused_profile(&self) -> Result<(), String> {
             let process = self
                 .process
@@ -606,6 +665,7 @@ mod windows_service_app {
         capabilities: Arc<WorkerCapabilityState>,
         encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
         presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
+        presentation_multicast_result_tx: mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
         presentation_feedback: PresentationFeedbackBus,
     }
 
@@ -625,6 +685,7 @@ mod windows_service_app {
             capabilities,
             encoder_capability_cache,
             presentation_key_result_tx,
+            presentation_multicast_result_tx,
             presentation_feedback,
         } = runtime;
         let WorkerCapabilityReaderIdentity {
@@ -927,6 +988,40 @@ mod windows_service_app {
                             );
                             return;
                         }
+                        Ok(IpcMessage::WorkerPresentationMulticastStartResult(result))
+                            if result.process_id == expected_process_id
+                                && result.session_id == expected_session_id =>
+                        {
+                            if !capabilities.is_current(
+                                generation,
+                                result.process_id,
+                                result.session_id,
+                            ) {
+                                eprintln!(
+                                    "Stale Worker presentation-multicast result ignored for pid {} session {}",
+                                    result.process_id, result.session_id
+                                );
+                                return;
+                            }
+                            if presentation_multicast_result_tx.send(result).is_err() {
+                                return;
+                            }
+                        }
+                        Ok(IpcMessage::WorkerPresentationMulticastStartResult(result)) => {
+                            let _ = capabilities.clear_report_if_current(
+                                generation,
+                                expected_process_id,
+                                expected_session_id,
+                            );
+                            eprintln!(
+                                "Worker presentation-multicast result identity mismatch: expected pid {} session {}, received pid {} session {}",
+                                expected_process_id,
+                                expected_session_id,
+                                result.process_id,
+                                result.session_id
+                            );
+                            return;
+                        }
                         Ok(IpcMessage::WorkerPresentationFeedback(report))
                             if report.process_id == expected_process_id
                                 && report.session_id == expected_session_id =>
@@ -1060,6 +1155,22 @@ mod windows_service_app {
             .map_err(|error| format!("failed to encode Worker UDP media frame: {error:?}"))?;
         pipe.write_all(&bytes)
             .map_err(|error| format!("Worker UDP media IPC write failed: {error}"))
+    }
+
+    fn send_presentation_multicast_start(
+        pipe: &NamedPipeServer,
+        start: ServicePresentationMulticastStart,
+    ) -> Result<(), String> {
+        let bytes = IpcFrame::service_presentation_multicast_start(start)
+            .map_err(|error| {
+                format!("failed to build Worker presentation multicast frame: {error:?}")
+            })?
+            .encode()
+            .map_err(|error| {
+                format!("failed to encode Worker presentation multicast frame: {error:?}")
+            })?;
+        pipe.write_all(&bytes)
+            .map_err(|error| format!("Worker presentation multicast IPC write failed: {error}"))
     }
 
     fn send_media_feedback(
@@ -1303,13 +1414,22 @@ mod windows_service_app {
             mpsc::sync_channel::<PresentationKeyInstallBinding>(
                 PRESENTATION_KEY_CLEAR_QUEUE_CAPACITY,
             );
-        let presentation_key_channels = PresentationKeyDispatchChannels {
-            install_tx: presentation_key_install_tx,
-            clear_tx: presentation_key_clear_tx,
+        let (presentation_multicast_start_tx, presentation_multicast_start_rx) =
+            mpsc::sync_channel::<PresentationMulticastStartDispatch>(
+                PRESENTATION_MULTICAST_START_QUEUE_CAPACITY,
+            );
+        let presentation_channels = PresentationDispatchChannels {
+            key_install_tx: presentation_key_install_tx,
+            key_clear_tx: presentation_key_clear_tx,
+            multicast_start_tx: presentation_multicast_start_tx,
         };
         let (worker_presentation_key_result_tx, worker_presentation_key_result_rx) =
             mpsc::sync_channel::<WorkerPresentationKeyInstallResult>(
                 WORKER_PRESENTATION_KEY_RESULT_QUEUE_CAPACITY,
+            );
+        let (worker_presentation_multicast_result_tx, worker_presentation_multicast_result_rx) =
+            mpsc::sync_channel::<WorkerPresentationMulticastStartResult>(
+                WORKER_PRESENTATION_MULTICAST_RESULT_QUEUE_CAPACITY,
             );
         let released_media_session_floor = Arc::new(AtomicU64::new(0));
         let media_owner = Arc::new(AtomicU64::new(0));
@@ -1340,7 +1460,7 @@ mod windows_service_app {
             control_config,
             input_channels,
             media_channels,
-            presentation_key_channels,
+            presentation_channels,
             presentation_feedback.clone(),
             Arc::clone(&worker_capabilities),
         ) {
@@ -1362,6 +1482,7 @@ mod windows_service_app {
             Arc::clone(&worker_capabilities),
             Arc::clone(&encoder_capability_cache),
             worker_presentation_key_result_tx,
+            worker_presentation_multicast_result_tx,
             presentation_feedback,
         );
         let mut desired_focused_start: Option<ServiceUdpStreamStart> = None;
@@ -1378,8 +1499,19 @@ mod windows_service_app {
         let mut next_media_reconfigure_attempt = Instant::now();
         let mut next_worker_poll = Instant::now();
         let mut pending_presentation_key_install: Option<PendingPresentationKeyInstall> = None;
+        let mut pending_presentation_multicast_start: Option<PendingPresentationMulticastStart> =
+            None;
         loop {
             while let Ok(binding) = presentation_key_clear_rx.try_recv() {
+                if pending_presentation_multicast_start
+                    .as_ref()
+                    .is_some_and(|pending| pending.matches_key_binding(binding))
+                    && let Some(pending) = pending_presentation_multicast_start.take()
+                {
+                    let _ = pending
+                        .reply_tx
+                        .send(Err("control.presentation.key_cleared".to_owned()));
+                }
                 if let Err(error) = workers.clear_presentation_key(binding) {
                     eprintln!("ClassMesh Service presentation-key lifecycle clear failed: {error}");
                 }
@@ -1455,6 +1587,100 @@ mod windows_service_app {
                     }
                     Err(error) => {
                         eprintln!("ClassMesh Service presentation-key dispatch failed: {error}");
+                        let _ = dispatch
+                            .reply_tx
+                            .send(Err("control.presentation.worker_unavailable".to_owned()));
+                    }
+                }
+            }
+
+            if pending_presentation_multicast_start
+                .as_ref()
+                .is_some_and(|pending| pending.reply_tx.is_closed())
+            {
+                pending_presentation_multicast_start = None;
+            }
+
+            if pending_presentation_multicast_start
+                .as_ref()
+                .is_some_and(|pending| {
+                    !workers
+                        .is_running_worker(pending.expected_process_id, pending.expected_session_id)
+                })
+                && let Some(pending) = pending_presentation_multicast_start.take()
+            {
+                let _ = pending
+                    .reply_tx
+                    .send(Err("control.presentation.worker_exited".to_owned()));
+            }
+
+            while let Ok(result) = worker_presentation_multicast_result_rx.try_recv() {
+                let Some(pending) = pending_presentation_multicast_start.as_ref() else {
+                    eprintln!(
+                        "ClassMesh Service ignored stale Worker presentation-multicast result without a pending start"
+                    );
+                    continue;
+                };
+                if !pending.matches(&result) {
+                    eprintln!(
+                        "ClassMesh Service ignored miscorrelated Worker presentation-multicast result"
+                    );
+                    continue;
+                }
+                if !workers
+                    .is_running_worker(pending.expected_process_id, pending.expected_session_id)
+                {
+                    let pending = pending_presentation_multicast_start
+                        .take()
+                        .expect("pending multicast start presence checked");
+                    let _ = pending
+                        .reply_tx
+                        .send(Err("control.presentation.worker_exited".to_owned()));
+                    continue;
+                }
+
+                let pending = pending_presentation_multicast_start
+                    .take()
+                    .expect("pending multicast start presence checked");
+                match result.status {
+                    WorkerPresentationMulticastStartStatus::Started => {
+                        let _ = pending.reply_tx.send(Ok(()));
+                    }
+                    WorkerPresentationMulticastStartStatus::Rejected => {
+                        let _ = pending
+                            .reply_tx
+                            .send(Err("control.presentation.worker_rejected".to_owned()));
+                    }
+                }
+            }
+
+            while let Ok(dispatch) = presentation_multicast_start_rx.try_recv() {
+                if pending_presentation_multicast_start.is_some() {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(Err("control.presentation.worker_busy".to_owned()));
+                    continue;
+                }
+                if !dispatch.commit.try_commit() {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(Err("control.presentation.start_cancelled".to_owned()));
+                    continue;
+                }
+                match workers.send_presentation_multicast_start(dispatch.start) {
+                    Ok((process_id, session_id)) => {
+                        pending_presentation_multicast_start =
+                            Some(PendingPresentationMulticastStart {
+                                expected_process_id: process_id,
+                                expected_session_id: session_id,
+                                start: dispatch.start,
+                                reply_tx: dispatch.reply_tx,
+                            });
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "ClassMesh Service presentation-multicast dispatch failed: {error}"
+                        );
                         let _ = dispatch
                             .reply_tx
                             .send(Err("control.presentation.worker_unavailable".to_owned()));
@@ -1714,12 +1940,17 @@ mod windows_service_app {
 
             if Instant::now() >= next_worker_poll {
                 let event = workers.poll();
-                if !matches!(event, WorkerManagerEvent::None)
-                    && let Some(pending) = pending_presentation_key_install.take()
-                {
-                    let _ = pending
-                        .reply_tx
-                        .send(Err("control.presentation.worker_restarted".to_owned()));
+                if !matches!(event, WorkerManagerEvent::None) {
+                    if let Some(pending) = pending_presentation_key_install.take() {
+                        let _ = pending
+                            .reply_tx
+                            .send(Err("control.presentation.worker_restarted".to_owned()));
+                    }
+                    if let Some(pending) = pending_presentation_multicast_start.take() {
+                        let _ = pending
+                            .reply_tx
+                            .send(Err("control.presentation.worker_restarted".to_owned()));
+                    }
                 }
                 if matches!(event, WorkerManagerEvent::Running(_)) {
                     focused_reconfigure_worker_pid = None;
@@ -1954,6 +2185,101 @@ mod windows_service_app {
             wrong = exact;
             wrong.epoch = 4;
             assert!(!pending.matches(&wrong));
+        }
+
+        fn multicast_start() -> ServicePresentationMulticastStart {
+            ServicePresentationMulticastStart {
+                control_session_id: 77,
+                request_id: 88,
+                presentation_id: 55,
+                stream_id: 7,
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                bitrate_kbps: 5_000,
+                group: std::net::Ipv4Addr::new(239, 10, 20, 30),
+                port: 50_000,
+                interface: std::net::Ipv4Addr::new(192, 0, 2, 10),
+                teacher_source: std::net::Ipv4Addr::new(192, 0, 2, 44),
+            }
+        }
+
+        #[test]
+        fn worker_multicast_result_requires_exact_process_session_and_start_binding() {
+            let start = multicast_start();
+            let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+            let pending = PendingPresentationMulticastStart {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                start,
+                reply_tx,
+            };
+            let exact = WorkerPresentationMulticastStartResult {
+                process_id: 42,
+                session_id: 7,
+                control_session_id: start.control_session_id,
+                request_id: start.request_id,
+                presentation_id: start.presentation_id,
+                stream_id: start.stream_id,
+                status: WorkerPresentationMulticastStartStatus::Started,
+            };
+            assert!(pending.matches(&exact));
+
+            let mut wrong = exact;
+            wrong.process_id = 43;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.session_id = 8;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.control_session_id = 78;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.request_id = 89;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.presentation_id = 56;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.stream_id = 8;
+            assert!(!pending.matches(&wrong));
+        }
+
+        #[test]
+        fn pending_multicast_start_is_invalidated_by_exact_key_lifecycle_binding() {
+            let start = multicast_start();
+            let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+            let pending = PendingPresentationMulticastStart {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                start,
+                reply_tx,
+            };
+            let exact_media_binding = PresentationKeyInstallBinding {
+                control_session_id: start.control_session_id,
+                request_id: 999,
+                presentation_id: start.presentation_id,
+                stream_id: start.stream_id,
+                epoch: 77,
+            };
+            assert!(pending.matches_key_binding(exact_media_binding));
+
+            for wrong in [
+                PresentationKeyInstallBinding {
+                    control_session_id: start.control_session_id + 1,
+                    ..exact_media_binding
+                },
+                PresentationKeyInstallBinding {
+                    presentation_id: start.presentation_id + 1,
+                    ..exact_media_binding
+                },
+                PresentationKeyInstallBinding {
+                    stream_id: start.stream_id + 1,
+                    ..exact_media_binding
+                },
+            ] {
+                assert!(!pending.matches_key_binding(wrong));
+            }
         }
 
         #[test]
