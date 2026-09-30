@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 
 use classmesh_protocol::PROTOCOL_VERSION;
@@ -7,12 +8,37 @@ use classmesh_protocol::media::{MAX_PACKET_PAYLOAD, MediaFlags};
 use classmesh_security::group_media::MAX_GROUP_MEDIA_SEALED_BYTES;
 
 use crate::receiver::{ReceiverEvent, ReceiverPolicy, ReceiverWindow};
+use crate::udp::DatagramError;
 use crate::{AssembleError, AssembledFrame, MediaPacket};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProtectedMediaReceiveCoreError {
     InvalidStreamId,
     ProtocolVersionOutOfRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DatagramFailureDisposition {
+    Tick,
+    DropMalformed,
+    Fail,
+}
+
+pub(crate) fn classify_datagram_failure(error: &DatagramError) -> DatagramFailureDisposition {
+    match error {
+        DatagramError::Io(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            DatagramFailureDisposition::Tick
+        }
+        DatagramError::Header(_)
+        | DatagramError::PayloadLengthMismatch
+        | DatagramError::DatagramTooLarge => DatagramFailureDisposition::DropMalformed,
+        DatagramError::Io(_) => DatagramFailureDisposition::Fail,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
