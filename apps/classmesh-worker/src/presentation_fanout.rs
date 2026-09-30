@@ -131,6 +131,14 @@ impl PresentationFanoutRuntime {
         self.distributor.pop_latest(id)
     }
 
+    pub(crate) const fn distributor(&self) -> &FrameDistributor {
+        &self.distributor
+    }
+
+    pub(crate) fn distributor_mut(&mut self) -> &mut FrameDistributor {
+        &mut self.distributor
+    }
+
     /// Encodes one captured frame and publishes every completed encoder output exactly once.
     ///
     /// A single capture submission may make multiple delayed encoder outputs ready; all of them are
