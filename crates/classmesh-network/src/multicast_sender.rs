@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io::ErrorKind;
 use std::net::{SocketAddr, SocketAddrV4};
 use std::time::Duration;
 
@@ -180,6 +181,19 @@ impl From<DatagramError> for ProtectedMulticastSendError {
     fn from(value: DatagramError) -> Self {
         Self::Datagram(value)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtectedMulticastBackpressureDrop {
+    pub frame_id: u64,
+    pub packets_sent: usize,
+    pub packets_total: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectedMulticastTrySendOutcome {
+    Sent(SendFrameReport),
+    DroppedBackpressure(ProtectedMulticastBackpressureDrop),
 }
 
 impl From<GroupMediaError> for ProtectedMulticastSendError {
@@ -388,8 +402,30 @@ impl ProtectedMulticastFrameSender {
     pub fn bind(
         config: ProtectedMulticastSenderConfig,
     ) -> Result<Self, ProtectedMulticastSendError> {
+        Self::bind_with_mode(config, false)
+    }
+
+    /// Binds a fail-fast multicast sender for the live Teacher presentation hot path.
+    ///
+    /// The socket never waits for kernel send-buffer space. Callers must use `try_send_*()`; a
+    /// `WouldBlock` is returned as a media-local backpressure drop rather than an error that can
+    /// stall or tear down the control session.
+    pub fn bind_nonblocking(
+        config: ProtectedMulticastSenderConfig,
+    ) -> Result<Self, ProtectedMulticastSendError> {
+        Self::bind_with_mode(config, true)
+    }
+
+    fn bind_with_mode(
+        config: ProtectedMulticastSenderConfig,
+        nonblocking: bool,
+    ) -> Result<Self, ProtectedMulticastSendError> {
         let socket = UdpMediaSocket::bind(config.local_bind())?;
-        socket.set_write_timeout(Some(DEFAULT_MULTICAST_WRITE_TIMEOUT))?;
+        if nonblocking {
+            socket.set_nonblocking(true)?;
+        } else {
+            socket.set_write_timeout(Some(DEFAULT_MULTICAST_WRITE_TIMEOUT))?;
+        }
         socket.set_multicast_interface_v4(config.membership().interface())?;
         socket.set_multicast_ttl_v4(MULTICAST_MEDIA_TTL)?;
 
@@ -409,6 +445,19 @@ impl ProtectedMulticastFrameSender {
         let sealed =
             protect_shared_h264_frame(self.packetizer.config, coordinator, authorization, frame)?;
         self.send_frame(&sealed)
+    }
+
+    /// Seals once against the live coordinator/authorization state, then performs a nonblocking
+    /// multicast send. A backpressure drop consumes the SFrame sender counter and is never retried.
+    pub fn try_send_shared_h264_frame(
+        &mut self,
+        coordinator: &mut GroupMediaCoordinator,
+        authorization: &AuthorizationStore,
+        frame: &SharedEncodedFrame,
+    ) -> Result<ProtectedMulticastTrySendOutcome, ProtectedMulticastSendError> {
+        let sealed =
+            protect_shared_h264_frame(self.packetizer.config, coordinator, authorization, frame)?;
+        self.try_send_frame(&sealed)
     }
 
     pub fn send_frame(
@@ -435,6 +484,22 @@ impl ProtectedMulticastFrameSender {
         })
     }
 
+    /// Sends an already-sealed frame without waiting for UDP send-buffer capacity.
+    ///
+    /// If the socket reports `WouldBlock` after zero or more complete datagrams, the remainder of
+    /// that frame is abandoned. Sequence numbers stay consumed and the frame is never retried, so
+    /// receivers can recover through the existing bounded loss/keyframe path without nonce/counter
+    /// reuse.
+    pub fn try_send_frame(
+        &mut self,
+        frame: &SealedGroupMediaFrame,
+    ) -> Result<ProtectedMulticastTrySendOutcome, ProtectedMulticastSendError> {
+        let prepared = self.packetizer.packetize(frame)?;
+        try_send_prepared_frame(frame, &prepared, |packet| {
+            self.socket.send_packet_to(packet, self.destination)
+        })
+    }
+
     pub fn local_addr(&self) -> Result<SocketAddr, ProtectedMulticastSendError> {
         self.socket.local_addr().map_err(Into::into)
     }
@@ -443,6 +508,46 @@ impl ProtectedMulticastFrameSender {
     pub const fn destination(&self) -> SocketAddr {
         self.destination
     }
+}
+
+fn try_send_prepared_frame<F>(
+    frame: &SealedGroupMediaFrame,
+    prepared: &PreparedMulticastFrame,
+    mut send_packet: F,
+) -> Result<ProtectedMulticastTrySendOutcome, ProtectedMulticastSendError>
+where
+    F: FnMut(&MediaPacket) -> Result<usize, DatagramError>,
+{
+    let binding = frame.binding();
+    let mut packets_sent = 0_usize;
+
+    for packet in &prepared.packets {
+        let expected = MEDIA_HEADER_LEN + packet.payload.len();
+        match send_packet(packet) {
+            Ok(written) if written == expected => {
+                packets_sent = packets_sent.saturating_add(1);
+            }
+            Ok(_) => return Err(ProtectedMulticastSendError::ShortDatagramWrite),
+            Err(DatagramError::Io(error)) if error.kind() == ErrorKind::WouldBlock => {
+                return Ok(ProtectedMulticastTrySendOutcome::DroppedBackpressure(
+                    ProtectedMulticastBackpressureDrop {
+                        frame_id: binding.frame_id(),
+                        packets_sent,
+                        packets_total: prepared.packets.len(),
+                    },
+                ));
+            }
+            Err(error) => return Err(ProtectedMulticastSendError::Datagram(error)),
+        }
+    }
+
+    Ok(ProtectedMulticastTrySendOutcome::Sent(SendFrameReport {
+        frame_id: binding.frame_id(),
+        packets: prepared.packets.len(),
+        payload_bytes: frame.len(),
+        first_sequence: prepared.first_sequence,
+        next_sequence: prepared.next_sequence,
+    }))
 }
 
 #[cfg(test)]
@@ -733,6 +838,89 @@ mod tests {
                 GroupMediaCoordinatorError::Crypto(GroupMediaError::BindingEpochMismatch)
             ))
         ));
+    }
+
+    #[test]
+    fn nonblocking_send_reports_partial_frame_backpressure_without_retry() {
+        use std::io;
+
+        let active_epoch = epoch(9);
+        let sealed = sealed_frame(
+            700,
+            800,
+            active_epoch,
+            91,
+            123_456,
+            false,
+            MAX_PACKET_PAYLOAD.saturating_mul(3),
+        );
+        let mut packetizer = ProtectedMulticastPacketizer::new(config(active_epoch));
+        let prepared = packetizer.packetize(&sealed).expect("frame packetizes");
+        assert!(prepared.packets.len() >= 3);
+
+        let mut calls = 0_usize;
+        let outcome = try_send_prepared_frame(&sealed, &prepared, |packet| {
+            calls = calls.saturating_add(1);
+            if calls == 2 {
+                return Err(DatagramError::Io(io::Error::from(ErrorKind::WouldBlock)));
+            }
+            Ok(MEDIA_HEADER_LEN + packet.payload.len())
+        })
+        .expect("WouldBlock is media-local backpressure");
+
+        assert_eq!(
+            outcome,
+            ProtectedMulticastTrySendOutcome::DroppedBackpressure(
+                ProtectedMulticastBackpressureDrop {
+                    frame_id: 91,
+                    packets_sent: 1,
+                    packets_total: prepared.packets.len(),
+                }
+            )
+        );
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn nonblocking_send_preserves_non_backpressure_udp_errors() {
+        use std::io;
+
+        let active_epoch = epoch(10);
+        let sealed = sealed_frame(700, 800, active_epoch, 92, 123_456, true, 128);
+        let mut packetizer = ProtectedMulticastPacketizer::new(config(active_epoch));
+        let prepared = packetizer.packetize(&sealed).expect("frame packetizes");
+
+        let result = try_send_prepared_frame(&sealed, &prepared, |_| {
+            Err(DatagramError::Io(io::Error::from(
+                ErrorKind::NetworkUnreachable,
+            )))
+        });
+
+        assert!(matches!(
+            result,
+            Err(ProtectedMulticastSendError::Datagram(DatagramError::Io(error)))
+                if error.kind() == ErrorKind::NetworkUnreachable
+        ));
+    }
+
+    #[test]
+    fn nonblocking_send_returns_normal_report_when_all_datagrams_fit() {
+        let active_epoch = epoch(11);
+        let sealed = sealed_frame(700, 800, active_epoch, 93, 123_456, true, 128);
+        let mut packetizer = ProtectedMulticastPacketizer::new(config(active_epoch));
+        let prepared = packetizer.packetize(&sealed).expect("frame packetizes");
+
+        let outcome = try_send_prepared_frame(&sealed, &prepared, |packet| {
+            Ok(MEDIA_HEADER_LEN + packet.payload.len())
+        })
+        .expect("frame sends");
+
+        let ProtectedMulticastTrySendOutcome::Sent(report) = outcome else {
+            panic!("successful datagrams must produce a send report");
+        };
+        assert_eq!(report.frame_id, 93);
+        assert_eq!(report.packets, prepared.packets.len());
+        assert_eq!(report.payload_bytes, sealed.len());
     }
 
     #[test]
