@@ -5,7 +5,7 @@ use classmesh_network::AssembledFrame;
 use classmesh_network::multicast_receiver::ReceivedGroupMediaCiphertext;
 use classmesh_security::group_media::{
     GroupMediaEpoch, GroupMediaError, GroupMediaFrameBinding, GroupMediaKeyMaterial,
-    GroupMediaReceiver, GroupMediaReplayError,
+    GroupMediaReceiver,
 };
 use classmesh_windows_runtime::ipc::ServicePresentationKeyClear;
 use classmesh_windows_runtime::ipc_sensitive::{
@@ -19,18 +19,6 @@ pub enum WorkerGroupMediaKeyError {
     NoInstalledKey,
     StreamMismatch { expected: u32, received: u32 },
     Security(GroupMediaError),
-}
-
-impl WorkerGroupMediaKeyError {
-    #[must_use]
-    pub const fn disrupts_decode_continuity(&self) -> bool {
-        !matches!(
-            self,
-            Self::Security(GroupMediaError::Replay(
-                GroupMediaReplayError::Duplicate | GroupMediaReplayError::TooOld
-            ))
-        )
-    }
 }
 
 impl Display for WorkerGroupMediaKeyError {
@@ -370,28 +358,6 @@ mod tests {
         assert_eq!(access_unit.timestamp_us, 123_460);
         assert!(access_unit.keyframe);
         assert_eq!(access_unit.data, b"authenticated-h264-access-unit");
-    }
-
-    #[test]
-    fn replay_only_open_failures_do_not_disrupt_decode_continuity() {
-        let mut state = WorkerGroupMediaKeyState::default();
-        state
-            .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x47))
-            .expect("install");
-        let sealed = sealed(3, 0x47, 96, 123_461, false, b"frame");
-
-        state
-            .open_access_unit(received(&sealed))
-            .expect("first frame opens");
-        let duplicate = state
-            .open_access_unit(received(&sealed))
-            .expect_err("duplicate must be rejected");
-        assert!(!duplicate.disrupts_decode_continuity());
-
-        let wrong_stream = state
-            .open_access_unit(received_with_transport_stream(&sealed, STREAM_ID + 1))
-            .expect_err("wrong transport stream must be rejected");
-        assert!(wrong_stream.disrupts_decode_continuity());
     }
 
     #[test]
