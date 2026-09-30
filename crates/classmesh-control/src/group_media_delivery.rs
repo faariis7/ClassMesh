@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::net::SocketAddr;
+
+use classmesh_core::adaptation::{StreamProfile, StreamProfileError};
 
 use classmesh_protocol::ProtocolVersion;
 use classmesh_protocol::control_wire::ControlEnvelope;
 use classmesh_security::group_media::GroupMediaEpoch;
 use classmesh_security::group_media_coordinator::{
-    GroupMediaCoordinator, MAX_GROUP_MEDIA_RECEIVERS,
+    GroupMediaCoordinator, GroupMediaReceiverInstallState, MAX_GROUP_MEDIA_RECEIVERS,
 };
 use classmesh_security::{AuthorizationStore, PrincipalId};
 
@@ -20,6 +23,7 @@ use crate::presentation_fallback::{
     PresentationFallbackChange, PresentationFallbackCoordinator, PresentationFallbackError,
 };
 use crate::quic::ControlTransportError;
+use crate::stream::ValidatedPresentationUnicastFallbackOffer;
 
 #[derive(Debug)]
 pub enum TeacherGroupMediaDeliveryError {
@@ -30,6 +34,7 @@ pub enum TeacherGroupMediaDeliveryError {
     SessionBindingMismatch,
     PendingAckExists,
     MissingPendingAck,
+    SenderTarget(PresentationSenderTargetError),
     Fallback(PresentationFallbackError),
     Binding(GroupMediaSessionError),
     Ack(PresentationKeyAckError),
@@ -59,6 +64,9 @@ impl Display for TeacherGroupMediaDeliveryError {
             }
             Self::MissingPendingAck => {
                 formatter.write_str("Teacher group-media receiver has no pending key ACK")
+            }
+            Self::SenderTarget(error) => {
+                write!(formatter, "Teacher presentation sender target: {error:?}")
             }
             Self::Fallback(error) => {
                 write!(formatter, "Teacher presentation fallback: {error:?}")
@@ -103,6 +111,40 @@ impl From<PresentationFallbackError> for TeacherGroupMediaDeliveryError {
     fn from(value: PresentationFallbackError) -> Self {
         Self::Fallback(value)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationSenderTargetError {
+    InvalidPresentationId,
+    InvalidProfile(StreamProfileError),
+    StreamMismatch { expected: u32, received: u64 },
+    ProfileMismatch,
+    InvalidPort,
+    FallbackNotEnabled,
+    EpochNotActive,
+    ReceiverEpochNotInstalled,
+}
+
+impl From<StreamProfileError> for PresentationSenderTargetError {
+    fn from(value: StreamProfileError) -> Self {
+        Self::InvalidProfile(value)
+    }
+}
+
+impl From<PresentationSenderTargetError> for TeacherGroupMediaDeliveryError {
+    fn from(value: PresentationSenderTargetError) -> Self {
+        Self::SenderTarget(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationUnicastSenderTarget {
+    pub receiver: PrincipalId,
+    pub destination: SocketAddr,
+    pub presentation_id: u64,
+    pub stream_id: u32,
+    pub profile: StreamProfile,
+    pub epoch: GroupMediaEpoch,
 }
 
 pub struct PresentationKeyAckRequest<'a> {
@@ -337,6 +379,66 @@ impl TeacherGroupMediaDeliveryManager {
     ) -> bool {
         fallback.restore_multicast(receiver);
         self.remove_receiver(receiver)
+    }
+
+    pub fn build_unicast_sender_target(
+        &self,
+        fallback: &PresentationFallbackCoordinator,
+        coordinator: &GroupMediaCoordinator,
+        receiver: PrincipalId,
+        session: &ClientControlSession,
+        authorization: &AuthorizationStore,
+        now_unix_ms: u64,
+        presentation_id: u64,
+        profile: StreamProfile,
+        epoch: GroupMediaEpoch,
+        offer: &ValidatedPresentationUnicastFallbackOffer,
+    ) -> Result<PresentationUnicastSenderTarget, TeacherGroupMediaDeliveryError> {
+        if presentation_id == 0 {
+            return Err(PresentationSenderTargetError::InvalidPresentationId.into());
+        }
+        let profile = profile.validate().map_err(PresentationSenderTargetError::from)?;
+        let stream_id = u32::try_from(offer.stream_id).map_err(|_| {
+            PresentationSenderTargetError::StreamMismatch {
+                expected: fallback.stream_id(),
+                received: offer.stream_id,
+            }
+        })?;
+        if stream_id == 0 || stream_id != fallback.stream_id() {
+            return Err(PresentationSenderTargetError::StreamMismatch {
+                expected: fallback.stream_id(),
+                received: offer.stream_id,
+            }
+            .into());
+        }
+        if offer.profile != profile {
+            return Err(PresentationSenderTargetError::ProfileMismatch.into());
+        }
+        if offer.port == 0 {
+            return Err(PresentationSenderTargetError::InvalidPort.into());
+        }
+
+        self.validate_registered_client(receiver, session, authorization, now_unix_ms)?;
+        if !fallback.is_unicast_fallback(receiver) {
+            return Err(PresentationSenderTargetError::FallbackNotEnabled.into());
+        }
+        if coordinator.active_epoch() != Some(epoch) {
+            return Err(PresentationSenderTargetError::EpochNotActive.into());
+        }
+        if coordinator.receiver_state(receiver)
+            != Some(GroupMediaReceiverInstallState::Installed(epoch))
+        {
+            return Err(PresentationSenderTargetError::ReceiverEpochNotInstalled.into());
+        }
+
+        Ok(PresentationUnicastSenderTarget {
+            receiver,
+            destination: SocketAddr::new(session.connection.remote_address().ip(), offer.port),
+            presentation_id,
+            stream_id,
+            profile,
+            epoch,
+        })
     }
 
     #[must_use]
