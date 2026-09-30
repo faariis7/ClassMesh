@@ -38,10 +38,7 @@ impl ConcurrentFrameDistributor {
         }
     }
 
-    pub fn with_limits(
-        max_sinks: usize,
-        max_queue_depth: usize,
-    ) -> Result<Self, DistributorError> {
+    pub fn with_limits(max_sinks: usize, max_queue_depth: usize) -> Result<Self, DistributorError> {
         FrameDistributor::with_limits(max_sinks, max_queue_depth).map(Self::from_distributor)
     }
 
@@ -75,25 +72,18 @@ impl ConcurrentFrameDistributor {
     ///
     /// The returned frame owns an `Arc<[u8]>`; the internal distributor mutex is released before
     /// the caller can perform any potentially blocking transport work.
-    pub fn wait_latest(
-        &self,
-        id: SinkId,
-        timeout: Duration,
-    ) -> Option<SharedEncodedFrame> {
+    pub fn wait_latest(&self, id: SinkId, timeout: Duration) -> Option<SharedEncodedFrame> {
         let mut distributor = self.lock();
         if let Some(frame) = distributor.pop_latest(id) {
             return Some(frame);
         }
 
-        let waited = self.inner.changed.wait_timeout_while(
-            distributor,
-            timeout,
-            |state| {
-                state
-                    .stats(id)
-                    .is_some_and(|stats| stats.queued == 0)
-            },
-        );
+        let waited = self
+            .inner
+            .changed
+            .wait_timeout_while(distributor, timeout, |state| {
+                state.stats(id).is_some_and(|stats| stats.queued == 0)
+            });
         let (mut distributor, _) = match waited {
             Ok(value) => value,
             Err(poisoned) => poisoned.into_inner(),
@@ -158,9 +148,7 @@ mod tests {
         assert_eq!(before.queued, 2);
         assert_eq!(before.dropped, 1);
 
-        let received = distributor
-            .pop_latest(SinkId(1))
-            .expect("latest frame");
+        let received = distributor.pop_latest(SinkId(1)).expect("latest frame");
         assert_eq!(received.meta.frame_id, 3);
         assert_eq!(Arc::as_ptr(&received.data), pointer);
 
