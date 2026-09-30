@@ -1484,14 +1484,12 @@ impl IpcFrame {
                 if self.payload.len() != SERVICE_PRESENTATION_KEYFRAME_REQUEST_LEN {
                     return Err(IpcMessageError::InvalidPayload);
                 }
-                let presentation_id = u64::from_be_bytes(
-                    self.payload[0..8].try_into().expect("eight bytes"),
-                );
+                let presentation_id =
+                    u64::from_be_bytes(self.payload[0..8].try_into().expect("eight bytes"));
                 let stream_id =
                     u32::from_be_bytes(self.payload[8..12].try_into().expect("four bytes"));
-                let after_frame_id = u64::from_be_bytes(
-                    self.payload[12..20].try_into().expect("eight bytes"),
-                );
+                let after_frame_id =
+                    u64::from_be_bytes(self.payload[12..20].try_into().expect("eight bytes"));
                 let request =
                     PresentationKeyframeRequest::new(presentation_id, stream_id, after_frame_id)
                         .map_err(|_| IpcMessageError::InvalidPayload)?;
