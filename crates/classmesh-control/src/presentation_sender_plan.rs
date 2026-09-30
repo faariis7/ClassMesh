@@ -96,8 +96,7 @@ impl TeacherPresentationSenderPlan {
         match self.targets.get(&target.receiver).copied() {
             Some(previous) if previous.target == target => Ok(Vec::new()),
             Some(previous) => {
-                let replacement =
-                    TeacherPresentationOutlierBinding::new(previous.slot_id, target)?;
+                let replacement = TeacherPresentationOutlierBinding::new(previous.slot_id, target)?;
                 self.targets.insert(target.receiver, replacement);
                 Ok(vec![
                     TeacherPresentationSenderAction::DetachUnicast(previous),
@@ -115,7 +114,9 @@ impl TeacherPresentationSenderPlan {
                 let binding = TeacherPresentationOutlierBinding::new(slot_id, target)?;
                 self.next_slot_id = next_slot_id;
                 self.targets.insert(target.receiver, binding);
-                Ok(vec![TeacherPresentationSenderAction::AttachUnicast(binding)])
+                Ok(vec![TeacherPresentationSenderAction::AttachUnicast(
+                    binding,
+                )])
             }
         }
     }
