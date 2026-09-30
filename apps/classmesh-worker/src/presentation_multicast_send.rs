@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use classmesh_capture_win::{CapturedFrameMeta, DxgiFrame};
 use classmesh_network::multicast_sender::{
-    DEFAULT_PROTECTED_MULTICAST_SINK_QUEUE_CAPACITY, ProtectedMulticastDistributorSink,
-    ProtectedMulticastFrameSender, ProtectedMulticastSendError, ProtectedMulticastSenderConfig,
-    ProtectedMulticastSinkError,
+    DEFAULT_PROTECTED_MULTICAST_SINK_QUEUE_CAPACITY, ProtectedMulticastBackpressureDrop,
+    ProtectedMulticastDistributorSink, ProtectedMulticastFrameSender, ProtectedMulticastSendError,
+    ProtectedMulticastSenderConfig, ProtectedMulticastSinkError, ProtectedMulticastTrySendOutcome,
 };
 use classmesh_network::transport::SendFrameReport;
 use classmesh_security::AuthorizationStore;
@@ -64,6 +64,20 @@ impl From<ProtectedMulticastSinkError> for PresentationMulticastSendRuntimeError
 pub struct PresentationMulticastSendStep {
     pub encoded_outputs: usize,
     pub sent: Option<SendFrameReport>,
+    pub backpressure_drop: Option<ProtectedMulticastBackpressureDrop>,
+}
+
+fn delivery_fields(
+    outcome: Option<ProtectedMulticastTrySendOutcome>,
+) -> (
+    Option<SendFrameReport>,
+    Option<ProtectedMulticastBackpressureDrop>,
+) {
+    match outcome {
+        None => (None, None),
+        Some(ProtectedMulticastTrySendOutcome::Sent(report)) => (Some(report), None),
+        Some(ProtectedMulticastTrySendOutcome::DroppedBackpressure(drop)) => (None, Some(drop)),
+    }
 }
 
 /// Production Teacher video-engine composition for one protected multicast rendition.
@@ -71,8 +85,9 @@ pub struct PresentationMulticastSendStep {
 /// This runtime owns capture-to-H.264 fan-out plus the multicast socket/sink. The caller retains the
 /// authoritative `GroupMediaCoordinator` and `AuthorizationStore`, so key epochs, SFrame counters
 /// and live receiver authorization remain single-owned by Teacher Core. The multicast sink removes
-/// the latest shared frame before sealing/sending; a failed UDP send is therefore media-local and is
-/// never implicitly retried with the same encoded frame.
+/// the next decoder-safe shared frame before sealing/sending. The live socket is nonblocking:
+/// kernel send-buffer pressure becomes an explicit media-local drop and never stalls capture/control
+/// or retries the same sealed frame/counter.
 #[derive(Debug)]
 pub struct PresentationMulticastSendRuntime {
     fanout: PresentationFanoutRuntime,
@@ -106,7 +121,7 @@ impl PresentationMulticastSendRuntime {
             sink_id,
             queue_capacity,
         )?;
-        let sender = ProtectedMulticastFrameSender::bind(sender_config)?;
+        let sender = ProtectedMulticastFrameSender::bind_nonblocking(sender_config)?;
         Ok(Self {
             fanout,
             sink,
@@ -152,15 +167,19 @@ impl PresentationMulticastSendRuntime {
         authorization: &AuthorizationStore,
     ) -> Result<PresentationMulticastSendStep, PresentationMulticastSendRuntimeError> {
         let encoded_outputs = self.fanout.process_frame(meta, frame)?;
-        let sent = self.sink.send_latest(
-            self.fanout.distributor_mut(),
-            &mut self.sender,
-            coordinator,
-            authorization,
-        )?;
+        let delivery = match self.sink.take_next_decodable(self.fanout.distributor_mut()) {
+            Some(frame) => Some(self.sender.try_send_shared_h264_frame(
+                coordinator,
+                authorization,
+                &frame,
+            )?),
+            None => None,
+        };
+        let (sent, backpressure_drop) = delivery_fields(delivery);
         Ok(PresentationMulticastSendStep {
             encoded_outputs,
             sent,
+            backpressure_drop,
         })
     }
 }
@@ -221,5 +240,33 @@ mod tests {
                 ProtectedMulticastSinkError::Distributor(DistributorError::InvalidQueueCapacity)
             ))
         ));
+    }
+
+    #[test]
+    fn delivery_fields_keep_success_and_backpressure_mutually_exclusive() {
+        let report = SendFrameReport {
+            frame_id: 42,
+            packets: 3,
+            payload_bytes: 1_024,
+            first_sequence: 10,
+            next_sequence: 13,
+        };
+        assert_eq!(
+            delivery_fields(Some(ProtectedMulticastTrySendOutcome::Sent(report))),
+            (Some(report), None)
+        );
+
+        let drop = ProtectedMulticastBackpressureDrop {
+            frame_id: 43,
+            packets_sent: 1,
+            packets_total: 4,
+        };
+        assert_eq!(
+            delivery_fields(Some(ProtectedMulticastTrySendOutcome::DroppedBackpressure(
+                drop
+            ))),
+            (None, Some(drop))
+        );
+        assert_eq!(delivery_fields(None), (None, None));
     }
 }
