@@ -7,6 +7,10 @@ use classmesh_network::multicast_sender::{
     ProtectedMulticastDistributorSink, ProtectedMulticastFrameSender, ProtectedMulticastSendError,
     ProtectedMulticastSenderConfig, ProtectedMulticastSinkError, ProtectedMulticastTrySendOutcome,
 };
+use classmesh_network::protected_unicast_sender::{
+    ProtectedUnicastFanout, ProtectedUnicastFanoutDelivery, ProtectedUnicastFanoutError,
+    ProtectedUnicastSenderConfig,
+};
 use classmesh_network::transport::SendFrameReport;
 use classmesh_security::AuthorizationStore;
 use classmesh_security::group_media_coordinator::GroupMediaCoordinator;
@@ -20,6 +24,7 @@ pub enum PresentationMulticastSendRuntimeError {
     Fanout(PresentationFanoutError),
     Network(ProtectedMulticastSendError),
     Sink(ProtectedMulticastSinkError),
+    Unicast(ProtectedUnicastFanoutError),
 }
 
 impl fmt::Display for PresentationMulticastSendRuntimeError {
@@ -28,6 +33,9 @@ impl fmt::Display for PresentationMulticastSendRuntimeError {
             Self::Fanout(error) => write!(formatter, "teacher presentation fan-out: {error}"),
             Self::Network(error) => write!(formatter, "teacher presentation multicast: {error}"),
             Self::Sink(error) => write!(formatter, "teacher presentation multicast sink: {error}"),
+            Self::Unicast(error) => {
+                write!(formatter, "teacher presentation unicast fan-out: {error}")
+            }
         }
     }
 }
@@ -38,6 +46,7 @@ impl std::error::Error for PresentationMulticastSendRuntimeError {
             Self::Fanout(error) => Some(error),
             Self::Network(error) => Some(error),
             Self::Sink(error) => Some(error),
+            Self::Unicast(error) => Some(error),
         }
     }
 }
@@ -60,11 +69,18 @@ impl From<ProtectedMulticastSinkError> for PresentationMulticastSendRuntimeError
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl From<ProtectedUnicastFanoutError> for PresentationMulticastSendRuntimeError {
+    fn from(value: ProtectedUnicastFanoutError) -> Self {
+        Self::Unicast(value)
+    }
+}
+
+#[derive(Debug)]
 pub struct PresentationMulticastSendStep {
     pub encoded_outputs: usize,
     pub sent: Option<SendFrameReport>,
     pub backpressure_drop: Option<ProtectedMulticastBackpressureDrop>,
+    pub unicast_deliveries: Vec<ProtectedUnicastFanoutDelivery>,
 }
 
 fn delivery_fields(
@@ -80,19 +96,21 @@ fn delivery_fields(
     }
 }
 
-/// Production Teacher video-engine composition for one protected multicast rendition.
+/// Production Teacher video-engine composition for one encoded presentation rendition.
 ///
-/// This runtime owns capture-to-H.264 fan-out plus the multicast socket/sink. The caller retains the
-/// authoritative `GroupMediaCoordinator` and `AuthorizationStore`, so key epochs, SFrame counters
-/// and live receiver authorization remain single-owned by Teacher Core. The multicast sink removes
-/// the next decoder-safe shared frame before sealing/sending. The live socket is nonblocking:
-/// kernel send-buffer pressure becomes an explicit media-local drop and never stalls capture/control
-/// or retries the same sealed frame/counter.
+/// This runtime owns one capture-to-H.264 fan-out, the multicast socket/sink and bounded explicit
+/// unicast outlier sinks. The caller retains the authoritative `GroupMediaCoordinator` and
+/// `AuthorizationStore`, so key epochs, SFrame counters, fallback policy and live receiver
+/// authorization remain single-owned by Teacher Core. Every transport drains decoder-safe frames
+/// from the same encoded-frame distributor; unicast outliers never create another encoder. All live
+/// UDP sockets are nonblocking, so per-destination pressure remains media-local and cannot stall
+/// capture/control or other healthy receivers.
 #[derive(Debug)]
 pub struct PresentationMulticastSendRuntime {
     fanout: PresentationFanoutRuntime,
     sink: ProtectedMulticastDistributorSink,
     sender: ProtectedMulticastFrameSender,
+    unicast: ProtectedUnicastFanout,
 }
 
 impl PresentationMulticastSendRuntime {
@@ -126,6 +144,7 @@ impl PresentationMulticastSendRuntime {
             fanout,
             sink,
             sender,
+            unicast: ProtectedUnicastFanout::default(),
         })
     }
 
@@ -149,6 +168,31 @@ impl PresentationMulticastSendRuntime {
         self.sink.stats(self.fanout.distributor())
     }
 
+    pub fn attach_unicast_outlier(
+        &mut self,
+        sink_id: SinkId,
+        config: ProtectedUnicastSenderConfig,
+        queue_capacity: usize,
+    ) -> Result<(), PresentationMulticastSendRuntimeError> {
+        self.unicast
+            .attach(
+                self.fanout.distributor_mut(),
+                sink_id,
+                config,
+                queue_capacity,
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn detach_unicast_outlier(&mut self, sink_id: SinkId) -> bool {
+        self.unicast.detach(self.fanout.distributor_mut(), sink_id)
+    }
+
+    #[must_use]
+    pub fn unicast_outlier_count(&self) -> usize {
+        self.unicast.len()
+    }
+
     pub fn reset_pipeline(&mut self) {
         self.fanout.reset_pipeline();
     }
@@ -157,8 +201,11 @@ impl PresentationMulticastSendRuntime {
         self.fanout.request_keyframe().map_err(Into::into)
     }
 
-    /// Encodes once, publishes once into the bounded fan-out, then sends only the newest queued
-    /// multicast frame through the existing SFrame-protected sender.
+    /// Encodes once and publishes once into the bounded shared fan-out.
+    ///
+    /// Multicast and every explicit unicast outlier then drain decoder-safe frames independently.
+    /// The unicast fan-out seals each shared encoded allocation once for all outliers consuming that
+    /// same frame; multicast keeps its existing protected sender path.
     pub fn process_frame(
         &mut self,
         meta: CapturedFrameMeta,
@@ -176,10 +223,14 @@ impl PresentationMulticastSendRuntime {
             None => None,
         };
         let (sent, backpressure_drop) = delivery_fields(delivery);
+        let unicast_deliveries =
+            self.unicast
+                .drain(self.fanout.distributor_mut(), coordinator, authorization)?;
         Ok(PresentationMulticastSendStep {
             encoded_outputs,
             sent,
             backpressure_drop,
+            unicast_deliveries,
         })
     }
 }
@@ -240,6 +291,35 @@ mod tests {
                 ProtectedMulticastSinkError::Distributor(DistributorError::InvalidQueueCapacity)
             ))
         ));
+    }
+
+    #[test]
+    fn runtime_contract_exposes_bounded_unicast_outlier_management() {
+        use classmesh_network::protected_unicast_sender::ProtectedUnicastSenderConfig;
+
+        fn assert_api(
+            runtime: &mut PresentationMulticastSendRuntime,
+            sink_id: SinkId,
+            config: ProtectedUnicastSenderConfig,
+        ) {
+            let _ = runtime.attach_unicast_outlier(sink_id, config, 2);
+            let _ = runtime.detach_unicast_outlier(sink_id);
+            let _: usize = runtime.unicast_outlier_count();
+        }
+
+        let _ = assert_api
+            as fn(&mut PresentationMulticastSendRuntime, SinkId, ProtectedUnicastSenderConfig);
+    }
+
+    #[test]
+    fn send_step_keeps_unicast_delivery_results_separate_from_multicast() {
+        let step = PresentationMulticastSendStep {
+            encoded_outputs: 1,
+            sent: None,
+            backpressure_drop: None,
+            unicast_deliveries: Vec::new(),
+        };
+        assert!(step.unicast_deliveries.is_empty());
     }
 
     #[test]
