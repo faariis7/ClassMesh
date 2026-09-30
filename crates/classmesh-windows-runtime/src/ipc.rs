@@ -1618,14 +1618,10 @@ impl IpcFrame {
                     stream_id: u32::from_be_bytes(
                         self.payload[20..24].try_into().expect("four bytes"),
                     ),
-                    epoch: u32::from_be_bytes(
-                        self.payload[24..28].try_into().expect("four bytes"),
-                    ),
+                    epoch: u32::from_be_bytes(self.payload[24..28].try_into().expect("four bytes")),
                     destination: SocketAddr::new(
                         address,
-                        u16::from_be_bytes(
-                            self.payload[28..30].try_into().expect("two bytes"),
-                        ),
+                        u16::from_be_bytes(self.payload[28..30].try_into().expect("two bytes")),
                     ),
                 };
                 action.validate()?;
