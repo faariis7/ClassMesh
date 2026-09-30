@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -267,6 +268,204 @@ impl ProtectedUnicastDistributorSink {
 
     pub fn detach(self, distributor: &mut FrameDistributor) -> bool {
         distributor.remove_sink(self.id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProtectedUnicastFanoutBinding {
+    presentation_id: u64,
+    stream_id: u32,
+    epoch: GroupMediaEpoch,
+}
+
+impl From<ProtectedUnicastSenderConfig> for ProtectedUnicastFanoutBinding {
+    fn from(config: ProtectedUnicastSenderConfig) -> Self {
+        Self {
+            presentation_id: config.presentation_id(),
+            stream_id: config.stream_id(),
+            epoch: config.epoch(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ProtectedUnicastFanoutEntry {
+    sink: ProtectedUnicastDistributorSink,
+    sender: ProtectedUnicastFrameSender,
+    config: ProtectedUnicastSenderConfig,
+}
+
+#[derive(Debug)]
+pub enum ProtectedUnicastFanoutError {
+    BindingMismatch,
+    Distributor(DistributorError),
+    Sender(ProtectedUnicastSendError),
+    Seal(ProtectedUnicastSendError),
+}
+
+impl fmt::Display for ProtectedUnicastFanoutError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BindingMismatch => formatter.write_str(
+                "protected unicast fanout requires one presentation/stream/epoch binding",
+            ),
+            Self::Distributor(error) => {
+                write!(formatter, "protected unicast fanout distributor: {error:?}")
+            }
+            Self::Sender(error) => write!(formatter, "protected unicast fanout sender: {error}"),
+            Self::Seal(error) => write!(formatter, "protected unicast fanout seal: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ProtectedUnicastFanoutError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Sender(error) | Self::Seal(error) => Some(error),
+            Self::BindingMismatch | Self::Distributor(_) => None,
+        }
+    }
+}
+
+impl From<DistributorError> for ProtectedUnicastFanoutError {
+    fn from(value: DistributorError) -> Self {
+        Self::Distributor(value)
+    }
+}
+
+#[derive(Debug)]
+pub enum ProtectedUnicastFanoutDelivery {
+    Sent {
+        sink_id: SinkId,
+        report: SendFrameReport,
+    },
+    DroppedBackpressure {
+        sink_id: SinkId,
+        drop: ProtectedUnicastBackpressureDrop,
+    },
+    Failed {
+        sink_id: SinkId,
+        error: ProtectedUnicastSendError,
+    },
+}
+
+#[derive(Debug, Default)]
+pub struct ProtectedUnicastFanout {
+    entries: BTreeMap<SinkId, ProtectedUnicastFanoutEntry>,
+    binding: Option<ProtectedUnicastFanoutBinding>,
+}
+
+impl ProtectedUnicastFanout {
+    pub fn attach(
+        &mut self,
+        distributor: &mut FrameDistributor,
+        sink_id: SinkId,
+        config: ProtectedUnicastSenderConfig,
+        capacity: usize,
+    ) -> Result<(), ProtectedUnicastFanoutError> {
+        let binding = ProtectedUnicastFanoutBinding::from(config);
+        if self.binding.is_some_and(|current| current != binding) {
+            return Err(ProtectedUnicastFanoutError::BindingMismatch);
+        }
+        if self.entries.contains_key(&sink_id) {
+            return Err(ProtectedUnicastFanoutError::Distributor(
+                DistributorError::DuplicateSink,
+            ));
+        }
+
+        let sender = ProtectedUnicastFrameSender::bind_nonblocking(config)
+            .map_err(ProtectedUnicastFanoutError::Sender)?;
+        let sink = ProtectedUnicastDistributorSink::attach(distributor, sink_id, capacity)?;
+        self.entries.insert(
+            sink_id,
+            ProtectedUnicastFanoutEntry {
+                sink,
+                sender,
+                config,
+            },
+        );
+        self.binding = Some(binding);
+        Ok(())
+    }
+
+    pub fn detach(&mut self, distributor: &mut FrameDistributor, sink_id: SinkId) -> bool {
+        let Some(entry) = self.entries.remove(&sink_id) else {
+            return false;
+        };
+        let removed = entry.sink.detach(distributor);
+        if self.entries.is_empty() {
+            self.binding = None;
+        }
+        removed
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn drain(
+        &mut self,
+        distributor: &mut FrameDistributor,
+        coordinator: &mut GroupMediaCoordinator,
+        authorization: &AuthorizationStore,
+    ) -> Result<Vec<ProtectedUnicastFanoutDelivery>, ProtectedUnicastFanoutError> {
+        let mut groups: Vec<(SharedEncodedFrame, Vec<SinkId>)> = Vec::new();
+
+        for (&sink_id, entry) in &self.entries {
+            let Some(frame) = entry.sink.take_next_decodable(distributor) else {
+                continue;
+            };
+            if let Some((_, sink_ids)) = groups.iter_mut().find(|(existing, _)| {
+                existing.meta.frame_id == frame.meta.frame_id
+                    && existing.meta.timestamp_us == frame.meta.timestamp_us
+                    && existing.meta.keyframe == frame.meta.keyframe
+            }) {
+                sink_ids.push(sink_id);
+            } else {
+                groups.push((frame, vec![sink_id]));
+            }
+        }
+
+        let mut deliveries = Vec::new();
+        for (frame, sink_ids) in groups {
+            let config = self
+                .entries
+                .get(&sink_ids[0])
+                .expect("fanout group references registered sink")
+                .config;
+            let sealed =
+                seal_shared_h264_frame_for_unicast(config, coordinator, authorization, &frame)
+                    .map_err(ProtectedUnicastFanoutError::Seal)?;
+
+            for sink_id in sink_ids {
+                let entry = self
+                    .entries
+                    .get_mut(&sink_id)
+                    .expect("fanout group references registered sink");
+                match entry.sender.try_send_frame(&sealed) {
+                    Ok(ProtectedUnicastTrySendOutcome::Sent(report)) => {
+                        deliveries.push(ProtectedUnicastFanoutDelivery::Sent { sink_id, report });
+                    }
+                    Ok(ProtectedUnicastTrySendOutcome::DroppedBackpressure(drop)) => {
+                        deliveries.push(ProtectedUnicastFanoutDelivery::DroppedBackpressure {
+                            sink_id,
+                            drop,
+                        });
+                    }
+                    Err(error) => {
+                        deliveries.push(ProtectedUnicastFanoutDelivery::Failed { sink_id, error });
+                    }
+                }
+            }
+        }
+
+        Ok(deliveries)
     }
 }
 
