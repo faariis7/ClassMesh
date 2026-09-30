@@ -2102,8 +2102,8 @@ mod tests {
 
     #[test]
     fn service_presentation_keyframe_request_round_trips_sanitized_binding() {
-        let request =
-            PresentationKeyframeRequest::new(55, 9, 0).expect("valid presentation keyframe request");
+        let request = PresentationKeyframeRequest::new(55, 9, 0)
+            .expect("valid presentation keyframe request");
         let frame = IpcFrame::service_presentation_keyframe_request(request)
             .expect("valid sanitized keyframe directive");
         assert!(
@@ -2111,15 +2111,17 @@ mod tests {
             "sanitized presentation keyframe directive requires IPC v0.7+"
         );
         assert_eq!(
-            frame.message().expect("typed presentation keyframe directive"),
+            frame
+                .message()
+                .expect("typed presentation keyframe directive"),
             IpcMessage::ServicePresentationKeyframeRequest(request)
         );
     }
 
     #[test]
     fn service_presentation_keyframe_request_rejects_downgrade_and_invalid_wire_binding() {
-        let request =
-            PresentationKeyframeRequest::new(55, 9, 42).expect("valid presentation keyframe request");
+        let request = PresentationKeyframeRequest::new(55, 9, 42)
+            .expect("valid presentation keyframe request");
 
         let mut downgraded = IpcFrame::service_presentation_keyframe_request(request)
             .expect("valid sanitized keyframe directive");
