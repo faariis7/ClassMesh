@@ -1,13 +1,20 @@
-use classmesh_core::keyframe::KeyframeRequestCoordinator;
+use classmesh_core::keyframe::{KeyframeRequestCoordinator, PresentationKeyframeRequest};
 use classmesh_protocol::feedback::FeedbackMessage;
 
 pub const DEFAULT_PRESENTATION_KEYFRAME_MIN_INTERVAL_US: u64 = 250_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresentationRecoveryError {
+    InvalidPresentationId,
     InvalidStreamId,
     InvalidKeyframeInterval,
     StreamMismatch { expected: u32, received: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationRecoveryDecision {
+    pub outcome: PresentationRecoveryOutcome,
+    pub keyframe_request: Option<PresentationKeyframeRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +88,43 @@ impl PresentationRecoveryCoordinator {
     #[must_use]
     pub const fn suppressed_keyframes(&self) -> u64 {
         self.keyframes.suppressed_requests()
+    }
+
+    pub fn observe_and_plan(
+        &mut self,
+        presentation_id: u64,
+        now_us: u64,
+        feedback: &FeedbackMessage,
+    ) -> Result<PresentationRecoveryDecision, PresentationRecoveryError> {
+        if presentation_id == 0 {
+            return Err(PresentationRecoveryError::InvalidPresentationId);
+        }
+
+        let outcome = self.observe(now_us, feedback)?;
+        let keyframe_request = match outcome {
+            PresentationRecoveryOutcome::KeyframeGranted { after_frame_id } => Some(
+                PresentationKeyframeRequest::new(
+                    presentation_id,
+                    self.stream_id,
+                    after_frame_id,
+                )
+                .map_err(|error| match error {
+                    classmesh_core::keyframe::PresentationKeyframeRequestError::InvalidPresentationId => {
+                        PresentationRecoveryError::InvalidPresentationId
+                    }
+                    classmesh_core::keyframe::PresentationKeyframeRequestError::InvalidStreamId => {
+                        PresentationRecoveryError::InvalidStreamId
+                    }
+                })?,
+            ),
+            PresentationRecoveryOutcome::NackObserved { .. }
+            | PresentationRecoveryOutcome::KeyframeSuppressed { .. } => None,
+        };
+
+        Ok(PresentationRecoveryDecision {
+            outcome,
+            keyframe_request,
+        })
     }
 
     pub fn observe(
