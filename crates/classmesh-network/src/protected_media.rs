@@ -44,7 +44,7 @@ impl ProtectedMediaBinding {
         self.epoch
     }
 
-    pub(crate) const fn accepts(self, binding: GroupMediaFrameBinding) -> bool {
+    pub(crate) fn accepts(self, binding: GroupMediaFrameBinding) -> bool {
         binding.presentation_id() == self.presentation_id
             && binding.stream_id() == self.stream_id
             && binding.epoch() == self.epoch
