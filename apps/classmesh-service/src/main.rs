@@ -26,9 +26,10 @@ mod windows_service_app {
     };
     use classmesh_windows_runtime::ipc::{
         IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage,
-        ServicePresentationMulticastStart, ServiceUdpStreamStart,
+        ServicePresentationMulticastStart, ServicePresentationUnicastStart, ServiceUdpStreamStart,
         WorkerPresentationKeyInstallResult, WorkerPresentationKeyInstallStatus,
         WorkerPresentationMulticastStartResult, WorkerPresentationMulticastStartStatus,
+        WorkerPresentationUnicastStartResult, WorkerPresentationUnicastStartStatus,
     };
     use classmesh_windows_runtime::ipc_sensitive::{
         PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
@@ -61,8 +62,10 @@ mod windows_service_app {
     const PRESENTATION_KEY_INSTALL_QUEUE_CAPACITY: usize = 1;
     const PRESENTATION_KEY_CLEAR_QUEUE_CAPACITY: usize = 1;
     const PRESENTATION_MULTICAST_START_QUEUE_CAPACITY: usize = 1;
+    const PRESENTATION_UNICAST_START_QUEUE_CAPACITY: usize = 1;
     const WORKER_PRESENTATION_KEY_RESULT_QUEUE_CAPACITY: usize = 4;
     const WORKER_PRESENTATION_MULTICAST_RESULT_QUEUE_CAPACITY: usize = 4;
+    const WORKER_PRESENTATION_UNICAST_RESULT_QUEUE_CAPACITY: usize = 4;
     const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
     const MEDIA_RECONFIGURE_RETRY: Duration = Duration::from_millis(250);
     const MAX_MEDIA_RECONFIGURE_ATTEMPTS: u8 = 4;
@@ -71,7 +74,8 @@ mod windows_service_app {
         ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, FocusedMediaDispatchChannels,
         FocusedMediaFeedback, FocusedMediaReconfigure, FocusedMediaStart, InputAvailability,
         InputDispatchChannels, PresentationDispatchChannels, PresentationFeedbackBus,
-        PresentationKeyInstallDispatch, PresentationMulticastStartDispatch, WorkerCapabilityState,
+        PresentationKeyInstallDispatch, PresentationMulticastStartDispatch,
+        PresentationUnicastStartDispatch, WorkerCapabilityState,
     };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -136,6 +140,31 @@ mod windows_service_app {
     }
 
     #[derive(Debug)]
+    struct PendingPresentationUnicastStart {
+        expected_process_id: u32,
+        expected_session_id: u32,
+        start: ServicePresentationUnicastStart,
+        reply_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+    }
+
+    impl PendingPresentationUnicastStart {
+        fn matches(&self, result: &WorkerPresentationUnicastStartResult) -> bool {
+            result.process_id == self.expected_process_id
+                && result.session_id == self.expected_session_id
+                && result.control_session_id == self.start.control_session_id
+                && result.request_id == self.start.request_id
+                && result.presentation_id == self.start.presentation_id
+                && result.stream_id == self.start.stream_id
+        }
+
+        fn matches_key_binding(&self, binding: PresentationKeyInstallBinding) -> bool {
+            binding.control_session_id == self.start.control_session_id
+                && binding.presentation_id == self.start.presentation_id
+                && binding.stream_id == self.start.stream_id
+        }
+    }
+
+    #[derive(Debug)]
     struct WorkerManager {
         executable: Option<PathBuf>,
         process: Option<SessionProcess>,
@@ -144,6 +173,7 @@ mod windows_service_app {
         encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
         presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
         presentation_multicast_result_tx: mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
+        presentation_unicast_result_tx: mpsc::SyncSender<WorkerPresentationUnicastStartResult>,
         presentation_feedback: PresentationFeedbackBus,
         watchdog: WorkerWatchdog,
         pending_restart: Option<(SessionId, Instant)>,
@@ -158,6 +188,9 @@ mod windows_service_app {
             presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
             presentation_multicast_result_tx: mpsc::SyncSender<
                 WorkerPresentationMulticastStartResult,
+            >,
+            presentation_unicast_result_tx: mpsc::SyncSender<
+                WorkerPresentationUnicastStartResult,
             >,
             presentation_feedback: PresentationFeedbackBus,
         ) -> Self {
@@ -175,6 +208,7 @@ mod windows_service_app {
                 encoder_capability_cache,
                 presentation_key_result_tx,
                 presentation_multicast_result_tx,
+                presentation_unicast_result_tx,
                 presentation_feedback,
                 watchdog: WorkerWatchdog::new(WorkerRestartPolicy::default()),
                 pending_restart: None,
@@ -258,6 +292,9 @@ mod windows_service_app {
                                         .clone(),
                                     presentation_multicast_result_tx: self
                                         .presentation_multicast_result_tx
+                                        .clone(),
+                                    presentation_unicast_result_tx: self
+                                        .presentation_unicast_result_tx
                                         .clone(),
                                     presentation_feedback: self.presentation_feedback.clone(),
                                 },
@@ -496,6 +533,28 @@ mod windows_service_app {
             Ok((process.process_id(), process.session_id()))
         }
 
+        fn send_presentation_unicast_start(
+            &self,
+            start: ServicePresentationUnicastStart,
+        ) -> Result<(u32, u32), String> {
+            let process = self
+                .process
+                .as_ref()
+                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
+            if !process.is_running().map_err(|error| {
+                format!("Worker presentation unicast liveness probe failed: {error}")
+            })? {
+                return Err(
+                    "interactive Worker exited before presentation unicast start".to_owned(),
+                );
+            }
+            let pipe = self.pipe.as_ref().ok_or_else(|| {
+                "Worker IPC pipe is unavailable for presentation unicast start".to_owned()
+            })?;
+            send_presentation_unicast_start(pipe, start)?;
+            Ok((process.process_id(), process.session_id()))
+        }
+
         fn clear_focused_profile(&self) -> Result<(), String> {
             let process = self
                 .process
@@ -666,6 +725,7 @@ mod windows_service_app {
         encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
         presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
         presentation_multicast_result_tx: mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
+        presentation_unicast_result_tx: mpsc::SyncSender<WorkerPresentationUnicastStartResult>,
         presentation_feedback: PresentationFeedbackBus,
     }
 
@@ -686,6 +746,7 @@ mod windows_service_app {
             encoder_capability_cache,
             presentation_key_result_tx,
             presentation_multicast_result_tx,
+            presentation_unicast_result_tx,
             presentation_feedback,
         } = runtime;
         let WorkerCapabilityReaderIdentity {
@@ -1022,6 +1083,40 @@ mod windows_service_app {
                             );
                             return;
                         }
+                        Ok(IpcMessage::WorkerPresentationUnicastStartResult(result))
+                            if result.process_id == expected_process_id
+                                && result.session_id == expected_session_id =>
+                        {
+                            if !capabilities.is_current(
+                                generation,
+                                result.process_id,
+                                result.session_id,
+                            ) {
+                                eprintln!(
+                                    "Stale Worker presentation-unicast result ignored for pid {} session {}",
+                                    result.process_id, result.session_id
+                                );
+                                return;
+                            }
+                            if presentation_unicast_result_tx.send(result).is_err() {
+                                return;
+                            }
+                        }
+                        Ok(IpcMessage::WorkerPresentationUnicastStartResult(result)) => {
+                            let _ = capabilities.clear_report_if_current(
+                                generation,
+                                expected_process_id,
+                                expected_session_id,
+                            );
+                            eprintln!(
+                                "Worker presentation-unicast result identity mismatch: expected pid {} session {}, received pid {} session {}",
+                                expected_process_id,
+                                expected_session_id,
+                                result.process_id,
+                                result.session_id
+                            );
+                            return;
+                        }
                         Ok(IpcMessage::WorkerPresentationFeedback(report))
                             if report.process_id == expected_process_id
                                 && report.session_id == expected_session_id =>
@@ -1171,6 +1266,22 @@ mod windows_service_app {
             })?;
         pipe.write_all(&bytes)
             .map_err(|error| format!("Worker presentation multicast IPC write failed: {error}"))
+    }
+
+    fn send_presentation_unicast_start(
+        pipe: &NamedPipeServer,
+        start: ServicePresentationUnicastStart,
+    ) -> Result<(), String> {
+        let bytes = IpcFrame::service_presentation_unicast_start(start)
+            .map_err(|error| {
+                format!("failed to build Worker presentation unicast frame: {error:?}")
+            })?
+            .encode()
+            .map_err(|error| {
+                format!("failed to encode Worker presentation unicast frame: {error:?}")
+            })?;
+        pipe.write_all(&bytes)
+            .map_err(|error| format!("Worker presentation unicast IPC write failed: {error}"))
     }
 
     fn send_media_feedback(
