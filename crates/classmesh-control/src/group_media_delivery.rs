@@ -536,7 +536,7 @@ mod tests {
     use crate::authorization::AuthenticatedControlGuard;
     use crate::client_session::{ClientControlSession, connect_client_session_with_retries};
     use crate::group_media_feedback::{
-        PresentationFeedbackError, PresentationFeedbackRequest,
+        PresentationFeedbackError, PresentationFeedbackRequest, PresentationRecoveryPlanRequest,
         accept_and_coordinate_presentation_feedback, accept_and_plan_presentation_feedback,
         accept_presentation_feedback, build_presentation_feedback_envelope,
     };
@@ -1342,13 +1342,15 @@ mod tests {
         )?;
         let granted = accept_and_plan_presentation_feedback(
             &delivery,
-            PresentationFeedbackRequest::new(receiver, &pair.client, &first, 7),
+            PresentationRecoveryPlanRequest::new(
+                PresentationFeedbackRequest::new(receiver, &pair.client, &first, 7),
+                55,
+                1_000_000,
+            ),
             &mut guard,
             &authorization,
             150,
-            55,
             &mut recovery,
-            1_000_000,
         )?;
         assert_eq!(
             granted.outcome,
@@ -1372,13 +1374,15 @@ mod tests {
         )?;
         let suppressed = accept_and_plan_presentation_feedback(
             &delivery,
-            PresentationFeedbackRequest::new(receiver, &pair.client, &simultaneous, 7),
+            PresentationRecoveryPlanRequest::new(
+                PresentationFeedbackRequest::new(receiver, &pair.client, &simultaneous, 7),
+                55,
+                1_010_000,
+            ),
             &mut guard,
             &authorization,
             150,
-            55,
             &mut recovery,
-            1_010_000,
         )?;
         assert_eq!(
             suppressed.outcome,
