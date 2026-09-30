@@ -2,6 +2,7 @@ use std::fmt;
 use std::time::Duration;
 
 use classmesh_capture_win::{CapturedFrameMeta, DxgiFrame};
+use classmesh_core::keyframe::PresentationKeyframeRequest;
 use classmesh_network::multicast_sender::{
     DEFAULT_PROTECTED_MULTICAST_SINK_QUEUE_CAPACITY, ProtectedMulticastBackpressureDrop,
     ProtectedMulticastDistributorSink, ProtectedMulticastFrameSender, ProtectedMulticastSendError,
@@ -83,6 +84,14 @@ pub struct PresentationMulticastSendStep {
     pub unicast_deliveries: Vec<ProtectedUnicastFanoutDelivery>,
 }
 
+fn presentation_keyframe_request_matches(
+    config: ProtectedMulticastSenderConfig,
+    request: PresentationKeyframeRequest,
+) -> bool {
+    request.presentation_id() == config.presentation_id()
+        && request.stream_id() == config.stream_id()
+}
+
 fn delivery_fields(
     outcome: Option<ProtectedMulticastTrySendOutcome>,
 ) -> (
@@ -110,6 +119,7 @@ pub struct PresentationMulticastSendRuntime {
     fanout: PresentationFanoutRuntime,
     sink: ProtectedMulticastDistributorSink,
     sender: ProtectedMulticastFrameSender,
+    sender_config: ProtectedMulticastSenderConfig,
     unicast: ProtectedUnicastFanout,
 }
 
@@ -144,6 +154,7 @@ impl PresentationMulticastSendRuntime {
             fanout,
             sink,
             sender,
+            sender_config,
             unicast: ProtectedUnicastFanout::default(),
         })
     }
@@ -200,6 +211,17 @@ impl PresentationMulticastSendRuntime {
     pub fn request_keyframe(&mut self) -> Result<bool, PresentationMulticastSendRuntimeError> {
         self.fanout.request_keyframe().map_err(Into::into)
     }
+
+    pub fn apply_keyframe_request(
+        &mut self,
+        request: PresentationKeyframeRequest,
+    ) -> Result<bool, PresentationMulticastSendRuntimeError> {
+        if !presentation_keyframe_request_matches(self.sender_config, request) {
+            return Ok(false);
+        }
+        self.request_keyframe()
+    }
+
 
     /// Encodes once and publishes once into the bounded shared fan-out.
     ///
@@ -320,6 +342,42 @@ mod tests {
             unicast_deliveries: Vec::new(),
         };
         assert!(step.unicast_deliveries.is_empty());
+    }
+
+    #[test]
+    fn presentation_keyframe_directive_must_match_exact_sender_binding() {
+        let config = sender_config();
+        let exact =
+            PresentationKeyframeRequest::new(config.presentation_id(), config.stream_id(), 42)
+                .expect("valid exact directive");
+        assert!(presentation_keyframe_request_matches(config, exact));
+
+        let wrong_presentation =
+            PresentationKeyframeRequest::new(config.presentation_id() + 1, config.stream_id(), 42)
+                .expect("valid drifted directive");
+        assert!(!presentation_keyframe_request_matches(
+            config,
+            wrong_presentation
+        ));
+
+        let wrong_stream =
+            PresentationKeyframeRequest::new(config.presentation_id(), config.stream_id() + 1, 42)
+                .expect("valid drifted directive");
+        assert!(!presentation_keyframe_request_matches(config, wrong_stream));
+    }
+
+    #[test]
+    fn runtime_contract_accepts_only_sanitized_keyframe_directive() {
+        fn assert_api(
+            runtime: &mut PresentationMulticastSendRuntime,
+            request: PresentationKeyframeRequest,
+        ) {
+            let _: Result<bool, PresentationMulticastSendRuntimeError> =
+                runtime.apply_keyframe_request(request);
+        }
+
+        let _ =
+            assert_api as fn(&mut PresentationMulticastSendRuntime, PresentationKeyframeRequest);
     }
 
     #[test]
