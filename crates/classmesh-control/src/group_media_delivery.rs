@@ -537,8 +537,8 @@ mod tests {
     use crate::client_session::{ClientControlSession, connect_client_session_with_retries};
     use crate::group_media_feedback::{
         PresentationFeedbackError, PresentationFeedbackRequest,
-        accept_and_coordinate_presentation_feedback, accept_presentation_feedback,
-        build_presentation_feedback_envelope,
+        accept_and_coordinate_presentation_feedback, accept_and_plan_presentation_feedback,
+        accept_presentation_feedback, build_presentation_feedback_envelope,
     };
     use crate::group_media_session::PresentationKeyGrantRequest;
     use crate::handshake::{ServerHelloConfig, server_hello};
@@ -1314,6 +1314,78 @@ mod tests {
         assert_eq!(recovery.granted_keyframes(), 1);
         assert_eq!(recovery.suppressed_keyframes(), 1);
         assert_eq!(guard.last_sequence(), 4);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authenticated_feedback_plans_only_granted_sanitized_encoder_request() -> TestResult {
+        let receiver = principal(7);
+        let pair = session_pair(77).await?;
+        let authorization = authorization(receiver, std::slice::from_ref(&pair.certificate));
+        let mut delivery = TeacherGroupMediaDeliveryManager::with_limit(2)?;
+        delivery.register_client_session(&pair.client, receiver, &authorization, 150)?;
+
+        let identity = authenticated_peer_identity(&pair.client.connection, &authorization, 150)
+            .map_err(|error| format!("peer identity: {error:?}"))?;
+        let mut guard = AuthenticatedControlGuard::new(identity, 77, VERSION, 1);
+        let mut recovery =
+            PresentationRecoveryCoordinator::new(7, 250_000).expect("valid recovery coordinator");
+
+        let first = build_presentation_feedback_envelope(
+            77,
+            VERSION,
+            2,
+            &FeedbackMessage::RequestKeyframe {
+                stream_id: 7,
+                after_frame_id: 91,
+            },
+        )?;
+        let granted = accept_and_plan_presentation_feedback(
+            &delivery,
+            PresentationFeedbackRequest::new(receiver, &pair.client, &first, 7),
+            &mut guard,
+            &authorization,
+            150,
+            55,
+            &mut recovery,
+            1_000_000,
+        )?;
+        assert_eq!(
+            granted.outcome,
+            PresentationRecoveryOutcome::KeyframeGranted { after_frame_id: 91 }
+        );
+        let request = granted
+            .keyframe_request
+            .expect("granted authenticated request must plan encoder IDR");
+        assert_eq!(request.presentation_id(), 55);
+        assert_eq!(request.stream_id(), 7);
+        assert_eq!(request.after_frame_id(), 91);
+
+        let simultaneous = build_presentation_feedback_envelope(
+            77,
+            VERSION,
+            3,
+            &FeedbackMessage::RequestKeyframe {
+                stream_id: 7,
+                after_frame_id: 92,
+            },
+        )?;
+        let suppressed = accept_and_plan_presentation_feedback(
+            &delivery,
+            PresentationFeedbackRequest::new(receiver, &pair.client, &simultaneous, 7),
+            &mut guard,
+            &authorization,
+            150,
+            55,
+            &mut recovery,
+            1_010_000,
+        )?;
+        assert_eq!(
+            suppressed.outcome,
+            PresentationRecoveryOutcome::KeyframeSuppressed { after_frame_id: 92 }
+        );
+        assert!(suppressed.keyframe_request.is_none());
+        assert_eq!(guard.last_sequence(), 3);
         Ok(())
     }
 
