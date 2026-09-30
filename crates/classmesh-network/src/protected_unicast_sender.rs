@@ -537,6 +537,145 @@ mod tests {
     }
 
     #[test]
+    fn protected_unicast_fanout_seals_once_and_delivers_same_ciphertext_to_two_outliers() {
+        use std::collections::{BTreeMap, BTreeSet};
+        use std::time::Duration;
+
+        use classmesh_security::{
+            CredentialFingerprint, CredentialRecord, Permission, Principal, PrincipalId,
+            PrincipalKind,
+        };
+        use classmesh_video::{Codec, EncodedFrameMeta};
+        use classmesh_video::distributor::{FrameDistributor, SharedEncodedFrame, SinkId};
+
+        let receiver_one = UdpMediaSocket::bind(loopback(0)).expect("receiver one");
+        let receiver_two = UdpMediaSocket::bind(loopback(0)).expect("receiver two");
+        receiver_one
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("receiver one timeout");
+        receiver_two
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("receiver two timeout");
+        let destination_one = receiver_one.local_addr().expect("receiver one address");
+        let destination_two = receiver_two.local_addr().expect("receiver two address");
+
+        let principal_id = PrincipalId([8; 32]);
+        let fingerprint = CredentialFingerprint([18; 32]);
+        let mut permissions = BTreeSet::new();
+        permissions.insert(Permission::ReceivePresentation);
+        let mut credentials = BTreeMap::new();
+        credentials.insert(fingerprint, CredentialRecord::active(fingerprint, 1));
+        let mut authorization = AuthorizationStore::default();
+        authorization
+            .upsert(Principal {
+                id: principal_id,
+                kind: PrincipalKind::StudentDevice,
+                enabled: true,
+                permissions,
+                credentials,
+            })
+            .expect("authorized receiver");
+
+        let mut coordinator = GroupMediaCoordinator::default();
+        coordinator
+            .register_receiver(&authorization, principal_id)
+            .expect("receiver registers");
+        let epoch = coordinator.begin_epoch().expect("epoch starts");
+
+        let mut distributor = FrameDistributor::default();
+        let mut fanout = ProtectedUnicastFanout::default();
+        fanout
+            .attach(
+                &mut distributor,
+                SinkId(41),
+                config(destination_one, epoch),
+                2,
+            )
+            .expect("first outlier");
+        fanout
+            .attach(
+                &mut distributor,
+                SinkId(42),
+                config(destination_two, epoch),
+                2,
+            )
+            .expect("second outlier");
+
+        distributor.publish(SharedEncodedFrame::new(
+            EncodedFrameMeta {
+                frame_id: 91,
+                timestamp_us: 3_033_303,
+                keyframe: true,
+            },
+            Codec::H264,
+            vec![0x5a; 2_048],
+        ));
+
+        let deliveries = fanout
+            .drain(&mut distributor, &mut coordinator, &authorization)
+            .expect("fanout drain");
+        assert_eq!(deliveries.len(), 2);
+        assert!(deliveries.iter().all(|delivery| matches!(
+            delivery,
+            ProtectedUnicastFanoutDelivery::Sent { .. }
+        )));
+
+        fn ciphertext(socket: &UdpMediaSocket, packets: usize) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            for _ in 0..packets {
+                let (packet, _) = socket.receive_packet().expect("loopback packet");
+                bytes.extend(packet.payload);
+            }
+            bytes
+        }
+
+        let first_packets = match &deliveries[0] {
+            ProtectedUnicastFanoutDelivery::Sent { report, .. } => report.packets,
+            _ => unreachable!("all deliveries asserted sent"),
+        };
+        let second_packets = match &deliveries[1] {
+            ProtectedUnicastFanoutDelivery::Sent { report, .. } => report.packets,
+            _ => unreachable!("all deliveries asserted sent"),
+        };
+        assert_eq!(
+            ciphertext(&receiver_one, first_packets),
+            ciphertext(&receiver_two, second_packets),
+            "all admitted outliers must receive the same once-sealed ciphertext"
+        );
+    }
+
+    #[test]
+    fn protected_unicast_fanout_rejects_binding_drift_before_registering_sink() {
+        use classmesh_video::distributor::{FrameDistributor, SinkId};
+
+        let receiver_one = UdpMediaSocket::bind(loopback(0)).expect("receiver one");
+        let receiver_two = UdpMediaSocket::bind(loopback(0)).expect("receiver two");
+        let destination_one = receiver_one.local_addr().expect("receiver one address");
+        let destination_two = receiver_two.local_addr().expect("receiver two address");
+        let epoch = epoch(7);
+
+        let mut distributor = FrameDistributor::default();
+        let mut fanout = ProtectedUnicastFanout::default();
+        fanout
+            .attach(
+                &mut distributor,
+                SinkId(1),
+                config(destination_one, epoch),
+                2,
+            )
+            .expect("first outlier");
+
+        let drift = ProtectedUnicastSenderConfig::new(destination_two, 700, 801, epoch)
+            .expect("individually valid drifted config");
+        assert!(matches!(
+            fanout.attach(&mut distributor, SinkId(2), drift, 2),
+            Err(ProtectedUnicastFanoutError::BindingMismatch)
+        ));
+        assert_eq!(fanout.len(), 1);
+        assert_eq!(distributor.sink_count(), 1);
+    }
+
+    #[test]
     fn config_rejects_non_unicast_destination_and_invalid_binding() {
         for destination in [
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 50_000),
