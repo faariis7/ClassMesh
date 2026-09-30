@@ -592,23 +592,7 @@ mod windows_service_app {
             Ok(process.process_id())
         }
 
-        fn send_presentation_unicast_start(
-        pipe: &NamedPipeServer,
-        start: ServicePresentationUnicastStart,
-    ) -> Result<(), String> {
-        let bytes = IpcFrame::service_presentation_unicast_start(start)
-            .map_err(|error| {
-                format!("failed to build Worker presentation unicast frame: {error:?}")
-            })?
-            .encode()
-            .map_err(|error| {
-                format!("failed to encode Worker presentation unicast frame: {error:?}")
-            })?;
-        pipe.write_all(&bytes)
-            .map_err(|error| format!("Worker presentation unicast IPC write failed: {error}"))
-    }
-
-    fn send_media_feedback(&self, feedback: &FeedbackMessage) -> Result<(), String> {
+        fn send_media_feedback(&self, feedback: &FeedbackMessage) -> Result<(), String> {
             let process = self
                 .process
                 .as_ref()
@@ -1282,6 +1266,22 @@ mod windows_service_app {
             })?;
         pipe.write_all(&bytes)
             .map_err(|error| format!("Worker presentation multicast IPC write failed: {error}"))
+    }
+
+    fn send_presentation_unicast_start(
+        pipe: &NamedPipeServer,
+        start: ServicePresentationUnicastStart,
+    ) -> Result<(), String> {
+        let bytes = IpcFrame::service_presentation_unicast_start(start)
+            .map_err(|error| {
+                format!("failed to build Worker presentation unicast frame: {error:?}")
+            })?
+            .encode()
+            .map_err(|error| {
+                format!("failed to encode Worker presentation unicast frame: {error:?}")
+            })?;
+        pipe.write_all(&bytes)
+            .map_err(|error| format!("Worker presentation unicast IPC write failed: {error}"))
     }
 
     fn send_media_feedback(
