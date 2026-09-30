@@ -839,6 +839,7 @@ mod tests {
                     &fallback,
                     &coordinator,
                     &authorization,
+                    &ownership,
                     PresentationUnicastSenderTargetRequest::new(
                         receiver,
                         &pair.client,
@@ -862,6 +863,7 @@ mod tests {
                     &fallback,
                     &coordinator,
                     &authorization,
+                    &ownership,
                     PresentationUnicastSenderTargetRequest::new(
                         receiver,
                         &pair.client,
