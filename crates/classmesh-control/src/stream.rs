@@ -50,6 +50,13 @@ pub struct ValidatedPresentationStreamOffer {
     pub multicast: UdpMulticastParameters,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedPresentationUnicastFallbackOffer {
+    pub stream_id: u64,
+    pub profile: StreamProfile,
+    pub port: u16,
+}
+
 pub fn udp_unicast_port(parameters: &[u8]) -> Result<u16, StreamOfferError> {
     let [version, high, low] = parameters else {
         return Err(StreamOfferError::InvalidUdpUnicastParameters);
@@ -222,6 +229,53 @@ pub fn validate_presentation_stream_offer(
     })
 }
 
+/// Validates an explicit protected UDP-unicast fallback offer for one presentation outlier.
+///
+/// This is additive to the multicast contract and does not select a default transport. The IP
+/// address is intentionally absent from the validated payload; runtime must derive the destination
+/// from the authenticated control peer via `peer_bound_udp_unicast_destination`.
+pub fn validate_presentation_unicast_fallback_offer(
+    offer: &StreamOffer,
+    negotiated_capabilities: &std::collections::BTreeSet<Capability>,
+) -> Result<ValidatedPresentationUnicastFallbackOffer, StreamOfferError> {
+    if offer.stream_id == 0 {
+        return Err(StreamOfferError::InvalidStreamId);
+    }
+    if u32::try_from(offer.stream_id).is_err() {
+        return Err(StreamOfferError::StreamIdOutOfRange);
+    }
+    if offer.kind != WireStreamKind::TeacherPresentation as i32 {
+        return Err(StreamOfferError::UnsupportedKind);
+    }
+    if offer.transport_parameters.len() > MAX_STREAM_TRANSPORT_PARAMETERS {
+        return Err(StreamOfferError::TransportParametersTooLarge);
+    }
+    if !negotiated_capabilities.contains(&Capability::TeacherPresentation)
+        || !negotiated_capabilities.contains(&Capability::SframeGroupMedia)
+        || !negotiated_capabilities.contains(&Capability::UdpUnicast)
+    {
+        return Err(StreamOfferError::TransportCapabilityNotNegotiated);
+    }
+
+    let profile = offer
+        .profile
+        .as_ref()
+        .ok_or(StreamOfferError::MissingProfile)
+        .and_then(stream_profile_from_wire)?;
+    let transport = WireMediaTransport::try_from(offer.transport)
+        .map_err(|_| StreamOfferError::UnsupportedTransport)?;
+    if transport != WireMediaTransport::UdpUnicast {
+        return Err(StreamOfferError::UnsupportedTransport);
+    }
+    let port = udp_unicast_port(&offer.transport_parameters)?;
+
+    Ok(ValidatedPresentationUnicastFallbackOffer {
+        stream_id: offer.stream_id,
+        profile,
+        port,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -271,6 +325,104 @@ mod tests {
             Capability::SframeGroupMedia,
             Capability::UdpMulticast,
         ])
+    }
+
+    fn presentation_unicast_fallback_offer() -> StreamOffer {
+        let mut offer = presentation_offer();
+        offer.transport = WireMediaTransport::UdpUnicast as i32;
+        offer.transport_parameters = vec![UDP_UNICAST_PARAMETERS_VERSION, 0xc3, 0x50];
+        offer
+    }
+
+    fn presentation_unicast_caps() -> BTreeSet<Capability> {
+        BTreeSet::from([
+            Capability::TeacherPresentation,
+            Capability::SframeGroupMedia,
+            Capability::UdpUnicast,
+        ])
+    }
+
+    #[test]
+    fn presentation_unicast_fallback_requires_exact_protected_capability_contract() {
+        let offer = presentation_unicast_fallback_offer();
+        for missing in [
+            Capability::TeacherPresentation,
+            Capability::SframeGroupMedia,
+            Capability::UdpUnicast,
+        ] {
+            let mut capabilities = presentation_unicast_caps();
+            capabilities.remove(&missing);
+            assert_eq!(
+                validate_presentation_unicast_fallback_offer(&offer, &capabilities),
+                Err(StreamOfferError::TransportCapabilityNotNegotiated)
+            );
+        }
+
+        let validated =
+            validate_presentation_unicast_fallback_offer(&offer, &presentation_unicast_caps())
+                .expect("explicit protected fallback validates");
+        assert_eq!(validated.stream_id, 9);
+        assert_eq!(validated.profile, StreamProfile::new(1920, 1080, 30, 5_000));
+        assert_eq!(validated.port, 50_000);
+    }
+
+    #[test]
+    fn presentation_unicast_fallback_is_explicit_and_port_only() {
+        let caps = presentation_unicast_caps();
+
+        let mut multicast = presentation_unicast_fallback_offer();
+        multicast.transport = WireMediaTransport::UdpMulticast as i32;
+        assert_eq!(
+            validate_presentation_unicast_fallback_offer(&multicast, &caps),
+            Err(StreamOfferError::UnsupportedTransport)
+        );
+
+        let mut interactive = presentation_unicast_fallback_offer();
+        interactive.kind = WireStreamKind::Interactive as i32;
+        assert_eq!(
+            validate_presentation_unicast_fallback_offer(&interactive, &caps),
+            Err(StreamOfferError::UnsupportedKind)
+        );
+
+        for invalid in [
+            vec![2, 0xc3, 0x50],
+            vec![UDP_UNICAST_PARAMETERS_VERSION, 0, 0],
+            vec![UDP_UNICAST_PARAMETERS_VERSION, 0xc3],
+            vec![UDP_UNICAST_PARAMETERS_VERSION, 0xc3, 0x50, 1],
+        ] {
+            let mut offer = presentation_unicast_fallback_offer();
+            offer.transport_parameters = invalid;
+            assert_eq!(
+                validate_presentation_unicast_fallback_offer(&offer, &caps),
+                Err(StreamOfferError::InvalidUdpUnicastParameters)
+            );
+        }
+    }
+
+    #[test]
+    fn presentation_unicast_fallback_reuses_bounded_h264_stream_validation() {
+        let caps = presentation_unicast_caps();
+
+        let mut zero = presentation_unicast_fallback_offer();
+        zero.stream_id = 0;
+        assert_eq!(
+            validate_presentation_unicast_fallback_offer(&zero, &caps),
+            Err(StreamOfferError::InvalidStreamId)
+        );
+
+        let mut too_large = presentation_unicast_fallback_offer();
+        too_large.stream_id = u64::from(u32::MAX) + 1;
+        assert_eq!(
+            validate_presentation_unicast_fallback_offer(&too_large, &caps),
+            Err(StreamOfferError::StreamIdOutOfRange)
+        );
+
+        let mut bad_profile = presentation_unicast_fallback_offer();
+        bad_profile.profile.as_mut().expect("profile").codec = VideoCodec::Hevc as i32;
+        assert_eq!(
+            validate_presentation_unicast_fallback_offer(&bad_profile, &caps),
+            Err(StreamOfferError::UnsupportedCodec)
+        );
     }
 
     #[test]
