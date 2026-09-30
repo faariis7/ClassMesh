@@ -137,6 +137,39 @@ impl From<PresentationSenderTargetError> for TeacherGroupMediaDeliveryError {
     }
 }
 
+pub struct PresentationUnicastSenderTargetRequest<'a> {
+    receiver: PrincipalId,
+    session: &'a ClientControlSession,
+    now_unix_ms: u64,
+    presentation_id: u64,
+    profile: StreamProfile,
+    epoch: GroupMediaEpoch,
+    offer: &'a ValidatedPresentationUnicastFallbackOffer,
+}
+
+impl<'a> PresentationUnicastSenderTargetRequest<'a> {
+    #[must_use]
+    pub const fn new(
+        receiver: PrincipalId,
+        session: &'a ClientControlSession,
+        now_unix_ms: u64,
+        presentation_id: u64,
+        profile: StreamProfile,
+        epoch: GroupMediaEpoch,
+        offer: &'a ValidatedPresentationUnicastFallbackOffer,
+    ) -> Self {
+        Self {
+            receiver,
+            session,
+            now_unix_ms,
+            presentation_id,
+            profile,
+            epoch,
+            offer,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PresentationUnicastSenderTarget {
     pub receiver: PrincipalId,
@@ -385,61 +418,64 @@ impl TeacherGroupMediaDeliveryManager {
         &self,
         fallback: &PresentationFallbackCoordinator,
         coordinator: &GroupMediaCoordinator,
-        receiver: PrincipalId,
-        session: &ClientControlSession,
         authorization: &AuthorizationStore,
-        now_unix_ms: u64,
-        presentation_id: u64,
-        profile: StreamProfile,
-        epoch: GroupMediaEpoch,
-        offer: &ValidatedPresentationUnicastFallbackOffer,
+        request: PresentationUnicastSenderTargetRequest<'_>,
     ) -> Result<PresentationUnicastSenderTarget, TeacherGroupMediaDeliveryError> {
-        if presentation_id == 0 {
+        if request.presentation_id == 0 {
             return Err(PresentationSenderTargetError::InvalidPresentationId.into());
         }
-        let profile = profile
+        let profile = request
+            .profile
             .validate()
             .map_err(PresentationSenderTargetError::from)?;
-        let stream_id = u32::try_from(offer.stream_id).map_err(|_| {
+        let stream_id = u32::try_from(request.offer.stream_id).map_err(|_| {
             PresentationSenderTargetError::StreamMismatch {
                 expected: fallback.stream_id(),
-                received: offer.stream_id,
+                received: request.offer.stream_id,
             }
         })?;
         if stream_id == 0 || stream_id != fallback.stream_id() {
             return Err(PresentationSenderTargetError::StreamMismatch {
                 expected: fallback.stream_id(),
-                received: offer.stream_id,
+                received: request.offer.stream_id,
             }
             .into());
         }
-        if offer.profile != profile {
+        if request.offer.profile != profile {
             return Err(PresentationSenderTargetError::ProfileMismatch.into());
         }
-        if offer.port == 0 {
+        if request.offer.port == 0 {
             return Err(PresentationSenderTargetError::InvalidPort.into());
         }
 
-        self.validate_registered_client(receiver, session, authorization, now_unix_ms)?;
-        if !fallback.is_unicast_fallback(receiver) {
+        self.validate_registered_client(
+            request.receiver,
+            request.session,
+            authorization,
+            request.now_unix_ms,
+        )?;
+        if !fallback.is_unicast_fallback(request.receiver) {
             return Err(PresentationSenderTargetError::FallbackNotEnabled.into());
         }
-        if coordinator.active_epoch() != Some(epoch) {
+        if coordinator.active_epoch() != Some(request.epoch) {
             return Err(PresentationSenderTargetError::EpochNotActive.into());
         }
-        if coordinator.receiver_state(receiver)
-            != Some(GroupMediaReceiverInstallState::Installed(epoch))
+        if coordinator.receiver_state(request.receiver)
+            != Some(GroupMediaReceiverInstallState::Installed(request.epoch))
         {
             return Err(PresentationSenderTargetError::ReceiverEpochNotInstalled.into());
         }
 
         Ok(PresentationUnicastSenderTarget {
-            receiver,
-            destination: SocketAddr::new(session.connection.remote_address().ip(), offer.port),
-            presentation_id,
+            receiver: request.receiver,
+            destination: SocketAddr::new(
+                request.session.connection.remote_address().ip(),
+                request.offer.port,
+            ),
+            presentation_id: request.presentation_id,
             stream_id,
             profile,
-            epoch,
+            epoch: request.epoch,
         })
     }
 
@@ -724,14 +760,16 @@ mod tests {
         let target = delivery.build_unicast_sender_target(
             &fallback,
             &coordinator,
-            receiver,
-            &pair.client,
             &authorization,
-            150,
-            55,
-            profile,
-            epoch,
-            &offer,
+            PresentationUnicastSenderTargetRequest::new(
+                receiver,
+                &pair.client,
+                150,
+                55,
+                profile,
+                epoch,
+                &offer,
+            ),
         )?;
 
         assert_eq!(target.receiver, receiver);
@@ -767,7 +805,7 @@ mod tests {
             150,
         )?;
 
-        let mut coordinator = coordinator(&authorization, receiver);
+        let coordinator = coordinator(&authorization, receiver);
         let epoch = coordinator.active_epoch().expect("active epoch");
         let profile = StreamProfile::new(1920, 1080, 30, 5_000);
         let drifted = ValidatedPresentationUnicastFallbackOffer {
@@ -781,14 +819,16 @@ mod tests {
                 .build_unicast_sender_target(
                     &fallback,
                     &coordinator,
-                    receiver,
-                    &pair.client,
                     &authorization,
-                    150,
-                    55,
-                    profile,
-                    epoch,
-                    &drifted,
+                    PresentationUnicastSenderTargetRequest::new(
+                                    receiver,
+                                    &pair.client,
+                                    150,
+                                    55,
+                                    profile,
+                                    epoch,
+                                    &drifted,
+                                ),
                 )
                 .is_err()
         );
@@ -803,14 +843,16 @@ mod tests {
                 .build_unicast_sender_target(
                     &fallback,
                     &coordinator,
-                    receiver,
-                    &pair.client,
                     &authorization,
-                    150,
-                    55,
-                    profile,
-                    epoch,
-                    &exact,
+                    PresentationUnicastSenderTargetRequest::new(
+                                    receiver,
+                                    &pair.client,
+                                    150,
+                                    55,
+                                    profile,
+                                    epoch,
+                                    &exact,
+                                ),
                 )
                 .is_err(),
             "receiver must install the exact active epoch before sender attachment"
