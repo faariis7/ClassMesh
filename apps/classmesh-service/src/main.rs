@@ -1745,6 +1745,26 @@ mod windows_service_app {
                     .send(Err("control.presentation.worker_exited".to_owned()));
             }
 
+            if pending_presentation_unicast_start
+                .as_ref()
+                .is_some_and(|pending| pending.reply_tx.is_closed())
+            {
+                pending_presentation_unicast_start = None;
+            }
+
+            if pending_presentation_unicast_start
+                .as_ref()
+                .is_some_and(|pending| {
+                    !workers
+                        .is_running_worker(pending.expected_process_id, pending.expected_session_id)
+                })
+                && let Some(pending) = pending_presentation_unicast_start.take()
+            {
+                let _ = pending
+                    .reply_tx
+                    .send(Err("control.presentation.worker_exited".to_owned()));
+            }
+
             while let Ok(result) = worker_presentation_multicast_result_rx.try_recv() {
                 let Some(pending) = pending_presentation_multicast_start.as_ref() else {
                     eprintln!(
@@ -1786,7 +1806,9 @@ mod windows_service_app {
             }
 
             while let Ok(dispatch) = presentation_multicast_start_rx.try_recv() {
-                if pending_presentation_multicast_start.is_some() {
+                if pending_presentation_multicast_start.is_some()
+                    || pending_presentation_unicast_start.is_some()
+                {
                     let _ = dispatch
                         .reply_tx
                         .send(Err("control.presentation.worker_busy".to_owned()));
@@ -1811,6 +1833,82 @@ mod windows_service_app {
                     Err(error) => {
                         eprintln!(
                             "ClassMesh Service presentation-multicast dispatch failed: {error}"
+                        );
+                        let _ = dispatch
+                            .reply_tx
+                            .send(Err("control.presentation.worker_unavailable".to_owned()));
+                    }
+                }
+            }
+
+            while let Ok(result) = worker_presentation_unicast_result_rx.try_recv() {
+                let Some(pending) = pending_presentation_unicast_start.as_ref() else {
+                    eprintln!(
+                        "ClassMesh Service ignored stale Worker presentation-unicast result without a pending start"
+                    );
+                    continue;
+                };
+                if !pending.matches(&result) {
+                    eprintln!(
+                        "ClassMesh Service ignored miscorrelated Worker presentation-unicast result"
+                    );
+                    continue;
+                }
+                if !workers
+                    .is_running_worker(pending.expected_process_id, pending.expected_session_id)
+                {
+                    let pending = pending_presentation_unicast_start
+                        .take()
+                        .expect("pending unicast start presence checked");
+                    let _ = pending
+                        .reply_tx
+                        .send(Err("control.presentation.worker_exited".to_owned()));
+                    continue;
+                }
+
+                let pending = pending_presentation_unicast_start
+                    .take()
+                    .expect("pending unicast start presence checked");
+                match result.status {
+                    WorkerPresentationUnicastStartStatus::Started => {
+                        let _ = pending.reply_tx.send(Ok(()));
+                    }
+                    WorkerPresentationUnicastStartStatus::Rejected => {
+                        let _ = pending
+                            .reply_tx
+                            .send(Err("control.presentation.worker_rejected".to_owned()));
+                    }
+                }
+            }
+
+            while let Ok(dispatch) = presentation_unicast_start_rx.try_recv() {
+                if pending_presentation_multicast_start.is_some()
+                    || pending_presentation_unicast_start.is_some()
+                {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(Err("control.presentation.worker_busy".to_owned()));
+                    continue;
+                }
+                if !dispatch.commit.try_commit() {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(Err("control.presentation.start_cancelled".to_owned()));
+                    continue;
+                }
+                match workers.send_presentation_unicast_start(dispatch.start) {
+                    Ok((process_id, session_id)) => {
+                        pending_presentation_unicast_start =
+                            Some(PendingPresentationUnicastStart {
+                                expected_process_id: process_id,
+                                expected_session_id: session_id,
+                                start: dispatch.start,
+                                reply_tx: dispatch.reply_tx,
+                            });
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "ClassMesh Service presentation-unicast dispatch failed: {error}"
                         );
                         let _ = dispatch
                             .reply_tx
@@ -2078,6 +2176,11 @@ mod windows_service_app {
                             .send(Err("control.presentation.worker_restarted".to_owned()));
                     }
                     if let Some(pending) = pending_presentation_multicast_start.take() {
+                        let _ = pending
+                            .reply_tx
+                            .send(Err("control.presentation.worker_restarted".to_owned()));
+                    }
+                    if let Some(pending) = pending_presentation_unicast_start.take() {
                         let _ = pending
                             .reply_tx
                             .send(Err("control.presentation.worker_restarted".to_owned()));
