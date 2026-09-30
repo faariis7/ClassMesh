@@ -48,7 +48,8 @@ use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::{AuthorizationStore, Permission, PrincipalId};
 use classmesh_windows_runtime::ipc::{
-    ServicePresentationMulticastStart, ServiceUdpStreamStart, WorkerPresentationFeedback,
+    ServicePresentationMulticastStart, ServicePresentationUnicastStart, ServiceUdpStreamStart,
+    WorkerPresentationFeedback,
 };
 use classmesh_windows_runtime::ipc_sensitive::{
     PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
@@ -189,11 +190,19 @@ pub(crate) struct PresentationMulticastStartDispatch {
     pub(crate) reply_tx: oneshot::Sender<Result<(), String>>,
 }
 
+#[derive(Debug)]
+pub(crate) struct PresentationUnicastStartDispatch {
+    pub(crate) start: ServicePresentationUnicastStart,
+    pub(crate) commit: MediaStartCommit,
+    pub(crate) reply_tx: oneshot::Sender<Result<(), String>>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PresentationDispatchChannels {
     pub(crate) key_install_tx: mpsc::SyncSender<PresentationKeyInstallDispatch>,
     pub(crate) key_clear_tx: mpsc::SyncSender<PresentationKeyInstallBinding>,
     pub(crate) multicast_start_tx: mpsc::SyncSender<PresentationMulticastStartDispatch>,
+    pub(crate) unicast_start_tx: mpsc::SyncSender<PresentationUnicastStartDispatch>,
 }
 
 #[derive(Debug, Clone)]
