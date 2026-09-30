@@ -2448,26 +2448,100 @@ mod tests {
     }
 
     #[test]
-    fn presentation_transport_answer_advertises_only_full_multicast_contract() {
+    fn presentation_transport_answer_advertises_each_full_protected_contract() {
         let full = BTreeSet::from([
+            Capability::TeacherPresentation,
+            Capability::SframeGroupMedia,
+            Capability::UdpMulticast,
+            Capability::UdpUnicast,
+        ]);
+        assert_eq!(
+            negotiated_presentation_transports(&full),
+            vec![
+                WireMediaTransport::UdpMulticast as i32,
+                WireMediaTransport::UdpUnicast as i32,
+            ]
+        );
+
+        let multicast_only = BTreeSet::from([
             Capability::TeacherPresentation,
             Capability::SframeGroupMedia,
             Capability::UdpMulticast,
         ]);
         assert_eq!(
-            negotiated_presentation_transports(&full),
+            negotiated_presentation_transports(&multicast_only),
             vec![WireMediaTransport::UdpMulticast as i32]
         );
 
-        for missing in [
+        let unicast_only = BTreeSet::from([
+            Capability::TeacherPresentation,
+            Capability::SframeGroupMedia,
+            Capability::UdpUnicast,
+        ]);
+        assert_eq!(
+            negotiated_presentation_transports(&unicast_only),
+            vec![WireMediaTransport::UdpUnicast as i32]
+        );
+
+        assert!(negotiated_presentation_transports(&BTreeSet::from([
+            Capability::TeacherPresentation,
+            Capability::UdpUnicast,
+        ]))
+        .is_empty());
+    }
+
+    #[test]
+    fn presentation_offer_dispatch_validation_is_transport_explicit() {
+        use classmesh_protocol::control_wire::{StreamOffer, VideoCodec, VideoProfile};
+        use classmesh_control::stream::{
+            UDP_MULTICAST_PARAMETERS_VERSION, UDP_UNICAST_PARAMETERS_VERSION,
+        };
+
+        let capabilities = BTreeSet::from([
             Capability::TeacherPresentation,
             Capability::SframeGroupMedia,
             Capability::UdpMulticast,
-        ] {
-            let mut partial = full.clone();
-            partial.remove(&missing);
-            assert!(negotiated_presentation_transports(&partial).is_empty());
-        }
+            Capability::UdpUnicast,
+        ]);
+        let profile = Some(VideoProfile {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 5_000,
+            codec: VideoCodec::H264 as i32,
+        });
+
+        let multicast = StreamOffer {
+            stream_id: 9,
+            kind: WireStreamKind::TeacherPresentation as i32,
+            transport: WireMediaTransport::UdpMulticast as i32,
+            profile: profile.clone(),
+            transport_parameters: vec![
+                UDP_MULTICAST_PARAMETERS_VERSION,
+                239,
+                10,
+                20,
+                30,
+                0xc3,
+                0x50,
+            ],
+        };
+        assert!(matches!(
+            validate_presentation_offer_for_dispatch(&multicast, &capabilities),
+            Ok(ValidatedPresentationDispatchOffer::Multicast(_))
+        ));
+
+        let unicast = StreamOffer {
+            stream_id: 9,
+            kind: WireStreamKind::TeacherPresentation as i32,
+            transport: WireMediaTransport::UdpUnicast as i32,
+            profile,
+            transport_parameters: vec![UDP_UNICAST_PARAMETERS_VERSION, 0xc3, 0x50],
+        };
+        assert!(matches!(
+            validate_presentation_offer_for_dispatch(&unicast, &capabilities),
+            Ok(ValidatedPresentationDispatchOffer::Unicast(_))
+        ));
     }
 
     #[test]
