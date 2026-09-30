@@ -6,9 +6,7 @@ use classmesh_security::PrincipalId;
 use classmesh_security::group_media::GroupMediaEpoch;
 
 use crate::group_media_delivery::PresentationUnicastSenderTarget;
-use crate::presentation_recovery::{
-    PresentationRecoveryDecision, PresentationRecoveryOutcome,
-};
+use crate::presentation_recovery::{PresentationRecoveryDecision, PresentationRecoveryOutcome};
 
 #[cfg(test)]
 mod tests {
@@ -38,10 +36,11 @@ mod tests {
             plan.apply_unicast_target(first).expect("first target"),
             vec![TeacherPresentationSenderAction::AttachUnicast(first)]
         );
-        assert!(plan
-            .apply_unicast_target(first)
-            .expect("exact retry")
-            .is_empty());
+        assert!(
+            plan.apply_unicast_target(first)
+                .expect("exact retry")
+                .is_empty()
+        );
 
         let drifted = target(7, 49_001, 2);
         assert_eq!(
