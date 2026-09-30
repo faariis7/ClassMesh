@@ -178,11 +178,9 @@ mod tests {
     use super::*;
 
     fn sender_config() -> ProtectedMulticastSenderConfig {
-        let membership = MulticastMembership::new(
-            Ipv4Addr::new(239, 10, 20, 30),
-            Ipv4Addr::new(192, 0, 2, 10),
-        )
-        .expect("valid administrative multicast membership");
+        let membership =
+            MulticastMembership::new(Ipv4Addr::new(239, 10, 20, 30), Ipv4Addr::new(192, 0, 2, 10))
+                .expect("valid administrative multicast membership");
         ProtectedMulticastSenderConfig::new(
             membership,
             49_000,
@@ -220,9 +218,7 @@ mod tests {
                 0,
             ),
             Err(PresentationMulticastSendRuntimeError::Sink(
-                ProtectedMulticastSinkError::Distributor(
-                    DistributorError::InvalidQueueCapacity
-                )
+                ProtectedMulticastSinkError::Distributor(DistributorError::InvalidQueueCapacity)
             ))
         ));
     }
