@@ -24,9 +24,10 @@ pub enum PresentationFallbackChange {
 /// A caller must first establish that a currently authenticated presentation receiver should be
 /// treated as an outlier, then call `request_unicast` with that receiver's negotiated capabilities.
 ///
-/// Admission requires the existing Teacher Presentation + SFrame contract, the original multicast
-/// capability and an explicitly negotiated UDP-unicast capability. The coordinator owns no sockets,
-/// keys, authorization records or control-session state.
+/// Admission requires the existing Teacher Presentation + SFrame contract and an explicitly
+/// negotiated UDP-unicast capability. Multicast capability is intentionally not required: a
+/// receiver whose local multicast probe failed is a valid fallback candidate. The coordinator owns
+/// no sockets, keys, authorization records or control-session state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresentationFallbackCoordinator {
     stream_id: u32,
@@ -81,7 +82,6 @@ impl PresentationFallbackCoordinator {
         for required in [
             Capability::TeacherPresentation,
             Capability::SframeGroupMedia,
-            Capability::UdpMulticast,
             Capability::UdpUnicast,
         ] {
             if !negotiated_capabilities.contains(&required) {
@@ -123,7 +123,6 @@ mod tests {
         BTreeSet::from([
             Capability::TeacherPresentation,
             Capability::SframeGroupMedia,
-            Capability::UdpMulticast,
             Capability::UdpUnicast,
         ])
     }
@@ -145,12 +144,11 @@ mod tests {
     }
 
     #[test]
-    fn fallback_requires_explicit_negotiated_multicast_and_unicast_contracts() {
+    fn fallback_requires_presentation_sframe_and_unicast_contracts() {
         let receiver = principal(1);
         for missing in [
             Capability::TeacherPresentation,
             Capability::SframeGroupMedia,
-            Capability::UdpMulticast,
             Capability::UdpUnicast,
         ] {
             let mut capabilities = fallback_capabilities();
@@ -166,6 +164,21 @@ mod tests {
             );
             assert_eq!(coordinator.unicast_receiver_count(), 0);
         }
+    }
+
+    #[test]
+    fn multicast_capability_is_not_required_for_a_probe_failed_outlier() {
+        let receiver = principal(9);
+        let capabilities = fallback_capabilities();
+        assert!(!capabilities.contains(&Capability::UdpMulticast));
+        let mut coordinator =
+            PresentationFallbackCoordinator::with_limit(7, 1).expect("valid coordinator");
+
+        assert_eq!(
+            coordinator.request_unicast(receiver, &capabilities),
+            Ok(PresentationFallbackChange::Enabled)
+        );
+        assert!(coordinator.is_unicast_fallback(receiver));
     }
 
     #[test]
