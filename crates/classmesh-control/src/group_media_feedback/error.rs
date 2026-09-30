@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 
 use crate::authorization::CommandAuthorizationError;
 use crate::group_media_delivery::TeacherGroupMediaDeliveryError;
+use crate::presentation_recovery::PresentationRecoveryError;
 
 #[derive(Debug)]
 pub enum PresentationFeedbackError {
@@ -19,6 +20,7 @@ pub enum PresentationFeedbackError {
     StreamMismatch { expected: u32, received: u32 },
     Delivery(TeacherGroupMediaDeliveryError),
     Authorization(CommandAuthorizationError),
+    Recovery(PresentationRecoveryError),
 }
 
 impl Display for PresentationFeedbackError {
@@ -62,6 +64,9 @@ impl Display for PresentationFeedbackError {
             Self::Authorization(error) => {
                 write!(formatter, "presentation feedback authorization: {error:?}")
             }
+            Self::Recovery(error) => {
+                write!(formatter, "presentation feedback recovery: {error:?}")
+            }
         }
     }
 }
@@ -84,5 +89,11 @@ impl From<TeacherGroupMediaDeliveryError> for PresentationFeedbackError {
 impl From<CommandAuthorizationError> for PresentationFeedbackError {
     fn from(value: CommandAuthorizationError) -> Self {
         Self::Authorization(value)
+    }
+}
+
+impl From<PresentationRecoveryError> for PresentationFeedbackError {
+    fn from(value: PresentationRecoveryError) -> Self {
+        Self::Recovery(value)
     }
 }
