@@ -1096,7 +1096,7 @@ async fn await_presentation_start(
     commit: MediaStartCommit,
     reply_rx: &mut oneshot::Receiver<Result<(), String>>,
 ) -> Result<(), String> {
-    match tokio::time::timeout(PRESENTATION_START_TIMEOUT, reply_rx).await {
+    match tokio::time::timeout(PRESENTATION_START_TIMEOUT, &mut *reply_rx).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Err("control.presentation.start_reply_dropped".to_owned()),
         Err(_) if commit.cancel() => Err("control.presentation.start_timeout".to_owned()),
