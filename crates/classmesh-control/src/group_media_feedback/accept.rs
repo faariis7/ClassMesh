@@ -5,7 +5,9 @@ use classmesh_security::{AuthorizationStore, Permission, PrincipalId};
 use crate::authorization::AuthenticatedControlGuard;
 use crate::client_session::ClientControlSession;
 use crate::group_media_delivery::TeacherGroupMediaDeliveryManager;
-use crate::presentation_recovery::{PresentationRecoveryCoordinator, PresentationRecoveryOutcome};
+use crate::presentation_recovery::{
+    PresentationRecoveryCoordinator, PresentationRecoveryDecision, PresentationRecoveryOutcome,
+};
 
 use super::PresentationFeedbackError;
 use super::wire::feedback_from_envelope;
@@ -30,6 +32,27 @@ impl<'a> PresentationFeedbackRequest<'a> {
             session,
             envelope,
             expected_stream_id,
+        }
+    }
+}
+
+pub struct PresentationRecoveryPlanRequest<'a> {
+    feedback: PresentationFeedbackRequest<'a>,
+    presentation_id: u64,
+    recovery_now_us: u64,
+}
+
+impl<'a> PresentationRecoveryPlanRequest<'a> {
+    #[must_use]
+    pub const fn new(
+        feedback: PresentationFeedbackRequest<'a>,
+        presentation_id: u64,
+        recovery_now_us: u64,
+    ) -> Self {
+        Self {
+            feedback,
+            presentation_id,
+            recovery_now_us,
         }
     }
 }
@@ -90,5 +113,25 @@ pub fn accept_and_coordinate_presentation_feedback(
         accept_presentation_feedback(delivery, request, guard, authorization, now_unix_ms)?;
     recovery
         .observe(recovery_now_us, &feedback)
+        .map_err(Into::into)
+}
+
+pub fn accept_and_plan_presentation_feedback(
+    delivery: &TeacherGroupMediaDeliveryManager,
+    request: PresentationRecoveryPlanRequest<'_>,
+    guard: &mut AuthenticatedControlGuard,
+    authorization: &AuthorizationStore,
+    now_unix_ms: u64,
+    recovery: &mut PresentationRecoveryCoordinator,
+) -> Result<PresentationRecoveryDecision, PresentationFeedbackError> {
+    let feedback = accept_presentation_feedback(
+        delivery,
+        request.feedback,
+        guard,
+        authorization,
+        now_unix_ms,
+    )?;
+    recovery
+        .observe_and_plan(request.presentation_id, request.recovery_now_us, &feedback)
         .map_err(Into::into)
 }
