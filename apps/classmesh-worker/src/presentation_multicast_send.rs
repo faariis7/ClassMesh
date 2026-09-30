@@ -167,10 +167,7 @@ impl PresentationMulticastSendRuntime {
         authorization: &AuthorizationStore,
     ) -> Result<PresentationMulticastSendStep, PresentationMulticastSendRuntimeError> {
         let encoded_outputs = self.fanout.process_frame(meta, frame)?;
-        let delivery = match self
-            .sink
-            .take_next_decodable(self.fanout.distributor_mut())
-        {
+        let delivery = match self.sink.take_next_decodable(self.fanout.distributor_mut()) {
             Some(frame) => Some(self.sender.try_send_shared_h264_frame(
                 coordinator,
                 authorization,
@@ -265,9 +262,9 @@ mod tests {
             packets_total: 4,
         };
         assert_eq!(
-            delivery_fields(Some(
-                ProtectedMulticastTrySendOutcome::DroppedBackpressure(drop)
-            )),
+            delivery_fields(Some(ProtectedMulticastTrySendOutcome::DroppedBackpressure(
+                drop
+            ))),
             (None, Some(drop))
         );
         assert_eq!(delivery_fields(None), (None, None));
