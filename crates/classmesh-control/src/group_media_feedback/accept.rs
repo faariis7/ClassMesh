@@ -95,7 +95,6 @@ pub fn accept_and_coordinate_presentation_feedback(
         .map_err(Into::into)
 }
 
-
 pub fn accept_and_plan_presentation_feedback(
     delivery: &TeacherGroupMediaDeliveryManager,
     request: PresentationFeedbackRequest<'_>,
