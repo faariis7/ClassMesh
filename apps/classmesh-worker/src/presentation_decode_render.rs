@@ -199,9 +199,7 @@ impl PresentationDecodeRuntime {
         Ok(PresentationDecodeStep::Decoded(batch))
     }
 
-    fn drain_decoded(
-        &mut self,
-    ) -> Result<PresentationDecodeBatch, Box<dyn std::error::Error>> {
+    fn drain_decoded(&mut self) -> Result<PresentationDecodeBatch, Box<dyn std::error::Error>> {
         use classmesh_render_win::{DxgiFailureClass, classify_dxgi_error};
 
         let frames = match self.decoder.poll_decoded() {
@@ -280,9 +278,7 @@ impl PresentationDecodeRuntime {
         open
     }
 
-    pub fn finish(
-        &mut self,
-    ) -> Result<PresentationDecodeBatch, Box<dyn std::error::Error>> {
+    pub fn finish(&mut self) -> Result<PresentationDecodeBatch, Box<dyn std::error::Error>> {
         let decoded = self.drain_decoded()?;
         self.decoder.end_streaming()?;
         Ok(decoded)
