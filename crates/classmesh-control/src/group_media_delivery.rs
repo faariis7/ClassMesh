@@ -607,7 +607,7 @@ mod tests {
 
         let mut coordinator = coordinator(&authorization, receiver);
         let grant = coordinator.issue_key(&authorization, receiver)?;
-        let epoch = grant.epoch;
+        let epoch = grant.epoch();
         drop(grant);
         coordinator.mark_installed(&authorization, receiver, epoch)?;
 
