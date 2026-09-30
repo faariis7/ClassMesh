@@ -1417,10 +1417,23 @@ mod windows_service_app {
             install_tx: presentation_key_install_tx,
             clear_tx: presentation_key_clear_tx,
         };
+        let (presentation_multicast_start_tx, presentation_multicast_start_rx) =
+            mpsc::sync_channel::<PresentationMulticastStartDispatch>(
+                PRESENTATION_MULTICAST_START_QUEUE_CAPACITY,
+            );
+        let presentation_multicast_channels = PresentationMulticastDispatchChannels {
+            start_tx: presentation_multicast_start_tx,
+        };
         let (worker_presentation_key_result_tx, worker_presentation_key_result_rx) =
             mpsc::sync_channel::<WorkerPresentationKeyInstallResult>(
                 WORKER_PRESENTATION_KEY_RESULT_QUEUE_CAPACITY,
             );
+        let (
+            worker_presentation_multicast_result_tx,
+            worker_presentation_multicast_result_rx,
+        ) = mpsc::sync_channel::<WorkerPresentationMulticastStartResult>(
+            WORKER_PRESENTATION_MULTICAST_RESULT_QUEUE_CAPACITY,
+        );
         let released_media_session_floor = Arc::new(AtomicU64::new(0));
         let media_owner = Arc::new(AtomicU64::new(0));
         let media_channels = FocusedMediaDispatchChannels {
@@ -1451,6 +1464,7 @@ mod windows_service_app {
             input_channels,
             media_channels,
             presentation_key_channels,
+            presentation_multicast_channels,
             presentation_feedback.clone(),
             Arc::clone(&worker_capabilities),
         ) {
@@ -1472,6 +1486,7 @@ mod windows_service_app {
             Arc::clone(&worker_capabilities),
             Arc::clone(&encoder_capability_cache),
             worker_presentation_key_result_tx,
+            worker_presentation_multicast_result_tx,
             presentation_feedback,
         );
         let mut desired_focused_start: Option<ServiceUdpStreamStart> = None;
@@ -1488,6 +1503,8 @@ mod windows_service_app {
         let mut next_media_reconfigure_attempt = Instant::now();
         let mut next_worker_poll = Instant::now();
         let mut pending_presentation_key_install: Option<PendingPresentationKeyInstall> = None;
+        let mut pending_presentation_multicast_start:
+            Option<PendingPresentationMulticastStart> = None;
         loop {
             while let Ok(binding) = presentation_key_clear_rx.try_recv() {
                 if let Err(error) = workers.clear_presentation_key(binding) {
