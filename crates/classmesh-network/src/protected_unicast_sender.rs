@@ -6,7 +6,9 @@ use classmesh_security::group_media::{GroupMediaEpoch, GroupMediaError, SealedGr
 use classmesh_security::group_media_coordinator::{
     GroupMediaCoordinator, GroupMediaCoordinatorError,
 };
-use classmesh_video::distributor::SharedEncodedFrame;
+use classmesh_video::distributor::{
+    DistributorError, FrameDistributor, SharedEncodedFrame, SinkId, SinkMode, SinkStats,
+};
 
 use crate::PacketizeError;
 use crate::protected_media::{
@@ -223,6 +225,48 @@ impl From<ProtectedMediaTrySendOutcome> for ProtectedUnicastTrySendOutcome {
                 Self::DroppedBackpressure(drop.into())
             }
         }
+    }
+}
+
+/// Bounded unicast attachment for the shared encoded-frame distributor.
+///
+/// The adapter owns only one sink registration. The caller keeps the distributor and therefore
+/// shares the same `Arc<[u8]>` encoded allocation with multicast and other outliers. Decoder-safe
+/// draining preserves a pending recovery keyframe before newer dependent deltas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtectedUnicastDistributorSink {
+    id: SinkId,
+}
+
+impl ProtectedUnicastDistributorSink {
+    pub fn attach(
+        distributor: &mut FrameDistributor,
+        id: SinkId,
+        capacity: usize,
+    ) -> Result<Self, DistributorError> {
+        distributor.add_sink(id, SinkMode::Unicast, capacity)?;
+        Ok(Self { id })
+    }
+
+    #[must_use]
+    pub const fn id(self) -> SinkId {
+        self.id
+    }
+
+    #[must_use]
+    pub fn stats(self, distributor: &FrameDistributor) -> Option<SinkStats> {
+        distributor.stats(self.id)
+    }
+
+    pub fn take_next_decodable(
+        self,
+        distributor: &mut FrameDistributor,
+    ) -> Option<SharedEncodedFrame> {
+        distributor.pop_next_decodable(self.id)
+    }
+
+    pub fn detach(self, distributor: &mut FrameDistributor) -> bool {
+        distributor.remove_sink(self.id)
     }
 }
 
