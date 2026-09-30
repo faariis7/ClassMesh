@@ -1589,6 +1589,93 @@ mod windows_service_app {
                 }
             }
 
+            if pending_presentation_multicast_start
+                .as_ref()
+                .is_some_and(|pending| pending.reply_tx.is_closed())
+            {
+                pending_presentation_multicast_start = None;
+            }
+
+            if pending_presentation_multicast_start.as_ref().is_some_and(|pending| {
+                !workers.is_running_worker(
+                    pending.expected_process_id,
+                    pending.expected_session_id,
+                )
+            }) && let Some(pending) = pending_presentation_multicast_start.take()
+            {
+                let _ = pending
+                    .reply_tx
+                    .send(Err("control.presentation.worker_exited".to_owned()));
+            }
+
+            while let Ok(result) = worker_presentation_multicast_result_rx.try_recv() {
+                let Some(pending) = pending_presentation_multicast_start.as_ref() else {
+                    eprintln!(
+                        "ClassMesh Service ignored stale Worker presentation-multicast result without a pending start"
+                    );
+                    continue;
+                };
+                if !pending.matches(&result) {
+                    eprintln!(
+                        "ClassMesh Service ignored miscorrelated Worker presentation-multicast result"
+                    );
+                    continue;
+                }
+                if !workers
+                    .is_running_worker(pending.expected_process_id, pending.expected_session_id)
+                {
+                    let pending = pending_presentation_multicast_start
+                        .take()
+                        .expect("pending multicast start presence checked");
+                    let _ = pending
+                        .reply_tx
+                        .send(Err("control.presentation.worker_exited".to_owned()));
+                    continue;
+                }
+
+                let pending = pending_presentation_multicast_start
+                    .take()
+                    .expect("pending multicast start presence checked");
+                match result.status {
+                    WorkerPresentationMulticastStartStatus::Started => {
+                        let _ = pending.reply_tx.send(Ok(()));
+                    }
+                    WorkerPresentationMulticastStartStatus::Rejected => {
+                        let _ = pending
+                            .reply_tx
+                            .send(Err("control.presentation.worker_rejected".to_owned()));
+                    }
+                }
+            }
+
+            while let Ok(dispatch) = presentation_multicast_start_rx.try_recv() {
+                if pending_presentation_multicast_start.is_some() {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(Err("control.presentation.worker_busy".to_owned()));
+                    continue;
+                }
+                match workers.send_presentation_multicast_start(dispatch.start) {
+                    Ok((process_id, session_id)) => {
+                        pending_presentation_multicast_start =
+                            Some(PendingPresentationMulticastStart {
+                                expected_process_id: process_id,
+                                expected_session_id: session_id,
+                                start: dispatch.start,
+                                reply_tx: dispatch.reply_tx,
+                            });
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "ClassMesh Service presentation-multicast dispatch failed: {error}"
+                        );
+                        let _ = dispatch
+                            .reply_tx
+                            .send(Err("control.presentation.worker_unavailable".to_owned()));
+                    }
+                }
+            }
+
             match input_cleanup_rx.try_recv() {
                 Ok(()) => {
                     if let Err(error) = workers.release_input() {
