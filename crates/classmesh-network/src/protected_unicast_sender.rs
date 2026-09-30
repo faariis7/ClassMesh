@@ -2,14 +2,13 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use classmesh_security::AuthorizationStore;
-use classmesh_security::group_media::{
-    GroupMediaEpoch, GroupMediaError, SealedGroupMediaFrame,
-};
+use classmesh_security::group_media::{GroupMediaEpoch, GroupMediaError, SealedGroupMediaFrame};
 use classmesh_security::group_media_coordinator::{
     GroupMediaCoordinator, GroupMediaCoordinatorError,
 };
 use classmesh_video::distributor::SharedEncodedFrame;
 
+use crate::PacketizeError;
 use crate::protected_media::{
     ProtectedMediaBackpressureDrop, ProtectedMediaBinding, ProtectedMediaCoreError,
     ProtectedMediaPacketizer, ProtectedMediaTrySendOutcome, protect_shared_h264_frame,
@@ -17,7 +16,6 @@ use crate::protected_media::{
 };
 use crate::transport::SendFrameReport;
 use crate::udp::{DatagramError, UdpMediaSocket};
-use crate::PacketizeError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProtectedUnicastSenderConfig {
@@ -140,12 +138,16 @@ impl fmt::Display for ProtectedUnicastSendError {
             Self::Security(error) => write!(formatter, "group-media binding: {error}"),
             Self::Coordinator(error) => write!(formatter, "group-media coordinator: {error}"),
             Self::Packetize(error) => {
-                write!(formatter, "protected unicast packetization failed: {error:?}")
+                write!(
+                    formatter,
+                    "protected unicast packetization failed: {error:?}"
+                )
             }
-            Self::Datagram(error) => write!(formatter, "protected unicast UDP send failed: {error}"),
-            Self::ShortDatagramWrite => {
-                formatter.write_str("protected unicast UDP write did not send the complete datagram")
+            Self::Datagram(error) => {
+                write!(formatter, "protected unicast UDP send failed: {error}")
             }
+            Self::ShortDatagramWrite => formatter
+                .write_str("protected unicast UDP write did not send the complete datagram"),
         }
     }
 }
@@ -270,7 +272,8 @@ impl ProtectedUnicastFrameSender {
     ) -> Result<ProtectedUnicastTrySendOutcome, ProtectedUnicastSendError> {
         let prepared = self.packetizer.packetize(frame)?;
         try_send_prepared_frame(frame, &prepared, |packet| {
-            self.socket.send_packet_to(packet, self.config.destination())
+            self.socket
+                .send_packet_to(packet, self.config.destination())
         })
         .map(Into::into)
         .map_err(Into::into)
