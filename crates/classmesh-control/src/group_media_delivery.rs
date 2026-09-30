@@ -22,6 +22,7 @@ use crate::group_media_session::{
 use crate::presentation_fallback::{
     PresentationFallbackChange, PresentationFallbackCoordinator, PresentationFallbackError,
 };
+use crate::presentation_state::PresentationOwnership;
 use crate::quic::ControlTransportError;
 use crate::stream::ValidatedPresentationUnicastFallbackOffer;
 
@@ -115,7 +116,7 @@ impl From<PresentationFallbackError> for TeacherGroupMediaDeliveryError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresentationSenderTargetError {
-    InvalidPresentationId,
+    MissingActivePresentation,
     InvalidProfile(StreamProfileError),
     StreamMismatch { expected: u32, received: u64 },
     ProfileMismatch,
@@ -141,7 +142,6 @@ pub struct PresentationUnicastSenderTargetRequest<'a> {
     receiver: PrincipalId,
     session: &'a ClientControlSession,
     now_unix_ms: u64,
-    presentation_id: u64,
     profile: StreamProfile,
     epoch: GroupMediaEpoch,
     offer: &'a ValidatedPresentationUnicastFallbackOffer,
@@ -153,7 +153,6 @@ impl<'a> PresentationUnicastSenderTargetRequest<'a> {
         receiver: PrincipalId,
         session: &'a ClientControlSession,
         now_unix_ms: u64,
-        presentation_id: u64,
         profile: StreamProfile,
         epoch: GroupMediaEpoch,
         offer: &'a ValidatedPresentationUnicastFallbackOffer,
@@ -162,7 +161,6 @@ impl<'a> PresentationUnicastSenderTargetRequest<'a> {
             receiver,
             session,
             now_unix_ms,
-            presentation_id,
             profile,
             epoch,
             offer,
@@ -419,22 +417,32 @@ impl TeacherGroupMediaDeliveryManager {
         fallback: &PresentationFallbackCoordinator,
         coordinator: &GroupMediaCoordinator,
         authorization: &AuthorizationStore,
+        ownership: &PresentationOwnership,
         request: PresentationUnicastSenderTargetRequest<'_>,
     ) -> Result<PresentationUnicastSenderTarget, TeacherGroupMediaDeliveryError> {
-        if request.presentation_id == 0 {
-            return Err(PresentationSenderTargetError::InvalidPresentationId.into());
-        }
+        let owner = ownership
+            .owner()
+            .ok_or(PresentationSenderTargetError::MissingActivePresentation)?;
         let profile = request
             .profile
             .validate()
             .map_err(PresentationSenderTargetError::from)?;
+        let owner_stream_id = u32::try_from(owner.stream_id).map_err(|_| {
+            PresentationSenderTargetError::StreamMismatch {
+                expected: fallback.stream_id(),
+                received: owner.stream_id,
+            }
+        })?;
         let stream_id = u32::try_from(request.offer.stream_id).map_err(|_| {
             PresentationSenderTargetError::StreamMismatch {
                 expected: fallback.stream_id(),
                 received: request.offer.stream_id,
             }
         })?;
-        if stream_id == 0 || stream_id != fallback.stream_id() {
+        if owner_stream_id == 0
+            || owner_stream_id != fallback.stream_id()
+            || stream_id != owner_stream_id
+        {
             return Err(PresentationSenderTargetError::StreamMismatch {
                 expected: fallback.stream_id(),
                 received: request.offer.stream_id,
@@ -472,8 +480,8 @@ impl TeacherGroupMediaDeliveryManager {
                 request.session.connection.remote_address().ip(),
                 request.offer.port,
             ),
-            presentation_id: request.presentation_id,
-            stream_id,
+            presentation_id: owner.presentation_id,
+            stream_id: owner_stream_id,
             profile,
             epoch: request.epoch,
         })
@@ -669,6 +677,14 @@ mod tests {
         store
     }
 
+    fn active_ownership(presentation_id: u64, stream_id: u64) -> PresentationOwnership {
+        let mut ownership = PresentationOwnership::default();
+        ownership
+            .start(principal(99), 900, presentation_id, stream_id)
+            .expect("presentation ownership starts");
+        ownership
+    }
+
     fn coordinator(
         authorization: &AuthorizationStore,
         receiver: PrincipalId,
@@ -752,6 +768,7 @@ mod tests {
         drop(grant);
         coordinator.mark_installed(&authorization, receiver, epoch)?;
 
+        let ownership = active_ownership(55, 7);
         let profile = StreamProfile::new(1920, 1080, 30, 5_000);
         let offer = ValidatedPresentationUnicastFallbackOffer {
             stream_id: 7,
@@ -762,11 +779,11 @@ mod tests {
             &fallback,
             &coordinator,
             &authorization,
+            &ownership,
             PresentationUnicastSenderTargetRequest::new(
                 receiver,
                 &pair.client,
                 150,
-                55,
                 profile,
                 epoch,
                 &offer,
@@ -808,6 +825,7 @@ mod tests {
 
         let coordinator = coordinator(&authorization, receiver);
         let epoch = coordinator.active_epoch().expect("active epoch");
+        let ownership = active_ownership(55, 7);
         let profile = StreamProfile::new(1920, 1080, 30, 5_000);
         let drifted = ValidatedPresentationUnicastFallbackOffer {
             stream_id: 7,
@@ -825,7 +843,6 @@ mod tests {
                         receiver,
                         &pair.client,
                         150,
-                        55,
                         profile,
                         epoch,
                         &drifted,
@@ -849,7 +866,6 @@ mod tests {
                         receiver,
                         &pair.client,
                         150,
-                        55,
                         profile,
                         epoch,
                         &exact,
