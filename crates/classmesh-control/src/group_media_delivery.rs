@@ -355,12 +355,12 @@ mod tests {
         accept_and_coordinate_presentation_feedback, accept_presentation_feedback,
         build_presentation_feedback_envelope,
     };
-    use crate::presentation_recovery::{
-        PresentationRecoveryCoordinator, PresentationRecoveryOutcome,
-    };
     use crate::group_media_session::PresentationKeyGrantRequest;
     use crate::handshake::{ServerHelloConfig, server_hello};
     use crate::peer_identity::authenticated_peer_identity;
+    use crate::presentation_recovery::{
+        PresentationRecoveryCoordinator, PresentationRecoveryOutcome,
+    };
     use crate::quic::{
         ControlChannel, DEFAULT_IO_TIMEOUT, accept, client_config_with_roots,
         server_config_with_certificate,
