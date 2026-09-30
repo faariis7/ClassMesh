@@ -148,8 +148,8 @@ mod tests {
 
     #[test]
     fn simultaneous_receiver_requests_are_globally_coalesced() {
-        let mut recovery = PresentationRecoveryCoordinator::new(7, 250_000)
-            .expect("valid recovery coordinator");
+        let mut recovery =
+            PresentationRecoveryCoordinator::new(7, 250_000).expect("valid recovery coordinator");
 
         assert_eq!(
             recovery.observe(1_000_000, &keyframe(7, 40)),
@@ -170,8 +170,8 @@ mod tests {
 
     #[test]
     fn multicast_nack_never_requests_a_group_retransmit_or_implicit_idr() {
-        let mut recovery = PresentationRecoveryCoordinator::for_stream(7)
-            .expect("valid recovery coordinator");
+        let mut recovery =
+            PresentationRecoveryCoordinator::for_stream(7).expect("valid recovery coordinator");
         let nack = FeedbackMessage::Nack {
             stream_id: 7,
             frame_id: 99,
@@ -192,8 +192,8 @@ mod tests {
 
     #[test]
     fn wrong_stream_fails_before_recovery_state_changes() {
-        let mut recovery = PresentationRecoveryCoordinator::for_stream(7)
-            .expect("valid recovery coordinator");
+        let mut recovery =
+            PresentationRecoveryCoordinator::for_stream(7).expect("valid recovery coordinator");
 
         assert_eq!(
             recovery.observe(1_000_000, &keyframe(8, 40)),
@@ -209,8 +209,8 @@ mod tests {
 
     #[test]
     fn backwards_time_does_not_bypass_shared_keyframe_throttle() {
-        let mut recovery = PresentationRecoveryCoordinator::new(7, 100)
-            .expect("valid recovery coordinator");
+        let mut recovery =
+            PresentationRecoveryCoordinator::new(7, 100).expect("valid recovery coordinator");
         assert!(matches!(
             recovery.observe(1_000, &keyframe(7, 1)),
             Ok(PresentationRecoveryOutcome::KeyframeGranted { .. })
