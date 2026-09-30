@@ -340,8 +340,10 @@ mod tests {
     fn unicast_distributor_sink_shares_allocation_and_preserves_recovery_order() {
         use std::sync::Arc;
 
+        use classmesh_video::distributor::{
+            FrameDistributor, SharedEncodedFrame, SinkId, SinkMode,
+        };
         use classmesh_video::{Codec, EncodedFrameMeta};
-        use classmesh_video::distributor::{FrameDistributor, SharedEncodedFrame, SinkId, SinkMode};
 
         fn shared(frame_id: u64, keyframe: bool) -> SharedEncodedFrame {
             SharedEncodedFrame::new(
