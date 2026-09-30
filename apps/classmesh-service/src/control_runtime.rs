@@ -1112,7 +1112,8 @@ async fn run_established_session(
     let mut outbound_sequence = HELLO_SEQUENCE;
     let mut focused_adaptation = FocusedAdaptationState::new();
     let mut installed_presentation_key: Option<InstalledPresentationKeyBinding> = None;
-    let mut worker_key_lease = PresentationKeyWorkerLease::new(presentation_dispatch.key_clear_tx.clone());
+    let mut worker_key_lease =
+        PresentationKeyWorkerLease::new(presentation_dispatch.key_clear_tx.clone());
     let mut presentation_feedback_rx = presentation_feedback.subscribe();
     let (mut send, mut receive) = channel.into_split();
     let (inbound_tx, mut inbound_rx) =
