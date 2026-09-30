@@ -1644,6 +1644,8 @@ impl Drop for IpcFrameDecoder {
 
 #[cfg(test)]
 mod tests {
+    use classmesh_core::keyframe::PresentationKeyframeRequest;
+
     use super::*;
 
     fn frame(payload: &[u8]) -> IpcFrame {
@@ -2096,6 +2098,54 @@ mod tests {
             dirty_ipv4_tail.message(),
             Err(IpcMessageError::InvalidPayload)
         );
+    }
+
+    #[test]
+    fn service_presentation_keyframe_request_round_trips_sanitized_binding() {
+        let request =
+            PresentationKeyframeRequest::new(55, 9, 0).expect("valid presentation keyframe request");
+        let frame = IpcFrame::service_presentation_keyframe_request(request)
+            .expect("valid sanitized keyframe directive");
+        assert!(
+            IPC_VERSION_MINOR >= 7,
+            "sanitized presentation keyframe directive requires IPC v0.7+"
+        );
+        assert_eq!(
+            frame.message().expect("typed presentation keyframe directive"),
+            IpcMessage::ServicePresentationKeyframeRequest(request)
+        );
+    }
+
+    #[test]
+    fn service_presentation_keyframe_request_rejects_downgrade_and_invalid_wire_binding() {
+        let request =
+            PresentationKeyframeRequest::new(55, 9, 42).expect("valid presentation keyframe request");
+
+        let mut downgraded = IpcFrame::service_presentation_keyframe_request(request)
+            .expect("valid sanitized keyframe directive");
+        downgraded.header.version_minor = 6;
+        assert_eq!(
+            downgraded.message(),
+            Err(IpcMessageError::UnsupportedVersion)
+        );
+
+        let mut zero_presentation = IpcFrame::service_presentation_keyframe_request(request)
+            .expect("valid sanitized keyframe directive");
+        zero_presentation.payload[0..8].fill(0);
+        assert_eq!(
+            zero_presentation.message(),
+            Err(IpcMessageError::InvalidPayload)
+        );
+
+        let mut zero_stream = IpcFrame::service_presentation_keyframe_request(request)
+            .expect("valid sanitized keyframe directive");
+        zero_stream.payload[8..12].fill(0);
+        assert_eq!(zero_stream.message(), Err(IpcMessageError::InvalidPayload));
+
+        let mut wrong_length = IpcFrame::service_presentation_keyframe_request(request)
+            .expect("valid sanitized keyframe directive");
+        wrong_length.payload.push(0);
+        assert_eq!(wrong_length.message(), Err(IpcMessageError::InvalidPayload));
     }
 
     #[test]
