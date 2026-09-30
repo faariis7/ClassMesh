@@ -1422,7 +1422,9 @@ async fn run_established_session(
                                     let stream_id = u32::try_from(validated_stream_id)
                                         .expect("validated stream id fits media header");
                                     match validated {
-                                        ValidatedPresentationDispatchOffer::Multicast(validated) => {
+                                        ValidatedPresentationDispatchOffer::Multicast(
+                                            validated,
+                                        ) => {
                                             match (
                                                 multicast_interface,
                                                 connection.remote_address().ip(),
@@ -1439,22 +1441,21 @@ async fn run_established_session(
                                                     Some(interface),
                                                     std::net::IpAddr::V4(teacher_source),
                                                 ) => {
-                                                    let start =
-                                                        ServicePresentationMulticastStart {
-                                                            control_session_id:
-                                                                session.control_session_id,
-                                                            request_id: envelope.request_id,
-                                                            presentation_id: owner.presentation_id,
-                                                            stream_id,
-                                                            width: profile.width,
-                                                            height: profile.height,
-                                                            fps: profile.fps,
-                                                            bitrate_kbps: profile.bitrate_kbps,
-                                                            group: validated.multicast.group,
-                                                            port: validated.multicast.port,
-                                                            interface,
-                                                            teacher_source,
-                                                        };
+                                                    let start = ServicePresentationMulticastStart {
+                                                        control_session_id: session
+                                                            .control_session_id,
+                                                        request_id: envelope.request_id,
+                                                        presentation_id: owner.presentation_id,
+                                                        stream_id,
+                                                        width: profile.width,
+                                                        height: profile.height,
+                                                        fps: profile.fps,
+                                                        bitrate_kbps: profile.bitrate_kbps,
+                                                        group: validated.multicast.group,
+                                                        port: validated.multicast.port,
+                                                        interface,
+                                                        teacher_source,
+                                                    };
                                                     let (reply_tx, mut reply_rx) =
                                                         oneshot::channel();
                                                     let commit = MediaStartCommit::pending();
@@ -1511,20 +1512,17 @@ async fn run_established_session(
                                                 },
                                             ) {
                                                 Ok(()) => {
-                                                    await_presentation_start(
-                                                        commit,
-                                                        &mut reply_rx,
-                                                    )
-                                                    .await
+                                                    await_presentation_start(commit, &mut reply_rx)
+                                                        .await
                                                 }
-                                                Err(mpsc::TrySendError::Full(_)) => Err(
-                                                    "control.presentation.start_backpressure"
-                                                        .to_owned(),
-                                                ),
-                                                Err(mpsc::TrySendError::Disconnected(_)) => Err(
-                                                    "control.presentation.start_disconnected"
-                                                        .to_owned(),
-                                                ),
+                                                Err(mpsc::TrySendError::Full(_)) => {
+                                                    Err("control.presentation.start_backpressure"
+                                                        .to_owned())
+                                                }
+                                                Err(mpsc::TrySendError::Disconnected(_)) => {
+                                                    Err("control.presentation.start_disconnected"
+                                                        .to_owned())
+                                                }
                                             }
                                         }
                                     }
