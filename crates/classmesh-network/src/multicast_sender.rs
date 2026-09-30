@@ -267,6 +267,13 @@ impl ProtectedMulticastDistributorSink {
         distributor.pop_latest(self.id)
     }
 
+    pub fn take_next_decodable(
+        self,
+        distributor: &mut FrameDistributor,
+    ) -> Option<SharedEncodedFrame> {
+        distributor.pop_next_decodable(self.id)
+    }
+
     pub fn send_latest(
         self,
         distributor: &mut FrameDistributor,
@@ -274,7 +281,7 @@ impl ProtectedMulticastDistributorSink {
         coordinator: &mut GroupMediaCoordinator,
         authorization: &AuthorizationStore,
     ) -> Result<Option<SendFrameReport>, ProtectedMulticastSinkError> {
-        let Some(frame) = self.take_latest(distributor) else {
+        let Some(frame) = self.take_next_decodable(distributor) else {
             return Ok(None);
         };
         sender
@@ -577,6 +584,33 @@ mod tests {
         assert_eq!(after.dropped, 2);
         assert!(sink.detach(&mut distributor));
         assert!(sink.stats(&distributor).is_none());
+    }
+
+    #[test]
+    fn multicast_send_drain_preserves_pending_keyframe_before_latest_delta() {
+        let mut distributor = FrameDistributor::default();
+        let sink = ProtectedMulticastDistributorSink::attach(
+            &mut distributor,
+            SinkId(99),
+            DEFAULT_PROTECTED_MULTICAST_SINK_QUEUE_CAPACITY,
+        )
+        .expect("multicast sink attaches");
+
+        distributor.publish(shared_frame(Codec::H264, 1, true));
+        distributor.publish(shared_frame(Codec::H264, 2, false));
+        distributor.publish(shared_frame(Codec::H264, 3, false));
+
+        let recovery = sink
+            .take_next_decodable(&mut distributor)
+            .expect("recovery keyframe");
+        assert_eq!(recovery.meta.frame_id, 1);
+        assert!(recovery.meta.keyframe);
+
+        let latest = sink
+            .take_next_decodable(&mut distributor)
+            .expect("latest delta after recovery");
+        assert_eq!(latest.meta.frame_id, 3);
+        assert!(!latest.meta.keyframe);
     }
 
     #[test]
