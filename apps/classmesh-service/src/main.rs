@@ -1529,10 +1529,15 @@ mod windows_service_app {
             mpsc::sync_channel::<PresentationMulticastStartDispatch>(
                 PRESENTATION_MULTICAST_START_QUEUE_CAPACITY,
             );
+        let (presentation_unicast_start_tx, presentation_unicast_start_rx) =
+            mpsc::sync_channel::<PresentationUnicastStartDispatch>(
+                PRESENTATION_UNICAST_START_QUEUE_CAPACITY,
+            );
         let presentation_channels = PresentationDispatchChannels {
             key_install_tx: presentation_key_install_tx,
             key_clear_tx: presentation_key_clear_tx,
             multicast_start_tx: presentation_multicast_start_tx,
+            unicast_start_tx: presentation_unicast_start_tx,
         };
         let (worker_presentation_key_result_tx, worker_presentation_key_result_rx) =
             mpsc::sync_channel::<WorkerPresentationKeyInstallResult>(
@@ -1541,6 +1546,10 @@ mod windows_service_app {
         let (worker_presentation_multicast_result_tx, worker_presentation_multicast_result_rx) =
             mpsc::sync_channel::<WorkerPresentationMulticastStartResult>(
                 WORKER_PRESENTATION_MULTICAST_RESULT_QUEUE_CAPACITY,
+            );
+        let (worker_presentation_unicast_result_tx, worker_presentation_unicast_result_rx) =
+            mpsc::sync_channel::<WorkerPresentationUnicastStartResult>(
+                WORKER_PRESENTATION_UNICAST_RESULT_QUEUE_CAPACITY,
             );
         let released_media_session_floor = Arc::new(AtomicU64::new(0));
         let media_owner = Arc::new(AtomicU64::new(0));
@@ -1594,6 +1603,7 @@ mod windows_service_app {
             Arc::clone(&encoder_capability_cache),
             worker_presentation_key_result_tx,
             worker_presentation_multicast_result_tx,
+            worker_presentation_unicast_result_tx,
             presentation_feedback,
         );
         let mut desired_focused_start: Option<ServiceUdpStreamStart> = None;
@@ -1612,12 +1622,22 @@ mod windows_service_app {
         let mut pending_presentation_key_install: Option<PendingPresentationKeyInstall> = None;
         let mut pending_presentation_multicast_start: Option<PendingPresentationMulticastStart> =
             None;
+        let mut pending_presentation_unicast_start: Option<PendingPresentationUnicastStart> = None;
         loop {
             while let Ok(binding) = presentation_key_clear_rx.try_recv() {
                 if pending_presentation_multicast_start
                     .as_ref()
                     .is_some_and(|pending| pending.matches_key_binding(binding))
                     && let Some(pending) = pending_presentation_multicast_start.take()
+                {
+                    let _ = pending
+                        .reply_tx
+                        .send(Err("control.presentation.key_cleared".to_owned()));
+                }
+                if pending_presentation_unicast_start
+                    .as_ref()
+                    .is_some_and(|pending| pending.matches_key_binding(binding))
+                    && let Some(pending) = pending_presentation_unicast_start.take()
                 {
                     let _ = pending
                         .reply_tx
@@ -1766,7 +1786,9 @@ mod windows_service_app {
             }
 
             while let Ok(dispatch) = presentation_multicast_start_rx.try_recv() {
-                if pending_presentation_multicast_start.is_some() {
+                if pending_presentation_multicast_start.is_some()
+                    || pending_presentation_unicast_start.is_some()
+                {
                     let _ = dispatch
                         .reply_tx
                         .send(Err("control.presentation.worker_busy".to_owned()));
@@ -1791,6 +1813,102 @@ mod windows_service_app {
                     Err(error) => {
                         eprintln!(
                             "ClassMesh Service presentation-multicast dispatch failed: {error}"
+                        );
+                        let _ = dispatch
+                            .reply_tx
+                            .send(Err("control.presentation.worker_unavailable".to_owned()));
+                    }
+                }
+            }
+
+            if pending_presentation_unicast_start
+                .as_ref()
+                .is_some_and(|pending| pending.reply_tx.is_closed())
+            {
+                pending_presentation_unicast_start = None;
+            }
+
+            if pending_presentation_unicast_start
+                .as_ref()
+                .is_some_and(|pending| {
+                    !workers
+                        .is_running_worker(pending.expected_process_id, pending.expected_session_id)
+                })
+                && let Some(pending) = pending_presentation_unicast_start.take()
+            {
+                let _ = pending
+                    .reply_tx
+                    .send(Err("control.presentation.worker_exited".to_owned()));
+            }
+
+            while let Ok(result) = worker_presentation_unicast_result_rx.try_recv() {
+                let Some(pending) = pending_presentation_unicast_start.as_ref() else {
+                    eprintln!(
+                        "ClassMesh Service ignored stale Worker presentation-unicast result without a pending start"
+                    );
+                    continue;
+                };
+                if !pending.matches(&result) {
+                    eprintln!(
+                        "ClassMesh Service ignored miscorrelated Worker presentation-unicast result"
+                    );
+                    continue;
+                }
+                if !workers
+                    .is_running_worker(pending.expected_process_id, pending.expected_session_id)
+                {
+                    let pending = pending_presentation_unicast_start
+                        .take()
+                        .expect("pending unicast start presence checked");
+                    let _ = pending
+                        .reply_tx
+                        .send(Err("control.presentation.worker_exited".to_owned()));
+                    continue;
+                }
+
+                let pending = pending_presentation_unicast_start
+                    .take()
+                    .expect("pending unicast start presence checked");
+                match result.status {
+                    WorkerPresentationUnicastStartStatus::Started => {
+                        let _ = pending.reply_tx.send(Ok(()));
+                    }
+                    WorkerPresentationUnicastStartStatus::Rejected => {
+                        let _ = pending
+                            .reply_tx
+                            .send(Err("control.presentation.worker_rejected".to_owned()));
+                    }
+                }
+            }
+
+            while let Ok(dispatch) = presentation_unicast_start_rx.try_recv() {
+                if pending_presentation_multicast_start.is_some()
+                    || pending_presentation_unicast_start.is_some()
+                {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(Err("control.presentation.worker_busy".to_owned()));
+                    continue;
+                }
+                if !dispatch.commit.try_commit() {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(Err("control.presentation.start_cancelled".to_owned()));
+                    continue;
+                }
+                match workers.send_presentation_unicast_start(dispatch.start) {
+                    Ok((process_id, session_id)) => {
+                        pending_presentation_unicast_start =
+                            Some(PendingPresentationUnicastStart {
+                                expected_process_id: process_id,
+                                expected_session_id: session_id,
+                                start: dispatch.start,
+                                reply_tx: dispatch.reply_tx,
+                            });
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "ClassMesh Service presentation-unicast dispatch failed: {error}"
                         );
                         let _ = dispatch
                             .reply_tx
