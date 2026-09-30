@@ -79,6 +79,28 @@ mod tests {
     }
 
     #[test]
+    fn recovery_action_rejects_inconsistent_manually_constructed_decision() {
+        let request = PresentationKeyframeRequest::new(55, 7, 91).expect("valid request");
+        let inconsistent = PresentationRecoveryDecision {
+            outcome: PresentationRecoveryOutcome::KeyframeGranted { after_frame_id: 90 },
+            keyframe_request: Some(request),
+        };
+        assert_eq!(
+            TeacherPresentationSenderPlan::recovery_action(inconsistent),
+            None
+        );
+
+        let suppressed_with_request = PresentationRecoveryDecision {
+            outcome: PresentationRecoveryOutcome::KeyframeSuppressed { after_frame_id: 91 },
+            keyframe_request: Some(request),
+        };
+        assert_eq!(
+            TeacherPresentationSenderPlan::recovery_action(suppressed_with_request),
+            None
+        );
+    }
+
+    #[test]
     fn recovery_action_exists_only_for_granted_sanitized_request() {
         let request = PresentationKeyframeRequest::new(55, 7, 91).expect("valid request");
         let granted = PresentationRecoveryDecision {
