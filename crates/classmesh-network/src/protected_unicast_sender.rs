@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 
 use classmesh_security::AuthorizationStore;
 use classmesh_security::group_media::{GroupMediaEpoch, GroupMediaError, SealedGroupMediaFrame};
@@ -422,9 +423,9 @@ impl ProtectedUnicastFanout {
                 continue;
             };
             if let Some((_, sink_ids)) = groups.iter_mut().find(|(existing, _)| {
-                existing.meta.frame_id == frame.meta.frame_id
-                    && existing.meta.timestamp_us == frame.meta.timestamp_us
-                    && existing.meta.keyframe == frame.meta.keyframe
+                existing.codec == frame.codec
+                    && existing.meta == frame.meta
+                    && Arc::ptr_eq(&existing.data, &frame.data)
             }) {
                 sink_ids.push(sink_id);
             } else {
