@@ -28,8 +28,9 @@ use classmesh_control::quic::{
     ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
 };
 use classmesh_control::stream::{
+    ValidatedPresentationStreamOffer, ValidatedPresentationUnicastFallbackOffer,
     peer_bound_udp_unicast_destination, stream_profile_to_wire, validate_interactive_stream_offer,
-    validate_presentation_stream_offer,
+    validate_presentation_stream_offer, validate_presentation_unicast_fallback_offer,
 };
 use classmesh_control::{DEFAULT_OFFLINE_AFTER, HeartbeatSample, HeartbeatTracker};
 use classmesh_core::adaptation::{
@@ -48,7 +49,8 @@ use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
 use classmesh_security::{AuthorizationStore, Permission, PrincipalId};
 use classmesh_windows_runtime::ipc::{
-    ServicePresentationMulticastStart, ServiceUdpStreamStart, WorkerPresentationFeedback,
+    ServicePresentationMulticastStart, ServicePresentationUnicastStart, ServiceUdpStreamStart,
+    WorkerPresentationFeedback,
 };
 use classmesh_windows_runtime::ipc_sensitive::{
     PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
@@ -64,7 +66,7 @@ const CONFIG_VERSION: u32 = 1;
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const PRESENTATION_KEY_INSTALL_TIMEOUT: Duration = Duration::from_secs(1);
-const PRESENTATION_MULTICAST_START_TIMEOUT: Duration = Duration::from_secs(1);
+const PRESENTATION_START_TIMEOUT: Duration = Duration::from_secs(1);
 const PRESENTATION_FEEDBACK_BUS_CAPACITY: usize = 64;
 const CONTROL_INBOUND_QUEUE_CAPACITY: usize = 32;
 
@@ -189,11 +191,19 @@ pub(crate) struct PresentationMulticastStartDispatch {
     pub(crate) reply_tx: oneshot::Sender<Result<(), String>>,
 }
 
+#[derive(Debug)]
+pub(crate) struct PresentationUnicastStartDispatch {
+    pub(crate) start: ServicePresentationUnicastStart,
+    pub(crate) commit: MediaStartCommit,
+    pub(crate) reply_tx: oneshot::Sender<Result<(), String>>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PresentationDispatchChannels {
     pub(crate) key_install_tx: mpsc::SyncSender<PresentationKeyInstallDispatch>,
     pub(crate) key_clear_tx: mpsc::SyncSender<PresentationKeyInstallBinding>,
     pub(crate) multicast_start_tx: mpsc::SyncSender<PresentationMulticastStartDispatch>,
+    pub(crate) unicast_start_tx: mpsc::SyncSender<PresentationUnicastStartDispatch>,
 }
 
 #[derive(Debug, Clone)]
@@ -1082,6 +1092,21 @@ impl Drop for ReceivePumpGuard {
     }
 }
 
+async fn await_presentation_start(
+    commit: MediaStartCommit,
+    reply_rx: &mut oneshot::Receiver<Result<(), String>>,
+) -> Result<(), String> {
+    match tokio::time::timeout(PRESENTATION_START_TIMEOUT, &mut *reply_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("control.presentation.start_reply_dropped".to_owned()),
+        Err(_) if commit.cancel() => Err("control.presentation.start_timeout".to_owned()),
+        Err(_) if commit.is_committed() => reply_rx
+            .await
+            .unwrap_or_else(|_| Err("control.presentation.start_reply_dropped".to_owned())),
+        Err(_) => Err("control.presentation.start_cancelled".to_owned()),
+    }
+}
+
 async fn run_established_session(
     connection: &quinn::Connection,
     channel: ControlChannel,
@@ -1343,7 +1368,7 @@ async fn run_established_session(
                 let answer = if presentation_offer {
                     let supported =
                         negotiated_presentation_transports(&session.negotiated.capabilities);
-                    match validate_presentation_stream_offer(
+                    match validate_presentation_offer_for_dispatch(
                         offer,
                         &session.negotiated.capabilities,
                     ) {
@@ -1354,10 +1379,18 @@ async fn run_established_session(
                             supported_transports: supported,
                         },
                         Ok(validated) => {
+                            let (validated_stream_id, profile) = match &validated {
+                                ValidatedPresentationDispatchOffer::Multicast(validated) => {
+                                    (validated.stream_id, validated.profile)
+                                }
+                                ValidatedPresentationDispatchOffer::Unicast(validated) => {
+                                    (validated.stream_id, validated.profile)
+                                }
+                            };
                             let owner = presentation.owner_for_stream(
                                 peer.identity.principal_id(),
                                 session.control_session_id,
-                                validated.stream_id,
+                                validated_stream_id,
                             );
                             let installed = installed_presentation_key.filter(|installed| {
                                 owner.is_some_and(|owner| {
@@ -1369,98 +1402,131 @@ async fn run_established_session(
                                 worker_key_lease
                                     .matches_installed(session.control_session_id, installed)
                             });
-                            let teacher_source = match connection.remote_address().ip() {
-                                std::net::IpAddr::V4(address) => Some(address),
-                                std::net::IpAddr::V6(_) => None,
-                            };
 
                             let dispatch_result = match (
                                 owner,
                                 installed,
                                 worker_ready,
-                                multicast_interface,
-                                teacher_source,
+                                envelope.request_id,
                             ) {
-                                (None, _, _, _, _) => {
+                                (None, _, _, _) => {
                                     Err("control.presentation.stream_not_owner".to_owned())
                                 }
-                                (_, None, _, _, _) | (_, _, false, _, _) => {
+                                (_, None, _, _) | (_, _, false, _) => {
                                     Err("control.presentation.worker_key_not_installed".to_owned())
                                 }
-                                (_, _, _, None, _) => {
-                                    Err("control.presentation.multicast_unavailable".to_owned())
+                                (_, _, _, 0) => {
+                                    Err("control.presentation.invalid_request_id".to_owned())
                                 }
-                                (_, _, _, _, None) => {
-                                    Err("control.presentation.multicast_peer_not_ipv4".to_owned())
-                                }
-                                (
-                                    Some(owner),
-                                    Some(_),
-                                    true,
-                                    Some(interface),
-                                    Some(teacher_source),
-                                ) if envelope.request_id != 0 => {
-                                    let stream_id = u32::try_from(validated.stream_id)
+                                (Some(owner), Some(_), true, _) => {
+                                    let stream_id = u32::try_from(validated_stream_id)
                                         .expect("validated stream id fits media header");
-                                    let start = ServicePresentationMulticastStart {
-                                        control_session_id: session.control_session_id,
-                                        request_id: envelope.request_id,
-                                        presentation_id: owner.presentation_id,
-                                        stream_id,
-                                        width: validated.profile.width,
-                                        height: validated.profile.height,
-                                        fps: validated.profile.fps,
-                                        bitrate_kbps: validated.profile.bitrate_kbps,
-                                        group: validated.multicast.group,
-                                        port: validated.multicast.port,
-                                        interface,
-                                        teacher_source,
-                                    };
-                                    let (reply_tx, mut reply_rx) = oneshot::channel();
-                                    let commit = MediaStartCommit::pending();
-                                    match presentation_dispatch.multicast_start_tx.try_send(
-                                        PresentationMulticastStartDispatch {
-                                            start,
-                                            commit: commit.clone(),
-                                            reply_tx,
-                                        },
-                                    ) {
-                                        Ok(()) => match tokio::time::timeout(
-                                            PRESENTATION_MULTICAST_START_TIMEOUT,
-                                            &mut reply_rx,
-                                        )
-                                        .await
-                                        {
-                                            Ok(Ok(result)) => result,
-                                            Ok(Err(_)) => {
-                                                Err("control.presentation.start_reply_dropped"
-                                                    .to_owned())
+                                    match validated {
+                                        ValidatedPresentationDispatchOffer::Multicast(
+                                            validated,
+                                        ) => {
+                                            match (
+                                                multicast_interface,
+                                                connection.remote_address().ip(),
+                                            ) {
+                                                (None, _) => Err(
+                                                    "control.presentation.multicast_unavailable"
+                                                        .to_owned(),
+                                                ),
+                                                (_, std::net::IpAddr::V6(_)) => Err(
+                                                    "control.presentation.multicast_peer_not_ipv4"
+                                                        .to_owned(),
+                                                ),
+                                                (
+                                                    Some(interface),
+                                                    std::net::IpAddr::V4(teacher_source),
+                                                ) => {
+                                                    let start = ServicePresentationMulticastStart {
+                                                        control_session_id: session
+                                                            .control_session_id,
+                                                        request_id: envelope.request_id,
+                                                        presentation_id: owner.presentation_id,
+                                                        stream_id,
+                                                        width: profile.width,
+                                                        height: profile.height,
+                                                        fps: profile.fps,
+                                                        bitrate_kbps: profile.bitrate_kbps,
+                                                        group: validated.multicast.group,
+                                                        port: validated.multicast.port,
+                                                        interface,
+                                                        teacher_source,
+                                                    };
+                                                    let (reply_tx, mut reply_rx) =
+                                                        oneshot::channel();
+                                                    let commit = MediaStartCommit::pending();
+                                                    match presentation_dispatch
+                                                        .multicast_start_tx
+                                                        .try_send(
+                                                            PresentationMulticastStartDispatch {
+                                                                start,
+                                                                commit: commit.clone(),
+                                                                reply_tx,
+                                                            },
+                                                        ) {
+                                                        Ok(()) => {
+                                                            await_presentation_start(
+                                                                commit,
+                                                                &mut reply_rx,
+                                                            )
+                                                            .await
+                                                        }
+                                                        Err(mpsc::TrySendError::Full(_)) => Err(
+                                                            "control.presentation.start_backpressure"
+                                                                .to_owned(),
+                                                        ),
+                                                        Err(
+                                                            mpsc::TrySendError::Disconnected(_),
+                                                        ) => Err(
+                                                            "control.presentation.start_disconnected"
+                                                                .to_owned(),
+                                                        ),
+                                                    }
+                                                }
                                             }
-                                            Err(_) if commit.cancel() => {
-                                                Err("control.presentation.start_timeout".to_owned())
-                                            }
-                                            Err(_) if commit.is_committed() => {
-                                                reply_rx.await.unwrap_or_else(|_| {
-                                                    Err("control.presentation.start_reply_dropped"
-                                                        .to_owned())
-                                                })
-                                            }
-                                            Err(_) => {
-                                                Err("control.presentation.start_cancelled"
-                                                    .to_owned())
-                                            }
-                                        },
-                                        Err(mpsc::TrySendError::Full(_)) => {
-                                            Err("control.presentation.start_backpressure"
-                                                .to_owned())
                                         }
-                                        Err(mpsc::TrySendError::Disconnected(_)) => {
-                                            Err("control.presentation.start_disconnected"
-                                                .to_owned())
+                                        ValidatedPresentationDispatchOffer::Unicast(validated) => {
+                                            let start = ServicePresentationUnicastStart {
+                                                control_session_id: session.control_session_id,
+                                                request_id: envelope.request_id,
+                                                presentation_id: owner.presentation_id,
+                                                stream_id,
+                                                width: profile.width,
+                                                height: profile.height,
+                                                fps: profile.fps,
+                                                bitrate_kbps: profile.bitrate_kbps,
+                                                port: validated.port,
+                                                teacher_source: connection.remote_address().ip(),
+                                            };
+                                            let (reply_tx, mut reply_rx) = oneshot::channel();
+                                            let commit = MediaStartCommit::pending();
+                                            match presentation_dispatch.unicast_start_tx.try_send(
+                                                PresentationUnicastStartDispatch {
+                                                    start,
+                                                    commit: commit.clone(),
+                                                    reply_tx,
+                                                },
+                                            ) {
+                                                Ok(()) => {
+                                                    await_presentation_start(commit, &mut reply_rx)
+                                                        .await
+                                                }
+                                                Err(mpsc::TrySendError::Full(_)) => {
+                                                    Err("control.presentation.start_backpressure"
+                                                        .to_owned())
+                                                }
+                                                Err(mpsc::TrySendError::Disconnected(_)) => {
+                                                    Err("control.presentation.start_disconnected"
+                                                        .to_owned())
+                                                }
+                                            }
                                         }
                                     }
                                 }
-                                _ => Err("control.presentation.invalid_request_id".to_owned()),
                             };
 
                             match dispatch_result {
@@ -2221,15 +2287,49 @@ fn presentation_key_epoch_is_fresh(
     }
 }
 
-fn negotiated_presentation_transports(capabilities: &BTreeSet<Capability>) -> Vec<i32> {
-    if capabilities.contains(&Capability::TeacherPresentation)
-        && capabilities.contains(&Capability::SframeGroupMedia)
-        && capabilities.contains(&Capability::UdpMulticast)
-    {
-        vec![WireMediaTransport::UdpMulticast as i32]
-    } else {
-        Vec::new()
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ValidatedPresentationDispatchOffer {
+    Multicast(ValidatedPresentationStreamOffer),
+    Unicast(ValidatedPresentationUnicastFallbackOffer),
+}
+
+fn validate_presentation_offer_for_dispatch(
+    offer: &classmesh_protocol::control_wire::StreamOffer,
+    capabilities: &BTreeSet<Capability>,
+) -> Result<ValidatedPresentationDispatchOffer, classmesh_control::stream::StreamOfferError> {
+    let transport = WireMediaTransport::try_from(offer.transport)
+        .map_err(|_| classmesh_control::stream::StreamOfferError::UnsupportedTransport)?;
+    match transport {
+        WireMediaTransport::UdpMulticast => validate_presentation_stream_offer(offer, capabilities)
+            .map(ValidatedPresentationDispatchOffer::Multicast),
+        WireMediaTransport::UdpUnicast => {
+            validate_presentation_unicast_fallback_offer(offer, capabilities)
+                .map(ValidatedPresentationDispatchOffer::Unicast)
+        }
+        WireMediaTransport::Unspecified
+        | WireMediaTransport::QuicDatagram
+        | WireMediaTransport::Webrtc
+        | WireMediaTransport::ReliableFallback => {
+            Err(classmesh_control::stream::StreamOfferError::UnsupportedTransport)
+        }
     }
+}
+
+fn negotiated_presentation_transports(capabilities: &BTreeSet<Capability>) -> Vec<i32> {
+    if !capabilities.contains(&Capability::TeacherPresentation)
+        || !capabilities.contains(&Capability::SframeGroupMedia)
+    {
+        return Vec::new();
+    }
+
+    let mut transports = Vec::with_capacity(2);
+    if capabilities.contains(&Capability::UdpMulticast) {
+        transports.push(WireMediaTransport::UdpMulticast as i32);
+    }
+    if capabilities.contains(&Capability::UdpUnicast) {
+        transports.push(WireMediaTransport::UdpUnicast as i32);
+    }
+    transports
 }
 
 fn negotiated_interactive_transports(capabilities: &BTreeSet<Capability>) -> Vec<i32> {
@@ -2448,26 +2548,102 @@ mod tests {
     }
 
     #[test]
-    fn presentation_transport_answer_advertises_only_full_multicast_contract() {
+    fn presentation_transport_answer_advertises_each_full_protected_contract() {
         let full = BTreeSet::from([
+            Capability::TeacherPresentation,
+            Capability::SframeGroupMedia,
+            Capability::UdpMulticast,
+            Capability::UdpUnicast,
+        ]);
+        assert_eq!(
+            negotiated_presentation_transports(&full),
+            vec![
+                WireMediaTransport::UdpMulticast as i32,
+                WireMediaTransport::UdpUnicast as i32,
+            ]
+        );
+
+        let multicast_only = BTreeSet::from([
             Capability::TeacherPresentation,
             Capability::SframeGroupMedia,
             Capability::UdpMulticast,
         ]);
         assert_eq!(
-            negotiated_presentation_transports(&full),
+            negotiated_presentation_transports(&multicast_only),
             vec![WireMediaTransport::UdpMulticast as i32]
         );
 
-        for missing in [
+        let unicast_only = BTreeSet::from([
+            Capability::TeacherPresentation,
+            Capability::SframeGroupMedia,
+            Capability::UdpUnicast,
+        ]);
+        assert_eq!(
+            negotiated_presentation_transports(&unicast_only),
+            vec![WireMediaTransport::UdpUnicast as i32]
+        );
+
+        assert!(
+            negotiated_presentation_transports(&BTreeSet::from([
+                Capability::TeacherPresentation,
+                Capability::UdpUnicast,
+            ]))
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn presentation_offer_dispatch_validation_is_transport_explicit() {
+        use classmesh_control::stream::{
+            UDP_MULTICAST_PARAMETERS_VERSION, UDP_UNICAST_PARAMETERS_VERSION,
+        };
+        use classmesh_protocol::control_wire::{StreamOffer, VideoCodec, VideoProfile};
+
+        let capabilities = BTreeSet::from([
             Capability::TeacherPresentation,
             Capability::SframeGroupMedia,
             Capability::UdpMulticast,
-        ] {
-            let mut partial = full.clone();
-            partial.remove(&missing);
-            assert!(negotiated_presentation_transports(&partial).is_empty());
-        }
+            Capability::UdpUnicast,
+        ]);
+        let profile = Some(VideoProfile {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 5_000,
+            codec: VideoCodec::H264 as i32,
+        });
+
+        let multicast = StreamOffer {
+            stream_id: 9,
+            kind: WireStreamKind::TeacherPresentation as i32,
+            transport: WireMediaTransport::UdpMulticast as i32,
+            profile,
+            transport_parameters: vec![
+                UDP_MULTICAST_PARAMETERS_VERSION,
+                239,
+                10,
+                20,
+                30,
+                0xc3,
+                0x50,
+            ],
+        };
+        assert!(matches!(
+            validate_presentation_offer_for_dispatch(&multicast, &capabilities),
+            Ok(ValidatedPresentationDispatchOffer::Multicast(_))
+        ));
+
+        let unicast = StreamOffer {
+            stream_id: 9,
+            kind: WireStreamKind::TeacherPresentation as i32,
+            transport: WireMediaTransport::UdpUnicast as i32,
+            profile,
+            transport_parameters: vec![UDP_UNICAST_PARAMETERS_VERSION, 0xc3, 0x50],
+        };
+        assert!(matches!(
+            validate_presentation_offer_for_dispatch(&unicast, &capabilities),
+            Ok(ValidatedPresentationDispatchOffer::Unicast(_))
+        ));
     }
 
     #[test]
