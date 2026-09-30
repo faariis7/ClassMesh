@@ -1179,6 +1179,30 @@ fn publish_worker_presentation_multicast_start_result(
 }
 
 #[cfg(windows)]
+fn publish_worker_presentation_unicast_start_result(
+    pipe: &classmesh_win32::NamedPipeClient,
+    process_id: u32,
+    session_id: u32,
+    start: classmesh_windows_runtime::ipc::ServicePresentationUnicastStart,
+    status: classmesh_windows_runtime::ipc::WorkerPresentationUnicastStartStatus,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = classmesh_windows_runtime::ipc::WorkerPresentationUnicastStartResult {
+        process_id,
+        session_id,
+        control_session_id: start.control_session_id,
+        request_id: start.request_id,
+        presentation_id: start.presentation_id,
+        stream_id: start.stream_id,
+        status,
+    };
+    let frame =
+        classmesh_windows_runtime::ipc::IpcFrame::worker_presentation_unicast_start_result(result)
+            .map_err(ipc_message_error)?;
+    pipe.write_all(&frame.encode().map_err(ipc_frame_error)?)?;
+    Ok(())
+}
+
+#[cfg(windows)]
 fn request_worker_presentation_keyframe_once(
     pipe: &classmesh_win32::NamedPipeClient,
     process_id: u32,
