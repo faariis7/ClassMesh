@@ -354,8 +354,8 @@ mod tests {
             let _ = runtime.apply_keyframe_request(request);
         }
 
-        let _ = assert_api
-            as fn(&mut PresentationMulticastSendRuntime, PresentationKeyframeRequest);
+        let _ =
+            assert_api as fn(&mut PresentationMulticastSendRuntime, PresentationKeyframeRequest);
     }
 
     #[test]
