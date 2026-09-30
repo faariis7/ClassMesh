@@ -11,6 +11,7 @@ pub mod presentation_fanout;
 pub mod presentation_multicast_receive;
 #[cfg(windows)]
 pub mod presentation_multicast_send;
+pub mod presentation_unicast_receive;
 #[cfg(windows)]
 pub mod receiver_render;
 #[cfg(windows)]
