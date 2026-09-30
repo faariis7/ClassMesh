@@ -48,7 +48,10 @@ impl fmt::Display for PresentationMulticastSendRuntimeError {
                 write!(formatter, "teacher presentation unicast fan-out: {error}")
             }
             Self::UnicastActionConfig(error) => {
-                write!(formatter, "teacher presentation unicast action config: {error}")
+                write!(
+                    formatter,
+                    "teacher presentation unicast action config: {error}"
+                )
             }
             Self::UnicastActionBindingMismatch => formatter.write_str(
                 "teacher presentation unicast action does not match the live sender binding",
