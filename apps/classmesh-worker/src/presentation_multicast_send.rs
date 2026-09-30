@@ -33,7 +33,9 @@ impl fmt::Display for PresentationMulticastSendRuntimeError {
             Self::Fanout(error) => write!(formatter, "teacher presentation fan-out: {error}"),
             Self::Network(error) => write!(formatter, "teacher presentation multicast: {error}"),
             Self::Sink(error) => write!(formatter, "teacher presentation multicast sink: {error}"),
-            Self::Unicast(error) => write!(formatter, "teacher presentation unicast fan-out: {error}"),
+            Self::Unicast(error) => {
+                write!(formatter, "teacher presentation unicast fan-out: {error}")
+            }
         }
     }
 }
@@ -183,8 +185,7 @@ impl PresentationMulticastSendRuntime {
     }
 
     pub fn detach_unicast_outlier(&mut self, sink_id: SinkId) -> bool {
-        self.unicast
-            .detach(self.fanout.distributor_mut(), sink_id)
+        self.unicast.detach(self.fanout.distributor_mut(), sink_id)
     }
 
     #[must_use]
@@ -222,13 +223,9 @@ impl PresentationMulticastSendRuntime {
             None => None,
         };
         let (sent, backpressure_drop) = delivery_fields(delivery);
-        let unicast_deliveries = self
-            .unicast
-            .drain(
-                self.fanout.distributor_mut(),
-                coordinator,
-                authorization,
-            )?;
+        let unicast_deliveries =
+            self.unicast
+                .drain(self.fanout.distributor_mut(), coordinator, authorization)?;
         Ok(PresentationMulticastSendStep {
             encoded_outputs,
             sent,
