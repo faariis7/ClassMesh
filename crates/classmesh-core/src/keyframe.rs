@@ -86,6 +86,23 @@ mod tests {
     }
 
     #[test]
+    fn presentation_keyframe_request_requires_exact_nonzero_binding() {
+        assert_eq!(
+            PresentationKeyframeRequest::new(55, 7, 0)
+                .expect("zero after-frame is a valid recovery boundary"),
+            PresentationKeyframeRequest::new(55, 7, 0).expect("valid request")
+        );
+        assert_eq!(
+            PresentationKeyframeRequest::new(0, 7, 42),
+            Err(PresentationKeyframeRequestError::InvalidPresentationId)
+        );
+        assert_eq!(
+            PresentationKeyframeRequest::new(55, 0, 42),
+            Err(PresentationKeyframeRequestError::InvalidStreamId)
+        );
+    }
+
+    #[test]
     fn backwards_clock_input_does_not_bypass_throttle() {
         let mut coordinator = KeyframeRequestCoordinator::new(100);
         assert!(coordinator.request(1_000));
