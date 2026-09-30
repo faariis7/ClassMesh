@@ -329,9 +329,7 @@ impl PresentationDecodeRuntime {
         true
     }
 
-    pub fn finish(
-        &mut self,
-    ) -> Result<PresentationDecodeBatch, Box<dyn std::error::Error>> {
+    pub fn finish(&mut self) -> Result<PresentationDecodeBatch, Box<dyn std::error::Error>> {
         Ok(PresentationDecodeBatch::default())
     }
 
