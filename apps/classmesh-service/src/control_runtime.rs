@@ -28,8 +28,9 @@ use classmesh_control::quic::{
     ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
 };
 use classmesh_control::stream::{
+    ValidatedPresentationStreamOffer, ValidatedPresentationUnicastFallbackOffer,
     peer_bound_udp_unicast_destination, stream_profile_to_wire, validate_interactive_stream_offer,
-    validate_presentation_stream_offer,
+    validate_presentation_stream_offer, validate_presentation_unicast_fallback_offer,
 };
 use classmesh_control::{DEFAULT_OFFLINE_AFTER, HeartbeatSample, HeartbeatTracker};
 use classmesh_core::adaptation::{
@@ -2221,15 +2222,49 @@ fn presentation_key_epoch_is_fresh(
     }
 }
 
-fn negotiated_presentation_transports(capabilities: &BTreeSet<Capability>) -> Vec<i32> {
-    if capabilities.contains(&Capability::TeacherPresentation)
-        && capabilities.contains(&Capability::SframeGroupMedia)
-        && capabilities.contains(&Capability::UdpMulticast)
-    {
-        vec![WireMediaTransport::UdpMulticast as i32]
-    } else {
-        Vec::new()
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ValidatedPresentationDispatchOffer {
+    Multicast(ValidatedPresentationStreamOffer),
+    Unicast(ValidatedPresentationUnicastFallbackOffer),
+}
+
+fn validate_presentation_offer_for_dispatch(
+    offer: &classmesh_protocol::control_wire::StreamOffer,
+    capabilities: &BTreeSet<Capability>,
+) -> Result<ValidatedPresentationDispatchOffer, classmesh_control::stream::StreamOfferError> {
+    let transport = WireMediaTransport::try_from(offer.transport)
+        .map_err(|_| classmesh_control::stream::StreamOfferError::UnsupportedTransport)?;
+    match transport {
+        WireMediaTransport::UdpMulticast => validate_presentation_stream_offer(offer, capabilities)
+            .map(ValidatedPresentationDispatchOffer::Multicast),
+        WireMediaTransport::UdpUnicast => {
+            validate_presentation_unicast_fallback_offer(offer, capabilities)
+                .map(ValidatedPresentationDispatchOffer::Unicast)
+        }
+        WireMediaTransport::Unspecified
+        | WireMediaTransport::QuicDatagram
+        | WireMediaTransport::Webrtc
+        | WireMediaTransport::ReliableFallback => {
+            Err(classmesh_control::stream::StreamOfferError::UnsupportedTransport)
+        }
     }
+}
+
+fn negotiated_presentation_transports(capabilities: &BTreeSet<Capability>) -> Vec<i32> {
+    if !capabilities.contains(&Capability::TeacherPresentation)
+        || !capabilities.contains(&Capability::SframeGroupMedia)
+    {
+        return Vec::new();
+    }
+
+    let mut transports = Vec::with_capacity(2);
+    if capabilities.contains(&Capability::UdpMulticast) {
+        transports.push(WireMediaTransport::UdpMulticast as i32);
+    }
+    if capabilities.contains(&Capability::UdpUnicast) {
+        transports.push(WireMediaTransport::UdpUnicast as i32);
+    }
+    transports
 }
 
 fn negotiated_interactive_transports(capabilities: &BTreeSet<Capability>) -> Vec<i32> {
