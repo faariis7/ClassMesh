@@ -1,26 +1,27 @@
 use std::fmt;
-use std::io::ErrorKind;
 use std::net::{SocketAddr, SocketAddrV4};
 use std::time::Duration;
 
-use classmesh_protocol::PROTOCOL_VERSION;
-use classmesh_protocol::media::MEDIA_HEADER_LEN;
 use classmesh_security::AuthorizationStore;
-use classmesh_security::group_media::{
-    GroupMediaEpoch, GroupMediaError, GroupMediaFrameBinding, SealedGroupMediaFrame,
-};
+use classmesh_security::group_media::{GroupMediaEpoch, GroupMediaError, SealedGroupMediaFrame};
 use classmesh_security::group_media_coordinator::{
     GroupMediaCoordinator, GroupMediaCoordinatorError,
 };
-use classmesh_video::Codec;
 use classmesh_video::distributor::{
     DistributorError, FrameDistributor, SharedEncodedFrame, SinkId, SinkMode, SinkStats,
 };
 
 use crate::multicast::{MulticastMembership, MulticastProbeOutcome};
+use crate::protected_media::{
+    PreparedProtectedFrame, ProtectedMediaBackpressureDrop, ProtectedMediaBinding,
+    ProtectedMediaCoreError, ProtectedMediaPacketizer, ProtectedMediaTrySendOutcome,
+    protect_shared_h264_frame as protect_shared_h264_frame_core,
+    send_prepared_frame as send_prepared_frame_core,
+    try_send_prepared_frame as try_send_prepared_frame_core,
+};
 use crate::transport::SendFrameReport;
 use crate::udp::{DatagramError, UdpMediaSocket};
-use crate::{MediaPacket, PacketizeError, PacketizeMeta, packetize_frame};
+use crate::{MediaPacket, PacketizeError};
 
 pub const MULTICAST_MEDIA_TTL: u32 = 1;
 pub const DEFAULT_MULTICAST_WRITE_TIMEOUT: Duration = Duration::from_millis(100);
@@ -96,10 +97,8 @@ impl ProtectedMulticastSenderConfig {
         SocketAddr::V4(SocketAddrV4::new(self.membership.interface(), 0))
     }
 
-    fn accepts_binding(self, binding: GroupMediaFrameBinding) -> bool {
-        binding.presentation_id() == self.presentation_id
-            && binding.stream_id() == self.stream_id
-            && binding.epoch() == self.epoch
+    fn protected_binding(self) -> ProtectedMediaBinding {
+        ProtectedMediaBinding::new(self.presentation_id, self.stream_id, self.epoch)
     }
 }
 
@@ -183,6 +182,21 @@ impl From<DatagramError> for ProtectedMulticastSendError {
     }
 }
 
+impl From<ProtectedMediaCoreError> for ProtectedMulticastSendError {
+    fn from(value: ProtectedMediaCoreError) -> Self {
+        match value {
+            ProtectedMediaCoreError::ProtocolVersionOutOfRange => Self::ProtocolVersionOutOfRange,
+            ProtectedMediaCoreError::FrameBindingMismatch => Self::FrameBindingMismatch,
+            ProtectedMediaCoreError::UnsupportedCodec => Self::UnsupportedCodec,
+            ProtectedMediaCoreError::Security(error) => Self::Security(error),
+            ProtectedMediaCoreError::Coordinator(error) => Self::Coordinator(error),
+            ProtectedMediaCoreError::Packetize(error) => Self::Packetize(error),
+            ProtectedMediaCoreError::Datagram(error) => Self::Datagram(error),
+            ProtectedMediaCoreError::ShortDatagramWrite => Self::ShortDatagramWrite,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProtectedMulticastBackpressureDrop {
     pub frame_id: u64,
@@ -194,6 +208,27 @@ pub struct ProtectedMulticastBackpressureDrop {
 pub enum ProtectedMulticastTrySendOutcome {
     Sent(SendFrameReport),
     DroppedBackpressure(ProtectedMulticastBackpressureDrop),
+}
+
+impl From<ProtectedMediaBackpressureDrop> for ProtectedMulticastBackpressureDrop {
+    fn from(value: ProtectedMediaBackpressureDrop) -> Self {
+        Self {
+            frame_id: value.frame_id,
+            packets_sent: value.packets_sent,
+            packets_total: value.packets_total,
+        }
+    }
+}
+
+impl From<ProtectedMediaTrySendOutcome> for ProtectedMulticastTrySendOutcome {
+    fn from(value: ProtectedMediaTrySendOutcome) -> Self {
+        match value {
+            ProtectedMediaTrySendOutcome::Sent(report) => Self::Sent(report),
+            ProtectedMediaTrySendOutcome::DroppedBackpressure(drop) => {
+                Self::DroppedBackpressure(drop.into())
+            }
+        }
+    }
 }
 
 impl From<GroupMediaError> for ProtectedMulticastSendError {
@@ -315,79 +350,30 @@ fn protect_shared_h264_frame(
     authorization: &AuthorizationStore,
     frame: &SharedEncodedFrame,
 ) -> Result<SealedGroupMediaFrame, ProtectedMulticastSendError> {
-    if frame.codec != Codec::H264 {
-        return Err(ProtectedMulticastSendError::UnsupportedCodec);
-    }
-
-    let binding = GroupMediaFrameBinding::new(
-        config.presentation_id(),
-        config.stream_id(),
-        config.epoch(),
-        frame.meta.frame_id,
-        frame.meta.timestamp_us,
-        frame.meta.keyframe,
-    )?;
-    coordinator
-        .seal_bound_frame(authorization, frame.data.as_ref(), binding)
-        .map_err(Into::into)
+    protect_shared_h264_frame_core(
+        config.protected_binding(),
+        coordinator,
+        authorization,
+        frame,
+    )
+    .map_err(Into::into)
 }
+
+type PreparedMulticastFrame = PreparedProtectedFrame;
 
 #[derive(Debug)]
-struct PreparedMulticastFrame {
-    packets: Vec<MediaPacket>,
-    first_sequence: u32,
-    next_sequence: u32,
-}
-
-#[derive(Debug)]
-struct ProtectedMulticastPacketizer {
-    config: ProtectedMulticastSenderConfig,
-    next_sequence: u32,
-}
+struct ProtectedMulticastPacketizer(ProtectedMediaPacketizer);
 
 impl ProtectedMulticastPacketizer {
-    const fn new(config: ProtectedMulticastSenderConfig) -> Self {
-        Self {
-            config,
-            next_sequence: 0,
-        }
+    fn new(config: ProtectedMulticastSenderConfig) -> Self {
+        Self(ProtectedMediaPacketizer::new(config.protected_binding()))
     }
 
     fn packetize(
         &mut self,
         frame: &SealedGroupMediaFrame,
     ) -> Result<PreparedMulticastFrame, ProtectedMulticastSendError> {
-        let binding = frame.binding();
-        if !self.config.accepts_binding(binding) {
-            return Err(ProtectedMulticastSendError::FrameBindingMismatch);
-        }
-
-        let protocol_major = u8::try_from(PROTOCOL_VERSION.major)
-            .map_err(|_| ProtectedMulticastSendError::ProtocolVersionOutOfRange)?;
-        let protocol_minor = u8::try_from(PROTOCOL_VERSION.minor)
-            .map_err(|_| ProtectedMulticastSendError::ProtocolVersionOutOfRange)?;
-        let first_sequence = self.next_sequence;
-        let packets = packetize_frame(
-            frame.as_bytes(),
-            PacketizeMeta {
-                protocol_major,
-                protocol_minor,
-                stream_id: binding.stream_id(),
-                frame_id: binding.frame_id(),
-                first_sequence,
-                timestamp_us: binding.timestamp_us(),
-                keyframe: binding.keyframe(),
-            },
-        )?;
-        let packet_count = u32::try_from(packets.len())
-            .map_err(|_| ProtectedMulticastSendError::Packetize(PacketizeError::TooManyPackets))?;
-        let next_sequence = first_sequence.wrapping_add(packet_count);
-        self.next_sequence = next_sequence;
-        Ok(PreparedMulticastFrame {
-            packets,
-            first_sequence,
-            next_sequence,
-        })
+        self.0.packetize(frame).map_err(Into::into)
     }
 }
 
@@ -464,24 +450,11 @@ impl ProtectedMulticastFrameSender {
         &mut self,
         frame: &SealedGroupMediaFrame,
     ) -> Result<SendFrameReport, ProtectedMulticastSendError> {
-        let binding = frame.binding();
         let prepared = self.packetizer.packetize(frame)?;
-
-        for packet in &prepared.packets {
-            let expected = MEDIA_HEADER_LEN + packet.payload.len();
-            let written = self.socket.send_packet_to(packet, self.destination)?;
-            if written != expected {
-                return Err(ProtectedMulticastSendError::ShortDatagramWrite);
-            }
-        }
-
-        Ok(SendFrameReport {
-            frame_id: binding.frame_id(),
-            packets: prepared.packets.len(),
-            payload_bytes: frame.len(),
-            first_sequence: prepared.first_sequence,
-            next_sequence: prepared.next_sequence,
+        send_prepared_frame_core(frame, &prepared, |packet| {
+            self.socket.send_packet_to(packet, self.destination)
         })
+        .map_err(Into::into)
     }
 
     /// Sends an already-sealed frame without waiting for UDP send-buffer capacity.
@@ -513,41 +486,14 @@ impl ProtectedMulticastFrameSender {
 fn try_send_prepared_frame<F>(
     frame: &SealedGroupMediaFrame,
     prepared: &PreparedMulticastFrame,
-    mut send_packet: F,
+    send_packet: F,
 ) -> Result<ProtectedMulticastTrySendOutcome, ProtectedMulticastSendError>
 where
     F: FnMut(&MediaPacket) -> Result<usize, DatagramError>,
 {
-    let binding = frame.binding();
-    let mut packets_sent = 0_usize;
-
-    for packet in &prepared.packets {
-        let expected = MEDIA_HEADER_LEN + packet.payload.len();
-        match send_packet(packet) {
-            Ok(written) if written == expected => {
-                packets_sent = packets_sent.saturating_add(1);
-            }
-            Ok(_) => return Err(ProtectedMulticastSendError::ShortDatagramWrite),
-            Err(DatagramError::Io(error)) if error.kind() == ErrorKind::WouldBlock => {
-                return Ok(ProtectedMulticastTrySendOutcome::DroppedBackpressure(
-                    ProtectedMulticastBackpressureDrop {
-                        frame_id: binding.frame_id(),
-                        packets_sent,
-                        packets_total: prepared.packets.len(),
-                    },
-                ));
-            }
-            Err(error) => return Err(ProtectedMulticastSendError::Datagram(error)),
-        }
-    }
-
-    Ok(ProtectedMulticastTrySendOutcome::Sent(SendFrameReport {
-        frame_id: binding.frame_id(),
-        packets: prepared.packets.len(),
-        payload_bytes: frame.len(),
-        first_sequence: prepared.first_sequence,
-        next_sequence: prepared.next_sequence,
-    }))
+    try_send_prepared_frame_core(frame, prepared, send_packet)
+        .map(Into::into)
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
