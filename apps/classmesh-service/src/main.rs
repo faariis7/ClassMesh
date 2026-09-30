@@ -2170,6 +2170,64 @@ mod windows_service_app {
             assert!(!pending.matches(&wrong));
         }
 
+        fn multicast_start() -> ServicePresentationMulticastStart {
+            ServicePresentationMulticastStart {
+                control_session_id: 77,
+                request_id: 88,
+                presentation_id: 55,
+                stream_id: 7,
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                bitrate_kbps: 5_000,
+                group: std::net::Ipv4Addr::new(239, 10, 20, 30),
+                port: 50_000,
+                interface: std::net::Ipv4Addr::new(192, 0, 2, 10),
+                teacher_source: std::net::Ipv4Addr::new(192, 0, 2, 44),
+            }
+        }
+
+        #[test]
+        fn worker_multicast_result_requires_exact_process_session_and_start_binding() {
+            let start = multicast_start();
+            let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+            let pending = PendingPresentationMulticastStart {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                start,
+                reply_tx,
+            };
+            let exact = WorkerPresentationMulticastStartResult {
+                process_id: 42,
+                session_id: 7,
+                control_session_id: start.control_session_id,
+                request_id: start.request_id,
+                presentation_id: start.presentation_id,
+                stream_id: start.stream_id,
+                status: WorkerPresentationMulticastStartStatus::Started,
+            };
+            assert!(pending.matches(&exact));
+
+            let mut wrong = exact;
+            wrong.process_id = 43;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.session_id = 8;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.control_session_id = 78;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.request_id = 89;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.presentation_id = 56;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.stream_id = 8;
+            assert!(!pending.matches(&wrong));
+        }
+
         #[test]
         fn released_session_floor_rejects_stale_profile_updates() {
             assert!(focused_reconfigure_is_stale(7, 7, None));
