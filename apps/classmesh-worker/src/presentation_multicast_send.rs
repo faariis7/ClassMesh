@@ -222,7 +222,6 @@ impl PresentationMulticastSendRuntime {
         self.request_keyframe()
     }
 
-
     /// Encodes once and publishes once into the bounded shared fan-out.
     ///
     /// Multicast and every explicit unicast outlier then drain decoder-safe frames independently.
