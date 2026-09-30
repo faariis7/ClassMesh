@@ -12,7 +12,9 @@ use classmesh_security::group_media_coordinator::{
     GroupMediaCoordinator, GroupMediaCoordinatorError,
 };
 use classmesh_video::Codec;
-use classmesh_video::distributor::SharedEncodedFrame;
+use classmesh_video::distributor::{
+    DistributorError, FrameDistributor, SharedEncodedFrame, SinkId, SinkMode, SinkStats,
+};
 
 use crate::multicast::{MulticastMembership, MulticastProbeOutcome};
 use crate::transport::SendFrameReport;
@@ -21,6 +23,7 @@ use crate::{MediaPacket, PacketizeError, PacketizeMeta, packetize_frame};
 
 pub const MULTICAST_MEDIA_TTL: u32 = 1;
 pub const DEFAULT_MULTICAST_WRITE_TIMEOUT: Duration = Duration::from_millis(100);
+pub const DEFAULT_PROTECTED_MULTICAST_SINK_QUEUE_CAPACITY: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProtectedMulticastSenderConfig {
@@ -188,6 +191,100 @@ impl From<GroupMediaError> for ProtectedMulticastSendError {
 impl From<GroupMediaCoordinatorError> for ProtectedMulticastSendError {
     fn from(value: GroupMediaCoordinatorError) -> Self {
         Self::Coordinator(value)
+    }
+}
+
+#[derive(Debug)]
+pub enum ProtectedMulticastSinkError {
+    Distributor(DistributorError),
+    Send(ProtectedMulticastSendError),
+}
+
+impl fmt::Display for ProtectedMulticastSinkError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Distributor(error) => {
+                write!(formatter, "presentation multicast fan-out: {error:?}")
+            }
+            Self::Send(error) => write!(formatter, "presentation multicast send: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ProtectedMulticastSinkError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Send(error) => Some(error),
+            Self::Distributor(_) => None,
+        }
+    }
+}
+
+impl From<DistributorError> for ProtectedMulticastSinkError {
+    fn from(value: DistributorError) -> Self {
+        Self::Distributor(value)
+    }
+}
+
+impl From<ProtectedMulticastSendError> for ProtectedMulticastSinkError {
+    fn from(value: ProtectedMulticastSendError) -> Self {
+        Self::Send(value)
+    }
+}
+
+/// Bounded multicast attachment for the shared encoded-frame distributor.
+///
+/// The caller owns the distributor so the same `SharedEncodedFrame` allocation can also feed
+/// future unicast/SFU/recording sinks. This adapter only registers one multicast queue and drains
+/// its newest frame; older queued frames are discarded by `FrameDistributor` rather than allowing
+/// presentation latency to grow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtectedMulticastDistributorSink {
+    id: SinkId,
+}
+
+impl ProtectedMulticastDistributorSink {
+    pub fn attach(
+        distributor: &mut FrameDistributor,
+        id: SinkId,
+        capacity: usize,
+    ) -> Result<Self, ProtectedMulticastSinkError> {
+        distributor.add_sink(id, SinkMode::Multicast, capacity)?;
+        Ok(Self { id })
+    }
+
+    #[must_use]
+    pub const fn id(self) -> SinkId {
+        self.id
+    }
+
+    #[must_use]
+    pub fn stats(self, distributor: &FrameDistributor) -> Option<SinkStats> {
+        distributor.stats(self.id)
+    }
+
+    pub fn take_latest(self, distributor: &mut FrameDistributor) -> Option<SharedEncodedFrame> {
+        distributor.pop_latest(self.id)
+    }
+
+    pub fn send_latest(
+        self,
+        distributor: &mut FrameDistributor,
+        sender: &mut ProtectedMulticastFrameSender,
+        coordinator: &mut GroupMediaCoordinator,
+        authorization: &AuthorizationStore,
+    ) -> Result<Option<SendFrameReport>, ProtectedMulticastSinkError> {
+        let Some(frame) = self.take_latest(distributor) else {
+            return Ok(None);
+        };
+        sender
+            .send_shared_h264_frame(coordinator, authorization, &frame)
+            .map(Some)
+            .map_err(Into::into)
+    }
+
+    pub fn detach(self, distributor: &mut FrameDistributor) -> bool {
+        distributor.remove_sink(self.id)
     }
 }
 
@@ -441,6 +538,71 @@ mod tests {
             codec,
             vec![0x5a; 128],
         )
+    }
+
+    #[test]
+    fn multicast_distributor_sink_is_bounded_and_keeps_latest_shared_frame() {
+        use std::sync::Arc;
+
+        let mut distributor = FrameDistributor::default();
+        let sink = ProtectedMulticastDistributorSink::attach(
+            &mut distributor,
+            SinkId(99),
+            DEFAULT_PROTECTED_MULTICAST_SINK_QUEUE_CAPACITY,
+        )
+        .expect("multicast sink attaches");
+
+        let first = shared_frame(Codec::H264, 1, true);
+        let second = shared_frame(Codec::H264, 2, false);
+        let latest = shared_frame(Codec::H264, 3, false);
+        let latest_ptr = Arc::as_ptr(&latest.data);
+
+        distributor.publish(first);
+        distributor.publish(second);
+        distributor.publish(latest);
+
+        let before = sink.stats(&distributor).expect("sink stats");
+        assert_eq!(before.mode, SinkMode::Multicast);
+        assert_eq!(before.queued, 2);
+        assert_eq!(before.dropped, 1);
+
+        let drained = sink
+            .take_latest(&mut distributor)
+            .expect("latest frame available");
+        assert_eq!(drained.meta.frame_id, 3);
+        assert_eq!(Arc::as_ptr(&drained.data), latest_ptr);
+
+        let after = sink.stats(&distributor).expect("sink stats after drain");
+        assert_eq!(after.queued, 0);
+        assert_eq!(after.dropped, 2);
+        assert!(sink.detach(&mut distributor));
+        assert!(sink.stats(&distributor).is_none());
+    }
+
+    #[test]
+    fn multicast_distributor_sink_reuses_distributor_capacity_validation() {
+        let mut distributor = FrameDistributor::with_limits(1, 2).expect("bounded distributor");
+        assert!(matches!(
+            ProtectedMulticastDistributorSink::attach(&mut distributor, SinkId(1), 0),
+            Err(ProtectedMulticastSinkError::Distributor(
+                DistributorError::InvalidQueueCapacity
+            ))
+        ));
+        assert!(matches!(
+            ProtectedMulticastDistributorSink::attach(&mut distributor, SinkId(1), 3),
+            Err(ProtectedMulticastSinkError::Distributor(
+                DistributorError::QueueCapacityExceeded
+            ))
+        ));
+
+        ProtectedMulticastDistributorSink::attach(&mut distributor, SinkId(1), 1)
+            .expect("first sink");
+        assert!(matches!(
+            ProtectedMulticastDistributorSink::attach(&mut distributor, SinkId(2), 1),
+            Err(ProtectedMulticastSinkError::Distributor(
+                DistributorError::SinkLimitReached
+            ))
+        ));
     }
 
     #[test]
