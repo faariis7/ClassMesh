@@ -362,18 +362,24 @@ fn protect_shared_h264_frame(
 type PreparedMulticastFrame = PreparedProtectedFrame;
 
 #[derive(Debug)]
-struct ProtectedMulticastPacketizer(ProtectedMediaPacketizer);
+struct ProtectedMulticastPacketizer {
+    config: ProtectedMulticastSenderConfig,
+    core: ProtectedMediaPacketizer,
+}
 
 impl ProtectedMulticastPacketizer {
     fn new(config: ProtectedMulticastSenderConfig) -> Self {
-        Self(ProtectedMediaPacketizer::new(config.protected_binding()))
+        Self {
+            config,
+            core: ProtectedMediaPacketizer::new(config.protected_binding()),
+        }
     }
 
     fn packetize(
         &mut self,
         frame: &SealedGroupMediaFrame,
     ) -> Result<PreparedMulticastFrame, ProtectedMulticastSendError> {
-        self.0.packetize(frame).map_err(Into::into)
+        self.core.packetize(frame).map_err(Into::into)
     }
 }
 
@@ -499,14 +505,17 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    use std::io::ErrorKind;
     use std::net::{IpAddr, Ipv4Addr};
 
-    use classmesh_protocol::media::{MAX_PACKET_PAYLOAD, MediaFlags};
-    use classmesh_security::group_media::{GroupMediaKeyMaterial, GroupMediaSender};
+    use classmesh_protocol::media::{MAX_PACKET_PAYLOAD, MEDIA_HEADER_LEN, MediaFlags};
+    use classmesh_security::group_media::{
+        GroupMediaFrameBinding, GroupMediaKeyMaterial, GroupMediaSender,
+    };
     use classmesh_security::{
         CredentialFingerprint, CredentialRecord, Permission, Principal, PrincipalId, PrincipalKind,
     };
-    use classmesh_video::EncodedFrameMeta;
+    use classmesh_video::{Codec, EncodedFrameMeta};
 
     use crate::multicast::MulticastProbeFailure;
 
