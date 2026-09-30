@@ -1852,8 +1852,8 @@ async fn run_established_session(
                 };
                 let expected_binding = install.binding();
                 let (reply_tx, mut reply_rx) = oneshot::channel();
-                match presentation_keys
-                    .install_tx
+                match presentation_dispatch
+                    .key_install_tx
                     .try_send(PresentationKeyInstallDispatch { install, reply_tx })
                 {
                     Ok(()) => {}
