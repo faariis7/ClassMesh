@@ -2483,19 +2483,21 @@ mod tests {
             vec![WireMediaTransport::UdpUnicast as i32]
         );
 
-        assert!(negotiated_presentation_transports(&BTreeSet::from([
-            Capability::TeacherPresentation,
-            Capability::UdpUnicast,
-        ]))
-        .is_empty());
+        assert!(
+            negotiated_presentation_transports(&BTreeSet::from([
+                Capability::TeacherPresentation,
+                Capability::UdpUnicast,
+            ]))
+            .is_empty()
+        );
     }
 
     #[test]
     fn presentation_offer_dispatch_validation_is_transport_explicit() {
-        use classmesh_protocol::control_wire::{StreamOffer, VideoCodec, VideoProfile};
         use classmesh_control::stream::{
             UDP_MULTICAST_PARAMETERS_VERSION, UDP_UNICAST_PARAMETERS_VERSION,
         };
+        use classmesh_protocol::control_wire::{StreamOffer, VideoCodec, VideoProfile};
 
         let capabilities = BTreeSet::from([
             Capability::TeacherPresentation,
