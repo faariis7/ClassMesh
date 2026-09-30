@@ -1406,6 +1406,59 @@ mod focused_profile_tests {
     }
 
     #[test]
+    fn presentation_unicast_start_routes_as_typed_worker_event() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        use classmesh_windows_runtime::ipc::{IpcFrame, ServicePresentationUnicastStart};
+        use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+
+        let start = ServicePresentationUnicastStart {
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 7,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+            port: 49_000,
+            teacher_source: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44)),
+        };
+        let frame =
+            IpcFrame::service_presentation_unicast_start(start).expect("valid unicast start");
+        let event = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
+            .expect("unicast start routes");
+
+        let WorkerEvent::PresentationUnicastStart(received) = event else {
+            panic!("expected presentation unicast start event");
+        };
+        assert_eq!(received, start);
+    }
+
+    #[test]
+    fn service_cannot_send_worker_unicast_result_back_to_worker() {
+        use classmesh_windows_runtime::ipc::{
+            IpcFrame, WorkerPresentationUnicastStartResult, WorkerPresentationUnicastStartStatus,
+        };
+        use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+
+        let result = WorkerPresentationUnicastStartResult {
+            process_id: 42,
+            session_id: 7,
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: 55,
+            stream_id: 7,
+            status: WorkerPresentationUnicastStartStatus::Started,
+        };
+        let frame = IpcFrame::worker_presentation_unicast_start_result(result)
+            .expect("valid unicast result");
+        let error = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
+            .expect_err("Worker-to-Service result must be rejected on Service-to-Worker path");
+        assert!(error.contains("unexpected IPC message after handshake"));
+    }
+
+    #[test]
     fn service_cannot_send_worker_multicast_result_back_to_worker() {
         use classmesh_windows_runtime::ipc::{
             IpcFrame, WorkerPresentationMulticastStartResult,
