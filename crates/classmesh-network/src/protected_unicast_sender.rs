@@ -226,6 +226,27 @@ impl From<ProtectedMediaTrySendOutcome> for ProtectedUnicastTrySendOutcome {
     }
 }
 
+/// Seals one shared H.264 access unit with the authoritative group-media sender state.
+///
+/// The destination in `config` is intentionally not part of the cryptographic binding. Callers may
+/// reuse the returned ciphertext across multiple unicast destinations that share the same
+/// presentation/stream/epoch binding, without creating another SFrame sender or consuming another
+/// group-media counter.
+pub fn seal_shared_h264_frame_for_unicast(
+    config: ProtectedUnicastSenderConfig,
+    coordinator: &mut GroupMediaCoordinator,
+    authorization: &AuthorizationStore,
+    frame: &SharedEncodedFrame,
+) -> Result<SealedGroupMediaFrame, ProtectedUnicastSendError> {
+    protect_shared_h264_frame(
+        config.protected_binding(),
+        coordinator,
+        authorization,
+        frame,
+    )
+    .map_err(Into::into)
+}
+
 /// Fail-fast protected UDP-unicast sender for one explicit presentation outlier.
 ///
 /// The destination must be derived by the caller from the authenticated receiver peer plus the
@@ -257,12 +278,8 @@ impl ProtectedUnicastFrameSender {
         authorization: &AuthorizationStore,
         frame: &SharedEncodedFrame,
     ) -> Result<ProtectedUnicastTrySendOutcome, ProtectedUnicastSendError> {
-        let sealed = protect_shared_h264_frame(
-            self.config.protected_binding(),
-            coordinator,
-            authorization,
-            frame,
-        )?;
+        let sealed =
+            seal_shared_h264_frame_for_unicast(self.config, coordinator, authorization, frame)?;
         self.try_send_frame(&sealed)
     }
 
