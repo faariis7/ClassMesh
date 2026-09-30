@@ -128,6 +128,12 @@ mod windows_service_app {
                 && result.presentation_id == self.start.presentation_id
                 && result.stream_id == self.start.stream_id
         }
+
+        fn matches_key_binding(&self, binding: PresentationKeyInstallBinding) -> bool {
+            binding.control_session_id == self.start.control_session_id
+                && binding.presentation_id == self.start.presentation_id
+                && binding.stream_id == self.start.stream_id
+        }
     }
 
     #[derive(Debug)]
@@ -1501,6 +1507,15 @@ mod windows_service_app {
             None;
         loop {
             while let Ok(binding) = presentation_key_clear_rx.try_recv() {
+                if pending_presentation_multicast_start
+                    .as_ref()
+                    .is_some_and(|pending| pending.matches_key_binding(binding))
+                    && let Some(pending) = pending_presentation_multicast_start.take()
+                {
+                    let _ = pending
+                        .reply_tx
+                        .send(Err("control.presentation.key_cleared".to_owned()));
+                }
                 if let Err(error) = workers.clear_presentation_key(binding) {
                     eprintln!("ClassMesh Service presentation-key lifecycle clear failed: {error}");
                 }
@@ -1648,6 +1663,12 @@ mod windows_service_app {
                     let _ = dispatch
                         .reply_tx
                         .send(Err("control.presentation.worker_busy".to_owned()));
+                    continue;
+                }
+                if !dispatch.commit.try_commit() {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(Err("control.presentation.start_cancelled".to_owned()));
                     continue;
                 }
                 match workers.send_presentation_multicast_start(dispatch.start) {
@@ -1923,12 +1944,17 @@ mod windows_service_app {
 
             if Instant::now() >= next_worker_poll {
                 let event = workers.poll();
-                if !matches!(event, WorkerManagerEvent::None)
-                    && let Some(pending) = pending_presentation_key_install.take()
-                {
-                    let _ = pending
-                        .reply_tx
-                        .send(Err("control.presentation.worker_restarted".to_owned()));
+                if !matches!(event, WorkerManagerEvent::None) {
+                    if let Some(pending) = pending_presentation_key_install.take() {
+                        let _ = pending
+                            .reply_tx
+                            .send(Err("control.presentation.worker_restarted".to_owned()));
+                    }
+                    if let Some(pending) = pending_presentation_multicast_start.take() {
+                        let _ = pending
+                            .reply_tx
+                            .send(Err("control.presentation.worker_restarted".to_owned()));
+                    }
                 }
                 if matches!(event, WorkerManagerEvent::Running(_)) {
                     focused_reconfigure_worker_pid = None;
