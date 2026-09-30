@@ -232,12 +232,9 @@ mod tests {
 
     #[test]
     fn reset_discards_stale_media_but_preserves_sink_registration() {
-        let mut runtime = PresentationFanoutRuntime::with_limits(
-            PresentationTarget::default(),
-            2,
-            2,
-        )
-        .expect("valid fan-out runtime");
+        let mut runtime =
+            PresentationFanoutRuntime::with_limits(PresentationTarget::default(), 2, 2)
+                .expect("valid fan-out runtime");
         runtime
             .add_sink(SinkId(1), SinkMode::Multicast, 2)
             .expect("multicast sink");
