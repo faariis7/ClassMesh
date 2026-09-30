@@ -169,6 +169,47 @@ mod tests {
     }
 
     #[test]
+    fn recovery_plans_encoder_keyframe_only_for_granted_explicit_request() {
+        let mut recovery =
+            PresentationRecoveryCoordinator::new(7, 250_000).expect("valid recovery coordinator");
+
+        let granted = recovery
+            .observe_and_plan(55, 1_000_000, &keyframe(7, 40))
+            .expect("first request");
+        assert_eq!(
+            granted.outcome,
+            PresentationRecoveryOutcome::KeyframeGranted { after_frame_id: 40 }
+        );
+        let request = granted.keyframe_request.expect("granted request must plan IDR");
+        assert_eq!(request.presentation_id(), 55);
+        assert_eq!(request.stream_id(), 7);
+        assert_eq!(request.after_frame_id(), 40);
+
+        let suppressed = recovery
+            .observe_and_plan(55, 1_010_000, &keyframe(7, 41))
+            .expect("coalesced request");
+        assert_eq!(
+            suppressed.outcome,
+            PresentationRecoveryOutcome::KeyframeSuppressed { after_frame_id: 41 }
+        );
+        assert!(suppressed.keyframe_request.is_none());
+
+        let nack = FeedbackMessage::Nack {
+            stream_id: 7,
+            frame_id: 42,
+            missing_packet_indices: vec![1, 2],
+        };
+        let observed = recovery
+            .observe_and_plan(55, 1_020_000, &nack)
+            .expect("observational NACK");
+        assert!(matches!(
+            observed.outcome,
+            PresentationRecoveryOutcome::NackObserved { .. }
+        ));
+        assert!(observed.keyframe_request.is_none());
+    }
+
+    #[test]
     fn multicast_nack_never_requests_a_group_retransmit_or_implicit_idr() {
         let mut recovery =
             PresentationRecoveryCoordinator::for_stream(7).expect("valid recovery coordinator");
