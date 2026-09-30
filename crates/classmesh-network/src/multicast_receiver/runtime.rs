@@ -2,10 +2,10 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::multicast::MulticastMembership;
-use crate::protected_media_receive::{
+pub(super) use crate::protected_media_receive::{
     DatagramFailureDisposition, classify_datagram_failure,
 };
-use crate::udp::{DatagramError, UdpMediaSocket};
+use crate::udp::UdpMediaSocket;
 
 use super::config::{ProtectedMulticastReceiveError, ProtectedMulticastReceiverConfig};
 use super::state::{
