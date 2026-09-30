@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use classmesh_core::adaptation::StreamProfile;
+use classmesh_core::keyframe::PresentationKeyframeRequest;
 use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure};
 use classmesh_protocol::feedback::FeedbackMessage;
 use prost::Message;
@@ -11,7 +12,7 @@ pub const IPC_MAGIC: u32 = 0x434D_4950; // "CMIP"
 pub const IPC_HEADER_LEN: usize = 12;
 pub const MAX_IPC_MESSAGE: usize = 1_048_576;
 pub const IPC_VERSION_MAJOR: u8 = 0;
-pub const IPC_VERSION_MINOR: u8 = 6;
+pub const IPC_VERSION_MINOR: u8 = 7;
 
 const MESSAGE_WORKER_HELLO: u16 = 1;
 const MESSAGE_SERVICE_READY: u16 = 2;
@@ -32,16 +33,19 @@ const MESSAGE_SERVICE_PRESENTATION_MULTICAST_START: u16 = 23;
 const MESSAGE_WORKER_PRESENTATION_MULTICAST_START_RESULT: u16 = 24;
 const MESSAGE_SERVICE_PRESENTATION_UNICAST_START: u16 = 25;
 const MESSAGE_WORKER_PRESENTATION_UNICAST_START_RESULT: u16 = 26;
+const MESSAGE_SERVICE_PRESENTATION_KEYFRAME_REQUEST: u16 = 27;
 const SERVICE_UDP_STREAM_START_LEN: usize = 32;
 const SERVICE_PRESENTATION_MULTICAST_START_LEN: usize = 56;
 const WORKER_PRESENTATION_MULTICAST_START_RESULT_LEN: usize = 40;
 const SERVICE_PRESENTATION_UNICAST_START_LEN: usize = 56;
 const WORKER_PRESENTATION_UNICAST_START_RESULT_LEN: usize = 40;
+const SERVICE_PRESENTATION_KEYFRAME_REQUEST_LEN: usize = 20;
 const WORKER_PRESENTATION_KEY_INSTALL_RESULT_LEN: usize = 48;
 const SERVICE_PRESENTATION_KEY_CLEAR_LEN: usize = 32;
 const WORKER_PRESENTATION_FEEDBACK_BINDING_LEN: usize = 36;
 const PRESENTATION_KEY_INSTALL_RESULT_MIN_MINOR: u8 = 6;
 const WORKER_PRESENTATION_FEEDBACK_MIN_MINOR: u8 = 6;
+const PRESENTATION_KEYFRAME_REQUEST_MIN_MINOR: u8 = 7;
 
 const MAX_EVIDENCE_ADAPTER_IDENTITY: usize = 128;
 const MAX_EVIDENCE_DRIVER_VERSION: usize = 128;
@@ -641,6 +645,7 @@ pub enum IpcMessage {
     ServicePresentationUnicastStart(ServicePresentationUnicastStart),
     WorkerPresentationUnicastStartResult(WorkerPresentationUnicastStartResult),
     ServiceMediaFeedback(FeedbackMessage),
+    ServicePresentationKeyframeRequest(PresentationKeyframeRequest),
     WorkerPresentationKeyInstallResult(WorkerPresentationKeyInstallResult),
     ServicePresentationKeyClear(ServicePresentationKeyClear),
     WorkerPresentationFeedback(WorkerPresentationFeedback),
@@ -959,6 +964,20 @@ impl IpcFrame {
             .encode()
             .map_err(|_| IpcMessageError::InvalidPayload)?;
         Ok(Self::new(MESSAGE_SERVICE_MEDIA_FEEDBACK, payload))
+    }
+
+    pub fn service_presentation_keyframe_request(
+        request: PresentationKeyframeRequest,
+    ) -> Result<Self, IpcMessageError> {
+        let mut payload = Vec::with_capacity(SERVICE_PRESENTATION_KEYFRAME_REQUEST_LEN);
+        payload.extend_from_slice(&request.presentation_id().to_be_bytes());
+        payload.extend_from_slice(&request.stream_id().to_be_bytes());
+        payload.extend_from_slice(&request.after_frame_id().to_be_bytes());
+        debug_assert_eq!(payload.len(), SERVICE_PRESENTATION_KEYFRAME_REQUEST_LEN);
+        Ok(Self::new(
+            MESSAGE_SERVICE_PRESENTATION_KEYFRAME_REQUEST,
+            payload,
+        ))
     }
 
     pub fn service_presentation_key_clear(
@@ -1457,6 +1476,24 @@ impl IpcFrame {
                     return Err(IpcMessageError::InvalidPayload);
                 }
                 Ok(IpcMessage::ServiceMediaFeedback(feedback))
+            }
+            MESSAGE_SERVICE_PRESENTATION_KEYFRAME_REQUEST => {
+                if self.header.version_minor < PRESENTATION_KEYFRAME_REQUEST_MIN_MINOR {
+                    return Err(IpcMessageError::UnsupportedVersion);
+                }
+                if self.payload.len() != SERVICE_PRESENTATION_KEYFRAME_REQUEST_LEN {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let presentation_id =
+                    u64::from_be_bytes(self.payload[0..8].try_into().expect("eight bytes"));
+                let stream_id =
+                    u32::from_be_bytes(self.payload[8..12].try_into().expect("four bytes"));
+                let after_frame_id =
+                    u64::from_be_bytes(self.payload[12..20].try_into().expect("eight bytes"));
+                let request =
+                    PresentationKeyframeRequest::new(presentation_id, stream_id, after_frame_id)
+                        .map_err(|_| IpcMessageError::InvalidPayload)?;
+                Ok(IpcMessage::ServicePresentationKeyframeRequest(request))
             }
             MESSAGE_SERVICE_PRESENTATION_KEY_CLEAR => {
                 if self.payload.len() != SERVICE_PRESENTATION_KEY_CLEAR_LEN {
@@ -2096,6 +2133,52 @@ mod tests {
             dirty_ipv4_tail.message(),
             Err(IpcMessageError::InvalidPayload)
         );
+    }
+
+    #[test]
+    fn service_presentation_keyframe_request_round_trips_sanitized_binding() {
+        let request = PresentationKeyframeRequest::new(55, 9, 0)
+            .expect("valid presentation keyframe request");
+        let frame = IpcFrame::service_presentation_keyframe_request(request)
+            .expect("valid sanitized keyframe directive");
+        assert_eq!(
+            frame
+                .message()
+                .expect("typed presentation keyframe directive"),
+            IpcMessage::ServicePresentationKeyframeRequest(request)
+        );
+    }
+
+    #[test]
+    fn service_presentation_keyframe_request_rejects_downgrade_and_invalid_wire_binding() {
+        let request = PresentationKeyframeRequest::new(55, 9, 42)
+            .expect("valid presentation keyframe request");
+
+        let mut downgraded = IpcFrame::service_presentation_keyframe_request(request)
+            .expect("valid sanitized keyframe directive");
+        downgraded.header.version_minor = 6;
+        assert_eq!(
+            downgraded.message(),
+            Err(IpcMessageError::UnsupportedVersion)
+        );
+
+        let mut zero_presentation = IpcFrame::service_presentation_keyframe_request(request)
+            .expect("valid sanitized keyframe directive");
+        zero_presentation.payload[0..8].fill(0);
+        assert_eq!(
+            zero_presentation.message(),
+            Err(IpcMessageError::InvalidPayload)
+        );
+
+        let mut zero_stream = IpcFrame::service_presentation_keyframe_request(request)
+            .expect("valid sanitized keyframe directive");
+        zero_stream.payload[8..12].fill(0);
+        assert_eq!(zero_stream.message(), Err(IpcMessageError::InvalidPayload));
+
+        let mut wrong_length = IpcFrame::service_presentation_keyframe_request(request)
+            .expect("valid sanitized keyframe directive");
+        wrong_length.payload.push(0);
+        assert_eq!(wrong_length.message(), Err(IpcMessageError::InvalidPayload));
     }
 
     #[test]
