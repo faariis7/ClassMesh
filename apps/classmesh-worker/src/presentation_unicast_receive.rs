@@ -314,8 +314,8 @@ mod tests {
 
     #[test]
     fn runtime_binds_reserved_loopback_port_and_adopts_request_only_retry() {
-        let reservation = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-            .expect("reserve loopback port");
+        let reservation =
+            std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve loopback port");
         let port = reservation.local_addr().expect("reserved address").port();
         drop(reservation);
 
