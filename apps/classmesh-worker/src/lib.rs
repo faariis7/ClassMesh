@@ -5,6 +5,8 @@ pub mod encoder_benchmark;
 pub mod group_media_receive;
 #[cfg(windows)]
 pub mod presentation;
+#[cfg(windows)]
+pub mod presentation_fanout;
 pub mod presentation_decode_render;
 pub mod presentation_multicast_receive;
 #[cfg(windows)]
