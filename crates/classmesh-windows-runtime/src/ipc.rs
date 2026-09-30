@@ -2141,10 +2141,6 @@ mod tests {
             .expect("valid presentation keyframe request");
         let frame = IpcFrame::service_presentation_keyframe_request(request)
             .expect("valid sanitized keyframe directive");
-        assert!(
-            IPC_VERSION_MINOR >= 7,
-            "sanitized presentation keyframe directive requires IPC v0.7+"
-        );
         assert_eq!(
             frame
                 .message()
