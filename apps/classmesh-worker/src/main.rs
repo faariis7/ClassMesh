@@ -366,10 +366,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     WorkerPresentationUnicastStartStatus::Rejected
                 } else {
                     let retry_started = presentation_multicast.is_none()
-                        && match (
-                            presentation_unicast.as_mut(),
-                            presentation_decode.as_mut(),
-                        ) {
+                        && match (presentation_unicast.as_mut(), presentation_decode.as_mut()) {
                             (Some(receiver), Some(decoder)) => {
                                 !receiver.failed()
                                     && decoder.pump_window()
