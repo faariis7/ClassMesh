@@ -189,9 +189,7 @@ mod windows_service_app {
             presentation_multicast_result_tx: mpsc::SyncSender<
                 WorkerPresentationMulticastStartResult,
             >,
-            presentation_unicast_result_tx: mpsc::SyncSender<
-                WorkerPresentationUnicastStartResult,
-            >,
+            presentation_unicast_result_tx: mpsc::SyncSender<WorkerPresentationUnicastStartResult>,
             presentation_feedback: PresentationFeedbackBus,
         ) -> Self {
             let executable = std::env::current_exe().ok().map(|service| {
