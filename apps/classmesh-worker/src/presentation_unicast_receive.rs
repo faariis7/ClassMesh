@@ -1,9 +1,241 @@
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, TrySendError};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use classmesh_network::protected_unicast_receiver::{
+    ProtectedUnicastFrameReceiver, ProtectedUnicastReceiveError, ProtectedUnicastReceiveOutcome,
+    ProtectedUnicastReceiverConfig,
+};
+use classmesh_windows_runtime::ipc::ServicePresentationUnicastStart;
+use classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding;
+
+const PRESENTATION_UNICAST_EVENT_CAPACITY: usize = 64;
+const PRESENTATION_UNICAST_START_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[derive(Debug)]
+pub enum WorkerPresentationUnicastStartError {
+    Receiver(ProtectedUnicastReceiveError),
+    ThreadSpawn(std::io::Error),
+    StartupTimeout,
+    StartupChannelClosed,
+}
+
+impl Display for WorkerPresentationUnicastStartError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Receiver(error) => write!(formatter, "unicast receiver startup failed: {error}"),
+            Self::ThreadSpawn(error) => write!(formatter, "unicast receive thread failed: {error}"),
+            Self::StartupTimeout => formatter.write_str("unicast receiver startup timed out"),
+            Self::StartupChannelClosed => {
+                formatter.write_str("unicast receiver startup channel closed")
+            }
+        }
+    }
+}
+
+impl Error for WorkerPresentationUnicastStartError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Receiver(error) => Some(error),
+            Self::ThreadSpawn(error) => Some(error),
+            Self::StartupTimeout | Self::StartupChannelClosed => None,
+        }
+    }
+}
+
+impl From<ProtectedUnicastReceiveError> for WorkerPresentationUnicastStartError {
+    fn from(value: ProtectedUnicastReceiveError) -> Self {
+        Self::Receiver(value)
+    }
+}
+
+enum StartupOutcome {
+    Started,
+    Rejected(ProtectedUnicastReceiveError),
+}
+
+pub struct WorkerPresentationUnicastRuntime {
+    binding: ServicePresentationUnicastStart,
+    stop: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
+    dropped_events: Arc<AtomicU64>,
+    receive_rx: Receiver<ProtectedUnicastReceiveOutcome>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl std::fmt::Debug for WorkerPresentationUnicastRuntime {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkerPresentationUnicastRuntime")
+            .field("binding", &self.binding)
+            .field("failed", &self.failed())
+            .field("dropped_events", &self.dropped_events())
+            .finish_non_exhaustive()
+    }
+}
+
+impl WorkerPresentationUnicastRuntime {
+    pub fn start(
+        binding: ServicePresentationUnicastStart,
+    ) -> Result<Self, WorkerPresentationUnicastStartError> {
+        let config = receiver_config(binding)?;
+        let (startup_tx, startup_rx) = mpsc::sync_channel(1);
+        let (receive_tx, receive_rx) = mpsc::sync_channel(PRESENTATION_UNICAST_EVENT_CAPACITY);
+        let stop = Arc::new(AtomicBool::new(false));
+        let failed = Arc::new(AtomicBool::new(false));
+        let dropped_events = Arc::new(AtomicU64::new(0));
+        let thread_stop = Arc::clone(&stop);
+        let thread_failed = Arc::clone(&failed);
+        let thread_dropped_events = Arc::clone(&dropped_events);
+
+        let thread = thread::Builder::new()
+            .name("classmesh-presentation-unicast".to_owned())
+            .spawn(move || {
+                let mut receiver = match ProtectedUnicastFrameReceiver::bind(config) {
+                    Ok(receiver) => receiver,
+                    Err(error) => {
+                        let _ = startup_tx.send(StartupOutcome::Rejected(error));
+                        return;
+                    }
+                };
+                if startup_tx.send(StartupOutcome::Started).is_err() {
+                    return;
+                }
+
+                let clock = Instant::now();
+                while !thread_stop.load(Ordering::Acquire) {
+                    let now_us = u64::try_from(clock.elapsed().as_micros()).unwrap_or(u64::MAX);
+                    match receiver.receive_once(now_us) {
+                        Ok(ProtectedUnicastReceiveOutcome::Events(batch)) if batch.is_empty() => {}
+                        Ok(outcome) => match receive_tx.try_send(outcome) {
+                            Ok(()) => {}
+                            Err(TrySendError::Full(_)) => {
+                                thread_dropped_events.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(TrySendError::Disconnected(_)) => return,
+                        },
+                        Err(_) => {
+                            thread_failed.store(true, Ordering::Release);
+                            return;
+                        }
+                    }
+                }
+            })
+            .map_err(WorkerPresentationUnicastStartError::ThreadSpawn)?;
+
+        match startup_rx.recv_timeout(PRESENTATION_UNICAST_START_TIMEOUT) {
+            Ok(StartupOutcome::Started) => Ok(Self {
+                binding,
+                stop,
+                failed,
+                dropped_events,
+                receive_rx,
+                thread: Some(thread),
+            }),
+            Ok(StartupOutcome::Rejected(error)) => {
+                let _ = thread.join();
+                Err(error.into())
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                stop.store(true, Ordering::Release);
+                let _ = thread.join();
+                Err(WorkerPresentationUnicastStartError::StartupTimeout)
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                stop.store(true, Ordering::Release);
+                let _ = thread.join();
+                Err(WorkerPresentationUnicastStartError::StartupChannelClosed)
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn binding(&self) -> ServicePresentationUnicastStart {
+        self.binding
+    }
+
+    #[must_use]
+    pub fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn dropped_events(&self) -> u64 {
+        self.dropped_events.load(Ordering::Relaxed)
+    }
+
+    pub fn try_receive(&self) -> Option<ProtectedUnicastReceiveOutcome> {
+        self.receive_rx.try_recv().ok()
+    }
+
+    #[must_use]
+    pub fn same_media_configuration(&self, candidate: ServicePresentationUnicastStart) -> bool {
+        same_media_configuration(self.binding, candidate)
+    }
+
+    pub fn adopt_retry(&mut self, candidate: ServicePresentationUnicastStart) -> bool {
+        if !self.same_media_configuration(candidate) {
+            return false;
+        }
+        self.binding.request_id = candidate.request_id;
+        true
+    }
+
+    #[must_use]
+    pub fn matches_key_binding(&self, key: PresentationKeyInstallBinding) -> bool {
+        start_matches_key_binding(self.binding, key)
+    }
+}
+
+impl Drop for WorkerPresentationUnicastRuntime {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+pub fn receiver_config(
+    start: ServicePresentationUnicastStart,
+) -> Result<ProtectedUnicastReceiverConfig, WorkerPresentationUnicastStartError> {
+    ProtectedUnicastReceiverConfig::new(start.port, start.teacher_source, start.stream_id)
+        .map_err(Into::into)
+}
+
+#[must_use]
+pub fn same_media_configuration(
+    current: ServicePresentationUnicastStart,
+    candidate: ServicePresentationUnicastStart,
+) -> bool {
+    current.control_session_id == candidate.control_session_id
+        && current.presentation_id == candidate.presentation_id
+        && current.stream_id == candidate.stream_id
+        && current.width == candidate.width
+        && current.height == candidate.height
+        && current.fps == candidate.fps
+        && current.bitrate_kbps == candidate.bitrate_kbps
+        && current.port == candidate.port
+        && current.teacher_source == candidate.teacher_source
+}
+
+#[must_use]
+pub fn start_matches_key_binding(
+    start: ServicePresentationUnicastStart,
+    key: PresentationKeyInstallBinding,
+) -> bool {
+    start.control_session_id == key.control_session_id
+        && start.presentation_id == key.presentation_id
+        && start.stream_id == key.stream_id
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-
-    use classmesh_windows_runtime::ipc::ServicePresentationUnicastStart;
-    use classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding;
 
     use super::*;
 
