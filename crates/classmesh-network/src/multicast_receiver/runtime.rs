@@ -1,9 +1,11 @@
-use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::multicast::MulticastMembership;
-use crate::udp::{DatagramError, UdpMediaSocket};
+pub(super) use crate::protected_media_receive::{
+    DatagramFailureDisposition, classify_datagram_failure,
+};
+use crate::udp::UdpMediaSocket;
 
 use super::config::{ProtectedMulticastReceiveError, ProtectedMulticastReceiverConfig};
 use super::state::{
@@ -11,30 +13,6 @@ use super::state::{
 };
 
 pub const DEFAULT_MULTICAST_READ_TIMEOUT: Duration = Duration::from_millis(10);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DatagramFailureDisposition {
-    Tick,
-    DropMalformed,
-    Fail,
-}
-
-pub(super) fn classify_datagram_failure(error: &DatagramError) -> DatagramFailureDisposition {
-    match error {
-        DatagramError::Io(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            ) =>
-        {
-            DatagramFailureDisposition::Tick
-        }
-        DatagramError::Header(_)
-        | DatagramError::PayloadLengthMismatch
-        | DatagramError::DatagramTooLarge => DatagramFailureDisposition::DropMalformed,
-        DatagramError::Io(_) => DatagramFailureDisposition::Fail,
-    }
-}
 
 #[derive(Debug)]
 pub struct ProtectedMulticastFrameReceiver {
