@@ -118,9 +118,9 @@ impl SinkQueue {
             .range(..keyframe_id)
             .map(|(&frame_id, _)| frame_id)
             .collect();
-        self.dropped = self.dropped.saturating_add(
-            u64::try_from(stale_before_keyframe.len()).unwrap_or(u64::MAX),
-        );
+        self.dropped = self
+            .dropped
+            .saturating_add(u64::try_from(stale_before_keyframe.len()).unwrap_or(u64::MAX));
         for frame_id in stale_before_keyframe {
             self.frames.remove(&frame_id);
         }
