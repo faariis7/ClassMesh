@@ -180,7 +180,9 @@ mod tests {
             granted.outcome,
             PresentationRecoveryOutcome::KeyframeGranted { after_frame_id: 40 }
         );
-        let request = granted.keyframe_request.expect("granted request must plan IDR");
+        let request = granted
+            .keyframe_request
+            .expect("granted request must plan IDR");
         assert_eq!(request.presentation_id(), 55);
         assert_eq!(request.stream_id(), 7);
         assert_eq!(request.after_frame_id(), 40);
