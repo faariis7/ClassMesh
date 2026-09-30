@@ -635,7 +635,10 @@ mod tests {
         assert_eq!(target.stream_id, 7);
         assert_eq!(target.profile, profile);
         assert_eq!(target.epoch, epoch);
-        assert_eq!(target.destination.ip(), pair.client.connection.remote_address().ip());
+        assert_eq!(
+            target.destination.ip(),
+            pair.client.connection.remote_address().ip()
+        );
         assert_eq!(target.destination.port(), 50_000);
         Ok(())
     }
