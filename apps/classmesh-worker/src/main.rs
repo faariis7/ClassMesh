@@ -525,19 +525,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 Err(error) => {
                                     eprintln!(
-                                        "ClassMesh Worker dropped multicast ciphertext before decode on frame={frame_id}: {error}"
+                                        "ClassMesh Worker dropped unauthenticated multicast ciphertext before decode on frame={frame_id}: {error}"
                                     );
-                                    if error.disrupts_decode_continuity() {
-                                        decoder.recover_after_loss();
-                                        request_worker_presentation_keyframe_once(
-                                            &pipe,
-                                            std::process::id(),
-                                            actual_session,
-                                            binding,
-                                            frame_id,
-                                            &mut presentation_keyframe_request_pending,
-                                        )?;
-                                    }
                                 }
                             }
                         }
