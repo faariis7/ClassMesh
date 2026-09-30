@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+use classmesh_network::AssembledFrame;
 use classmesh_network::multicast_receiver::ReceivedGroupMediaCiphertext;
 use classmesh_security::group_media::{
     GroupMediaEpoch, GroupMediaError, GroupMediaFrameBinding, GroupMediaKeyMaterial,
@@ -145,6 +146,25 @@ impl WorkerGroupMediaKeyState {
             .receiver
             .open_bound_frame(frame.ciphertext(), binding)
             .map_err(Into::into)
+    }
+
+    pub fn open_access_unit(
+        &mut self,
+        frame: ReceivedGroupMediaCiphertext,
+    ) -> Result<AssembledFrame, WorkerGroupMediaKeyError> {
+        let stream_id = frame.stream_id();
+        let frame_id = frame.frame_id();
+        let timestamp_us = frame.timestamp_us();
+        let keyframe = frame.keyframe();
+        let data = self.open_frame(&frame)?;
+
+        Ok(AssembledFrame {
+            stream_id,
+            frame_id,
+            timestamp_us,
+            keyframe,
+            data,
+        })
     }
 
     pub fn clear_if_matches(&mut self, clear: ServicePresentationKeyClear) -> bool {
@@ -313,6 +333,31 @@ mod tests {
             state.open_frame(&frame).expect("authenticated frame"),
             b"worker-presentation-frame"
         );
+    }
+
+    #[test]
+    fn authenticated_access_unit_preserves_verified_frame_metadata() {
+        let mut state = WorkerGroupMediaKeyState::default();
+        state
+            .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x46))
+            .expect("install");
+        let sealed = sealed(
+            3,
+            0x46,
+            95,
+            123_460,
+            true,
+            b"authenticated-h264-access-unit",
+        );
+        let access_unit = state
+            .open_access_unit(received(&sealed))
+            .expect("authenticated access unit");
+
+        assert_eq!(access_unit.stream_id, STREAM_ID);
+        assert_eq!(access_unit.frame_id, 95);
+        assert_eq!(access_unit.timestamp_us, 123_460);
+        assert!(access_unit.keyframe);
+        assert_eq!(access_unit.data, b"authenticated-h264-access-unit");
     }
 
     #[test]
