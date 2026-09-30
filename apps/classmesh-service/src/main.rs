@@ -2250,6 +2250,43 @@ mod windows_service_app {
         }
 
         #[test]
+        fn pending_multicast_start_is_invalidated_by_exact_key_lifecycle_binding() {
+            let start = multicast_start();
+            let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+            let pending = PendingPresentationMulticastStart {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                start,
+                reply_tx,
+            };
+            let exact_media_binding = PresentationKeyInstallBinding {
+                control_session_id: start.control_session_id,
+                request_id: 999,
+                presentation_id: start.presentation_id,
+                stream_id: start.stream_id,
+                epoch: 77,
+            };
+            assert!(pending.matches_key_binding(exact_media_binding));
+
+            for wrong in [
+                PresentationKeyInstallBinding {
+                    control_session_id: start.control_session_id + 1,
+                    ..exact_media_binding
+                },
+                PresentationKeyInstallBinding {
+                    presentation_id: start.presentation_id + 1,
+                    ..exact_media_binding
+                },
+                PresentationKeyInstallBinding {
+                    stream_id: start.stream_id + 1,
+                    ..exact_media_binding
+                },
+            ] {
+                assert!(!pending.matches_key_binding(wrong));
+            }
+        }
+
+        #[test]
         fn released_session_floor_rejects_stale_profile_updates() {
             assert!(focused_reconfigure_is_stale(7, 7, None));
             assert!(focused_reconfigure_is_stale(6, 7, None));
