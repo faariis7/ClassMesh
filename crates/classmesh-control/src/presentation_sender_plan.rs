@@ -96,10 +96,9 @@ impl TeacherPresentationSenderPlan {
         decision: PresentationRecoveryDecision,
     ) -> Option<TeacherPresentationSenderAction> {
         match (decision.outcome, decision.keyframe_request) {
-            (
-                PresentationRecoveryOutcome::KeyframeGranted { after_frame_id },
-                Some(request),
-            ) if request.after_frame_id() == after_frame_id => {
+            (PresentationRecoveryOutcome::KeyframeGranted { after_frame_id }, Some(request))
+                if request.after_frame_id() == after_frame_id =>
+            {
                 Some(TeacherPresentationSenderAction::RequestKeyframe(request))
             }
             _ => None,
