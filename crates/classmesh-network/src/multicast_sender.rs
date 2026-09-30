@@ -4,9 +4,15 @@ use std::time::Duration;
 
 use classmesh_protocol::PROTOCOL_VERSION;
 use classmesh_protocol::media::MEDIA_HEADER_LEN;
+use classmesh_security::AuthorizationStore;
 use classmesh_security::group_media::{
-    GroupMediaEpoch, GroupMediaFrameBinding, SealedGroupMediaFrame,
+    GroupMediaEpoch, GroupMediaError, GroupMediaFrameBinding, SealedGroupMediaFrame,
 };
+use classmesh_security::group_media_coordinator::{
+    GroupMediaCoordinator, GroupMediaCoordinatorError,
+};
+use classmesh_video::Codec;
+use classmesh_video::distributor::SharedEncodedFrame;
 
 use crate::multicast::{MulticastMembership, MulticastProbeOutcome};
 use crate::transport::SendFrameReport;
@@ -101,6 +107,9 @@ pub enum ProtectedMulticastSendError {
     InvalidStreamId,
     ProtocolVersionOutOfRange,
     FrameBindingMismatch,
+    UnsupportedCodec,
+    Security(GroupMediaError),
+    Coordinator(GroupMediaCoordinatorError),
     Packetize(PacketizeError),
     Datagram(DatagramError),
     ShortDatagramWrite,
@@ -123,6 +132,11 @@ impl fmt::Display for ProtectedMulticastSendError {
             Self::FrameBindingMismatch => {
                 formatter.write_str("sealed group-media frame does not match multicast sender")
             }
+            Self::UnsupportedCodec => {
+                formatter.write_str("presentation multicast sender requires H.264")
+            }
+            Self::Security(error) => write!(formatter, "group-media binding: {error}"),
+            Self::Coordinator(error) => write!(formatter, "group-media coordinator: {error}"),
             Self::Packetize(error) => {
                 write!(formatter, "multicast packetization failed: {error:?}")
             }
@@ -138,12 +152,15 @@ impl std::error::Error for ProtectedMulticastSendError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Datagram(error) => Some(error),
+            Self::Security(error) => Some(error),
+            Self::Coordinator(error) => Some(error),
             Self::MulticastUnavailable
             | Self::InvalidPort
             | Self::InvalidPresentationId
             | Self::InvalidStreamId
             | Self::ProtocolVersionOutOfRange
             | Self::FrameBindingMismatch
+            | Self::UnsupportedCodec
             | Self::Packetize(_)
             | Self::ShortDatagramWrite => None,
         }
@@ -160,6 +177,41 @@ impl From<DatagramError> for ProtectedMulticastSendError {
     fn from(value: DatagramError) -> Self {
         Self::Datagram(value)
     }
+}
+
+impl From<GroupMediaError> for ProtectedMulticastSendError {
+    fn from(value: GroupMediaError) -> Self {
+        Self::Security(value)
+    }
+}
+
+impl From<GroupMediaCoordinatorError> for ProtectedMulticastSendError {
+    fn from(value: GroupMediaCoordinatorError) -> Self {
+        Self::Coordinator(value)
+    }
+}
+
+fn protect_shared_h264_frame(
+    config: ProtectedMulticastSenderConfig,
+    coordinator: &mut GroupMediaCoordinator,
+    authorization: &AuthorizationStore,
+    frame: &SharedEncodedFrame,
+) -> Result<SealedGroupMediaFrame, ProtectedMulticastSendError> {
+    if frame.codec != Codec::H264 {
+        return Err(ProtectedMulticastSendError::UnsupportedCodec);
+    }
+
+    let binding = GroupMediaFrameBinding::new(
+        config.presentation_id(),
+        config.stream_id(),
+        config.epoch(),
+        frame.meta.frame_id,
+        frame.meta.timestamp_us,
+        frame.meta.keyframe,
+    )?;
+    coordinator
+        .seal_bound_frame(authorization, frame.data.as_ref(), binding)
+        .map_err(Into::into)
 }
 
 #[derive(Debug)]
@@ -244,6 +296,17 @@ impl ProtectedMulticastFrameSender {
         })
     }
 
+    pub fn send_shared_h264_frame(
+        &mut self,
+        coordinator: &mut GroupMediaCoordinator,
+        authorization: &AuthorizationStore,
+        frame: &SharedEncodedFrame,
+    ) -> Result<SendFrameReport, ProtectedMulticastSendError> {
+        let sealed =
+            protect_shared_h264_frame(self.packetizer.config, coordinator, authorization, frame)?;
+        self.send_frame(&sealed)
+    }
+
     pub fn send_frame(
         &mut self,
         frame: &SealedGroupMediaFrame,
@@ -280,10 +343,15 @@ impl ProtectedMulticastFrameSender {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::net::{IpAddr, Ipv4Addr};
 
     use classmesh_protocol::media::{MAX_PACKET_PAYLOAD, MediaFlags};
     use classmesh_security::group_media::{GroupMediaKeyMaterial, GroupMediaSender};
+    use classmesh_security::{
+        CredentialFingerprint, CredentialRecord, Permission, Principal, PrincipalId, PrincipalKind,
+    };
+    use classmesh_video::EncodedFrameMeta;
 
     use crate::multicast::MulticastProbeFailure;
 
@@ -336,6 +404,139 @@ mod tests {
         sender
             .seal_bound_frame(&vec![0x5a; bytes], binding)
             .expect("sealed frame")
+    }
+
+    fn principal(value: u8) -> PrincipalId {
+        PrincipalId([value; 32])
+    }
+
+    fn authorization_with_receiver(value: u8) -> AuthorizationStore {
+        let principal_id = principal(value);
+        let fingerprint = CredentialFingerprint([value.wrapping_add(100); 32]);
+        let mut permissions = BTreeSet::new();
+        permissions.insert(Permission::ReceivePresentation);
+        let mut credentials = BTreeMap::new();
+        credentials.insert(fingerprint, CredentialRecord::active(fingerprint, 1));
+
+        let mut authorization = AuthorizationStore::default();
+        authorization
+            .upsert(Principal {
+                id: principal_id,
+                kind: PrincipalKind::StudentDevice,
+                enabled: true,
+                permissions,
+                credentials,
+            })
+            .expect("test receiver principal registers");
+        authorization
+    }
+
+    fn shared_frame(codec: Codec, frame_id: u64, keyframe: bool) -> SharedEncodedFrame {
+        SharedEncodedFrame::new(
+            EncodedFrameMeta {
+                frame_id,
+                timestamp_us: frame_id.saturating_mul(33_333),
+                keyframe,
+            },
+            codec,
+            vec![0x5a; 128],
+        )
+    }
+
+    #[test]
+    fn shared_h264_frame_is_sealed_by_existing_coordinator_sender() {
+        let authorization = authorization_with_receiver(1);
+        let mut coordinator = GroupMediaCoordinator::default();
+        coordinator
+            .register_receiver(&authorization, principal(1))
+            .expect("receiver registers");
+        let active_epoch = coordinator.begin_epoch().expect("epoch starts");
+        let frame = shared_frame(Codec::H264, 91, true);
+
+        let sealed = protect_shared_h264_frame(
+            config(active_epoch),
+            &mut coordinator,
+            &authorization,
+            &frame,
+        )
+        .expect("shared H.264 frame is protected");
+        let binding = sealed.binding();
+
+        assert_eq!(binding.presentation_id(), 700);
+        assert_eq!(binding.stream_id(), 800);
+        assert_eq!(binding.epoch(), active_epoch);
+        assert_eq!(binding.frame_id(), 91);
+        assert_eq!(binding.timestamp_us(), 91 * 33_333);
+        assert!(binding.keyframe());
+        assert!(!sealed.is_empty());
+    }
+
+    #[test]
+    fn shared_multicast_bridge_rejects_non_h264_before_sealing() {
+        let authorization = authorization_with_receiver(1);
+        let mut coordinator = GroupMediaCoordinator::default();
+        coordinator
+            .register_receiver(&authorization, principal(1))
+            .expect("receiver registers");
+        let active_epoch = coordinator.begin_epoch().expect("epoch starts");
+
+        assert!(matches!(
+            protect_shared_h264_frame(
+                config(active_epoch),
+                &mut coordinator,
+                &authorization,
+                &shared_frame(Codec::Hevc, 1, true),
+            ),
+            Err(ProtectedMulticastSendError::UnsupportedCodec)
+        ));
+    }
+
+    #[test]
+    fn shared_multicast_bridge_fails_closed_when_rotation_is_required() {
+        let authorization = authorization_with_receiver(1);
+        let mut coordinator = GroupMediaCoordinator::default();
+        coordinator
+            .register_receiver(&authorization, principal(1))
+            .expect("receiver registers");
+        let active_epoch = coordinator.begin_epoch().expect("epoch starts");
+        assert!(coordinator.remove_receiver(principal(1)));
+        assert!(coordinator.rotation_required());
+
+        assert!(matches!(
+            protect_shared_h264_frame(
+                config(active_epoch),
+                &mut coordinator,
+                &authorization,
+                &shared_frame(Codec::H264, 2, false),
+            ),
+            Err(ProtectedMulticastSendError::Coordinator(
+                GroupMediaCoordinatorError::RotationRequired
+            ))
+        ));
+    }
+
+    #[test]
+    fn shared_multicast_bridge_rejects_sender_epoch_drift() {
+        let authorization = authorization_with_receiver(1);
+        let mut coordinator = GroupMediaCoordinator::default();
+        coordinator
+            .register_receiver(&authorization, principal(1))
+            .expect("receiver registers");
+        let first_epoch = coordinator.begin_epoch().expect("first epoch starts");
+        let second_epoch = coordinator.begin_epoch().expect("second epoch starts");
+        assert_ne!(first_epoch, second_epoch);
+
+        assert!(matches!(
+            protect_shared_h264_frame(
+                config(first_epoch),
+                &mut coordinator,
+                &authorization,
+                &shared_frame(Codec::H264, 3, false),
+            ),
+            Err(ProtectedMulticastSendError::Coordinator(
+                GroupMediaCoordinatorError::Crypto(GroupMediaError::BindingEpochMismatch)
+            ))
+        ));
     }
 
     #[test]
