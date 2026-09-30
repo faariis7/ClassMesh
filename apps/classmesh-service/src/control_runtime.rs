@@ -182,12 +182,6 @@ pub(crate) struct PresentationKeyInstallDispatch {
     pub(crate) reply_tx: oneshot::Sender<Result<PresentationKeyInstallBinding, String>>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct PresentationKeyDispatchChannels {
-    pub(crate) install_tx: mpsc::SyncSender<PresentationKeyInstallDispatch>,
-    pub(crate) clear_tx: mpsc::SyncSender<PresentationKeyInstallBinding>,
-}
-
 #[derive(Debug)]
 pub(crate) struct PresentationMulticastStartDispatch {
     pub(crate) start: ServicePresentationMulticastStart,
@@ -196,8 +190,10 @@ pub(crate) struct PresentationMulticastStartDispatch {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PresentationMulticastDispatchChannels {
-    pub(crate) start_tx: mpsc::SyncSender<PresentationMulticastStartDispatch>,
+pub(crate) struct PresentationDispatchChannels {
+    pub(crate) key_install_tx: mpsc::SyncSender<PresentationKeyInstallDispatch>,
+    pub(crate) key_clear_tx: mpsc::SyncSender<PresentationKeyInstallBinding>,
+    pub(crate) multicast_start_tx: mpsc::SyncSender<PresentationMulticastStartDispatch>,
 }
 
 #[derive(Debug, Clone)]
@@ -798,8 +794,7 @@ impl ControlRuntimeConfig {
 struct ControlRuntimeDispatch {
     input: InputDispatchChannels,
     media: FocusedMediaDispatchChannels,
-    presentation_keys: PresentationKeyDispatchChannels,
-    presentation_multicast: PresentationMulticastDispatchChannels,
+    presentation_dispatch: PresentationDispatchChannels,
     presentation_feedback: PresentationFeedbackBus,
     worker_capabilities: Arc<WorkerCapabilityState>,
 }
@@ -817,8 +812,7 @@ impl ControlRuntime {
         config: ControlRuntimeConfig,
         input: InputDispatchChannels,
         media: FocusedMediaDispatchChannels,
-        presentation_keys: PresentationKeyDispatchChannels,
-        presentation_multicast: PresentationMulticastDispatchChannels,
+        presentation_dispatch: PresentationDispatchChannels,
         presentation_feedback: PresentationFeedbackBus,
         worker_capabilities: Arc<WorkerCapabilityState>,
     ) -> Result<Self, String> {
@@ -850,8 +844,7 @@ impl ControlRuntime {
                     ControlRuntimeDispatch {
                         input,
                         media,
-                        presentation_keys,
-                        presentation_multicast,
+                        presentation_dispatch,
                         presentation_feedback,
                         worker_capabilities,
                     },
@@ -919,8 +912,7 @@ async fn run_listener(
     let ControlRuntimeDispatch {
         input,
         media,
-        presentation_keys,
-        presentation_multicast,
+        presentation_dispatch,
         presentation_feedback,
         worker_capabilities,
     } = dispatch;
@@ -974,8 +966,7 @@ async fn run_listener(
                 let session_ids = Arc::clone(&session_ids);
                 let input = input.clone();
                 let media = media.clone();
-                let presentation_keys = presentation_keys.clone();
-                let presentation_multicast = presentation_multicast.clone();
+                let presentation_dispatch = presentation_dispatch.clone();
                 let presentation_feedback = presentation_feedback.clone();
                 let presentation = presentation.clone();
                 let worker_capabilities = Arc::clone(&worker_capabilities);
@@ -1032,8 +1023,7 @@ async fn run_listener(
                                     authorization: authorization.as_ref(),
                                     input: &input,
                                     media: &media,
-                                    presentation_keys: &presentation_keys,
-                                    presentation_multicast: &presentation_multicast,
+                                    presentation_dispatch: &presentation_dispatch,
                                     presentation_feedback: &presentation_feedback,
                                     presentation: &presentation,
                                     multicast_interface,
@@ -1070,8 +1060,7 @@ struct EstablishedSessionRuntime<'a> {
     authorization: &'a AuthorizationStore,
     input: &'a InputDispatchState,
     media: &'a FocusedMediaDispatchChannels,
-    presentation_keys: &'a PresentationKeyDispatchChannels,
-    presentation_multicast: &'a PresentationMulticastDispatchChannels,
+    presentation_dispatch: &'a PresentationDispatchChannels,
     presentation_feedback: &'a PresentationFeedbackBus,
     presentation: &'a PresentationDispatchState,
     multicast_interface: Option<Ipv4Addr>,
@@ -1105,8 +1094,7 @@ async fn run_established_session(
         authorization,
         input,
         media,
-        presentation_keys,
-        presentation_multicast,
+        presentation_dispatch,
         presentation_feedback,
         presentation,
         multicast_interface,
@@ -1124,7 +1112,7 @@ async fn run_established_session(
     let mut outbound_sequence = HELLO_SEQUENCE;
     let mut focused_adaptation = FocusedAdaptationState::new();
     let mut installed_presentation_key: Option<InstalledPresentationKeyBinding> = None;
-    let mut worker_key_lease = PresentationKeyWorkerLease::new(presentation_keys.clear_tx.clone());
+    let mut worker_key_lease = PresentationKeyWorkerLease::new(presentation_dispatch.key_clear_tx.clone());
     let mut presentation_feedback_rx = presentation_feedback.subscribe();
     let (mut send, mut receive) = channel.into_split();
     let (inbound_tx, mut inbound_rx) =
@@ -1429,7 +1417,7 @@ async fn run_established_session(
                                     };
                                     let (reply_tx, mut reply_rx) = oneshot::channel();
                                     let commit = MediaStartCommit::pending();
-                                    match presentation_multicast.start_tx.try_send(
+                                    match presentation_dispatch.multicast_start_tx.try_send(
                                         PresentationMulticastStartDispatch {
                                             start,
                                             commit: commit.clone(),
