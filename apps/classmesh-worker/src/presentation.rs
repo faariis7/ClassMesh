@@ -84,7 +84,7 @@ impl TryFrom<EncoderBenchmarkConfig> for PresentationTarget {
 }
 
 impl PresentationTarget {
-    fn validate(self) -> Result<(), PresentationError> {
+    pub(crate) fn validate(self) -> Result<(), PresentationError> {
         if self.max_width < 2
             || self.max_height < 2
             || self.max_width > MAX_TARGET_WIDTH
