@@ -24,11 +24,7 @@ pub(crate) struct ProtectedMediaBinding {
 }
 
 impl ProtectedMediaBinding {
-    pub(crate) const fn new(
-        presentation_id: u64,
-        stream_id: u32,
-        epoch: GroupMediaEpoch,
-    ) -> Self {
+    pub(crate) const fn new(presentation_id: u64, stream_id: u32, epoch: GroupMediaEpoch) -> Self {
         Self {
             presentation_id,
             stream_id,
