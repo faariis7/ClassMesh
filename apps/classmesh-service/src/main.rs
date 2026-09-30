@@ -70,9 +70,8 @@ mod windows_service_app {
     use crate::control_runtime::{
         ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, FocusedMediaDispatchChannels,
         FocusedMediaFeedback, FocusedMediaReconfigure, FocusedMediaStart, InputAvailability,
-        InputDispatchChannels, PresentationFeedbackBus, PresentationKeyDispatchChannels,
-        PresentationKeyInstallDispatch, PresentationMulticastDispatchChannels,
-        PresentationMulticastStartDispatch, WorkerCapabilityState,
+        InputDispatchChannels, PresentationDispatchChannels, PresentationFeedbackBus,
+        PresentationKeyInstallDispatch, PresentationMulticastStartDispatch, WorkerCapabilityState,
     };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -1415,16 +1414,14 @@ mod windows_service_app {
             mpsc::sync_channel::<PresentationKeyInstallBinding>(
                 PRESENTATION_KEY_CLEAR_QUEUE_CAPACITY,
             );
-        let presentation_key_channels = PresentationKeyDispatchChannels {
-            install_tx: presentation_key_install_tx,
-            clear_tx: presentation_key_clear_tx,
-        };
         let (presentation_multicast_start_tx, presentation_multicast_start_rx) =
             mpsc::sync_channel::<PresentationMulticastStartDispatch>(
                 PRESENTATION_MULTICAST_START_QUEUE_CAPACITY,
             );
-        let presentation_multicast_channels = PresentationMulticastDispatchChannels {
-            start_tx: presentation_multicast_start_tx,
+        let presentation_channels = PresentationDispatchChannels {
+            key_install_tx: presentation_key_install_tx,
+            key_clear_tx: presentation_key_clear_tx,
+            multicast_start_tx: presentation_multicast_start_tx,
         };
         let (worker_presentation_key_result_tx, worker_presentation_key_result_rx) =
             mpsc::sync_channel::<WorkerPresentationKeyInstallResult>(
@@ -1463,8 +1460,7 @@ mod windows_service_app {
             control_config,
             input_channels,
             media_channels,
-            presentation_key_channels,
-            presentation_multicast_channels,
+            presentation_channels,
             presentation_feedback.clone(),
             Arc::clone(&worker_capabilities),
         ) {
