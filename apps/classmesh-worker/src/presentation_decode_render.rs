@@ -243,6 +243,11 @@ impl PresentationDecodeRuntime {
         Ok(batch)
     }
 
+    #[must_use]
+    pub const fn waiting_for_keyframe(&self) -> bool {
+        self.waiting_for_keyframe
+    }
+
     pub fn recover_after_loss(&mut self) {
         use classmesh_render_win::{DxgiFailureClass, classify_dxgi_error};
 
@@ -321,6 +326,11 @@ impl PresentationDecodeRuntime {
         _frame: &AssembledFrame,
     ) -> Result<PresentationDecodeStep, Box<dyn std::error::Error>> {
         Err("hardware decode is unavailable on this platform".into())
+    }
+
+    #[must_use]
+    pub const fn waiting_for_keyframe(&self) -> bool {
+        true
     }
 
     pub fn recover_after_loss(&mut self) {}
