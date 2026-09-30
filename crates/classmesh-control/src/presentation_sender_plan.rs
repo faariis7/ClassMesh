@@ -132,9 +132,11 @@ mod tests {
         let mut plan = TeacherPresentationSenderPlan::with_limit(2).expect("bounded plan");
         let first = target(7, 49_000, 1);
 
+        let first_binding =
+            TeacherPresentationOutlierBinding::new(1, first).expect("valid first binding");
         assert_eq!(
             plan.apply_unicast_target(first).expect("first target"),
-            vec![TeacherPresentationSenderAction::AttachUnicast(first)]
+            vec![TeacherPresentationSenderAction::AttachUnicast(first_binding)]
         );
         assert!(
             plan.apply_unicast_target(first)
@@ -146,8 +148,11 @@ mod tests {
         assert_eq!(
             plan.apply_unicast_target(drifted).expect("drifted target"),
             vec![
-                TeacherPresentationSenderAction::DetachUnicast(first),
-                TeacherPresentationSenderAction::AttachUnicast(drifted),
+                TeacherPresentationSenderAction::DetachUnicast(first_binding),
+                TeacherPresentationSenderAction::AttachUnicast(
+                    TeacherPresentationOutlierBinding::new(1, drifted)
+                        .expect("same stable runtime slot"),
+                ),
             ]
         );
         assert_eq!(plan.len(), 1);
@@ -157,14 +162,41 @@ mod tests {
     fn cleanup_detaches_only_known_receiver_binding() {
         let mut plan = TeacherPresentationSenderPlan::with_limit(2).expect("bounded plan");
         let first = target(7, 49_000, 1);
+        let first_binding =
+            TeacherPresentationOutlierBinding::new(1, first).expect("valid first binding");
         plan.apply_unicast_target(first).expect("first target");
 
         assert_eq!(
             plan.remove_receiver(principal(7)),
-            Some(TeacherPresentationSenderAction::DetachUnicast(first))
+            Some(TeacherPresentationSenderAction::DetachUnicast(first_binding))
         );
         assert_eq!(plan.remove_receiver(principal(7)), None);
         assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn removed_receiver_gets_fresh_monotonic_slot_on_readmission() {
+        let mut plan = TeacherPresentationSenderPlan::with_limit(2).expect("bounded plan");
+        let first = target(7, 49_000, 1);
+        plan.apply_unicast_target(first).expect("first target");
+        plan.remove_receiver(principal(7)).expect("detach first");
+
+        let readmitted = target(7, 49_100, 2);
+        assert_eq!(
+            plan.apply_unicast_target(readmitted).expect("readmitted target"),
+            vec![TeacherPresentationSenderAction::AttachUnicast(
+                TeacherPresentationOutlierBinding::new(2, readmitted)
+                    .expect("fresh runtime slot"),
+            )]
+        );
+    }
+
+    #[test]
+    fn outlier_binding_rejects_zero_runtime_slot() {
+        assert_eq!(
+            TeacherPresentationOutlierBinding::new(0, target(7, 49_000, 1)),
+            Err(TeacherPresentationSenderPlanError::InvalidRuntimeSlot)
+        );
     }
 
     #[test]
