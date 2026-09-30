@@ -1,13 +1,20 @@
-use classmesh_core::keyframe::KeyframeRequestCoordinator;
+use classmesh_core::keyframe::{KeyframeRequestCoordinator, PresentationKeyframeRequest};
 use classmesh_protocol::feedback::FeedbackMessage;
 
 pub const DEFAULT_PRESENTATION_KEYFRAME_MIN_INTERVAL_US: u64 = 250_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresentationRecoveryError {
+    InvalidPresentationId,
     InvalidStreamId,
     InvalidKeyframeInterval,
     StreamMismatch { expected: u32, received: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationRecoveryDecision {
+    pub outcome: PresentationRecoveryOutcome,
+    pub keyframe_request: Option<PresentationKeyframeRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +88,43 @@ impl PresentationRecoveryCoordinator {
     #[must_use]
     pub const fn suppressed_keyframes(&self) -> u64 {
         self.keyframes.suppressed_requests()
+    }
+
+    pub fn observe_and_plan(
+        &mut self,
+        presentation_id: u64,
+        now_us: u64,
+        feedback: &FeedbackMessage,
+    ) -> Result<PresentationRecoveryDecision, PresentationRecoveryError> {
+        if presentation_id == 0 {
+            return Err(PresentationRecoveryError::InvalidPresentationId);
+        }
+
+        let outcome = self.observe(now_us, feedback)?;
+        let keyframe_request = match outcome {
+            PresentationRecoveryOutcome::KeyframeGranted { after_frame_id } => Some(
+                PresentationKeyframeRequest::new(
+                    presentation_id,
+                    self.stream_id,
+                    after_frame_id,
+                )
+                .map_err(|error| match error {
+                    classmesh_core::keyframe::PresentationKeyframeRequestError::InvalidPresentationId => {
+                        PresentationRecoveryError::InvalidPresentationId
+                    }
+                    classmesh_core::keyframe::PresentationKeyframeRequestError::InvalidStreamId => {
+                        PresentationRecoveryError::InvalidStreamId
+                    }
+                })?,
+            ),
+            PresentationRecoveryOutcome::NackObserved { .. }
+            | PresentationRecoveryOutcome::KeyframeSuppressed { .. } => None,
+        };
+
+        Ok(PresentationRecoveryDecision {
+            outcome,
+            keyframe_request,
+        })
     }
 
     pub fn observe(
@@ -166,6 +210,68 @@ mod tests {
 
         assert_eq!(recovery.granted_keyframes(), 2);
         assert_eq!(recovery.suppressed_keyframes(), 1);
+    }
+
+    #[test]
+    fn recovery_plans_encoder_keyframe_only_for_granted_explicit_request() {
+        let mut recovery =
+            PresentationRecoveryCoordinator::new(7, 250_000).expect("valid recovery coordinator");
+
+        let granted = recovery
+            .observe_and_plan(55, 1_000_000, &keyframe(7, 40))
+            .expect("first request");
+        assert_eq!(
+            granted.outcome,
+            PresentationRecoveryOutcome::KeyframeGranted { after_frame_id: 40 }
+        );
+        let request = granted
+            .keyframe_request
+            .expect("granted request must plan IDR");
+        assert_eq!(request.presentation_id(), 55);
+        assert_eq!(request.stream_id(), 7);
+        assert_eq!(request.after_frame_id(), 40);
+
+        let suppressed = recovery
+            .observe_and_plan(55, 1_010_000, &keyframe(7, 41))
+            .expect("coalesced request");
+        assert_eq!(
+            suppressed.outcome,
+            PresentationRecoveryOutcome::KeyframeSuppressed { after_frame_id: 41 }
+        );
+        assert!(suppressed.keyframe_request.is_none());
+
+        let nack = FeedbackMessage::Nack {
+            stream_id: 7,
+            frame_id: 42,
+            missing_packet_indices: vec![1, 2],
+        };
+        let observed = recovery
+            .observe_and_plan(55, 1_020_000, &nack)
+            .expect("observational NACK");
+        assert!(matches!(
+            observed.outcome,
+            PresentationRecoveryOutcome::NackObserved { .. }
+        ));
+        assert!(observed.keyframe_request.is_none());
+    }
+
+    #[test]
+    fn invalid_presentation_binding_does_not_consume_keyframe_throttle() {
+        let mut recovery =
+            PresentationRecoveryCoordinator::new(7, 250_000).expect("valid recovery coordinator");
+
+        assert_eq!(
+            recovery.observe_and_plan(0, 1_000_000, &keyframe(7, 40)),
+            Err(PresentationRecoveryError::InvalidPresentationId)
+        );
+        assert_eq!(recovery.granted_keyframes(), 0);
+        assert_eq!(recovery.suppressed_keyframes(), 0);
+
+        let granted = recovery
+            .observe_and_plan(55, 1_000_000, &keyframe(7, 40))
+            .expect("valid binding should still receive first grant");
+        assert!(granted.keyframe_request.is_some());
+        assert_eq!(recovery.granted_keyframes(), 1);
     }
 
     #[test]
