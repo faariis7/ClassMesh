@@ -138,6 +138,8 @@ mod windows_service_app {
         capabilities: Arc<WorkerCapabilityState>,
         encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
         presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
+        presentation_multicast_result_tx:
+            mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
         presentation_feedback: PresentationFeedbackBus,
         watchdog: WorkerWatchdog,
         pending_restart: Option<(SessionId, Instant)>,
@@ -150,6 +152,8 @@ mod windows_service_app {
             capabilities: Arc<WorkerCapabilityState>,
             encoder_capability_cache: Arc<DurableEncoderCapabilityCache>,
             presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
+            presentation_multicast_result_tx:
+                mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
             presentation_feedback: PresentationFeedbackBus,
         ) -> Self {
             let executable = std::env::current_exe().ok().map(|service| {
@@ -165,6 +169,7 @@ mod windows_service_app {
                 capabilities,
                 encoder_capability_cache,
                 presentation_key_result_tx,
+                presentation_multicast_result_tx,
                 presentation_feedback,
                 watchdog: WorkerWatchdog::new(WorkerRestartPolicy::default()),
                 pending_restart: None,
@@ -245,6 +250,9 @@ mod windows_service_app {
                                     ),
                                     presentation_key_result_tx: self
                                         .presentation_key_result_tx
+                                        .clone(),
+                                    presentation_multicast_result_tx: self
+                                        .presentation_multicast_result_tx
                                         .clone(),
                                     presentation_feedback: self.presentation_feedback.clone(),
                                 },
