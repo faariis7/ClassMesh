@@ -36,6 +36,27 @@ impl<'a> PresentationFeedbackRequest<'a> {
     }
 }
 
+pub struct PresentationRecoveryPlanRequest<'a> {
+    feedback: PresentationFeedbackRequest<'a>,
+    presentation_id: u64,
+    recovery_now_us: u64,
+}
+
+impl<'a> PresentationRecoveryPlanRequest<'a> {
+    #[must_use]
+    pub const fn new(
+        feedback: PresentationFeedbackRequest<'a>,
+        presentation_id: u64,
+        recovery_now_us: u64,
+    ) -> Self {
+        Self {
+            feedback,
+            presentation_id,
+            recovery_now_us,
+        }
+    }
+}
+
 pub fn accept_presentation_feedback(
     delivery: &TeacherGroupMediaDeliveryManager,
     request: PresentationFeedbackRequest<'_>,
@@ -97,17 +118,15 @@ pub fn accept_and_coordinate_presentation_feedback(
 
 pub fn accept_and_plan_presentation_feedback(
     delivery: &TeacherGroupMediaDeliveryManager,
-    request: PresentationFeedbackRequest<'_>,
+    request: PresentationRecoveryPlanRequest<'_>,
     guard: &mut AuthenticatedControlGuard,
     authorization: &AuthorizationStore,
     now_unix_ms: u64,
-    presentation_id: u64,
     recovery: &mut PresentationRecoveryCoordinator,
-    recovery_now_us: u64,
 ) -> Result<PresentationRecoveryDecision, PresentationFeedbackError> {
     let feedback =
-        accept_presentation_feedback(delivery, request, guard, authorization, now_unix_ms)?;
+        accept_presentation_feedback(delivery, request.feedback, guard, authorization, now_unix_ms)?;
     recovery
-        .observe_and_plan(presentation_id, recovery_now_us, &feedback)
+        .observe_and_plan(request.presentation_id, request.recovery_now_us, &feedback)
         .map_err(Into::into)
 }
