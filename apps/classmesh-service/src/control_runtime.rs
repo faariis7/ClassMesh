@@ -1457,7 +1457,8 @@ async fn run_established_session(
                                                 })
                                             }
                                             Err(_) => {
-                                                Err("control.presentation.start_cancelled".to_owned())
+                                                Err("control.presentation.start_cancelled"
+                                                    .to_owned())
                                             }
                                         },
                                         Err(mpsc::TrySendError::Full(_)) => {
