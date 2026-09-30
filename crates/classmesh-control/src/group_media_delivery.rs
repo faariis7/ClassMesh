@@ -538,6 +538,7 @@ mod tests {
     use crate::presentation_recovery::{
         PresentationRecoveryCoordinator, PresentationRecoveryOutcome,
     };
+    use crate::presentation_state::PresentationOwnership;
     use crate::quic::{
         ControlChannel, DEFAULT_IO_TIMEOUT, accept, client_config_with_roots,
         server_config_with_certificate,
@@ -856,6 +857,62 @@ mod tests {
                 )
                 .is_err(),
             "receiver must install the exact active epoch before sender attachment"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unicast_sender_target_requires_active_presentation_ownership() -> TestResult {
+        use crate::presentation_fallback::PresentationFallbackCoordinator;
+
+        let receiver = principal(7);
+        let pair = session_pair(77).await?;
+        let authorization = authorization(receiver, std::slice::from_ref(&pair.certificate));
+        let mut delivery = TeacherGroupMediaDeliveryManager::with_limit(2)?;
+        delivery.register_client_session(&pair.client, receiver, &authorization, 150)?;
+
+        let mut fallback =
+            PresentationFallbackCoordinator::with_limit(7, 1).expect("valid fallback policy");
+        delivery.request_unicast_fallback(
+            &mut fallback,
+            receiver,
+            &pair.client,
+            &authorization,
+            150,
+        )?;
+
+        let mut coordinator = coordinator(&authorization, receiver);
+        let grant = coordinator.issue_key(&authorization, receiver)?;
+        let epoch = grant.epoch();
+        drop(grant);
+        coordinator.mark_installed(&authorization, receiver, epoch)?;
+
+        let ownership = PresentationOwnership::default();
+        let profile = StreamProfile::new(1920, 1080, 30, 5_000);
+        let offer = ValidatedPresentationUnicastFallbackOffer {
+            stream_id: 7,
+            profile,
+            port: 50_000,
+        };
+
+        assert!(
+            delivery
+                .build_unicast_sender_target(
+                    &fallback,
+                    &coordinator,
+                    &authorization,
+                    &ownership,
+                    PresentationUnicastSenderTargetRequest::new(
+                        receiver,
+                        &pair.client,
+                        150,
+                        profile,
+                        epoch,
+                        &offer,
+                    ),
+                )
+                .is_err(),
+            "sender target must derive presentation/stream from active ownership"
         );
         Ok(())
     }
