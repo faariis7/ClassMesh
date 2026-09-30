@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::net::SocketAddr;
+
+use classmesh_core::adaptation::{StreamProfile, StreamProfileError};
 
 use classmesh_protocol::ProtocolVersion;
 use classmesh_protocol::control_wire::ControlEnvelope;
 use classmesh_security::group_media::GroupMediaEpoch;
 use classmesh_security::group_media_coordinator::{
-    GroupMediaCoordinator, MAX_GROUP_MEDIA_RECEIVERS,
+    GroupMediaCoordinator, GroupMediaReceiverInstallState, MAX_GROUP_MEDIA_RECEIVERS,
 };
 use classmesh_security::{AuthorizationStore, PrincipalId};
 
@@ -19,7 +22,9 @@ use crate::group_media_session::{
 use crate::presentation_fallback::{
     PresentationFallbackChange, PresentationFallbackCoordinator, PresentationFallbackError,
 };
+use crate::presentation_state::PresentationOwnership;
 use crate::quic::ControlTransportError;
+use crate::stream::ValidatedPresentationUnicastFallbackOffer;
 
 #[derive(Debug)]
 pub enum TeacherGroupMediaDeliveryError {
@@ -30,6 +35,7 @@ pub enum TeacherGroupMediaDeliveryError {
     SessionBindingMismatch,
     PendingAckExists,
     MissingPendingAck,
+    SenderTarget(PresentationSenderTargetError),
     Fallback(PresentationFallbackError),
     Binding(GroupMediaSessionError),
     Ack(PresentationKeyAckError),
@@ -59,6 +65,9 @@ impl Display for TeacherGroupMediaDeliveryError {
             }
             Self::MissingPendingAck => {
                 formatter.write_str("Teacher group-media receiver has no pending key ACK")
+            }
+            Self::SenderTarget(error) => {
+                write!(formatter, "Teacher presentation sender target: {error:?}")
             }
             Self::Fallback(error) => {
                 write!(formatter, "Teacher presentation fallback: {error:?}")
@@ -103,6 +112,70 @@ impl From<PresentationFallbackError> for TeacherGroupMediaDeliveryError {
     fn from(value: PresentationFallbackError) -> Self {
         Self::Fallback(value)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationSenderTargetError {
+    MissingActivePresentation,
+    InvalidProfile(StreamProfileError),
+    StreamMismatch { expected: u32, received: u64 },
+    ProfileMismatch,
+    InvalidPort,
+    FallbackNotEnabled,
+    EpochNotActive,
+    ReceiverEpochNotInstalled,
+}
+
+impl From<StreamProfileError> for PresentationSenderTargetError {
+    fn from(value: StreamProfileError) -> Self {
+        Self::InvalidProfile(value)
+    }
+}
+
+impl From<PresentationSenderTargetError> for TeacherGroupMediaDeliveryError {
+    fn from(value: PresentationSenderTargetError) -> Self {
+        Self::SenderTarget(value)
+    }
+}
+
+pub struct PresentationUnicastSenderTargetRequest<'a> {
+    receiver: PrincipalId,
+    session: &'a ClientControlSession,
+    now_unix_ms: u64,
+    profile: StreamProfile,
+    epoch: GroupMediaEpoch,
+    offer: &'a ValidatedPresentationUnicastFallbackOffer,
+}
+
+impl<'a> PresentationUnicastSenderTargetRequest<'a> {
+    #[must_use]
+    pub const fn new(
+        receiver: PrincipalId,
+        session: &'a ClientControlSession,
+        now_unix_ms: u64,
+        profile: StreamProfile,
+        epoch: GroupMediaEpoch,
+        offer: &'a ValidatedPresentationUnicastFallbackOffer,
+    ) -> Self {
+        Self {
+            receiver,
+            session,
+            now_unix_ms,
+            profile,
+            epoch,
+            offer,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationUnicastSenderTarget {
+    pub receiver: PrincipalId,
+    pub destination: SocketAddr,
+    pub presentation_id: u64,
+    pub stream_id: u32,
+    pub profile: StreamProfile,
+    pub epoch: GroupMediaEpoch,
 }
 
 pub struct PresentationKeyAckRequest<'a> {
@@ -339,6 +412,81 @@ impl TeacherGroupMediaDeliveryManager {
         self.remove_receiver(receiver)
     }
 
+    pub fn build_unicast_sender_target(
+        &self,
+        fallback: &PresentationFallbackCoordinator,
+        coordinator: &GroupMediaCoordinator,
+        authorization: &AuthorizationStore,
+        ownership: &PresentationOwnership,
+        request: PresentationUnicastSenderTargetRequest<'_>,
+    ) -> Result<PresentationUnicastSenderTarget, TeacherGroupMediaDeliveryError> {
+        let owner = ownership
+            .owner()
+            .ok_or(PresentationSenderTargetError::MissingActivePresentation)?;
+        let profile = request
+            .profile
+            .validate()
+            .map_err(PresentationSenderTargetError::from)?;
+        let owner_stream_id = u32::try_from(owner.stream_id).map_err(|_| {
+            PresentationSenderTargetError::StreamMismatch {
+                expected: fallback.stream_id(),
+                received: owner.stream_id,
+            }
+        })?;
+        let stream_id = u32::try_from(request.offer.stream_id).map_err(|_| {
+            PresentationSenderTargetError::StreamMismatch {
+                expected: fallback.stream_id(),
+                received: request.offer.stream_id,
+            }
+        })?;
+        if owner_stream_id == 0
+            || owner_stream_id != fallback.stream_id()
+            || stream_id != owner_stream_id
+        {
+            return Err(PresentationSenderTargetError::StreamMismatch {
+                expected: fallback.stream_id(),
+                received: request.offer.stream_id,
+            }
+            .into());
+        }
+        if request.offer.profile != profile {
+            return Err(PresentationSenderTargetError::ProfileMismatch.into());
+        }
+        if request.offer.port == 0 {
+            return Err(PresentationSenderTargetError::InvalidPort.into());
+        }
+
+        self.validate_registered_client(
+            request.receiver,
+            request.session,
+            authorization,
+            request.now_unix_ms,
+        )?;
+        if !fallback.is_unicast_fallback(request.receiver) {
+            return Err(PresentationSenderTargetError::FallbackNotEnabled.into());
+        }
+        if coordinator.active_epoch() != Some(request.epoch) {
+            return Err(PresentationSenderTargetError::EpochNotActive.into());
+        }
+        if coordinator.receiver_state(request.receiver)
+            != Some(GroupMediaReceiverInstallState::Installed(request.epoch))
+        {
+            return Err(PresentationSenderTargetError::ReceiverEpochNotInstalled.into());
+        }
+
+        Ok(PresentationUnicastSenderTarget {
+            receiver: request.receiver,
+            destination: SocketAddr::new(
+                request.session.connection.remote_address().ip(),
+                request.offer.port,
+            ),
+            presentation_id: owner.presentation_id,
+            stream_id: owner_stream_id,
+            profile,
+            epoch: request.epoch,
+        })
+    }
+
     #[must_use]
     pub fn receiver_count(&self) -> usize {
         self.receivers.len()
@@ -362,6 +510,7 @@ mod tests {
     use std::error::Error;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+    use classmesh_core::adaptation::StreamProfile;
     use classmesh_core::recovery::RecoveryPolicy;
     use classmesh_protocol::control_wire::{
         ControlEnvelope, PresentationKeyAck, ProtocolVersion as WireProtocolVersion,
@@ -397,10 +546,12 @@ mod tests {
     use crate::presentation_recovery::{
         PresentationRecoveryCoordinator, PresentationRecoveryOutcome,
     };
+    use crate::presentation_state::PresentationOwnership;
     use crate::quic::{
         ControlChannel, DEFAULT_IO_TIMEOUT, accept, client_config_with_roots,
         server_config_with_certificate,
     };
+    use crate::stream::ValidatedPresentationUnicastFallbackOffer;
 
     use super::*;
 
@@ -526,6 +677,14 @@ mod tests {
         store
     }
 
+    fn active_ownership(presentation_id: u64, stream_id: u64) -> PresentationOwnership {
+        let mut ownership = PresentationOwnership::default();
+        ownership
+            .start(principal(99), 900, presentation_id, stream_id)
+            .expect("presentation ownership starts");
+        ownership
+    }
+
     fn coordinator(
         authorization: &AuthorizationStore,
         receiver: PrincipalId,
@@ -580,6 +739,199 @@ mod tests {
         assert!(delivery.remove_receiver_with_fallback(&mut fallback, receiver));
         assert_eq!(delivery.receiver_count(), 0);
         assert!(!fallback.is_unicast_fallback(receiver));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admitted_installed_fallback_builds_peer_bound_unicast_sender_target() -> TestResult {
+        use crate::presentation_fallback::PresentationFallbackCoordinator;
+
+        let receiver = principal(7);
+        let pair = session_pair(77).await?;
+        let authorization = authorization(receiver, std::slice::from_ref(&pair.certificate));
+        let mut delivery = TeacherGroupMediaDeliveryManager::with_limit(2)?;
+        delivery.register_client_session(&pair.client, receiver, &authorization, 150)?;
+
+        let mut fallback =
+            PresentationFallbackCoordinator::with_limit(7, 1).expect("valid fallback policy");
+        delivery.request_unicast_fallback(
+            &mut fallback,
+            receiver,
+            &pair.client,
+            &authorization,
+            150,
+        )?;
+
+        let mut coordinator = coordinator(&authorization, receiver);
+        let grant = coordinator.issue_key(&authorization, receiver)?;
+        let epoch = grant.epoch();
+        drop(grant);
+        coordinator.mark_installed(&authorization, receiver, epoch)?;
+
+        let ownership = active_ownership(55, 7);
+        let profile = StreamProfile::new(1920, 1080, 30, 5_000);
+        let offer = ValidatedPresentationUnicastFallbackOffer {
+            stream_id: 7,
+            profile,
+            port: 50_000,
+        };
+        let target = delivery.build_unicast_sender_target(
+            &fallback,
+            &coordinator,
+            &authorization,
+            &ownership,
+            PresentationUnicastSenderTargetRequest::new(
+                receiver,
+                &pair.client,
+                150,
+                profile,
+                epoch,
+                &offer,
+            ),
+        )?;
+
+        assert_eq!(target.receiver, receiver);
+        assert_eq!(target.presentation_id, 55);
+        assert_eq!(target.stream_id, 7);
+        assert_eq!(target.profile, profile);
+        assert_eq!(target.epoch, epoch);
+        assert_eq!(
+            target.destination.ip(),
+            pair.client.connection.remote_address().ip()
+        );
+        assert_eq!(target.destination.port(), 50_000);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unicast_sender_target_rejects_profile_or_install_state_drift() -> TestResult {
+        use crate::presentation_fallback::PresentationFallbackCoordinator;
+
+        let receiver = principal(7);
+        let pair = session_pair(77).await?;
+        let authorization = authorization(receiver, std::slice::from_ref(&pair.certificate));
+        let mut delivery = TeacherGroupMediaDeliveryManager::with_limit(2)?;
+        delivery.register_client_session(&pair.client, receiver, &authorization, 150)?;
+
+        let mut fallback =
+            PresentationFallbackCoordinator::with_limit(7, 1).expect("valid fallback policy");
+        delivery.request_unicast_fallback(
+            &mut fallback,
+            receiver,
+            &pair.client,
+            &authorization,
+            150,
+        )?;
+
+        let coordinator = coordinator(&authorization, receiver);
+        let epoch = coordinator.active_epoch().expect("active epoch");
+        let ownership = active_ownership(55, 7);
+        let profile = StreamProfile::new(1920, 1080, 30, 5_000);
+        let drifted = ValidatedPresentationUnicastFallbackOffer {
+            stream_id: 7,
+            profile: StreamProfile::new(1280, 720, 30, 2_500),
+            port: 50_000,
+        };
+
+        assert!(
+            delivery
+                .build_unicast_sender_target(
+                    &fallback,
+                    &coordinator,
+                    &authorization,
+                    &ownership,
+                    PresentationUnicastSenderTargetRequest::new(
+                        receiver,
+                        &pair.client,
+                        150,
+                        profile,
+                        epoch,
+                        &drifted,
+                    ),
+                )
+                .is_err()
+        );
+
+        let exact = ValidatedPresentationUnicastFallbackOffer {
+            stream_id: 7,
+            profile,
+            port: 50_000,
+        };
+        assert!(
+            delivery
+                .build_unicast_sender_target(
+                    &fallback,
+                    &coordinator,
+                    &authorization,
+                    &ownership,
+                    PresentationUnicastSenderTargetRequest::new(
+                        receiver,
+                        &pair.client,
+                        150,
+                        profile,
+                        epoch,
+                        &exact,
+                    ),
+                )
+                .is_err(),
+            "receiver must install the exact active epoch before sender attachment"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unicast_sender_target_requires_active_presentation_ownership() -> TestResult {
+        use crate::presentation_fallback::PresentationFallbackCoordinator;
+
+        let receiver = principal(7);
+        let pair = session_pair(77).await?;
+        let authorization = authorization(receiver, std::slice::from_ref(&pair.certificate));
+        let mut delivery = TeacherGroupMediaDeliveryManager::with_limit(2)?;
+        delivery.register_client_session(&pair.client, receiver, &authorization, 150)?;
+
+        let mut fallback =
+            PresentationFallbackCoordinator::with_limit(7, 1).expect("valid fallback policy");
+        delivery.request_unicast_fallback(
+            &mut fallback,
+            receiver,
+            &pair.client,
+            &authorization,
+            150,
+        )?;
+
+        let mut coordinator = coordinator(&authorization, receiver);
+        let grant = coordinator.issue_key(&authorization, receiver)?;
+        let epoch = grant.epoch();
+        drop(grant);
+        coordinator.mark_installed(&authorization, receiver, epoch)?;
+
+        let ownership = PresentationOwnership::default();
+        let profile = StreamProfile::new(1920, 1080, 30, 5_000);
+        let offer = ValidatedPresentationUnicastFallbackOffer {
+            stream_id: 7,
+            profile,
+            port: 50_000,
+        };
+
+        assert!(
+            delivery
+                .build_unicast_sender_target(
+                    &fallback,
+                    &coordinator,
+                    &authorization,
+                    &ownership,
+                    PresentationUnicastSenderTargetRequest::new(
+                        receiver,
+                        &pair.client,
+                        150,
+                        profile,
+                        epoch,
+                        &offer,
+                    ),
+                )
+                .is_err(),
+            "sender target must derive presentation/stream from active ownership"
+        );
         Ok(())
     }
 
