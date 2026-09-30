@@ -337,6 +337,79 @@ mod tests {
     }
 
     #[test]
+    fn one_coordinator_seal_can_feed_multiple_unicast_senders() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use classmesh_security::{
+            CredentialFingerprint, CredentialRecord, Permission, Principal, PrincipalId,
+            PrincipalKind,
+        };
+        use classmesh_video::{Codec, EncodedFrameMeta};
+
+        let receiver_one = UdpMediaSocket::bind(loopback(0)).expect("receiver one");
+        let receiver_two = UdpMediaSocket::bind(loopback(0)).expect("receiver two");
+        let destination_one = receiver_one.local_addr().expect("receiver one address");
+        let destination_two = receiver_two.local_addr().expect("receiver two address");
+
+        let principal_id = PrincipalId([7; 32]);
+        let fingerprint = CredentialFingerprint([17; 32]);
+        let mut permissions = BTreeSet::new();
+        permissions.insert(Permission::ReceivePresentation);
+        let mut credentials = BTreeMap::new();
+        credentials.insert(fingerprint, CredentialRecord::active(fingerprint, 1));
+        let mut authorization = AuthorizationStore::default();
+        authorization
+            .upsert(Principal {
+                id: principal_id,
+                kind: PrincipalKind::StudentDevice,
+                enabled: true,
+                permissions,
+                credentials,
+            })
+            .expect("authorized receiver");
+
+        let mut coordinator = GroupMediaCoordinator::default();
+        coordinator
+            .register_receiver(&authorization, principal_id)
+            .expect("receiver registers");
+        let active_epoch = coordinator.begin_epoch().expect("epoch starts");
+
+        let frame = SharedEncodedFrame::new(
+            EncodedFrameMeta {
+                frame_id: 91,
+                timestamp_us: 3_033_303,
+                keyframe: true,
+            },
+            Codec::H264,
+            vec![0x5a; 2_048],
+        );
+        let sealed = seal_shared_h264_frame_for_unicast(
+            config(destination_one, active_epoch),
+            &mut coordinator,
+            &authorization,
+            &frame,
+        )
+        .expect("single authoritative seal");
+
+        let mut first =
+            ProtectedUnicastFrameSender::bind_nonblocking(config(destination_one, active_epoch))
+                .expect("first sender");
+        let mut second =
+            ProtectedUnicastFrameSender::bind_nonblocking(config(destination_two, active_epoch))
+                .expect("second sender");
+
+        assert!(matches!(
+            first.try_send_frame(&sealed),
+            Ok(ProtectedUnicastTrySendOutcome::Sent(_))
+        ));
+        assert!(matches!(
+            second.try_send_frame(&sealed),
+            Ok(ProtectedUnicastTrySendOutcome::Sent(_))
+        ));
+        assert_eq!(sealed.binding().frame_id(), frame.meta.frame_id);
+    }
+
+    #[test]
     fn config_rejects_non_unicast_destination_and_invalid_binding() {
         for destination in [
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 50_000),
