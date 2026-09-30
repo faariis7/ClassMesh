@@ -257,11 +257,7 @@ mod tests {
         }
 
         let _ = assert_api
-            as fn(
-                &mut PresentationMulticastSendRuntime,
-                SinkId,
-                ProtectedUnicastSenderConfig,
-            );
+            as fn(&mut PresentationMulticastSendRuntime, SinkId, ProtectedUnicastSenderConfig);
     }
 
     #[test]
