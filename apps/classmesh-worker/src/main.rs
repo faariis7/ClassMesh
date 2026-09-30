@@ -287,10 +287,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         presentation_multicast.as_mut(),
                         presentation_decode.as_mut(),
                     ) {
-                        (Some(receiver), Some(decoder))
-                            if !receiver.failed() && decoder.pump_window() =>
-                        {
-                            receiver.adopt_retry(start)
+                        (Some(receiver), Some(decoder)) => {
+                            !receiver.failed()
+                                && decoder.pump_window()
+                                && receiver.adopt_retry(start)
                         }
                         _ => false,
                     };
