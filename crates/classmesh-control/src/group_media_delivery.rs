@@ -362,6 +362,7 @@ mod tests {
     use std::error::Error;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+    use classmesh_core::adaptation::StreamProfile;
     use classmesh_core::recovery::RecoveryPolicy;
     use classmesh_protocol::control_wire::{
         ControlEnvelope, PresentationKeyAck, ProtocolVersion as WireProtocolVersion,
@@ -401,6 +402,7 @@ mod tests {
         ControlChannel, DEFAULT_IO_TIMEOUT, accept, client_config_with_roots,
         server_config_with_certificate,
     };
+    use crate::stream::ValidatedPresentationUnicastFallbackOffer;
 
     use super::*;
 
@@ -580,6 +582,132 @@ mod tests {
         assert!(delivery.remove_receiver_with_fallback(&mut fallback, receiver));
         assert_eq!(delivery.receiver_count(), 0);
         assert!(!fallback.is_unicast_fallback(receiver));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admitted_installed_fallback_builds_peer_bound_unicast_sender_target() -> TestResult {
+        use crate::presentation_fallback::PresentationFallbackCoordinator;
+
+        let receiver = principal(7);
+        let pair = session_pair(77).await?;
+        let authorization = authorization(receiver, std::slice::from_ref(&pair.certificate));
+        let mut delivery = TeacherGroupMediaDeliveryManager::with_limit(2)?;
+        delivery.register_client_session(&pair.client, receiver, &authorization, 150)?;
+
+        let mut fallback =
+            PresentationFallbackCoordinator::with_limit(7, 1).expect("valid fallback policy");
+        delivery.request_unicast_fallback(
+            &mut fallback,
+            receiver,
+            &pair.client,
+            &authorization,
+            150,
+        )?;
+
+        let mut coordinator = coordinator(&authorization, receiver);
+        let grant = coordinator.issue_key(&authorization, receiver)?;
+        let epoch = grant.epoch;
+        drop(grant);
+        coordinator.mark_installed(&authorization, receiver, epoch)?;
+
+        let profile = StreamProfile::new(1920, 1080, 30, 5_000);
+        let offer = ValidatedPresentationUnicastFallbackOffer {
+            stream_id: 7,
+            profile,
+            port: 50_000,
+        };
+        let target = delivery.build_unicast_sender_target(
+            &fallback,
+            &coordinator,
+            receiver,
+            &pair.client,
+            &authorization,
+            150,
+            55,
+            profile,
+            epoch,
+            &offer,
+        )?;
+
+        assert_eq!(target.receiver, receiver);
+        assert_eq!(target.presentation_id, 55);
+        assert_eq!(target.stream_id, 7);
+        assert_eq!(target.profile, profile);
+        assert_eq!(target.epoch, epoch);
+        assert_eq!(target.destination.ip(), pair.client.connection.remote_address().ip());
+        assert_eq!(target.destination.port(), 50_000);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unicast_sender_target_rejects_profile_or_install_state_drift() -> TestResult {
+        use crate::presentation_fallback::PresentationFallbackCoordinator;
+
+        let receiver = principal(7);
+        let pair = session_pair(77).await?;
+        let authorization = authorization(receiver, std::slice::from_ref(&pair.certificate));
+        let mut delivery = TeacherGroupMediaDeliveryManager::with_limit(2)?;
+        delivery.register_client_session(&pair.client, receiver, &authorization, 150)?;
+
+        let mut fallback =
+            PresentationFallbackCoordinator::with_limit(7, 1).expect("valid fallback policy");
+        delivery.request_unicast_fallback(
+            &mut fallback,
+            receiver,
+            &pair.client,
+            &authorization,
+            150,
+        )?;
+
+        let mut coordinator = coordinator(&authorization, receiver);
+        let epoch = coordinator.active_epoch().expect("active epoch");
+        let profile = StreamProfile::new(1920, 1080, 30, 5_000);
+        let drifted = ValidatedPresentationUnicastFallbackOffer {
+            stream_id: 7,
+            profile: StreamProfile::new(1280, 720, 30, 2_500),
+            port: 50_000,
+        };
+
+        assert!(
+            delivery
+                .build_unicast_sender_target(
+                    &fallback,
+                    &coordinator,
+                    receiver,
+                    &pair.client,
+                    &authorization,
+                    150,
+                    55,
+                    profile,
+                    epoch,
+                    &drifted,
+                )
+                .is_err()
+        );
+
+        let exact = ValidatedPresentationUnicastFallbackOffer {
+            stream_id: 7,
+            profile,
+            port: 50_000,
+        };
+        assert!(
+            delivery
+                .build_unicast_sender_target(
+                    &fallback,
+                    &coordinator,
+                    receiver,
+                    &pair.client,
+                    &authorization,
+                    150,
+                    55,
+                    profile,
+                    epoch,
+                    &exact,
+                )
+                .is_err(),
+            "receiver must install the exact active epoch before sender attachment"
+        );
         Ok(())
     }
 
