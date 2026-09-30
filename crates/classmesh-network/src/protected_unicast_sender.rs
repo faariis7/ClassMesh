@@ -6,7 +6,9 @@ use classmesh_security::group_media::{GroupMediaEpoch, GroupMediaError, SealedGr
 use classmesh_security::group_media_coordinator::{
     GroupMediaCoordinator, GroupMediaCoordinatorError,
 };
-use classmesh_video::distributor::SharedEncodedFrame;
+use classmesh_video::distributor::{
+    DistributorError, FrameDistributor, SharedEncodedFrame, SinkId, SinkMode, SinkStats,
+};
 
 use crate::PacketizeError;
 use crate::protected_media::{
@@ -226,6 +228,48 @@ impl From<ProtectedMediaTrySendOutcome> for ProtectedUnicastTrySendOutcome {
     }
 }
 
+/// Bounded unicast attachment for the shared encoded-frame distributor.
+///
+/// The adapter owns only one sink registration. The caller keeps the distributor and therefore
+/// shares the same `Arc<[u8]>` encoded allocation with multicast and other outliers. Decoder-safe
+/// draining preserves a pending recovery keyframe before newer dependent deltas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtectedUnicastDistributorSink {
+    id: SinkId,
+}
+
+impl ProtectedUnicastDistributorSink {
+    pub fn attach(
+        distributor: &mut FrameDistributor,
+        id: SinkId,
+        capacity: usize,
+    ) -> Result<Self, DistributorError> {
+        distributor.add_sink(id, SinkMode::Unicast, capacity)?;
+        Ok(Self { id })
+    }
+
+    #[must_use]
+    pub const fn id(self) -> SinkId {
+        self.id
+    }
+
+    #[must_use]
+    pub fn stats(self, distributor: &FrameDistributor) -> Option<SinkStats> {
+        distributor.stats(self.id)
+    }
+
+    pub fn take_next_decodable(
+        self,
+        distributor: &mut FrameDistributor,
+    ) -> Option<SharedEncodedFrame> {
+        distributor.pop_next_decodable(self.id)
+    }
+
+    pub fn detach(self, distributor: &mut FrameDistributor) -> bool {
+        distributor.remove_sink(self.id)
+    }
+}
+
 /// Fail-fast protected UDP-unicast sender for one explicit presentation outlier.
 ///
 /// The destination must be derived by the caller from the authenticated receiver peer plus the
@@ -334,6 +378,72 @@ mod tests {
         sender
             .seal_bound_frame(&vec![0x5a; bytes], binding)
             .expect("sealed frame")
+    }
+
+    #[test]
+    fn unicast_distributor_sink_shares_allocation_and_preserves_recovery_order() {
+        use std::sync::Arc;
+
+        use classmesh_video::distributor::{
+            FrameDistributor, SharedEncodedFrame, SinkId, SinkMode,
+        };
+        use classmesh_video::{Codec, EncodedFrameMeta};
+
+        fn shared(frame_id: u64, keyframe: bool) -> SharedEncodedFrame {
+            SharedEncodedFrame::new(
+                EncodedFrameMeta {
+                    frame_id,
+                    timestamp_us: frame_id.saturating_mul(33_333),
+                    keyframe,
+                },
+                Codec::H264,
+                vec![u8::try_from(frame_id).unwrap_or(0); 32],
+            )
+        }
+
+        let mut distributor = FrameDistributor::default();
+        let sink = ProtectedUnicastDistributorSink::attach(&mut distributor, SinkId(41), 2)
+            .expect("bounded unicast sink attaches");
+        assert_eq!(
+            sink.stats(&distributor).expect("sink stats").mode,
+            SinkMode::Unicast
+        );
+
+        let keyframe = shared(1, true);
+        let pointer = Arc::as_ptr(&keyframe.data);
+        distributor.publish(keyframe);
+        distributor.publish(shared(2, false));
+        distributor.publish(shared(3, false));
+
+        let recovery = sink
+            .take_next_decodable(&mut distributor)
+            .expect("recovery keyframe survives pressure");
+        assert_eq!(recovery.meta.frame_id, 1);
+        assert!(recovery.meta.keyframe);
+        assert_eq!(Arc::as_ptr(&recovery.data), pointer);
+
+        let latest = sink
+            .take_next_decodable(&mut distributor)
+            .expect("latest dependent frame remains");
+        assert_eq!(latest.meta.frame_id, 3);
+        assert!(!latest.meta.keyframe);
+    }
+
+    #[test]
+    fn unicast_distributor_sink_detaches_without_affecting_other_sinks() {
+        use classmesh_video::distributor::{FrameDistributor, SinkId, SinkMode};
+
+        let mut distributor = FrameDistributor::default();
+        distributor
+            .add_sink(SinkId(1), SinkMode::Multicast, 2)
+            .expect("existing multicast sink");
+        let unicast = ProtectedUnicastDistributorSink::attach(&mut distributor, SinkId(2), 2)
+            .expect("unicast sink attaches");
+
+        assert_eq!(distributor.sink_count(), 2);
+        assert!(unicast.detach(&mut distributor));
+        assert_eq!(distributor.sink_count(), 1);
+        assert!(distributor.stats(SinkId(1)).is_some());
     }
 
     #[test]
