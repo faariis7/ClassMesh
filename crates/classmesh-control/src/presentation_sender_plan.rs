@@ -1,12 +1,111 @@
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use classmesh_core::adaptation::StreamProfile;
 use classmesh_core::keyframe::PresentationKeyframeRequest;
 use classmesh_security::PrincipalId;
 use classmesh_security::group_media::GroupMediaEpoch;
+use classmesh_security::group_media_coordinator::MAX_GROUP_MEDIA_RECEIVERS;
 
 use crate::group_media_delivery::PresentationUnicastSenderTarget;
 use crate::presentation_recovery::{PresentationRecoveryDecision, PresentationRecoveryOutcome};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeacherPresentationSenderAction {
+    AttachUnicast(PresentationUnicastSenderTarget),
+    DetachUnicast(PresentationUnicastSenderTarget),
+    RequestKeyframe(PresentationKeyframeRequest),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeacherPresentationSenderPlanError {
+    InvalidReceiverLimit,
+    ReceiverLimitReached,
+}
+
+#[derive(Debug)]
+pub struct TeacherPresentationSenderPlan {
+    targets: BTreeMap<PrincipalId, PresentationUnicastSenderTarget>,
+    max_receivers: usize,
+}
+
+impl Default for TeacherPresentationSenderPlan {
+    fn default() -> Self {
+        Self {
+            targets: BTreeMap::new(),
+            max_receivers: MAX_GROUP_MEDIA_RECEIVERS,
+        }
+    }
+}
+
+impl TeacherPresentationSenderPlan {
+    pub fn with_limit(max_receivers: usize) -> Result<Self, TeacherPresentationSenderPlanError> {
+        if max_receivers == 0 || max_receivers > MAX_GROUP_MEDIA_RECEIVERS {
+            return Err(TeacherPresentationSenderPlanError::InvalidReceiverLimit);
+        }
+        Ok(Self {
+            targets: BTreeMap::new(),
+            max_receivers,
+        })
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.targets.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.targets.is_empty()
+    }
+
+    pub fn apply_unicast_target(
+        &mut self,
+        target: PresentationUnicastSenderTarget,
+    ) -> Result<Vec<TeacherPresentationSenderAction>, TeacherPresentationSenderPlanError> {
+        match self.targets.get(&target.receiver).copied() {
+            Some(previous) if previous == target => Ok(Vec::new()),
+            Some(previous) => {
+                self.targets.insert(target.receiver, target);
+                Ok(vec![
+                    TeacherPresentationSenderAction::DetachUnicast(previous),
+                    TeacherPresentationSenderAction::AttachUnicast(target),
+                ])
+            }
+            None => {
+                if self.targets.len() >= self.max_receivers {
+                    return Err(TeacherPresentationSenderPlanError::ReceiverLimitReached);
+                }
+                self.targets.insert(target.receiver, target);
+                Ok(vec![TeacherPresentationSenderAction::AttachUnicast(target)])
+            }
+        }
+    }
+
+    pub fn remove_receiver(
+        &mut self,
+        receiver: PrincipalId,
+    ) -> Option<TeacherPresentationSenderAction> {
+        self.targets
+            .remove(&receiver)
+            .map(TeacherPresentationSenderAction::DetachUnicast)
+    }
+
+    #[must_use]
+    pub fn recovery_action(
+        decision: PresentationRecoveryDecision,
+    ) -> Option<TeacherPresentationSenderAction> {
+        match (decision.outcome, decision.keyframe_request) {
+            (
+                PresentationRecoveryOutcome::KeyframeGranted { after_frame_id },
+                Some(request),
+            ) if request.after_frame_id() == after_frame_id => {
+                Some(TeacherPresentationSenderAction::RequestKeyframe(request))
+            }
+            _ => None,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
