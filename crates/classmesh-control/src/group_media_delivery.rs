@@ -16,6 +16,9 @@ use crate::group_media_session::{
     BoundGroupMediaReceiverSession, GroupMediaSessionError, PendingPresentationKeyAck,
     PresentationKeyAckError, PresentationKeyGrantRequest,
 };
+use crate::presentation_fallback::{
+    PresentationFallbackChange, PresentationFallbackCoordinator, PresentationFallbackError,
+};
 use crate::quic::ControlTransportError;
 
 #[derive(Debug)]
@@ -27,6 +30,7 @@ pub enum TeacherGroupMediaDeliveryError {
     SessionBindingMismatch,
     PendingAckExists,
     MissingPendingAck,
+    Fallback(PresentationFallbackError),
     Binding(GroupMediaSessionError),
     Ack(PresentationKeyAckError),
     Transport(ControlTransportError),
@@ -55,6 +59,9 @@ impl Display for TeacherGroupMediaDeliveryError {
             }
             Self::MissingPendingAck => {
                 formatter.write_str("Teacher group-media receiver has no pending key ACK")
+            }
+            Self::Fallback(error) => {
+                write!(formatter, "Teacher presentation fallback: {error:?}")
             }
             Self::Binding(error) => write!(formatter, "Teacher group-media binding: {error}"),
             Self::Ack(error) => write!(formatter, "Teacher group-media ACK: {error}"),
@@ -89,6 +96,12 @@ impl From<PresentationKeyAckError> for TeacherGroupMediaDeliveryError {
 impl From<ControlTransportError> for TeacherGroupMediaDeliveryError {
     fn from(value: ControlTransportError) -> Self {
         Self::Transport(value)
+    }
+}
+
+impl From<PresentationFallbackError> for TeacherGroupMediaDeliveryError {
+    fn from(value: PresentationFallbackError) -> Self {
+        Self::Fallback(value)
     }
 }
 
@@ -303,6 +316,29 @@ impl TeacherGroupMediaDeliveryManager {
         Ok(bound)
     }
 
+    pub fn request_unicast_fallback(
+        &self,
+        fallback: &mut PresentationFallbackCoordinator,
+        receiver: PrincipalId,
+        session: &ClientControlSession,
+        authorization: &AuthorizationStore,
+        now_unix_ms: u64,
+    ) -> Result<PresentationFallbackChange, TeacherGroupMediaDeliveryError> {
+        self.validate_registered_client(receiver, session, authorization, now_unix_ms)?;
+        fallback
+            .request_unicast(receiver, &session.established.negotiated.capabilities)
+            .map_err(Into::into)
+    }
+
+    pub fn remove_receiver_with_fallback(
+        &mut self,
+        fallback: &mut PresentationFallbackCoordinator,
+        receiver: PrincipalId,
+    ) -> bool {
+        fallback.restore_multicast(receiver);
+        self.remove_receiver(receiver)
+    }
+
     #[must_use]
     pub fn receiver_count(&self) -> usize {
         self.receivers.len()
@@ -389,6 +425,7 @@ mod tests {
         BTreeSet::from([
             Capability::TeacherPresentation,
             Capability::SframeGroupMedia,
+            Capability::UdpUnicast,
         ])
     }
 
@@ -511,6 +548,70 @@ mod tests {
             TeacherGroupMediaDeliveryManager::with_limit(MAX_GROUP_MEDIA_RECEIVERS + 1),
             Err(TeacherGroupMediaDeliveryError::InvalidReceiverLimit)
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authenticated_receiver_fallback_is_session_bound_and_removed_with_delivery_session()
+    -> TestResult {
+        use crate::presentation_fallback::{
+            PresentationFallbackChange, PresentationFallbackCoordinator,
+        };
+
+        let receiver = principal(7);
+        let pair = session_pair(77).await?;
+        let authorization = authorization(receiver, std::slice::from_ref(&pair.certificate));
+        let mut delivery = TeacherGroupMediaDeliveryManager::with_limit(2)?;
+        delivery.register_client_session(&pair.client, receiver, &authorization, 150)?;
+        let mut fallback =
+            PresentationFallbackCoordinator::with_limit(7, 1).expect("valid fallback policy");
+
+        assert_eq!(
+            delivery.request_unicast_fallback(
+                &mut fallback,
+                receiver,
+                &pair.client,
+                &authorization,
+                150,
+            )?,
+            PresentationFallbackChange::Enabled
+        );
+        assert!(fallback.is_unicast_fallback(receiver));
+
+        assert!(delivery.remove_receiver_with_fallback(&mut fallback, receiver));
+        assert_eq!(delivery.receiver_count(), 0);
+        assert!(!fallback.is_unicast_fallback(receiver));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fallback_rejects_same_student_on_another_connection_before_policy_state_changes()
+    -> TestResult {
+        use crate::presentation_fallback::PresentationFallbackCoordinator;
+
+        let receiver = principal(7);
+        let first = session_pair(77).await?;
+        let second = session_pair(77).await?;
+        let authorization = authorization(
+            receiver,
+            &[first.certificate.clone(), second.certificate.clone()],
+        );
+        let mut delivery = TeacherGroupMediaDeliveryManager::with_limit(2)?;
+        delivery.register_client_session(&first.client, receiver, &authorization, 150)?;
+        let mut fallback =
+            PresentationFallbackCoordinator::with_limit(7, 1).expect("valid fallback policy");
+
+        assert!(matches!(
+            delivery.request_unicast_fallback(
+                &mut fallback,
+                receiver,
+                &second.client,
+                &authorization,
+                150,
+            ),
+            Err(TeacherGroupMediaDeliveryError::SessionBindingMismatch)
+        ));
+        assert_eq!(fallback.unicast_receiver_count(), 0);
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
