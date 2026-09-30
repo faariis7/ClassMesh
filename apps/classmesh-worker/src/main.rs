@@ -287,21 +287,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     WorkerPresentationMulticastStartStatus::Rejected
                 } else {
-                    let retry_started = match (
-                        presentation_multicast.as_mut(),
-                        presentation_decode.as_mut(),
-                    ) {
-                        (Some(receiver), Some(decoder)) => {
-                            !receiver.failed()
-                                && decoder.pump_window()
-                                && receiver.adopt_retry(start)
-                        }
-                        _ => false,
-                    };
+                    let retry_started = presentation_unicast.is_none()
+                        && match (
+                            presentation_multicast.as_mut(),
+                            presentation_decode.as_mut(),
+                        ) {
+                            (Some(receiver), Some(decoder)) => {
+                                !receiver.failed()
+                                    && decoder.pump_window()
+                                    && receiver.adopt_retry(start)
+                            }
+                            _ => false,
+                        };
                     if retry_started {
                         WorkerPresentationMulticastStartStatus::Started
                     } else {
                         presentation_multicast = None;
+                        presentation_unicast = None;
                         presentation_decode = None;
                         presentation_keyframe_request_pending = false;
                         match classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime::start(start) {
@@ -349,14 +351,91 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )?;
                 continue;
             }
+            Ok(WorkerEvent::PresentationUnicastStart(start)) => {
+                use classmesh_windows_runtime::ipc::WorkerPresentationUnicastStartStatus;
+
+                let key_binding_matches = group_media_keys.binding().is_some_and(|binding| {
+                    classmesh_worker::presentation_unicast_receive::start_matches_key_binding(
+                        start, binding,
+                    )
+                });
+                let status = if !key_binding_matches {
+                    eprintln!(
+                        "ClassMesh Worker rejected unicast start: active presentation key binding mismatch"
+                    );
+                    WorkerPresentationUnicastStartStatus::Rejected
+                } else {
+                    let retry_started = presentation_multicast.is_none()
+                        && match (
+                            presentation_unicast.as_mut(),
+                            presentation_decode.as_mut(),
+                        ) {
+                            (Some(receiver), Some(decoder)) => {
+                                !receiver.failed()
+                                    && decoder.pump_window()
+                                    && receiver.adopt_retry(start)
+                            }
+                            _ => false,
+                        };
+                    if retry_started {
+                        WorkerPresentationUnicastStartStatus::Started
+                    } else {
+                        presentation_multicast = None;
+                        presentation_unicast = None;
+                        presentation_decode = None;
+                        presentation_keyframe_request_pending = false;
+                        match classmesh_worker::presentation_unicast_receive::WorkerPresentationUnicastRuntime::start(start) {
+                            Ok(receiver) => {
+                                match classmesh_worker::presentation_decode_render::PresentationDecodeRuntime::new(
+                                    true, None,
+                                ) {
+                                    Ok(decoder) => {
+                                        eprintln!(
+                                            "ClassMesh Worker unicast presentation ready: presentation={}, stream={}, port={}, teacher_source={}",
+                                            start.presentation_id,
+                                            start.stream_id,
+                                            start.port,
+                                            start.teacher_source
+                                        );
+                                        presentation_unicast = Some(receiver);
+                                        presentation_decode = Some(decoder);
+                                        WorkerPresentationUnicastStartStatus::Started
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "ClassMesh Worker presentation decoder failed closed after unicast bind; start rejected: {error}"
+                                        );
+                                        WorkerPresentationUnicastStartStatus::Rejected
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "ClassMesh Worker unicast receiver failed closed; control remains active: {error}"
+                                );
+                                WorkerPresentationUnicastStartStatus::Rejected
+                            }
+                        }
+                    }
+                };
+                publish_worker_presentation_unicast_start_result(
+                    &pipe,
+                    std::process::id(),
+                    actual_session,
+                    start,
+                    status,
+                )?;
+                continue;
+            }
             Ok(WorkerEvent::PresentationKeyClear(clear)) => {
                 let cleared = group_media_keys.clear_if_matches(clear);
                 if cleared {
                     presentation_multicast = None;
+                    presentation_unicast = None;
                     presentation_decode = None;
                     presentation_keyframe_request_pending = false;
                     eprintln!(
-                        "ClassMesh Worker stopped multicast presentation with exact key clear"
+                        "ClassMesh Worker stopped presentation receive runtime with exact key clear"
                     );
                 }
                 eprintln!(
@@ -366,13 +445,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(WorkerEvent::PresentationKeyInstall(install)) => {
                 let binding = install.binding();
-                let status = if presentation_multicast
+                let receive_binding_mismatch = presentation_multicast
                     .as_ref()
                     .is_some_and(|runtime| !runtime.matches_key_binding(binding))
-                {
+                    || presentation_unicast
+                        .as_ref()
+                        .is_some_and(|runtime| !runtime.matches_key_binding(binding));
+                let status = if receive_binding_mismatch {
                     drop(install);
                     eprintln!(
-                        "ClassMesh Worker rejected presentation key install: multicast receiver binding mismatch"
+                        "ClassMesh Worker rejected presentation key install: active receiver binding mismatch"
                     );
                     classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Rejected
                 } else {
