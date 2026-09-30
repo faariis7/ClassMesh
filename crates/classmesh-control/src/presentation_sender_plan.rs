@@ -136,7 +136,9 @@ mod tests {
             TeacherPresentationOutlierBinding::new(1, first).expect("valid first binding");
         assert_eq!(
             plan.apply_unicast_target(first).expect("first target"),
-            vec![TeacherPresentationSenderAction::AttachUnicast(first_binding)]
+            vec![TeacherPresentationSenderAction::AttachUnicast(
+                first_binding
+            )]
         );
         assert!(
             plan.apply_unicast_target(first)
@@ -168,7 +170,9 @@ mod tests {
 
         assert_eq!(
             plan.remove_receiver(principal(7)),
-            Some(TeacherPresentationSenderAction::DetachUnicast(first_binding))
+            Some(TeacherPresentationSenderAction::DetachUnicast(
+                first_binding
+            ))
         );
         assert_eq!(plan.remove_receiver(principal(7)), None);
         assert!(plan.is_empty());
@@ -183,10 +187,10 @@ mod tests {
 
         let readmitted = target(7, 49_100, 2);
         assert_eq!(
-            plan.apply_unicast_target(readmitted).expect("readmitted target"),
+            plan.apply_unicast_target(readmitted)
+                .expect("readmitted target"),
             vec![TeacherPresentationSenderAction::AttachUnicast(
-                TeacherPresentationOutlierBinding::new(2, readmitted)
-                    .expect("fresh runtime slot"),
+                TeacherPresentationOutlierBinding::new(2, readmitted).expect("fresh runtime slot"),
             )]
         );
     }
