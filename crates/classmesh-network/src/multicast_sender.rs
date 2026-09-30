@@ -4,15 +4,15 @@ use std::time::Duration;
 
 use classmesh_protocol::PROTOCOL_VERSION;
 use classmesh_protocol::media::MEDIA_HEADER_LEN;
+use classmesh_security::AuthorizationStore;
 use classmesh_security::group_media::{
     GroupMediaEpoch, GroupMediaError, GroupMediaFrameBinding, SealedGroupMediaFrame,
 };
 use classmesh_security::group_media_coordinator::{
     GroupMediaCoordinator, GroupMediaCoordinatorError,
 };
-use classmesh_security::AuthorizationStore;
-use classmesh_video::distributor::SharedEncodedFrame;
 use classmesh_video::Codec;
+use classmesh_video::distributor::SharedEncodedFrame;
 
 use crate::multicast::{MulticastMembership, MulticastProbeOutcome};
 use crate::transport::SendFrameReport;
@@ -453,9 +453,13 @@ mod tests {
         let active_epoch = coordinator.begin_epoch().expect("epoch starts");
         let frame = shared_frame(Codec::H264, 91, true);
 
-        let sealed =
-            protect_shared_h264_frame(config(active_epoch), &mut coordinator, &authorization, &frame)
-                .expect("shared H.264 frame is protected");
+        let sealed = protect_shared_h264_frame(
+            config(active_epoch),
+            &mut coordinator,
+            &authorization,
+            &frame,
+        )
+        .expect("shared H.264 frame is protected");
         let binding = sealed.binding();
 
         assert_eq!(binding.presentation_id(), 700);
