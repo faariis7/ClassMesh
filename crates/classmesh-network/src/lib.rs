@@ -6,6 +6,7 @@ pub mod multicast;
 pub mod multicast_receiver;
 pub mod multicast_sender;
 mod protected_media;
+pub mod protected_unicast_sender;
 pub mod receiver;
 pub mod reliability;
 pub mod runtime_multicast_probe;
