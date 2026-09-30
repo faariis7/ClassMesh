@@ -64,13 +64,29 @@ impl SinkQueue {
     }
 
     fn push(&mut self, frame: SharedEncodedFrame) {
+        if frame.meta.keyframe {
+            self.dropped = self
+                .dropped
+                .saturating_add(u64::try_from(self.frames.len()).unwrap_or(u64::MAX));
+            self.frames.clear();
+            self.frames.insert(frame.meta.frame_id, frame);
+            return;
+        }
+
         while self.frames.len() >= self.capacity {
-            if let Some((&oldest, _)) = self.frames.first_key_value() {
-                self.frames.remove(&oldest);
+            let stale_delta = self
+                .frames
+                .iter()
+                .find(|(_, queued)| !queued.meta.keyframe)
+                .map(|(&frame_id, _)| frame_id);
+            let Some(stale_delta) = stale_delta else {
+                // A capacity-one live sink may still be holding the recovery keyframe. Keep it
+                // until the transport consumes it instead of replacing it with an undecodable delta.
                 self.dropped = self.dropped.saturating_add(1);
-            } else {
-                break;
-            }
+                return;
+            };
+            self.frames.remove(&stale_delta);
+            self.dropped = self.dropped.saturating_add(1);
         }
         self.frames.insert(frame.meta.frame_id, frame);
     }
@@ -84,6 +100,31 @@ impl SinkQueue {
         let latest_frame = self.frames.remove(&latest);
         self.frames.clear();
         latest_frame
+    }
+
+    fn pop_next_decodable(&mut self) -> Option<SharedEncodedFrame> {
+        let keyframe_id = self
+            .frames
+            .iter()
+            .rev()
+            .find(|(_, frame)| frame.meta.keyframe)
+            .map(|(&frame_id, _)| frame_id);
+        let Some(keyframe_id) = keyframe_id else {
+            return self.pop_latest();
+        };
+
+        let stale_before_keyframe: Vec<u64> = self
+            .frames
+            .range(..keyframe_id)
+            .map(|(&frame_id, _)| frame_id)
+            .collect();
+        self.dropped = self.dropped.saturating_add(
+            u64::try_from(stale_before_keyframe.len()).unwrap_or(u64::MAX),
+        );
+        for frame_id in stale_before_keyframe {
+            self.frames.remove(&frame_id);
+        }
+        self.frames.remove(&keyframe_id)
     }
 }
 
@@ -166,6 +207,14 @@ impl FrameDistributor {
 
     pub fn pop_latest(&mut self, id: SinkId) -> Option<SharedEncodedFrame> {
         self.sinks.get_mut(&id)?.pop_latest()
+    }
+
+    /// Returns a decoder-safe live frame.
+    ///
+    /// If a queued keyframe is waiting, it is delivered before any newer dependent delta frames.
+    /// Otherwise this falls back to the normal latest-frame-wins policy.
+    pub fn pop_next_decodable(&mut self, id: SinkId) -> Option<SharedEncodedFrame> {
+        self.sinks.get_mut(&id)?.pop_next_decodable()
     }
 
     pub fn discard_queued(&mut self) {
@@ -324,6 +373,83 @@ mod tests {
                 .frame_id,
             3
         );
+    }
+
+    #[test]
+    fn live_queue_preserves_keyframe_until_decoder_safe_drain() {
+        let mut distributor = FrameDistributor::default();
+        distributor
+            .add_sink(SinkId(1), SinkMode::Multicast, 2)
+            .expect("bounded multicast sink");
+
+        distributor.publish(frame(1));
+        distributor.publish(frame(2));
+        distributor.publish(frame(3));
+
+        let stats = distributor.stats(SinkId(1)).expect("stats");
+        assert_eq!(stats.queued, 2);
+        assert_eq!(stats.dropped, 1);
+
+        let recovery = distributor
+            .pop_next_decodable(SinkId(1))
+            .expect("keyframe must survive queue pressure");
+        assert!(recovery.meta.keyframe);
+        assert_eq!(recovery.meta.frame_id, 1);
+
+        let latest = distributor
+            .pop_next_decodable(SinkId(1))
+            .expect("newest dependent frame remains");
+        assert!(!latest.meta.keyframe);
+        assert_eq!(latest.meta.frame_id, 3);
+    }
+
+    #[test]
+    fn capacity_one_drops_delta_instead_of_replacing_pending_keyframe() {
+        let mut distributor = FrameDistributor::default();
+        distributor
+            .add_sink(SinkId(1), SinkMode::Multicast, 1)
+            .expect("single-frame sink");
+
+        distributor.publish(frame(1));
+        distributor.publish(frame(2));
+
+        let stats = distributor.stats(SinkId(1)).expect("stats");
+        assert_eq!(stats.queued, 1);
+        assert_eq!(stats.dropped, 1);
+        let recovery = distributor
+            .pop_next_decodable(SinkId(1))
+            .expect("keyframe remains queued");
+        assert_eq!(recovery.meta.frame_id, 1);
+        assert!(recovery.meta.keyframe);
+    }
+
+    #[test]
+    fn newer_keyframe_supersedes_obsolete_queued_chain() {
+        let mut distributor = FrameDistributor::default();
+        distributor
+            .add_sink(SinkId(1), SinkMode::Multicast, 3)
+            .expect("bounded multicast sink");
+
+        distributor.publish(frame(2));
+        distributor.publish(frame(3));
+        distributor.publish(SharedEncodedFrame::new(
+            EncodedFrameMeta {
+                frame_id: 4,
+                timestamp_us: 4_000,
+                keyframe: true,
+            },
+            Codec::H264,
+            vec![4; 16],
+        ));
+
+        let stats = distributor.stats(SinkId(1)).expect("stats");
+        assert_eq!(stats.queued, 1);
+        assert_eq!(stats.dropped, 2);
+        let recovery = distributor
+            .pop_next_decodable(SinkId(1))
+            .expect("new keyframe queued");
+        assert_eq!(recovery.meta.frame_id, 4);
+        assert!(recovery.meta.keyframe);
     }
 
     #[test]
