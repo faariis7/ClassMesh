@@ -2511,6 +2511,99 @@ mod windows_service_app {
             }
         }
 
+        fn unicast_start() -> ServicePresentationUnicastStart {
+            ServicePresentationUnicastStart {
+                control_session_id: 77,
+                request_id: 88,
+                presentation_id: 55,
+                stream_id: 7,
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                bitrate_kbps: 5_000,
+                port: 50_000,
+                teacher_source: "2001:db8::44".parse().expect("teacher source"),
+            }
+        }
+
+        #[test]
+        fn worker_unicast_result_requires_exact_process_session_and_start_binding() {
+            let start = unicast_start();
+            let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+            let pending = PendingPresentationUnicastStart {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                start,
+                reply_tx,
+            };
+            let exact = WorkerPresentationUnicastStartResult {
+                process_id: 42,
+                session_id: 7,
+                control_session_id: start.control_session_id,
+                request_id: start.request_id,
+                presentation_id: start.presentation_id,
+                stream_id: start.stream_id,
+                status: WorkerPresentationUnicastStartStatus::Started,
+            };
+            assert!(pending.matches(&exact));
+
+            let mut wrong = exact;
+            wrong.process_id = 43;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.session_id = 8;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.control_session_id = 78;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.request_id = 89;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.presentation_id = 56;
+            assert!(!pending.matches(&wrong));
+            wrong = exact;
+            wrong.stream_id = 8;
+            assert!(!pending.matches(&wrong));
+        }
+
+        #[test]
+        fn pending_unicast_start_is_invalidated_by_exact_key_lifecycle_binding() {
+            let start = unicast_start();
+            let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+            let pending = PendingPresentationUnicastStart {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                start,
+                reply_tx,
+            };
+            let exact_media_binding = PresentationKeyInstallBinding {
+                control_session_id: start.control_session_id,
+                request_id: 999,
+                presentation_id: start.presentation_id,
+                stream_id: start.stream_id,
+                epoch: 77,
+            };
+            assert!(pending.matches_key_binding(exact_media_binding));
+
+            for wrong in [
+                PresentationKeyInstallBinding {
+                    control_session_id: start.control_session_id + 1,
+                    ..exact_media_binding
+                },
+                PresentationKeyInstallBinding {
+                    presentation_id: start.presentation_id + 1,
+                    ..exact_media_binding
+                },
+                PresentationKeyInstallBinding {
+                    stream_id: start.stream_id + 1,
+                    ..exact_media_binding
+                },
+            ] {
+                assert!(!pending.matches_key_binding(wrong));
+            }
+        }
+
         #[test]
         fn released_session_floor_rejects_stale_profile_updates() {
             assert!(focused_reconfigure_is_stale(7, 7, None));
