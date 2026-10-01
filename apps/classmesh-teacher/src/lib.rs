@@ -411,6 +411,50 @@ mod tests {
     }
 
     #[test]
+    fn sender_action_inverse_restores_exact_runtime_binding() {
+        let binding =
+            TeacherPresentationOutlierBinding::new(11, target(7, 49_000, 3)).expect("binding");
+
+        assert_eq!(
+            inverse_sender_action(TeacherPresentationSenderAction::AttachUnicast(binding)),
+            Some(TeacherPresentationSenderAction::DetachUnicast(binding))
+        );
+        assert_eq!(
+            inverse_sender_action(TeacherPresentationSenderAction::DetachUnicast(binding)),
+            Some(TeacherPresentationSenderAction::AttachUnicast(binding))
+        );
+
+        let keyframe =
+            PresentationKeyframeRequest::new(55, 7, 42).expect("valid keyframe request");
+        assert_eq!(
+            inverse_sender_action(TeacherPresentationSenderAction::RequestKeyframe(keyframe)),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transactional_target_apply_exposes_live_plan_runtime_contract() {
+        use classmesh_control::presentation_sender_plan::TeacherPresentationSenderPlan;
+
+        fn assert_contract(
+            plan: &mut TeacherPresentationSenderPlan,
+            lifecycle: &mut TeacherVideoEngineLifecycle,
+            target: PresentationUnicastSenderTarget,
+        ) {
+            let _: Result<usize, TeacherVideoFallbackApplyError> =
+                apply_unicast_target_transactionally(plan, lifecycle, target);
+        }
+
+        let _ = assert_contract
+            as fn(
+                &mut TeacherPresentationSenderPlan,
+                &mut TeacherVideoEngineLifecycle,
+                PresentationUnicastSenderTarget,
+            );
+    }
+
+    #[test]
     fn granted_keyframe_is_forwarded_without_control_identity() {
         let request = PresentationKeyframeRequest::new(55, 7, 42).expect("valid keyframe request");
         let directive = TeacherVideoEngineDirective::from_sender_action(
