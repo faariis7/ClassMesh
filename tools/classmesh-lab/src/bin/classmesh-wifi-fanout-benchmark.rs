@@ -5,6 +5,7 @@ use classmesh_lab::wifi_direct_fanout::{DirectFanoutBenchmarkConfig, run_direct_
 use classmesh_lab::wifi_fanout_benchmark::{
     WIFI_FANOUT_EVIDENCE_VERSION, WIFI_FANOUT_SCALE_POINTS, WifiFanoutBenchmarkPlan,
 };
+use classmesh_lab::wifi_relay_fanout::run_relay_fanout_benchmark;
 
 fn main() -> ExitCode {
     match run() {
@@ -17,6 +18,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
+    let mut strategy = "direct-unicast".to_owned();
     let mut receivers = 5_usize;
     let mut frames = 120_u64;
     let mut payload_bytes = 1_200_usize;
@@ -31,6 +33,7 @@ fn run() -> Result<(), String> {
                 print_help();
                 return Ok(());
             }
+            "--strategy" => strategy = parse_next(&mut args, "--strategy")?,
             "--receivers" => receivers = parse_next(&mut args, "--receivers")?,
             "--frames" => frames = parse_next(&mut args, "--frames")?,
             "--payload-bytes" => payload_bytes = parse_next(&mut args, "--payload-bytes")?,
@@ -43,6 +46,11 @@ fn run() -> Result<(), String> {
         }
     }
 
+    if !matches!(strategy.as_str(), "direct-unicast" | "relay") {
+        return Err(format!(
+            "--strategy must be direct-unicast or relay; got {strategy:?}"
+        ));
+    }
     if !WIFI_FANOUT_SCALE_POINTS.contains(&receivers) {
         return Err(format!(
             "--receivers must be one of 5, 10, 20, 30; got {receivers}"
@@ -60,35 +68,60 @@ fn run() -> Result<(), String> {
     let weak_receiver = receiver_ids[weak_index - 1].clone();
     let plan = WifiFanoutBenchmarkPlan {
         schema_version: WIFI_FANOUT_EVIDENCE_VERSION,
-        run_id: format!("synthetic-direct-{receivers}"),
-        strategy_label: "direct-unicast".to_owned(),
+        run_id: format!("synthetic-{}-{receivers}", strategy.replace('-', "_")),
+        strategy_label: strategy.clone(),
         receiver_ids,
         duration_seconds: duration_seconds_for_frames(frames),
         weak_receiver_probe: Some(weak_receiver),
     };
+    let config = DirectFanoutBenchmarkConfig {
+        frame_count: frames,
+        payload_bytes,
+        queue_capacity,
+        weak_drain_every,
+    };
 
-    let report = run_direct_fanout_benchmark(
-        &plan,
-        DirectFanoutBenchmarkConfig {
-            frame_count: frames,
-            payload_bytes,
-            queue_capacity,
-            weak_drain_every,
-        },
-    )
-    .map_err(|error| error.to_string())?;
+    match strategy.as_str() {
+        "direct-unicast" => {
+            let report =
+                run_direct_fanout_benchmark(&plan, config).map_err(|error| error.to_string())?;
+            println!("mode=synthetic-direct-fanout");
+            println!("physical_wifi=false");
+            println!("strategy_selection=false");
+            println!("receivers={}", report.receivers.len());
+            println!("frames_published={}", report.frames_published);
+            println!("payload_bytes_per_frame={}", report.payload_bytes_per_frame);
+            println!(
+                "shared_allocation_mismatches={}",
+                report.shared_allocation_mismatches
+            );
+            print_receivers(report.receivers);
+        }
+        "relay" => {
+            let report =
+                run_relay_fanout_benchmark(&plan, config).map_err(|error| error.to_string())?;
+            println!("mode=synthetic-relay-fanout");
+            println!("physical_wifi=false");
+            println!("strategy_selection=false");
+            println!("receivers={}", report.receivers.len());
+            println!("teacher_frames_to_relay={}", report.teacher_frames_to_relay);
+            println!("teacher_payload_bytes={}", report.teacher_payload_bytes);
+            println!("relay_frames_published={}", report.relay_frames_published);
+            println!("payload_bytes_per_frame={}", report.payload_bytes_per_frame);
+            println!(
+                "shared_allocation_mismatches={}",
+                report.shared_allocation_mismatches
+            );
+            print_receivers(report.receivers);
+        }
+        _ => unreachable!("strategy validated above"),
+    }
 
-    println!("mode=synthetic-direct-fanout");
-    println!("physical_wifi=false");
-    println!("strategy_selection=false");
-    println!("receivers={}", report.receivers.len());
-    println!("frames_published={}", report.frames_published);
-    println!("payload_bytes_per_frame={}", report.payload_bytes_per_frame);
-    println!(
-        "shared_allocation_mismatches={}",
-        report.shared_allocation_mismatches
-    );
-    for receiver in report.receivers {
+    Ok(())
+}
+
+fn print_receivers(receivers: Vec<classmesh_lab::wifi_direct_fanout::DirectFanoutReceiverReport>) {
+    for receiver in receivers {
         println!(
             "receiver={} delivered={} queue_dropped={} max_queued={} queued_at_end={}",
             receiver.receiver_id,
@@ -98,8 +131,6 @@ fn run() -> Result<(), String> {
             receiver.queued_at_end
         );
     }
-
-    Ok(())
 }
 
 fn duration_seconds_for_frames(frames: u64) -> u32 {
@@ -121,21 +152,24 @@ where
 
 fn print_help() {
     println!(
-        "ClassMesh synthetic direct Wi-Fi fanout baseline
+        "ClassMesh synthetic Wi-Fi fanout benchmark
 
 Usage:
   classmesh-wifi-fanout-benchmark [options]
 
 Options:
-  --receivers <5|10|20|30>    Receiver count (default: 5)
-  --frames <count>             Synthetic frames (default: 120)
-  --payload-bytes <bytes>      H.264 payload bytes/frame (default: 1200)
-  --queue-capacity <count>     Per-receiver bounded queue (default: 4)
-  --weak-index <1..N>          Receiver intentionally drained slowly (default: 1)
-  --weak-drain-every <frames>  Drain weak receiver every N frames (default: 8)
-  --help                       Show this help
+  --strategy <direct-unicast|relay>  Synthetic topology (default: direct-unicast)
+  --receivers <5|10|20|30>           Receiver count (default: 5)
+  --frames <count>                    Synthetic frames (default: 120)
+  --payload-bytes <bytes>             H.264 payload bytes/frame (default: 1200)
+  --queue-capacity <count>            Per-receiver bounded queue (default: 4)
+  --weak-index <1..N>                 Receiver intentionally drained slowly (default: 1)
+  --weak-drain-every <frames>         Drain weak receiver every N frames (default: 8)
+  --help                              Show this help
 
-This is a deterministic synthetic fanout/isolation benchmark.
-It is NOT physical Wi-Fi evidence and does NOT select UDP, QUIC, WebRTC, or SFU."
+Both strategies are deterministic software baselines.
+relay models Teacher -> one relay -> bounded per-receiver relay fanout.
+Neither mode is physical Wi-Fi evidence or a real SFU/WebRTC implementation,
+and neither selects the final Wi-Fi strategy."
     );
 }
