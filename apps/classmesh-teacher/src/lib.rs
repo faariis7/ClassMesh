@@ -235,9 +235,9 @@ impl std::error::Error for TeacherVideoFallbackApplyError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Runtime(error) | Self::Rollback(error) => Some(error),
-            Self::Plan(_)
-            | Self::RollbackDidNotChangeState
-            | Self::UnexpectedPreparedAction => None,
+            Self::Plan(_) | Self::RollbackDidNotChangeState | Self::UnexpectedPreparedAction => {
+                None
+            }
         }
     }
 }
