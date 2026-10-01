@@ -203,6 +203,45 @@ mod tests {
     }
 
     #[test]
+    fn prepared_target_does_not_mutate_plan_until_exact_commit() {
+        let mut plan = TeacherPresentationSenderPlan::with_limit(2).expect("bounded plan");
+        let first = target(7, 49_000, 1);
+        let prepared = plan
+            .prepare_unicast_target(first)
+            .expect("prepare first target");
+
+        assert!(plan.is_empty());
+        assert_eq!(
+            prepared.actions(),
+            &[TeacherPresentationSenderAction::AttachUnicast(
+                TeacherPresentationOutlierBinding::new(1, first).expect("stable first slot"),
+            )]
+        );
+
+        plan.commit_unicast_target(prepared)
+            .expect("commit prepared target");
+        assert_eq!(plan.len(), 1);
+    }
+
+    #[test]
+    fn prepared_target_rejects_commit_after_plan_state_changes() {
+        let mut plan = TeacherPresentationSenderPlan::with_limit(2).expect("bounded plan");
+        let first = target(7, 49_000, 1);
+        let prepared = plan
+            .prepare_unicast_target(first)
+            .expect("prepare first target");
+
+        plan.apply_unicast_target(target(8, 49_001, 1))
+            .expect("intervening mutation");
+
+        assert_eq!(
+            plan.commit_unicast_target(prepared),
+            Err(TeacherPresentationSenderPlanError::PlanChanged)
+        );
+        assert_eq!(plan.len(), 1);
+    }
+
+    #[test]
     fn cleanup_detaches_only_known_receiver_binding() {
         let mut plan = TeacherPresentationSenderPlan::with_limit(2).expect("bounded plan");
         let first = target(7, 49_000, 1);
