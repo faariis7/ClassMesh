@@ -211,6 +211,7 @@ pub enum TeacherVideoFallbackApplyError {
     Plan(TeacherPresentationSenderPlanError),
     Runtime(TeacherVideoEngineLifecycleError),
     Rollback(TeacherVideoEngineLifecycleError),
+    RollbackDidNotChangeState,
     UnexpectedPreparedAction,
 }
 
@@ -221,6 +222,8 @@ impl std::fmt::Display for TeacherVideoFallbackApplyError {
             Self::Plan(error) => write!(formatter, "Teacher sender plan: {error:?}"),
             Self::Runtime(error) => write!(formatter, "Teacher video runtime apply: {error}"),
             Self::Rollback(error) => write!(formatter, "Teacher video runtime rollback: {error}"),
+            Self::RollbackDidNotChangeState => formatter
+                .write_str("Teacher video runtime rollback did not restore the prior state"),
             Self::UnexpectedPreparedAction => formatter
                 .write_str("Teacher fallback transaction contained a non-unicast sender action"),
         }
@@ -232,7 +235,9 @@ impl std::error::Error for TeacherVideoFallbackApplyError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Runtime(error) | Self::Rollback(error) => Some(error),
-            Self::Plan(_) | Self::UnexpectedPreparedAction => None,
+            Self::Plan(_)
+            | Self::RollbackDidNotChangeState
+            | Self::UnexpectedPreparedAction => None,
         }
     }
 }
@@ -276,9 +281,12 @@ fn rollback_applied_sender_actions(
     actions: &[TeacherPresentationSenderAction],
 ) -> Result<(), TeacherVideoFallbackApplyError> {
     for action in actions.iter().rev().copied() {
-        lifecycle
+        let changed = lifecycle
             .apply(TeacherVideoEngineDirective::from_sender_action(action))
             .map_err(TeacherVideoFallbackApplyError::Rollback)?;
+        if !changed {
+            return Err(TeacherVideoFallbackApplyError::RollbackDidNotChangeState);
+        }
     }
     Ok(())
 }
