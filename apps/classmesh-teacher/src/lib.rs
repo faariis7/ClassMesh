@@ -122,12 +122,11 @@ mod tests {
             directive: TeacherVideoEngineDirective,
             runtime: &mut PresentationMulticastSendRuntime,
         ) {
-            let _: Result<bool, TeacherVideoEngineApplyError> =
-                directive.apply(runtime, 2);
+            let _: Result<bool, TeacherVideoEngineApplyError> = directive.apply(runtime, 2);
         }
 
-        let _ = assert_apply
-            as fn(TeacherVideoEngineDirective, &mut PresentationMulticastSendRuntime);
+        let _ =
+            assert_apply as fn(TeacherVideoEngineDirective, &mut PresentationMulticastSendRuntime);
     }
 
     #[test]
