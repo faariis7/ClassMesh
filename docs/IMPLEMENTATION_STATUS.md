@@ -1,6 +1,6 @@
 # ClassMesh Implementation Status
 
-Last updated: 2026-09-24
+Last updated: 2026-10-01
 
 This file distinguishes **implemented code**, **hosted-CI validation**, **real-hardware validation still required**, and **future product work**. Architecture documents must not be read as claims that every planned feature is already production-ready.
 
@@ -11,6 +11,8 @@ This file distinguishes **implemented code**, **hosted-CI validation**, **real-h
 Phase 4 physical acceptance remains pending. Issue #3 must remain open until two physical Windows PCs pass the documented qualification.
 
 Phase 5 is complete under Issue #32 through PR #107. Phase 6 implementation is complete through 6E under Issue #108: authenticated input/lifecycle/secure-desktop handling is merged; the focused interactive media path now includes measured and Service-owned H.264 capability evidence/cache validation, peer-bound UDP stream dispatch, production Worker H.264 sending, profile adaptation, and bounded authenticated NACK/keyframe recovery through PR #145 (CI #619 green); the typed bounded clipboard skeleton is merged in PR #116. Phase 6F remains a physical interactive-control validation gate and is not satisfied by hosted CI.
+
+Phase 7 software implementation is complete through 7G: the live protected multicast sender/receiver path, authenticated group-media security, bounded unicast outlier fallback and coordinated/rate-limited recovery are merged through PR #272. PR #273 adds the CI-tested Phase 7H evidence harness and qualification bundle. Physical 7D multicast viability and 7H classroom-scale evidence remain open and cannot be closed by hosted CI.
 
 The hosted CI baseline covers Portable Rust / Ubuntu rustfmt, Clippy with warnings denied, full workspace tests and `classmesh-lab`, plus Windows workspace Clippy/tests and release builds for the media qualification executables. Hosted runners do not replace real interactive GPU/driver or two-PC validation.
 
@@ -103,6 +105,10 @@ Phase 7F implementation is complete at the security/data-plane boundary: product
 
 PR #174 adds the sender half of the production multicast transport: construction requires successful local multicast-probe evidence; the socket is bound to and explicitly routes multicast through the selected IPv4 interface; TTL is fixed to one hop; only `SealedGroupMediaFrame` is accepted; packet headers derive stream/frame/timestamp/keyframe fields from the authenticated SFrame binding; and the sender retains no multicast retransmission cache. PR #201 connects the encode-once boundary to that sender without introducing another key owner or SFrame counter: H.264 `SharedEncodedFrame` metadata is converted to the canonical group-media binding, sealing is delegated to the existing `GroupMediaCoordinator` (including live authorization/rotation checks), and only the resulting opaque sealed frame reaches multicast packetization. Non-H.264 input, rotation-required state and sender/coordinator epoch drift fail closed. PR #203 adds the bounded multicast fan-out attachment; PR #206/#211 establish one-encoder Teacher fan-out and protected multicast runtime composition; PR #212 preserves queued recovery keyframes under bounded pressure; PR #215 adds fail-fast nonblocking protected multicast send semantics; and PR #220 makes that nonblocking path the live Teacher runtime. Kernel UDP backpressure is a media-local drop with consumed SFrame counter/packet sequence and no implicit retry, while other transport/security failures remain fail-closed. `GroupMediaCoordinator` and authorization ownership stay caller-owned. Hosted CI still does not satisfy the Phase 7D physical multicast or 7H scale gates.
 
+Phase 7G software is complete through PR #272. The merged path includes coordinated stream-wide keyframe recovery, bounded explicit unicast fallback admission, protected UDP-unicast receive/send integration, stable monotonic outlier slots, transactional sender-plan prepare/commit, fail-closed runtime rollback, authenticated fallback-target validation and live Teacher in-process orchestration. Authenticated receiver feedback now reaches rate-limited recovery planning and only granted sanitized keyframe directives are applied to the exact active Teacher sender. The Teacher composition intentionally owns this live sender path in-process; older sanitized Service→Worker sender-action IPC contracts remain available but are not required for the active Teacher composition.
+
+PR #273 begins Phase 7H qualification tooling. The PowerShell harness creates an exact receiver-correlated manifest, rejects duplicate/invalid receiver identifiers, verifies expected per-receiver evidence presence, and always leaves the final PASS/FAIL decision undetermined for human/telemetry review. Windows CI executes an Init → synthetic evidence → ValidateEvidence self-test and publishes `classmesh-phase7h-qualification-windows-x64`. This proves only the harness/bundle, not physical classroom scale.
+
 PR #175 adds the receive-side multicast transport/reassembly boundary. Receiver startup remains probe-gated, joins the selected group/interface with a bounded read timeout, pins the expected Teacher source IPv4 plus protocol v0.4 and stream ID before reassembly, and treats malformed/mismatched packets as media-local drops rather than control-session failures. The existing bounded `ReceiverWindow` provides stale expiry and loss feedback; NACKs are capped to the 64-index control contract. Packet counts that exceed the SFrame sealed-frame ceiling are rejected before receiver-window allocation, and completed ciphertext is size-checked again before exposure. Completed frames are exposed explicitly as unauthenticated group-media ciphertext pending SFrame verification. Authenticated control-channel delivery of that feedback plus Worker-side key/decrypt/render integration remain pending.
 
 A reusable local runtime multicast probe now tests one explicitly selected IPv4 interface with a bounded self-looped datagram: secure random token, exact protocol/tag/stream correlation, administratively scoped group, TTL=1, and explicit join/receive/leave. This evidence is suitable only for deciding whether the local runtime may advertise `UdpMulticast`; it does not prove switch/IGMP behavior between two hosts and cannot close the Phase 7D physical gate.
@@ -130,16 +136,16 @@ PR #184 wires that feedback into the established Student control session. The ex
 ## Remaining security/control work
 
 - Phase 6F physical interactive-control validation under Issue #108, including degraded/lost media while authenticated control remains responsive; hosted CI cannot close this gate;
-- encrypted multicast media key distribution/replay/rotation for the later classroom-presentation phase;
+- Phase 7D physical wired multicast viability and Phase 7H classroom-scale qualification remain evidence gates; hosted CI cannot close them;
 - final privilege-boundary, dependency and update-chain review before the 1.0 gate.
 
 ## Other production work still required
 
-Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, deliberate multi-GPU selection, broader real-hardware device-loss/recovery evidence and long-running leak/driver soak tests. Classroom fan-out still needs production shared-output integration, multicast protection, per-client fallback and classroom-scale tests. Installer/update/product work still needs service/firewall installation, signed update/rollback, polished Console/Agent UI, diagnostics export and support bundles.
+Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, deliberate multi-GPU selection, broader real-hardware device-loss/recovery evidence and long-running leak/driver soak tests. Classroom presentation software fan-out/protection/fallback is implemented; physical multicast viability, classroom-scale qualification and longer soak evidence remain. Installer/update/product work still needs service/firewall installation, signed update/rollback, polished Console/Agent UI, diagnostics export and support bundles.
 
 ## Next implementation sequence
 
 1. Keep Issue #3 open and perform Phase 4 physical qualification when two Windows PCs are available; do not select the default one-to-one UDP-vs-QUIC-Datagram transport before that evidence exists.
 2. Run Phase 6F physical interactive-control validation, including degraded/lost media while authenticated control remains responsive, stuck-input cleanup, secure-desktop diagnostics and bounded focused-media recovery.
-3. Continue Phase 7 wired-classroom presentation work in parallel where it does not depend on unresolved physical transport evidence; keep multicast production/security and scale claims behind their explicit 7E/7H gates and never treat hosted CI as transport-selection evidence.
+3. Execute Phase 7 physical qualification when hardware is available: first retain Phase 7D two-PC multicast evidence on the intended wired path, then use the PR #273 Phase 7H harness/runbook for the feasible 2/5/10/20/30-receiver checkpoints. Keep all unexecuted scale points pending and never treat hosted CI as physical evidence.
 4. Continue later production security, Wi-Fi fan-out, monitoring-grid, installer/update and UI work in roadmap order.
