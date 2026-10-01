@@ -1,6 +1,10 @@
 use classmesh_control::presentation_sender_plan::{
     TeacherPresentationOutlierBinding, TeacherPresentationSenderAction,
 };
+#[cfg(windows)]
+use classmesh_control::presentation_sender_plan::{
+    TeacherPresentationSenderPlan, TeacherPresentationSenderPlanError,
+};
 use classmesh_core::keyframe::PresentationKeyframeRequest;
 use classmesh_windows_runtime::ipc::{
     ServicePresentationSenderUnicastAction, ServicePresentationSenderUnicastActionKind,
@@ -198,6 +202,99 @@ impl TeacherVideoEngineLifecycle {
         }
         self.active = None;
         Ok(true)
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+pub enum TeacherVideoFallbackApplyError {
+    Plan(TeacherPresentationSenderPlanError),
+    Runtime(TeacherVideoEngineLifecycleError),
+    Rollback(TeacherVideoEngineLifecycleError),
+    UnexpectedPreparedAction,
+}
+
+#[cfg(windows)]
+impl std::fmt::Display for TeacherVideoFallbackApplyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plan(error) => write!(formatter, "Teacher sender plan: {error:?}"),
+            Self::Runtime(error) => write!(formatter, "Teacher video runtime apply: {error}"),
+            Self::Rollback(error) => write!(formatter, "Teacher video runtime rollback: {error}"),
+            Self::UnexpectedPreparedAction => formatter
+                .write_str("Teacher fallback transaction contained a non-unicast sender action"),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl std::error::Error for TeacherVideoFallbackApplyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Runtime(error) | Self::Rollback(error) => Some(error),
+            Self::Plan(_) | Self::UnexpectedPreparedAction => None,
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn apply_unicast_target_transactionally(
+    plan: &mut TeacherPresentationSenderPlan,
+    lifecycle: &mut TeacherVideoEngineLifecycle,
+    target: classmesh_control::group_media_delivery::PresentationUnicastSenderTarget,
+) -> Result<usize, TeacherVideoFallbackApplyError> {
+    let prepared = plan
+        .prepare_unicast_target(target)
+        .map_err(TeacherVideoFallbackApplyError::Plan)?;
+    let actions = prepared.actions().to_vec();
+    let mut rollback_actions = Vec::with_capacity(actions.len());
+
+    for action in actions {
+        let inverse =
+            inverse_sender_action(action).ok_or(TeacherVideoFallbackApplyError::UnexpectedPreparedAction)?;
+        match lifecycle.apply(TeacherVideoEngineDirective::from_sender_action(action)) {
+            Ok(true) => rollback_actions.push(inverse),
+            Ok(false) => {}
+            Err(error) => {
+                rollback_applied_sender_actions(lifecycle, &rollback_actions)?;
+                return Err(TeacherVideoFallbackApplyError::Runtime(error));
+            }
+        }
+    }
+
+    if let Err(error) = plan.commit_unicast_target(prepared) {
+        rollback_applied_sender_actions(lifecycle, &rollback_actions)?;
+        return Err(TeacherVideoFallbackApplyError::Plan(error));
+    }
+
+    Ok(rollback_actions.len())
+}
+
+#[cfg(windows)]
+fn rollback_applied_sender_actions(
+    lifecycle: &mut TeacherVideoEngineLifecycle,
+    actions: &[TeacherPresentationSenderAction],
+) -> Result<(), TeacherVideoFallbackApplyError> {
+    for action in actions.iter().rev().copied() {
+        lifecycle
+            .apply(TeacherVideoEngineDirective::from_sender_action(action))
+            .map_err(TeacherVideoFallbackApplyError::Rollback)?;
+    }
+    Ok(())
+}
+
+#[must_use]
+pub const fn inverse_sender_action(
+    action: TeacherPresentationSenderAction,
+) -> Option<TeacherPresentationSenderAction> {
+    match action {
+        TeacherPresentationSenderAction::AttachUnicast(binding) => {
+            Some(TeacherPresentationSenderAction::DetachUnicast(binding))
+        }
+        TeacherPresentationSenderAction::DetachUnicast(binding) => {
+            Some(TeacherPresentationSenderAction::AttachUnicast(binding))
+        }
+        TeacherPresentationSenderAction::RequestKeyframe(_) => None,
     }
 }
 
@@ -407,6 +504,49 @@ mod tests {
                 DxgiFrame,
                 &mut GroupMediaCoordinator,
                 &AuthorizationStore,
+            );
+    }
+
+    #[test]
+    fn sender_action_inverse_restores_exact_runtime_binding() {
+        let binding =
+            TeacherPresentationOutlierBinding::new(11, target(7, 49_000, 3)).expect("binding");
+
+        assert_eq!(
+            inverse_sender_action(TeacherPresentationSenderAction::AttachUnicast(binding)),
+            Some(TeacherPresentationSenderAction::DetachUnicast(binding))
+        );
+        assert_eq!(
+            inverse_sender_action(TeacherPresentationSenderAction::DetachUnicast(binding)),
+            Some(TeacherPresentationSenderAction::AttachUnicast(binding))
+        );
+
+        let keyframe = PresentationKeyframeRequest::new(55, 7, 42).expect("valid keyframe request");
+        assert_eq!(
+            inverse_sender_action(TeacherPresentationSenderAction::RequestKeyframe(keyframe)),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transactional_target_apply_exposes_live_plan_runtime_contract() {
+        use classmesh_control::presentation_sender_plan::TeacherPresentationSenderPlan;
+
+        fn assert_contract(
+            plan: &mut TeacherPresentationSenderPlan,
+            lifecycle: &mut TeacherVideoEngineLifecycle,
+            target: PresentationUnicastSenderTarget,
+        ) {
+            let _: Result<usize, TeacherVideoFallbackApplyError> =
+                apply_unicast_target_transactionally(plan, lifecycle, target);
+        }
+
+        let _ = assert_contract
+            as fn(
+                &mut TeacherPresentationSenderPlan,
+                &mut TeacherVideoEngineLifecycle,
+                PresentationUnicastSenderTarget,
             );
     }
 
