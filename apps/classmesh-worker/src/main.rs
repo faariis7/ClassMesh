@@ -237,6 +237,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            Ok(WorkerEvent::PresentationKeyframeRequest(request)) => {
+                eprintln!(
+                    "ClassMesh Worker rejected Teacher presentation keyframe directive without an active sender runtime: presentation={}, stream={}, after_frame={}; control remains active",
+                    request.presentation_id(),
+                    request.stream_id(),
+                    request.after_frame_id()
+                );
+                continue;
+            }
+            Ok(WorkerEvent::PresentationSenderUnicastAction(action)) => {
+                eprintln!(
+                    "ClassMesh Worker rejected Teacher presentation unicast sender action without an active sender runtime: slot={}, presentation={}, stream={}, epoch={}, destination={}; control remains active",
+                    action.slot_id,
+                    action.presentation_id,
+                    action.stream_id,
+                    action.epoch,
+                    action.destination
+                );
+                continue;
+            }
             Ok(WorkerEvent::StreamReconfigure(reconfigure)) => {
                 match FocusedWorkerProfile::from_reconfigure(&reconfigure) {
                     Ok(profile) => {
@@ -891,6 +911,10 @@ enum WorkerEvent {
     PresentationKeyClear(classmesh_windows_runtime::ipc::ServicePresentationKeyClear),
     PresentationMulticastStart(classmesh_windows_runtime::ipc::ServicePresentationMulticastStart),
     PresentationUnicastStart(classmesh_windows_runtime::ipc::ServicePresentationUnicastStart),
+    PresentationKeyframeRequest(classmesh_core::keyframe::PresentationKeyframeRequest),
+    PresentationSenderUnicastAction(
+        classmesh_windows_runtime::ipc::ServicePresentationSenderUnicastAction,
+    ),
     IpcFailure(String),
 }
 
@@ -1324,6 +1348,12 @@ fn worker_event_from_decoded_frame(
             }
             Ok(IpcMessage::ServicePresentationUnicastStart(start)) => {
                 Ok(WorkerEvent::PresentationUnicastStart(start))
+            }
+            Ok(IpcMessage::ServicePresentationKeyframeRequest(request)) => {
+                Ok(WorkerEvent::PresentationKeyframeRequest(request))
+            }
+            Ok(IpcMessage::ServicePresentationSenderUnicastAction(action)) => {
+                Ok(WorkerEvent::PresentationSenderUnicastAction(action))
             }
             Ok(IpcMessage::ServiceEncoderCacheResult(result)) => {
                 Ok(WorkerEvent::EncoderCacheResult(result))
