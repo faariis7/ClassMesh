@@ -1,3 +1,47 @@
+use classmesh_control::presentation_sender_plan::{
+    TeacherPresentationOutlierBinding, TeacherPresentationSenderAction,
+};
+use classmesh_core::keyframe::PresentationKeyframeRequest;
+use classmesh_windows_runtime::ipc::{
+    ServicePresentationSenderUnicastAction, ServicePresentationSenderUnicastActionKind,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeacherVideoEngineDirective {
+    Unicast(ServicePresentationSenderUnicastAction),
+    Keyframe(PresentationKeyframeRequest),
+}
+
+impl TeacherVideoEngineDirective {
+    #[must_use]
+    pub fn from_sender_action(action: TeacherPresentationSenderAction) -> Self {
+        match action {
+            TeacherPresentationSenderAction::AttachUnicast(binding) => Self::Unicast(
+                unicast_directive(ServicePresentationSenderUnicastActionKind::Attach, binding),
+            ),
+            TeacherPresentationSenderAction::DetachUnicast(binding) => Self::Unicast(
+                unicast_directive(ServicePresentationSenderUnicastActionKind::Detach, binding),
+            ),
+            TeacherPresentationSenderAction::RequestKeyframe(request) => Self::Keyframe(request),
+        }
+    }
+}
+
+fn unicast_directive(
+    kind: ServicePresentationSenderUnicastActionKind,
+    binding: TeacherPresentationOutlierBinding,
+) -> ServicePresentationSenderUnicastAction {
+    let target = binding.target();
+    ServicePresentationSenderUnicastAction {
+        kind,
+        slot_id: binding.slot_id(),
+        presentation_id: target.presentation_id,
+        stream_id: target.stream_id,
+        epoch: target.epoch.get(),
+        destination: target.destination,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
