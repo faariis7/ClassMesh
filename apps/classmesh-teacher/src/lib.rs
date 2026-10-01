@@ -1,3 +1,10 @@
+#[cfg(windows)]
+use classmesh_control::group_media_delivery::{
+    PresentationUnicastSenderTargetRequest, TeacherGroupMediaDeliveryError,
+    TeacherGroupMediaDeliveryManager,
+};
+#[cfg(windows)]
+use classmesh_control::presentation_fallback::PresentationFallbackCoordinator;
 use classmesh_control::presentation_sender_plan::{
     TeacherPresentationOutlierBinding, TeacherPresentationSenderAction,
 };
@@ -5,6 +12,8 @@ use classmesh_control::presentation_sender_plan::{
 use classmesh_control::presentation_sender_plan::{
     TeacherPresentationSenderPlan, TeacherPresentationSenderPlanError,
 };
+#[cfg(windows)]
+use classmesh_control::presentation_state::PresentationOwnership;
 use classmesh_core::keyframe::PresentationKeyframeRequest;
 use classmesh_windows_runtime::ipc::{
     ServicePresentationSenderUnicastAction, ServicePresentationSenderUnicastActionKind,
@@ -203,6 +212,51 @@ impl TeacherVideoEngineLifecycle {
         self.active = None;
         Ok(true)
     }
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+pub enum TeacherVideoAuthorizedFallbackError {
+    Validation(TeacherGroupMediaDeliveryError),
+    Apply(TeacherVideoFallbackApplyError),
+}
+
+#[cfg(windows)]
+impl std::fmt::Display for TeacherVideoAuthorizedFallbackError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Validation(error) => write!(formatter, "Teacher fallback validation: {error}"),
+            Self::Apply(error) => write!(formatter, "Teacher fallback apply: {error}"),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl std::error::Error for TeacherVideoAuthorizedFallbackError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Validation(error) => Some(error),
+            Self::Apply(error) => Some(error),
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn apply_authorized_unicast_fallback(
+    delivery: &TeacherGroupMediaDeliveryManager,
+    fallback: &PresentationFallbackCoordinator,
+    coordinator: &GroupMediaCoordinator,
+    authorization: &AuthorizationStore,
+    ownership: &PresentationOwnership,
+    request: PresentationUnicastSenderTargetRequest<'_>,
+    plan: &mut TeacherPresentationSenderPlan,
+    lifecycle: &mut TeacherVideoEngineLifecycle,
+) -> Result<usize, TeacherVideoAuthorizedFallbackError> {
+    let target = delivery
+        .build_unicast_sender_target(fallback, coordinator, authorization, ownership, request)
+        .map_err(TeacherVideoAuthorizedFallbackError::Validation)?;
+    apply_unicast_target_transactionally(plan, lifecycle, target)
+        .map_err(TeacherVideoAuthorizedFallbackError::Apply)
 }
 
 #[cfg(windows)]
@@ -573,6 +627,44 @@ mod tests {
                 &mut TeacherVideoEngineLifecycle,
                 PresentationUnicastSenderTarget,
             );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn authorized_fallback_orchestration_exposes_exact_contract() {
+        use classmesh_control::group_media_delivery::{
+            PresentationUnicastSenderTargetRequest, TeacherGroupMediaDeliveryManager,
+        };
+        use classmesh_control::presentation_fallback::PresentationFallbackCoordinator;
+        use classmesh_control::presentation_sender_plan::TeacherPresentationSenderPlan;
+        use classmesh_control::presentation_state::PresentationOwnership;
+        use classmesh_security::AuthorizationStore;
+        use classmesh_security::group_media_coordinator::GroupMediaCoordinator;
+
+        fn assert_contract(
+            delivery: &TeacherGroupMediaDeliveryManager,
+            fallback: &PresentationFallbackCoordinator,
+            coordinator: &GroupMediaCoordinator,
+            authorization: &AuthorizationStore,
+            ownership: &PresentationOwnership,
+            request: PresentationUnicastSenderTargetRequest<'_>,
+            plan: &mut TeacherPresentationSenderPlan,
+            lifecycle: &mut TeacherVideoEngineLifecycle,
+        ) {
+            let _: Result<usize, TeacherVideoAuthorizedFallbackError> =
+                apply_authorized_unicast_fallback(
+                    delivery,
+                    fallback,
+                    coordinator,
+                    authorization,
+                    ownership,
+                    request,
+                    plan,
+                    lifecycle,
+                );
+        }
+
+        let _ = assert_contract;
     }
 
     #[test]
