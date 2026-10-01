@@ -25,7 +25,11 @@ function Assert-ReceiverSet {
         if ([string]::IsNullOrWhiteSpace($_)) {
             throw "Receiver identifiers must not be empty"
         }
-        $_.Trim()
+        $trimmed = $_.Trim()
+        if ($trimmed.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+            throw "Receiver identifiers must be valid file-name components"
+        }
+        $trimmed
     })
 
     $unique = @($normalized | Sort-Object -Unique)
