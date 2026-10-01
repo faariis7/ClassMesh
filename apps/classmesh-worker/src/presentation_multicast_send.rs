@@ -277,6 +277,13 @@ impl PresentationMulticastSendBinding {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationMulticastSendBinding {
+    pub presentation_id: u64,
+    pub stream_id: u32,
+    pub epoch: GroupMediaEpoch,
+}
+
 #[derive(Debug)]
 pub struct PresentationMulticastSendRuntime {
     fanout: PresentationFanoutRuntime,
@@ -327,6 +334,15 @@ impl PresentationMulticastSendRuntime {
     #[must_use]
     pub fn binding(&self) -> PresentationMulticastSendBinding {
         PresentationMulticastSendBinding::from_sender_config(self.sender_config)
+    }
+
+    #[must_use]
+    pub const fn binding(&self) -> PresentationMulticastSendBinding {
+        PresentationMulticastSendBinding {
+            presentation_id: self.sender_config.presentation_id(),
+            stream_id: self.sender_config.stream_id(),
+            epoch: self.sender_config.epoch(),
+        }
     }
 
     #[must_use]
