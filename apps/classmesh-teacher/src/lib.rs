@@ -6,6 +6,42 @@ use classmesh_windows_runtime::ipc::{
     ServicePresentationSenderUnicastAction, ServicePresentationSenderUnicastActionKind,
 };
 
+#[cfg(windows)]
+use classmesh_worker::presentation_multicast_send::{
+    PresentationMulticastSendRuntime, PresentationMulticastSendRuntimeError,
+};
+
+#[cfg(windows)]
+#[derive(Debug)]
+pub enum TeacherVideoEngineApplyError {
+    Runtime(PresentationMulticastSendRuntimeError),
+}
+
+#[cfg(windows)]
+impl std::fmt::Display for TeacherVideoEngineApplyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Runtime(error) => write!(formatter, "Teacher video engine runtime: {error}"),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl std::error::Error for TeacherVideoEngineApplyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Runtime(error) => Some(error),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl From<PresentationMulticastSendRuntimeError> for TeacherVideoEngineApplyError {
+    fn from(value: PresentationMulticastSendRuntimeError) -> Self {
+        Self::Runtime(value)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeacherVideoEngineDirective {
     Unicast(ServicePresentationSenderUnicastAction),
@@ -23,6 +59,20 @@ impl TeacherVideoEngineDirective {
                 unicast_directive(ServicePresentationSenderUnicastActionKind::Detach, binding),
             ),
             TeacherPresentationSenderAction::RequestKeyframe(request) => Self::Keyframe(request),
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn apply(
+        self,
+        runtime: &mut PresentationMulticastSendRuntime,
+        unicast_queue_capacity: usize,
+    ) -> Result<bool, TeacherVideoEngineApplyError> {
+        match self {
+            Self::Unicast(action) => runtime
+                .apply_unicast_sender_action(action, unicast_queue_capacity)
+                .map_err(Into::into),
+            Self::Keyframe(request) => runtime.apply_keyframe_request(request).map_err(Into::into),
         }
     }
 }
