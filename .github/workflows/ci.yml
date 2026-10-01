@@ -117,6 +117,21 @@ jobs:
           .\target\release\classmesh-wifi-fanout-benchmark.exe --help
           .\target\release\classmesh-wifi-fanout-benchmark.exe --receivers 5 --frames 120
 
+      - name: Validate Phase 8 physical Wi-Fi evidence harness
+        shell: pwsh
+        run: |
+          .\scripts\phase8-wifi-scale.ps1 -Mode Help
+          $results = Join-Path $env:RUNNER_TEMP "phase8-wifi-selftest"
+          $receivers = @("student-01","student-02","student-03","student-04","student-05")
+          .\scripts\phase8-wifi-scale.ps1 -Mode Init -Scenario weak-receiver -ReceiverCount 5 -ReceiverId $receivers -WeakReceiverId student-01 -Strategy direct-unicast -RunId ci-direct-5-weak -ApEvidenceExpected -ResultsDir $results
+          Set-Content -LiteralPath (Join-Path $results "teacher.log") -Value "synthetic-ci-evidence"
+          Set-Content -LiteralPath (Join-Path $results "physical-observations.md") -Value "Synthetic CI only; not physical Wi-Fi evidence."
+          Set-Content -LiteralPath (Join-Path $results "ap.log") -Value "synthetic-ci-evidence"
+          foreach ($receiver in $receivers) {
+            Set-Content -LiteralPath (Join-Path (Join-Path $results "receivers") "$receiver.log") -Value "synthetic-ci-evidence"
+          }
+          .\scripts\phase8-wifi-scale.ps1 -Mode ValidateEvidence -ResultsDir $results
+
       - name: Validate Phase 7H physical runner
         shell: pwsh
         run: |
@@ -200,6 +215,24 @@ jobs:
         with:
           name: classmesh-phase7h-qualification-windows-x64
           path: phase7h-bundle/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
+
+      - name: Stage Phase 8 Wi-Fi qualification bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path phase8-wifi-bundle -Force | Out-Null
+          Copy-Item target/release/classmesh-wifi-fanout-benchmark.exe phase8-wifi-bundle/
+          Copy-Item scripts/phase8-wifi-scale.ps1 phase8-wifi-bundle/
+          Copy-Item docs/PHASE8_WIFI_FANOUT_BENCHMARK.md phase8-wifi-bundle/
+          Copy-Item docs/PHASE8_WIFI_PHYSICAL_QUALIFICATION.md phase8-wifi-bundle/
+          Copy-Item docs/PHASE8_WIFI_RESULTS.md phase8-wifi-bundle/
+
+      - name: Upload Phase 8 Wi-Fi qualification bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-phase8-wifi-qualification-windows-x64
+          path: phase8-wifi-bundle/
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
