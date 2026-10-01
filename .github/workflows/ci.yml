@@ -39,6 +39,9 @@ jobs:
       - name: Synthetic media lab
         run: cargo run -p classmesh-lab --bin classmesh-lab
 
+      - name: Synthetic Wi-Fi fanout baseline
+        run: cargo run -p classmesh-lab --bin classmesh-wifi-fanout-benchmark -- --receivers 5 --frames 120
+
   windows:
     name: Windows Build
     runs-on: windows-latest
@@ -69,6 +72,9 @@ jobs:
 
       - name: Build transport benchmark
         run: cargo build -p classmesh-lab --bin classmesh-transport-benchmark --release
+
+      - name: Build Wi-Fi fanout benchmark
+        run: cargo build -p classmesh-lab --bin classmesh-wifi-fanout-benchmark --release
 
       - name: Build Phase 7 multicast probe
         run: cargo build -p classmesh-lab --bin classmesh-multicast-probe --release
@@ -104,6 +110,12 @@ jobs:
       - name: Validate Phase 7 multicast probe help
         shell: pwsh
         run: .\target\release\classmesh-multicast-probe.exe --help
+
+      - name: Validate Phase 8 synthetic fanout baseline
+        shell: pwsh
+        run: |
+          .\target\release\classmesh-wifi-fanout-benchmark.exe --help
+          .\target\release\classmesh-wifi-fanout-benchmark.exe --receivers 5 --frames 120
 
       - name: Validate Phase 7H physical runner
         shell: pwsh
