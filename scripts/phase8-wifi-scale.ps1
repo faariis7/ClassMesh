@@ -46,13 +46,16 @@ function Assert-ReceiverSet {
     if ($SupportedReceiverCounts -notcontains $ReceiverCount) {
         throw "-ReceiverCount must be one of 5, 10, 20, 30"
     }
-    if ($ReceiverId.Count -ne $ReceiverCount) {
+
+    $normalized = @($ReceiverId | ForEach-Object {
+        $_ -split ','
+    } | ForEach-Object {
+        Assert-SafeLabel -Name "Receiver identifier" -Value $_
+    })
+    if ($normalized.Count -ne $ReceiverCount) {
         throw "-ReceiverId must contain exactly $ReceiverCount receiver identifiers"
     }
 
-    $normalized = @($ReceiverId | ForEach-Object {
-        Assert-SafeLabel -Name "Receiver identifier" -Value $_
-    })
     $unique = @($normalized | Sort-Object -Unique)
     if ($unique.Count -ne $ReceiverCount) {
         throw "Receiver identifiers must be unique"
