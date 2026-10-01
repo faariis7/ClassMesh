@@ -39,8 +39,11 @@ jobs:
       - name: Synthetic media lab
         run: cargo run -p classmesh-lab --bin classmesh-lab
 
-      - name: Synthetic Wi-Fi fanout baseline
-        run: cargo run -p classmesh-lab --bin classmesh-wifi-fanout-benchmark -- --receivers 5 --frames 120
+      - name: Synthetic Wi-Fi direct fanout baseline
+        run: cargo run -p classmesh-lab --bin classmesh-wifi-fanout-benchmark -- --strategy direct-unicast --receivers 5 --frames 120
+
+      - name: Synthetic Wi-Fi relay fanout baseline
+        run: cargo run -p classmesh-lab --bin classmesh-wifi-fanout-benchmark -- --strategy relay --receivers 5 --frames 120
 
   windows:
     name: Windows Build
@@ -115,7 +118,8 @@ jobs:
         shell: pwsh
         run: |
           .\target\release\classmesh-wifi-fanout-benchmark.exe --help
-          .\target\release\classmesh-wifi-fanout-benchmark.exe --receivers 5 --frames 120
+          .\target\release\classmesh-wifi-fanout-benchmark.exe --strategy direct-unicast --receivers 5 --frames 120
+          .\target\release\classmesh-wifi-fanout-benchmark.exe --strategy relay --receivers 5 --frames 120
 
       - name: Validate Phase 7H physical runner
         shell: pwsh

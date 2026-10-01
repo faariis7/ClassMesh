@@ -213,7 +213,9 @@ pub fn run_direct_fanout_benchmark(
     })
 }
 
-fn validate_config(config: DirectFanoutBenchmarkConfig) -> Result<(), DirectFanoutBenchmarkError> {
+pub(crate) fn validate_config(
+    config: DirectFanoutBenchmarkConfig,
+) -> Result<(), DirectFanoutBenchmarkError> {
     if config.frame_count == 0 || config.frame_count > MAX_SYNTHETIC_FRAME_COUNT {
         return Err(DirectFanoutBenchmarkError::InvalidFrameCount(
             config.frame_count,
@@ -237,7 +239,7 @@ fn validate_config(config: DirectFanoutBenchmarkConfig) -> Result<(), DirectFano
     Ok(())
 }
 
-fn synthetic_frame(frame_id: u64, payload_bytes: usize) -> SharedEncodedFrame {
+pub(crate) fn synthetic_frame(frame_id: u64, payload_bytes: usize) -> SharedEncodedFrame {
     SharedEncodedFrame::new(
         EncodedFrameMeta {
             frame_id,

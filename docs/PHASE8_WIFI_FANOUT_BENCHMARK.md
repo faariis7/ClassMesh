@@ -1,12 +1,12 @@
-# Phase 8B Direct Wi-Fi Fan-Out Synthetic Baseline
+# Phase 8 Wi-Fi Fan-Out Synthetic Baselines
 
-This benchmark exercises the direct one-rendition fan-out boundary before physical Wi-Fi testing.
+These benchmarks exercise comparable one-rendition fan-out topologies before physical Wi-Fi testing.
 
-It is intentionally **synthetic**. A green result proves bounded queue isolation and shared encoded-frame allocation in software. It does not prove Wi-Fi airtime, latency, RF behavior, access-point capacity, or select UDP/QUIC/WebRTC/SFU.
+They are intentionally **synthetic**. Green results prove bounded queue isolation and shared encoded-frame behavior in software. They do not prove Wi-Fi airtime, latency, RF behavior, access-point capacity, real Teacher uplink bitrate, or select UDP/QUIC/WebRTC/SFU.
 
-## What it exercises
+## Direct baseline — Phase 8B
 
-The benchmark reuses the production `FrameDistributor`:
+The direct baseline reuses the production `FrameDistributor`:
 
 - one `SharedEncodedFrame` allocation is published to all receiver sinks;
 - each receiver has its own bounded `SinkMode::Unicast` queue;
@@ -15,38 +15,72 @@ The benchmark reuses the production `FrameDistributor`:
 - queue drops and maximum queue depth are reported per receiver;
 - current-frame deliveries are checked with `Arc::ptr_eq` against the published allocation.
 
-Supported receiver counts match the Phase 8A evidence contract: 5, 10, 20 and 30.
-
-## Run
+Run:
 
 ```powershell
-.\classmesh-wifi-fanout-benchmark.exe --receivers 5 --frames 120
+.\classmesh-wifi-fanout-benchmark.exe --strategy direct-unicast --receivers 5 --frames 120
 ```
 
-Example output fields:
+The synthetic topology reports `teacher_uplink_replication_factor=N` for N direct receiver paths. This is a topology factor, **not measured bitrate**.
+
+## Relay baseline — Phase 8C
+
+The relay baseline uses the same benchmark plan, frame generator, queue capacity and weak-receiver drain policy as the direct baseline, but models:
 
 ```text
-mode=synthetic-direct-fanout
+Teacher -> one relay input -> bounded per-receiver relay fan-out
+```
+
+Run:
+
+```powershell
+.\classmesh-wifi-fanout-benchmark.exe --strategy relay --receivers 5 --frames 120
+```
+
+The relay report includes:
+
+```text
+mode=synthetic-relay-fanout
 physical_wifi=false
 strategy_selection=false
-receivers=5
-frames_published=120
+teacher_uplink_replication_factor=1
+teacher_frames_to_relay=...
+teacher_payload_bytes=...
+relay_frames_published=...
 shared_allocation_mismatches=0
 receiver=student-01 delivered=... queue_dropped=... max_queued=... queued_at_end=...
 ```
 
-## Expected synthetic behavior
+This is a dependency-neutral relay topology model. It is deliberately **not** a LiveKit, WebRTC or other SFU integration. A real relay/SFU dependency should be introduced only if physical evidence shows that a relay path is worth the deployment and operational cost.
 
-For the default configuration:
+## Comparable synthetic invariants
 
-- `shared_allocation_mismatches=0`;
+For both strategies:
+
+- supported receiver counts are 5, 10, 20 and 30;
 - the intentionally weak receiver accumulates bounded drops;
-- healthy receivers have zero queue drops;
+- healthy receivers have zero queue drops in the default synthetic profile;
 - no receiver exceeds its configured queue capacity;
-- healthy receiver queues are drained without inheriting the weak receiver backlog.
+- healthy receiver queues do not inherit the weak receiver backlog;
+- one encoded payload allocation is reused inside the fan-out boundary.
+
+For the relay baseline specifically:
+
+- Teacher sends one synthetic frame into the relay per published frame;
+- the relay fans that shared frame to bounded receiver queues;
+- `shared_allocation_mismatches=0` verifies that the synthetic relay boundary does not create per-receiver encoded copies.
 
 ## What remains for Phase 8D
 
-Physical Wi-Fi runs must still retain 5/10/20/30-client evidence where hardware allows, including Teacher uplink, AP airtime/load where measurable, RTT/loss/jitter, queue age/depth/drop rate, end-to-end latency where measurable, CPU/GPU/memory/handles, and weak-client recovery behavior.
+Physical Wi-Fi runs must still retain 5/10/20/30-client evidence where hardware allows, including:
 
-Do not select the final Wi-Fi fan-out strategy from this synthetic benchmark or hosted CI.
+- measured Teacher uplink bitrate;
+- AP airtime/load where measurable;
+- RTT/loss/jitter/reorder;
+- queue age/depth/drop rate;
+- end-to-end latency where measurable;
+- CPU/GPU/memory/handles;
+- weak-client recovery behavior;
+- operational complexity and offline deployment requirements.
+
+Do not select the final Wi-Fi fan-out strategy from these synthetic benchmarks or hosted CI.
