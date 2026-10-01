@@ -424,8 +424,7 @@ mod tests {
             Some(TeacherPresentationSenderAction::AttachUnicast(binding))
         );
 
-        let keyframe =
-            PresentationKeyframeRequest::new(55, 7, 42).expect("valid keyframe request");
+        let keyframe = PresentationKeyframeRequest::new(55, 7, 42).expect("valid keyframe request");
         assert_eq!(
             inverse_sender_action(TeacherPresentationSenderAction::RequestKeyframe(keyframe)),
             None
