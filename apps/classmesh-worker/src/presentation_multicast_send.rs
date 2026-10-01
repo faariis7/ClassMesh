@@ -245,6 +245,38 @@ fn delivery_fields(
 /// from the same encoded-frame distributor; unicast outliers never create another encoder. All live
 /// UDP sockets are nonblocking, so per-destination pressure remains media-local and cannot stall
 /// capture/control or other healthy receivers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationMulticastSendBinding {
+    presentation_id: u64,
+    stream_id: u32,
+    epoch: u32,
+}
+
+impl PresentationMulticastSendBinding {
+    fn from_sender_config(config: ProtectedMulticastSenderConfig) -> Self {
+        Self {
+            presentation_id: config.presentation_id(),
+            stream_id: config.stream_id(),
+            epoch: config.epoch().get(),
+        }
+    }
+
+    #[must_use]
+    pub const fn presentation_id(self) -> u64 {
+        self.presentation_id
+    }
+
+    #[must_use]
+    pub const fn stream_id(self) -> u32 {
+        self.stream_id
+    }
+
+    #[must_use]
+    pub const fn epoch(self) -> u32 {
+        self.epoch
+    }
+}
+
 #[derive(Debug)]
 pub struct PresentationMulticastSendRuntime {
     fanout: PresentationFanoutRuntime,
@@ -290,6 +322,11 @@ impl PresentationMulticastSendRuntime {
             unicast: ProtectedUnicastFanout::default(),
             unicast_bindings: PresentationUnicastActionBindings::default(),
         })
+    }
+
+    #[must_use]
+    pub fn binding(&self) -> PresentationMulticastSendBinding {
+        PresentationMulticastSendBinding::from_sender_config(self.sender_config)
     }
 
     #[must_use]
