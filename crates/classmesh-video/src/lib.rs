@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 pub mod distributor;
+pub mod monitoring;
+pub mod monitoring_scheduler;
 pub mod rendition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
