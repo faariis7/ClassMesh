@@ -136,6 +136,32 @@ jobs:
             throw "Phase 7H evidence index was not created"
           }
 
+      - name: Validate Phase 8D physical Wi-Fi runner
+        shell: pwsh
+        run: |
+          .\scripts\phase8d-wifi.ps1 -Mode Help
+          $results = Join-Path $env:RUNNER_TEMP "phase8d-selftest"
+          $ids = @("student-01","student-02","student-03","student-04","student-05")
+          .\scripts\phase8d-wifi.ps1 -Mode Init -Strategy direct-unicast -ReceiverCount 5 -ReceiverId $ids -ResultsDir $results
+          $receiverDir = Join-Path $results "receivers"
+          Set-Content -LiteralPath (Join-Path $results "teacher.log") -Value "synthetic-ci-teacher-evidence"
+          Set-Content -LiteralPath (Join-Path $results "ap.log") -Value "synthetic-ci-ap-evidence"
+          foreach ($id in $ids) {
+            Set-Content -LiteralPath (Join-Path $receiverDir "$id.log") -Value "synthetic-ci-receiver-evidence"
+          }
+          .\scripts\phase8d-wifi.ps1 -Mode ValidateEvidence -ResultsDir $results
+          $indexPath = Join-Path $results "evidence-index.json"
+          if (-not (Test-Path -LiteralPath $indexPath)) {
+            throw "Phase 8D evidence index was not created"
+          }
+          $index = Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json
+          if ($null -ne $index.strategy_selected) {
+            throw "Phase 8D self-test must not select a strategy"
+          }
+          if ($null -eq $index.ap -or [string]::IsNullOrWhiteSpace([string]$index.ap.sha256)) {
+            throw "Phase 8D self-test did not index AP evidence"
+          }
+
       - name: Stage Phase 4 qualification bundle
         shell: pwsh
         run: |
@@ -208,6 +234,24 @@ jobs:
         with:
           name: classmesh-phase7h-qualification-windows-x64
           path: phase7h-bundle/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
+
+      - name: Stage Phase 8D physical Wi-Fi bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path phase8d-bundle -Force | Out-Null
+          Copy-Item target/release/classmesh-wifi-fanout-benchmark.exe phase8d-bundle/
+          Copy-Item scripts/phase8d-wifi.ps1 phase8d-bundle/
+          Copy-Item docs/PHASE8_WIFI_FANOUT_BENCHMARK.md phase8d-bundle/
+          Copy-Item docs/PHASE8_WIFI_PHYSICAL_QUALIFICATION.md phase8d-bundle/
+          Copy-Item docs/PHASE8_WIFI_PHYSICAL_RESULTS.md phase8d-bundle/
+
+      - name: Upload Phase 8D physical Wi-Fi bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-phase8d-wifi-qualification-windows-x64
+          path: phase8d-bundle/
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
