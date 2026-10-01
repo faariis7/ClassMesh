@@ -357,6 +357,35 @@ mod tests {
             );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn lifecycle_exposes_caller_owned_frame_processing_contract() {
+        use classmesh_capture_win::{CapturedFrameMeta, DxgiFrame};
+        use classmesh_security::AuthorizationStore;
+        use classmesh_security::group_media_coordinator::GroupMediaCoordinator;
+        use classmesh_worker::presentation_multicast_send::PresentationMulticastSendStep;
+
+        fn assert_process_frame(
+            lifecycle: &mut TeacherVideoEngineLifecycle,
+            meta: CapturedFrameMeta,
+            frame: DxgiFrame,
+            coordinator: &mut GroupMediaCoordinator,
+            authorization: &AuthorizationStore,
+        ) {
+            let _: Result<PresentationMulticastSendStep, TeacherVideoEngineLifecycleError> =
+                lifecycle.process_frame(meta, frame, coordinator, authorization);
+        }
+
+        let _ = assert_process_frame
+            as fn(
+                &mut TeacherVideoEngineLifecycle,
+                CapturedFrameMeta,
+                DxgiFrame,
+                &mut GroupMediaCoordinator,
+                &AuthorizationStore,
+            );
+    }
+
     #[test]
     fn granted_keyframe_is_forwarded_without_control_identity() {
         let request = PresentationKeyframeRequest::new(55, 7, 42).expect("valid keyframe request");
