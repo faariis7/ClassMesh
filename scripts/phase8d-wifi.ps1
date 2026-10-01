@@ -126,6 +126,13 @@ switch ($Mode) {
         if ($null -eq $manifest.receiver_ids -or $manifest.receiver_ids.Count -ne $manifest.receiver_count) {
             throw "Manifest receiver_ids do not match receiver_count"
         }
+        $manifestReceiverIds = @($manifest.receiver_ids | ForEach-Object { [string]$_ })
+        if (@($manifestReceiverIds | Sort-Object -Unique).Count -ne $manifest.receiver_count) {
+            throw "Manifest receiver_ids must be unique"
+        }
+        if ($manifest.physical_wifi -ne $true) {
+            throw "Manifest physical_wifi must be true for Phase 8D evidence"
+        }
         if ($null -ne $manifest.strategy_selected) {
             throw "Manifest strategy_selected must remain null until reviewed physical evidence produces a human decision"
         }
@@ -196,7 +203,7 @@ switch ($Mode) {
             if ($apItem.Length -le 0) {
                 throw "AP evidence exists but is empty: $apPath"
             }
-            $index.ap = [ordered]@{
+            $index["ap"] = [ordered]@{
                 path = "ap.log"
                 bytes = $apItem.Length
                 sha256 = (Get-FileHash -LiteralPath $apPath -Algorithm SHA256).Hash.ToLowerInvariant()
