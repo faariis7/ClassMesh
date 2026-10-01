@@ -55,8 +55,12 @@ Examples:
 
   .\scripts\phase7h-scale.ps1 -Mode ValidateEvidence -ResultsDir .\phase7h-results
 
-Expected receiver evidence files:
+Expected evidence files:
+  <ResultsDir>\teacher.log
   <ResultsDir>\receivers\<receiver-id>.log
+
+ValidateEvidence also writes:
+  <ResultsDir>\evidence-index.json
 
 The runbook and human/telemetry acceptance criteria are in:
   docs\PHASE7_SCALE_QUALIFICATION.md
@@ -109,7 +113,17 @@ switch ($Mode) {
             throw "Manifest receiver_ids do not match receiver_count"
         }
 
+        $teacherPath = Join-Path $ResultsDir "teacher.log"
+        if (-not (Test-Path -LiteralPath $teacherPath -PathType Leaf)) {
+            throw "Teacher evidence not found: $teacherPath"
+        }
+        if ((Get-Item -LiteralPath $teacherPath).Length -le 0) {
+            throw "Teacher evidence is empty: $teacherPath"
+        }
+
         $missing = @()
+        $empty = @()
+        $receiverEvidence = @()
         foreach ($id in $manifest.receiver_ids) {
             $safeId = [string]$id
             if ([string]::IsNullOrWhiteSpace($safeId) -or $safeId.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
@@ -119,16 +133,48 @@ switch ($Mode) {
             $logPath = Join-Path (Join-Path $ResultsDir "receivers") "$safeId.log"
             if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
                 $missing += $safeId
+                continue
+            }
+            $item = Get-Item -LiteralPath $logPath
+            if ($item.Length -le 0) {
+                $empty += $safeId
+                continue
+            }
+            $receiverEvidence += [ordered]@{
+                receiver_id = $safeId
+                path = "receivers/$safeId.log"
+                bytes = $item.Length
+                sha256 = (Get-FileHash -LiteralPath $logPath -Algorithm SHA256).Hash.ToLowerInvariant()
             }
         }
 
         if ($missing.Count -gt 0) {
             throw "Missing receiver evidence for: $($missing -join ', ')"
         }
+        if ($empty.Count -gt 0) {
+            throw "Empty receiver evidence for: $($empty -join ', ')"
+        }
+
+        $teacherItem = Get-Item -LiteralPath $teacherPath
+        $index = [ordered]@{
+            schema_version = 1
+            generated_utc = (Get-Date).ToUniversalTime().ToString("o")
+            qualification_passed = $null
+            manifest_sha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            teacher = [ordered]@{
+                path = "teacher.log"
+                bytes = $teacherItem.Length
+                sha256 = (Get-FileHash -LiteralPath $teacherPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+            receivers = @($receiverEvidence | Sort-Object receiver_id)
+        }
+        $indexPath = Join-Path $ResultsDir "evidence-index.json"
+        $index | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $indexPath -Encoding utf8
 
         Write-Host "evidence_complete=true"
         Write-Host "receiver_count=$($manifest.receiver_count)"
+        Write-Host "evidence_index=$indexPath"
         Write-Host "qualification_passed=undetermined"
-        Write-Host "All expected evidence files are present. Review telemetry and physical observations against the runbook before recording PASS/FAIL."
+        Write-Host "All expected non-empty evidence files are indexed. Review telemetry and physical observations against the runbook before recording PASS/FAIL."
     }
 }
