@@ -60,10 +60,7 @@ impl WifiFanoutBenchmarkPlan {
     }
 }
 
-fn validate_label(
-    field: &'static str,
-    value: &str,
-) -> Result<(), WifiFanoutBenchmarkPlanError> {
+fn validate_label(field: &'static str, value: &str) -> Result<(), WifiFanoutBenchmarkPlanError> {
     if value.is_empty()
         || value.len() > MAX_BENCHMARK_LABEL_LEN
         || !value
@@ -81,10 +78,7 @@ fn validate_label(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WifiFanoutBenchmarkPlanError {
     UnsupportedVersion(u16),
-    InvalidLabel {
-        field: &'static str,
-        value: String,
-    },
+    InvalidLabel { field: &'static str, value: String },
     UnsupportedReceiverCount(usize),
     InvalidDurationSeconds(u32),
     DuplicateReceiverId(String),
@@ -95,7 +89,10 @@ impl fmt::Display for WifiFanoutBenchmarkPlanError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnsupportedVersion(version) => {
-                write!(formatter, "unsupported Wi-Fi benchmark schema version {version}")
+                write!(
+                    formatter,
+                    "unsupported Wi-Fi benchmark schema version {version}"
+                )
             }
             Self::InvalidLabel { field, value } => {
                 write!(formatter, "invalid {field} label {value:?}")
@@ -112,7 +109,10 @@ impl fmt::Display for WifiFanoutBenchmarkPlanError {
                 write!(formatter, "duplicate receiver id {receiver_id:?}")
             }
             Self::UnknownWeakReceiver(receiver_id) => {
-                write!(formatter, "weak receiver {receiver_id:?} is not in the receiver set")
+                write!(
+                    formatter,
+                    "weak receiver {receiver_id:?} is not in the receiver set"
+                )
             }
         }
     }
