@@ -1997,6 +1997,101 @@ mod tests {
     }
 
     #[test]
+    fn service_presentation_sender_start_round_trips_exact_binding() {
+        let start = ServicePresentationSenderStart {
+            presentation_id: 55,
+            stream_id: 9,
+            epoch: 3,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+            group: Ipv4Addr::new(239, 10, 20, 30),
+            port: 49_000,
+            interface: Ipv4Addr::new(192, 0, 2, 10),
+        };
+        let frame = IpcFrame::service_presentation_sender_start(start)
+            .expect("valid Teacher sender start");
+        assert_eq!(
+            frame.message().expect("typed Teacher sender start"),
+            IpcMessage::ServicePresentationSenderStart(start)
+        );
+    }
+
+    #[test]
+    fn service_presentation_sender_start_rejects_invalid_binding_and_downgrade() {
+        let valid = ServicePresentationSenderStart {
+            presentation_id: 55,
+            stream_id: 9,
+            epoch: 3,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+            group: Ipv4Addr::new(239, 10, 20, 30),
+            port: 49_000,
+            interface: Ipv4Addr::new(192, 0, 2, 10),
+        };
+
+        for start in [
+            ServicePresentationSenderStart {
+                presentation_id: 0,
+                ..valid
+            },
+            ServicePresentationSenderStart {
+                stream_id: 0,
+                ..valid
+            },
+            ServicePresentationSenderStart { epoch: 0, ..valid },
+            ServicePresentationSenderStart { port: 0, ..valid },
+            ServicePresentationSenderStart {
+                group: Ipv4Addr::new(224, 1, 2, 3),
+                ..valid
+            },
+            ServicePresentationSenderStart {
+                interface: Ipv4Addr::UNSPECIFIED,
+                ..valid
+            },
+        ] {
+            assert_eq!(
+                IpcFrame::service_presentation_sender_start(start),
+                Err(IpcMessageError::InvalidPayload)
+            );
+        }
+
+        let mut downgraded =
+            IpcFrame::service_presentation_sender_start(valid).expect("valid sender start");
+        downgraded.header.version_minor = 8;
+        assert_eq!(
+            downgraded.message(),
+            Err(IpcMessageError::UnsupportedVersion)
+        );
+    }
+
+    #[test]
+    fn worker_presentation_sender_start_result_round_trips_exact_binding() {
+        for status in [
+            WorkerPresentationSenderStartStatus::Started,
+            WorkerPresentationSenderStartStatus::Rejected,
+        ] {
+            let result = WorkerPresentationSenderStartResult {
+                process_id: 42,
+                session_id: 7,
+                presentation_id: 55,
+                stream_id: 9,
+                epoch: 3,
+                status,
+            };
+            let frame = IpcFrame::worker_presentation_sender_start_result(result)
+                .expect("valid Teacher sender start result");
+            assert_eq!(
+                frame.message().expect("typed Teacher sender result"),
+                IpcMessage::WorkerPresentationSenderStartResult(result)
+            );
+        }
+    }
+
+    #[test]
     fn service_presentation_sender_unicast_action_round_trips_ipv4_and_ipv6() {
         for (kind, destination) in [
             (
