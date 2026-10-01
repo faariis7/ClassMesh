@@ -113,6 +113,23 @@ mod tests {
         assert_eq!(action.destination, target(9, 49_001, 4).destination);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn directive_exposes_real_video_runtime_apply_contract() {
+        use classmesh_worker::presentation_multicast_send::PresentationMulticastSendRuntime;
+
+        fn assert_apply(
+            directive: TeacherVideoEngineDirective,
+            runtime: &mut PresentationMulticastSendRuntime,
+        ) {
+            let _: Result<bool, TeacherVideoEngineApplyError> =
+                directive.apply(runtime, 2);
+        }
+
+        let _ = assert_apply
+            as fn(TeacherVideoEngineDirective, &mut PresentationMulticastSendRuntime);
+    }
+
     #[test]
     fn granted_keyframe_is_forwarded_without_control_identity() {
         let request = PresentationKeyframeRequest::new(55, 7, 42).expect("valid keyframe request");
