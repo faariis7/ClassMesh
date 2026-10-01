@@ -105,6 +105,17 @@ jobs:
         shell: pwsh
         run: .\target\release\classmesh-multicast-probe.exe --help
 
+      - name: Validate Phase 7H physical runner
+        shell: pwsh
+        run: |
+          .\scripts\phase7h-scale.ps1 -Mode Help
+          $results = Join-Path $env:RUNNER_TEMP "phase7h-selftest"
+          .\scripts\phase7h-scale.ps1 -Mode Init -ReceiverCount 2 -ReceiverId student-01,student-02 -ResultsDir $results
+          $receiverDir = Join-Path $results "receivers"
+          Set-Content -LiteralPath (Join-Path $receiverDir "student-01.log") -Value "synthetic-ci-evidence"
+          Set-Content -LiteralPath (Join-Path $receiverDir "student-02.log") -Value "synthetic-ci-evidence"
+          .\scripts\phase7h-scale.ps1 -Mode ValidateEvidence -ResultsDir $results
+
       - name: Stage Phase 4 qualification bundle
         shell: pwsh
         run: |
@@ -161,6 +172,22 @@ jobs:
         with:
           name: classmesh-phase7-multicast-probe-windows-x64
           path: phase7-multicast-probe-bundle/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
+
+      - name: Stage Phase 7H qualification bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path phase7h-bundle -Force | Out-Null
+          Copy-Item scripts/phase7h-scale.ps1 phase7h-bundle/
+          Copy-Item docs/PHASE7_SCALE_QUALIFICATION.md phase7h-bundle/
+          Copy-Item docs/PHASE7_SCALE_RESULTS.md phase7h-bundle/
+
+      - name: Upload Phase 7H qualification bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-phase7h-qualification-windows-x64
+          path: phase7h-bundle/
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
