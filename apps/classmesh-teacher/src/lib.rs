@@ -550,6 +550,44 @@ mod tests {
             );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn authorized_fallback_orchestration_exposes_exact_contract() {
+        use classmesh_control::group_media_delivery::{
+            PresentationUnicastSenderTargetRequest, TeacherGroupMediaDeliveryManager,
+        };
+        use classmesh_control::presentation_fallback::PresentationFallbackCoordinator;
+        use classmesh_control::presentation_sender_plan::TeacherPresentationSenderPlan;
+        use classmesh_control::presentation_state::PresentationOwnership;
+        use classmesh_security::AuthorizationStore;
+        use classmesh_security::group_media_coordinator::GroupMediaCoordinator;
+
+        fn assert_contract(
+            delivery: &TeacherGroupMediaDeliveryManager,
+            fallback: &PresentationFallbackCoordinator,
+            coordinator: &GroupMediaCoordinator,
+            authorization: &AuthorizationStore,
+            ownership: &PresentationOwnership,
+            request: PresentationUnicastSenderTargetRequest<'_>,
+            plan: &mut TeacherPresentationSenderPlan,
+            lifecycle: &mut TeacherVideoEngineLifecycle,
+        ) {
+            let _: Result<usize, TeacherVideoAuthorizedFallbackError> =
+                apply_authorized_unicast_fallback(
+                    delivery,
+                    fallback,
+                    coordinator,
+                    authorization,
+                    ownership,
+                    request,
+                    plan,
+                    lifecycle,
+                );
+        }
+
+        let _ = assert_contract;
+    }
+
     #[test]
     fn granted_keyframe_is_forwarded_without_control_identity() {
         let request = PresentationKeyframeRequest::new(55, 7, 42).expect("valid keyframe request");
