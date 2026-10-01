@@ -179,6 +179,49 @@ mod tests {
             assert_apply as fn(TeacherVideoEngineDirective, &mut PresentationMulticastSendRuntime);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn lifecycle_rejects_directive_without_active_video_runtime() {
+        let mut lifecycle = TeacherVideoEngineLifecycle::default();
+        let directive = TeacherVideoEngineDirective::Keyframe(
+            PresentationKeyframeRequest::new(55, 7, 42).expect("valid keyframe request"),
+        );
+
+        assert!(matches!(
+            lifecycle.apply(directive),
+            Err(TeacherVideoEngineLifecycleError::NoActiveRuntime)
+        ));
+        assert_eq!(lifecycle.active_binding(), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lifecycle_exposes_exact_start_apply_stop_contract() {
+        use classmesh_worker::presentation_multicast_send::{
+            PresentationMulticastSendBinding, PresentationMulticastSendRuntime,
+        };
+
+        fn assert_contract(
+            lifecycle: &mut TeacherVideoEngineLifecycle,
+            runtime: PresentationMulticastSendRuntime,
+            binding: PresentationMulticastSendBinding,
+            directive: TeacherVideoEngineDirective,
+        ) {
+            let _: Result<(), TeacherVideoEngineLifecycleError> = lifecycle.start(runtime, 2);
+            let _: Option<PresentationMulticastSendBinding> = lifecycle.active_binding();
+            let _: Result<bool, TeacherVideoEngineLifecycleError> = lifecycle.apply(directive);
+            let _: Result<bool, TeacherVideoEngineLifecycleError> = lifecycle.stop(binding);
+        }
+
+        let _ = assert_contract
+            as fn(
+                &mut TeacherVideoEngineLifecycle,
+                PresentationMulticastSendRuntime,
+                PresentationMulticastSendBinding,
+                TeacherVideoEngineDirective,
+            );
+    }
+
     #[test]
     fn granted_keyframe_is_forwarded_without_control_identity() {
         let request = PresentationKeyframeRequest::new(55, 7, 42).expect("valid keyframe request");
