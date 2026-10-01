@@ -61,10 +61,7 @@ mod tests {
     fn target(receiver: u8, port: u16, epoch: u32) -> PresentationUnicastSenderTarget {
         PresentationUnicastSenderTarget {
             receiver: PrincipalId([receiver; 32]),
-            destination: SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(192, 0, 2, receiver)),
-                port,
-            ),
+            destination: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, receiver)), port),
             presentation_id: 55,
             stream_id: 7,
             profile: StreamProfile::new(1920, 1080, 30, 5_000),
