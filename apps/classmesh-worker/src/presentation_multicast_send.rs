@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
@@ -10,12 +11,16 @@ use classmesh_network::multicast_sender::{
 };
 use classmesh_network::protected_unicast_sender::{
     ProtectedUnicastFanout, ProtectedUnicastFanoutDelivery, ProtectedUnicastFanoutError,
-    ProtectedUnicastSenderConfig,
+    ProtectedUnicastSendError, ProtectedUnicastSenderConfig,
 };
 use classmesh_network::transport::SendFrameReport;
 use classmesh_security::AuthorizationStore;
+use classmesh_security::group_media::GroupMediaEpoch;
 use classmesh_security::group_media_coordinator::GroupMediaCoordinator;
 use classmesh_video::distributor::{SinkId, SinkStats};
+use classmesh_windows_runtime::ipc::{
+    ServicePresentationSenderUnicastAction, ServicePresentationSenderUnicastActionKind,
+};
 
 use crate::presentation::{PresentationProfile, PresentationStats, PresentationTarget};
 use crate::presentation_fanout::{PresentationFanoutError, PresentationFanoutRuntime};
@@ -26,6 +31,11 @@ pub enum PresentationMulticastSendRuntimeError {
     Network(ProtectedMulticastSendError),
     Sink(ProtectedMulticastSinkError),
     Unicast(ProtectedUnicastFanoutError),
+    UnicastActionConfig(ProtectedUnicastSendError),
+    UnicastActionBindingMismatch,
+    UnicastActionSlotOccupied,
+    StaleUnicastDetach,
+    UnicastActionStateMismatch,
 }
 
 impl fmt::Display for PresentationMulticastSendRuntimeError {
@@ -37,6 +47,24 @@ impl fmt::Display for PresentationMulticastSendRuntimeError {
             Self::Unicast(error) => {
                 write!(formatter, "teacher presentation unicast fan-out: {error}")
             }
+            Self::UnicastActionConfig(error) => {
+                write!(
+                    formatter,
+                    "teacher presentation unicast action config: {error}"
+                )
+            }
+            Self::UnicastActionBindingMismatch => formatter.write_str(
+                "teacher presentation unicast action does not match the live sender binding",
+            ),
+            Self::UnicastActionSlotOccupied => formatter.write_str(
+                "teacher presentation unicast runtime slot is already bound differently",
+            ),
+            Self::StaleUnicastDetach => formatter.write_str(
+                "teacher presentation unicast detach does not match the current runtime binding",
+            ),
+            Self::UnicastActionStateMismatch => formatter.write_str(
+                "teacher presentation unicast runtime state diverged from the media fan-out",
+            ),
         }
     }
 }
@@ -48,6 +76,11 @@ impl std::error::Error for PresentationMulticastSendRuntimeError {
             Self::Network(error) => Some(error),
             Self::Sink(error) => Some(error),
             Self::Unicast(error) => Some(error),
+            Self::UnicastActionConfig(error) => Some(error),
+            Self::UnicastActionBindingMismatch
+            | Self::UnicastActionSlotOccupied
+            | Self::StaleUnicastDetach
+            | Self::UnicastActionStateMismatch => None,
         }
     }
 }
@@ -92,6 +125,104 @@ fn presentation_keyframe_request_matches(
         && request.stream_id() == config.stream_id()
 }
 
+fn presentation_sender_unicast_action_matches(
+    config: ProtectedMulticastSenderConfig,
+    action: ServicePresentationSenderUnicastAction,
+) -> bool {
+    action.slot_id != 0
+        && action.presentation_id == config.presentation_id()
+        && action.stream_id == config.stream_id()
+        && action.epoch == config.epoch().get()
+}
+
+fn protected_unicast_config_from_action(
+    sender_config: ProtectedMulticastSenderConfig,
+    action: ServicePresentationSenderUnicastAction,
+) -> Result<ProtectedUnicastSenderConfig, PresentationMulticastSendRuntimeError> {
+    if !presentation_sender_unicast_action_matches(sender_config, action) {
+        return Err(PresentationMulticastSendRuntimeError::UnicastActionBindingMismatch);
+    }
+    let epoch = GroupMediaEpoch::new(action.epoch)
+        .map_err(|_| PresentationMulticastSendRuntimeError::UnicastActionBindingMismatch)?;
+    ProtectedUnicastSenderConfig::new(
+        action.destination,
+        action.presentation_id,
+        action.stream_id,
+        epoch,
+    )
+    .map_err(PresentationMulticastSendRuntimeError::UnicastActionConfig)
+}
+
+fn same_unicast_action_binding(
+    left: ServicePresentationSenderUnicastAction,
+    right: ServicePresentationSenderUnicastAction,
+) -> bool {
+    left.slot_id == right.slot_id
+        && left.presentation_id == right.presentation_id
+        && left.stream_id == right.stream_id
+        && left.epoch == right.epoch
+        && left.destination == right.destination
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresentationUnicastActionDecision {
+    Noop,
+    Attach(SinkId),
+    Detach(SinkId),
+}
+
+#[derive(Debug, Default)]
+struct PresentationUnicastActionBindings {
+    active: BTreeMap<SinkId, ServicePresentationSenderUnicastAction>,
+}
+
+impl PresentationUnicastActionBindings {
+    fn classify(
+        &self,
+        sender_config: ProtectedMulticastSenderConfig,
+        action: ServicePresentationSenderUnicastAction,
+    ) -> Result<PresentationUnicastActionDecision, PresentationMulticastSendRuntimeError> {
+        let _ = protected_unicast_config_from_action(sender_config, action)?;
+        let sink_id = SinkId(action.slot_id);
+        match action.kind {
+            ServicePresentationSenderUnicastActionKind::Attach => match self.active.get(&sink_id) {
+                None => Ok(PresentationUnicastActionDecision::Attach(sink_id)),
+                Some(current) if same_unicast_action_binding(*current, action) => {
+                    Ok(PresentationUnicastActionDecision::Noop)
+                }
+                Some(_) => Err(PresentationMulticastSendRuntimeError::UnicastActionSlotOccupied),
+            },
+            ServicePresentationSenderUnicastActionKind::Detach => match self.active.get(&sink_id) {
+                None => Ok(PresentationUnicastActionDecision::Noop),
+                Some(current) if same_unicast_action_binding(*current, action) => {
+                    Ok(PresentationUnicastActionDecision::Detach(sink_id))
+                }
+                Some(_) => Err(PresentationMulticastSendRuntimeError::StaleUnicastDetach),
+            },
+        }
+    }
+
+    fn record_attach(&mut self, action: ServicePresentationSenderUnicastAction) {
+        self.active.insert(SinkId(action.slot_id), action);
+    }
+
+    fn record_detach(&mut self, action: ServicePresentationSenderUnicastAction) {
+        let sink_id = SinkId(action.slot_id);
+        if self
+            .active
+            .get(&sink_id)
+            .is_some_and(|current| same_unicast_action_binding(*current, action))
+        {
+            self.active.remove(&sink_id);
+        }
+    }
+
+    #[cfg(test)]
+    fn current(&self, sink_id: SinkId) -> Option<ServicePresentationSenderUnicastAction> {
+        self.active.get(&sink_id).copied()
+    }
+}
+
 fn delivery_fields(
     outcome: Option<ProtectedMulticastTrySendOutcome>,
 ) -> (
@@ -121,6 +252,7 @@ pub struct PresentationMulticastSendRuntime {
     sender: ProtectedMulticastFrameSender,
     sender_config: ProtectedMulticastSenderConfig,
     unicast: ProtectedUnicastFanout,
+    unicast_bindings: PresentationUnicastActionBindings,
 }
 
 impl PresentationMulticastSendRuntime {
@@ -156,6 +288,7 @@ impl PresentationMulticastSendRuntime {
             sender,
             sender_config,
             unicast: ProtectedUnicastFanout::default(),
+            unicast_bindings: PresentationUnicastActionBindings::default(),
         })
     }
 
@@ -197,6 +330,29 @@ impl PresentationMulticastSendRuntime {
 
     pub fn detach_unicast_outlier(&mut self, sink_id: SinkId) -> bool {
         self.unicast.detach(self.fanout.distributor_mut(), sink_id)
+    }
+
+    pub fn apply_unicast_sender_action(
+        &mut self,
+        action: ServicePresentationSenderUnicastAction,
+        queue_capacity: usize,
+    ) -> Result<bool, PresentationMulticastSendRuntimeError> {
+        match self.unicast_bindings.classify(self.sender_config, action)? {
+            PresentationUnicastActionDecision::Noop => Ok(false),
+            PresentationUnicastActionDecision::Attach(sink_id) => {
+                let config = protected_unicast_config_from_action(self.sender_config, action)?;
+                self.attach_unicast_outlier(sink_id, config, queue_capacity)?;
+                self.unicast_bindings.record_attach(action);
+                Ok(true)
+            }
+            PresentationUnicastActionDecision::Detach(sink_id) => {
+                if !self.detach_unicast_outlier(sink_id) {
+                    return Err(PresentationMulticastSendRuntimeError::UnicastActionStateMismatch);
+                }
+                self.unicast_bindings.record_detach(action);
+                Ok(true)
+            }
+        }
     }
 
     #[must_use]
@@ -263,6 +419,9 @@ mod tests {
     use classmesh_network::multicast::{MulticastMembership, MulticastProbeOutcome};
     use classmesh_security::group_media::GroupMediaEpoch;
     use classmesh_video::distributor::DistributorError;
+    use classmesh_windows_runtime::ipc::{
+        ServicePresentationSenderUnicastAction, ServicePresentationSenderUnicastActionKind,
+    };
 
     use crate::presentation::PresentationError;
 
@@ -377,6 +536,120 @@ mod tests {
 
         let _ =
             assert_api as fn(&mut PresentationMulticastSendRuntime, PresentationKeyframeRequest);
+    }
+
+    fn sender_action(
+        kind: ServicePresentationSenderUnicastActionKind,
+        slot_id: u64,
+        destination: &str,
+    ) -> ServicePresentationSenderUnicastAction {
+        let config = sender_config();
+        ServicePresentationSenderUnicastAction {
+            kind,
+            slot_id,
+            presentation_id: config.presentation_id(),
+            stream_id: config.stream_id(),
+            epoch: config.epoch().get(),
+            destination: destination.parse().expect("valid destination"),
+        }
+    }
+
+    #[test]
+    fn sender_unicast_action_requires_exact_live_presentation_binding() {
+        let config = sender_config();
+        let exact = sender_action(
+            ServicePresentationSenderUnicastActionKind::Attach,
+            11,
+            "192.0.2.44:49001",
+        );
+        assert!(presentation_sender_unicast_action_matches(config, exact));
+
+        let mut wrong_presentation = exact;
+        wrong_presentation.presentation_id += 1;
+        assert!(!presentation_sender_unicast_action_matches(
+            config,
+            wrong_presentation
+        ));
+
+        let mut wrong_stream = exact;
+        wrong_stream.stream_id += 1;
+        assert!(!presentation_sender_unicast_action_matches(
+            config,
+            wrong_stream
+        ));
+
+        let mut wrong_epoch = exact;
+        wrong_epoch.epoch += 1;
+        assert!(!presentation_sender_unicast_action_matches(
+            config,
+            wrong_epoch
+        ));
+    }
+
+    #[test]
+    fn sender_unicast_binding_state_is_idempotent_and_rejects_stale_detach() {
+        let config = sender_config();
+        let mut bindings = PresentationUnicastActionBindings::default();
+        let first = sender_action(
+            ServicePresentationSenderUnicastActionKind::Attach,
+            11,
+            "192.0.2.44:49001",
+        );
+
+        assert_eq!(
+            bindings.classify(config, first).expect("first attach"),
+            PresentationUnicastActionDecision::Attach(SinkId(11))
+        );
+        bindings.record_attach(first);
+        assert_eq!(
+            bindings.classify(config, first).expect("retry attach"),
+            PresentationUnicastActionDecision::Noop
+        );
+
+        let detach_first = ServicePresentationSenderUnicastAction {
+            kind: ServicePresentationSenderUnicastActionKind::Detach,
+            ..first
+        };
+        assert_eq!(
+            bindings
+                .classify(config, detach_first)
+                .expect("exact detach"),
+            PresentationUnicastActionDecision::Detach(SinkId(11))
+        );
+        bindings.record_detach(detach_first);
+
+        let replacement = sender_action(
+            ServicePresentationSenderUnicastActionKind::Attach,
+            11,
+            "192.0.2.44:49002",
+        );
+        assert_eq!(
+            bindings
+                .classify(config, replacement)
+                .expect("replacement attach"),
+            PresentationUnicastActionDecision::Attach(SinkId(11))
+        );
+        bindings.record_attach(replacement);
+
+        assert!(matches!(
+            bindings.classify(config, detach_first),
+            Err(PresentationMulticastSendRuntimeError::StaleUnicastDetach)
+        ));
+        assert_eq!(bindings.current(SinkId(11)), Some(replacement));
+    }
+
+    #[test]
+    fn runtime_contract_applies_typed_sender_unicast_actions() {
+        fn assert_api(
+            runtime: &mut PresentationMulticastSendRuntime,
+            action: ServicePresentationSenderUnicastAction,
+        ) {
+            let _: Result<bool, PresentationMulticastSendRuntimeError> =
+                runtime.apply_unicast_sender_action(action, 2);
+        }
+
+        let _ = assert_api
+            as fn(&mut PresentationMulticastSendRuntime, ServicePresentationSenderUnicastAction);
     }
 
     #[test]
