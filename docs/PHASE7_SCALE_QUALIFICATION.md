@@ -35,9 +35,10 @@ Initialize a run directory from the qualification bundle:
 .\phase7h-scale.ps1 -Mode Init -ReceiverCount 5 -ReceiverId student-01,student-02,student-03,student-04,student-05 -ResultsDir .\phase7h-results
 ```
 
-For each receiver preserve its runtime/telemetry log as:
+Preserve the Teacher runtime/telemetry log and one non-empty log per receiver as:
 
 ```text
+phase7h-results\teacher.log
 phase7h-results\receivers\<receiver-id>.log
 ```
 
@@ -47,7 +48,7 @@ Then verify that the expected evidence set is complete:
 .\phase7h-scale.ps1 -Mode ValidateEvidence -ResultsDir .\phase7h-results
 ```
 
-`ValidateEvidence` verifies presence/correlation only. It intentionally prints `qualification_passed=undetermined`.
+`ValidateEvidence` verifies exact receiver correlation, requires non-empty Teacher/receiver evidence, and writes `evidence-index.json` with SHA-256 + byte length for the manifest and every retained log. The hashes make the reviewed evidence set explicit; they are not a signature or authenticity proof. The command intentionally prints `qualification_passed=undetermined`.
 
 ## Telemetry to retain
 
