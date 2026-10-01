@@ -7,9 +7,7 @@ use classmesh_video::distributor::{
 };
 use classmesh_video::{Codec, EncodedFrameMeta};
 
-use crate::wifi_fanout_benchmark::{
-    WifiFanoutBenchmarkPlan, WifiFanoutBenchmarkPlanError,
-};
+use crate::wifi_fanout_benchmark::{WifiFanoutBenchmarkPlan, WifiFanoutBenchmarkPlanError};
 
 pub const MAX_SYNTHETIC_FRAME_COUNT: u64 = 1_000_000;
 pub const MAX_SYNTHETIC_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
@@ -82,8 +80,9 @@ impl fmt::Display for DirectFanoutBenchmarkError {
                     "direct fanout benchmark requires strategy_label=direct-unicast, got {label:?}"
                 )
             }
-            Self::MissingWeakReceiver => formatter
-                .write_str("direct fanout benchmark requires one weak_receiver_probe"),
+            Self::MissingWeakReceiver => {
+                formatter.write_str("direct fanout benchmark requires one weak_receiver_probe")
+            }
             Self::InvalidFrameCount(count) => write!(
                 formatter,
                 "invalid synthetic frame count {count}; expected 1..={MAX_SYNTHETIC_FRAME_COUNT}"
@@ -175,13 +174,9 @@ pub fn run_direct_fanout_benchmark(
         distributor.publish(frame);
 
         for (index, (_, sink_id)) in sinks.iter().enumerate() {
-            let stats = distributor
-                .stats(*sink_id)
-                .ok_or_else(|| {
-                    DirectFanoutBenchmarkError::MissingSinkStats(
-                        reports[index].receiver_id.clone(),
-                    )
-                })?;
+            let stats = distributor.stats(*sink_id).ok_or_else(|| {
+                DirectFanoutBenchmarkError::MissingSinkStats(reports[index].receiver_id.clone())
+            })?;
             reports[index].max_queued = reports[index].max_queued.max(stats.queued);
         }
 
@@ -195,8 +190,7 @@ pub fn run_direct_fanout_benchmark(
                 continue;
             };
             reports[index].delivered = reports[index].delivered.saturating_add(1);
-            if delivered.meta.frame_id == frame_id
-                && !Arc::ptr_eq(&published_data, &delivered.data)
+            if delivered.meta.frame_id == frame_id && !Arc::ptr_eq(&published_data, &delivered.data)
             {
                 shared_allocation_mismatches = shared_allocation_mismatches.saturating_add(1);
             }
@@ -204,11 +198,9 @@ pub fn run_direct_fanout_benchmark(
     }
 
     for (index, (_, sink_id)) in sinks.iter().enumerate() {
-        let stats = distributor
-            .stats(*sink_id)
-            .ok_or_else(|| {
-                DirectFanoutBenchmarkError::MissingSinkStats(reports[index].receiver_id.clone())
-            })?;
+        let stats = distributor.stats(*sink_id).ok_or_else(|| {
+            DirectFanoutBenchmarkError::MissingSinkStats(reports[index].receiver_id.clone())
+        })?;
         reports[index].queue_dropped = stats.dropped;
         reports[index].queued_at_end = stats.queued;
     }
@@ -318,20 +310,14 @@ mod tests {
         let mut wrong_strategy = plan(5);
         wrong_strategy.strategy_label = "relay".to_owned();
         assert!(matches!(
-            run_direct_fanout_benchmark(
-                &wrong_strategy,
-                DirectFanoutBenchmarkConfig::default()
-            ),
+            run_direct_fanout_benchmark(&wrong_strategy, DirectFanoutBenchmarkConfig::default()),
             Err(DirectFanoutBenchmarkError::WrongStrategyLabel(_))
         ));
 
         let mut no_weak_receiver = plan(5);
         no_weak_receiver.weak_receiver_probe = None;
         assert!(matches!(
-            run_direct_fanout_benchmark(
-                &no_weak_receiver,
-                DirectFanoutBenchmarkConfig::default()
-            ),
+            run_direct_fanout_benchmark(&no_weak_receiver, DirectFanoutBenchmarkConfig::default()),
             Err(DirectFanoutBenchmarkError::MissingWeakReceiver)
         ));
     }
