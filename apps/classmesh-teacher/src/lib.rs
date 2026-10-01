@@ -215,6 +215,15 @@ impl TeacherVideoEngineLifecycle {
 }
 
 #[cfg(windows)]
+pub struct TeacherAuthorizedFallbackContext<'a> {
+    pub delivery: &'a TeacherGroupMediaDeliveryManager,
+    pub fallback: &'a PresentationFallbackCoordinator,
+    pub coordinator: &'a GroupMediaCoordinator,
+    pub authorization: &'a AuthorizationStore,
+    pub ownership: &'a PresentationOwnership,
+}
+
+#[cfg(windows)]
 #[derive(Debug)]
 pub enum TeacherVideoAuthorizedFallbackError {
     Validation(TeacherGroupMediaDeliveryError),
@@ -243,17 +252,20 @@ impl std::error::Error for TeacherVideoAuthorizedFallbackError {
 
 #[cfg(windows)]
 pub fn apply_authorized_unicast_fallback(
-    delivery: &TeacherGroupMediaDeliveryManager,
-    fallback: &PresentationFallbackCoordinator,
-    coordinator: &GroupMediaCoordinator,
-    authorization: &AuthorizationStore,
-    ownership: &PresentationOwnership,
+    context: TeacherAuthorizedFallbackContext<'_>,
     request: PresentationUnicastSenderTargetRequest<'_>,
     plan: &mut TeacherPresentationSenderPlan,
     lifecycle: &mut TeacherVideoEngineLifecycle,
 ) -> Result<usize, TeacherVideoAuthorizedFallbackError> {
-    let target = delivery
-        .build_unicast_sender_target(fallback, coordinator, authorization, ownership, request)
+    let target = context
+        .delivery
+        .build_unicast_sender_target(
+            context.fallback,
+            context.coordinator,
+            context.authorization,
+            context.ownership,
+            request,
+        )
         .map_err(TeacherVideoAuthorizedFallbackError::Validation)?;
     apply_unicast_target_transactionally(plan, lifecycle, target)
         .map_err(TeacherVideoAuthorizedFallbackError::Apply)
@@ -642,26 +654,13 @@ mod tests {
         use classmesh_security::group_media_coordinator::GroupMediaCoordinator;
 
         fn assert_contract(
-            delivery: &TeacherGroupMediaDeliveryManager,
-            fallback: &PresentationFallbackCoordinator,
-            coordinator: &GroupMediaCoordinator,
-            authorization: &AuthorizationStore,
-            ownership: &PresentationOwnership,
+            context: TeacherAuthorizedFallbackContext<'_>,
             request: PresentationUnicastSenderTargetRequest<'_>,
             plan: &mut TeacherPresentationSenderPlan,
             lifecycle: &mut TeacherVideoEngineLifecycle,
         ) {
             let _: Result<usize, TeacherVideoAuthorizedFallbackError> =
-                apply_authorized_unicast_fallback(
-                    delivery,
-                    fallback,
-                    coordinator,
-                    authorization,
-                    ownership,
-                    request,
-                    plan,
-                    lifecycle,
-                );
+                apply_authorized_unicast_fallback(context, request, plan, lifecycle);
         }
 
         let _ = assert_contract;
