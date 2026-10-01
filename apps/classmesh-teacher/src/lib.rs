@@ -2,10 +2,19 @@ use classmesh_control::presentation_sender_plan::{
     TeacherPresentationOutlierBinding, TeacherPresentationSenderAction,
 };
 #[cfg(windows)]
+use classmesh_control::authorization::AuthenticatedControlGuard;
+#[cfg(windows)]
 use classmesh_control::group_media_delivery::{
     PresentationUnicastSenderTargetRequest, TeacherGroupMediaDeliveryError,
     TeacherGroupMediaDeliveryManager,
 };
+#[cfg(windows)]
+use classmesh_control::group_media_feedback::{
+    PresentationFeedbackError, PresentationRecoveryPlanRequest,
+    accept_and_plan_presentation_feedback,
+};
+#[cfg(windows)]
+use classmesh_control::presentation_recovery::PresentationRecoveryCoordinator;
 #[cfg(windows)]
 use classmesh_control::presentation_fallback::PresentationFallbackCoordinator;
 #[cfg(windows)]
@@ -212,6 +221,77 @@ impl TeacherVideoEngineLifecycle {
         self.active = None;
         Ok(true)
     }
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+pub enum TeacherVideoRecoveryApplyError {
+    Feedback(PresentationFeedbackError),
+    Runtime(TeacherVideoEngineLifecycleError),
+    DirectiveBindingMismatch,
+    UnexpectedRecoveryAction,
+}
+
+#[cfg(windows)]
+impl std::fmt::Display for TeacherVideoRecoveryApplyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Feedback(error) => write!(formatter, "Teacher recovery feedback: {error}"),
+            Self::Runtime(error) => write!(formatter, "Teacher recovery runtime: {error}"),
+            Self::DirectiveBindingMismatch => {
+                formatter.write_str("Teacher recovery directive did not match the active sender")
+            }
+            Self::UnexpectedRecoveryAction => formatter
+                .write_str("Teacher recovery planner produced a non-keyframe sender action"),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl std::error::Error for TeacherVideoRecoveryApplyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Feedback(error) => Some(error),
+            Self::Runtime(error) => Some(error),
+            Self::DirectiveBindingMismatch | Self::UnexpectedRecoveryAction => None,
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn accept_plan_and_apply_presentation_feedback(
+    delivery: &TeacherGroupMediaDeliveryManager,
+    request: PresentationRecoveryPlanRequest<'_>,
+    guard: &mut AuthenticatedControlGuard,
+    authorization: &AuthorizationStore,
+    now_unix_ms: u64,
+    recovery: &mut PresentationRecoveryCoordinator,
+    lifecycle: &mut TeacherVideoEngineLifecycle,
+) -> Result<bool, TeacherVideoRecoveryApplyError> {
+    let decision = accept_and_plan_presentation_feedback(
+        delivery,
+        request,
+        guard,
+        authorization,
+        now_unix_ms,
+        recovery,
+    )
+    .map_err(TeacherVideoRecoveryApplyError::Feedback)?;
+
+    let Some(action) = TeacherPresentationSenderPlan::recovery_action(decision) else {
+        return Ok(false);
+    };
+    if !matches!(action, TeacherPresentationSenderAction::RequestKeyframe(_)) {
+        return Err(TeacherVideoRecoveryApplyError::UnexpectedRecoveryAction);
+    }
+
+    let applied = lifecycle
+        .apply(TeacherVideoEngineDirective::from_sender_action(action))
+        .map_err(TeacherVideoRecoveryApplyError::Runtime)?;
+    if !applied {
+        return Err(TeacherVideoRecoveryApplyError::DirectiveBindingMismatch);
+    }
+    Ok(true)
 }
 
 #[cfg(windows)]
