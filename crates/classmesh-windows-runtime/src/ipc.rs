@@ -12,7 +12,7 @@ pub const IPC_MAGIC: u32 = 0x434D_4950; // "CMIP"
 pub const IPC_HEADER_LEN: usize = 12;
 pub const MAX_IPC_MESSAGE: usize = 1_048_576;
 pub const IPC_VERSION_MAJOR: u8 = 0;
-pub const IPC_VERSION_MINOR: u8 = 8;
+pub const IPC_VERSION_MINOR: u8 = 9;
 
 const MESSAGE_WORKER_HELLO: u16 = 1;
 const MESSAGE_SERVICE_READY: u16 = 2;
@@ -35,6 +35,8 @@ const MESSAGE_SERVICE_PRESENTATION_UNICAST_START: u16 = 25;
 const MESSAGE_WORKER_PRESENTATION_UNICAST_START_RESULT: u16 = 26;
 const MESSAGE_SERVICE_PRESENTATION_KEYFRAME_REQUEST: u16 = 27;
 const MESSAGE_SERVICE_PRESENTATION_SENDER_UNICAST_ACTION: u16 = 28;
+const MESSAGE_SERVICE_PRESENTATION_SENDER_START: u16 = 29;
+const MESSAGE_WORKER_PRESENTATION_SENDER_START_RESULT: u16 = 30;
 const SERVICE_UDP_STREAM_START_LEN: usize = 32;
 const SERVICE_PRESENTATION_MULTICAST_START_LEN: usize = 56;
 const WORKER_PRESENTATION_MULTICAST_START_RESULT_LEN: usize = 40;
@@ -42,6 +44,8 @@ const SERVICE_PRESENTATION_UNICAST_START_LEN: usize = 56;
 const WORKER_PRESENTATION_UNICAST_START_RESULT_LEN: usize = 40;
 const SERVICE_PRESENTATION_KEYFRAME_REQUEST_LEN: usize = 20;
 const SERVICE_PRESENTATION_SENDER_UNICAST_ACTION_LEN: usize = 48;
+const SERVICE_PRESENTATION_SENDER_START_LEN: usize = 40;
+const WORKER_PRESENTATION_SENDER_START_RESULT_LEN: usize = 28;
 const WORKER_PRESENTATION_KEY_INSTALL_RESULT_LEN: usize = 48;
 const SERVICE_PRESENTATION_KEY_CLEAR_LEN: usize = 32;
 const WORKER_PRESENTATION_FEEDBACK_BINDING_LEN: usize = 36;
@@ -49,6 +53,7 @@ const PRESENTATION_KEY_INSTALL_RESULT_MIN_MINOR: u8 = 6;
 const WORKER_PRESENTATION_FEEDBACK_MIN_MINOR: u8 = 6;
 const PRESENTATION_KEYFRAME_REQUEST_MIN_MINOR: u8 = 7;
 const PRESENTATION_SENDER_UNICAST_ACTION_MIN_MINOR: u8 = 8;
+const PRESENTATION_SENDER_START_MIN_MINOR: u8 = 9;
 
 const MAX_EVIDENCE_ADAPTER_IDENTITY: usize = 128;
 const MAX_EVIDENCE_DRIVER_VERSION: usize = 128;
@@ -412,6 +417,39 @@ impl ServicePresentationUnicastStart {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServicePresentationSenderStart {
+    pub presentation_id: u64,
+    pub stream_id: u32,
+    pub epoch: u32,
+    pub width: u16,
+    pub height: u16,
+    pub fps: u8,
+    pub bitrate_kbps: u32,
+    pub group: Ipv4Addr,
+    pub port: u16,
+    pub interface: Ipv4Addr,
+}
+
+impl ServicePresentationSenderStart {
+    fn validate(self) -> Result<(), IpcMessageError> {
+        if self.presentation_id == 0
+            || self.stream_id == 0
+            || self.epoch == 0
+            || self.port == 0
+            || !self.group.is_multicast()
+            || self.group.octets()[0] != 239
+            || !valid_multicast_interface(self.interface)
+        {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        StreamProfile::new(self.width, self.height, self.fps, self.bitrate_kbps)
+            .validate()
+            .map_err(|_| IpcMessageError::InvalidPayload)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServicePresentationSenderUnicastActionKind {
     Attach,
     Detach,
@@ -474,6 +512,53 @@ fn valid_teacher_unicast_source(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => valid_teacher_source(address),
         IpAddr::V6(address) => !address.is_unspecified() && !address.is_multicast(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerPresentationSenderStartStatus {
+    Started,
+    Rejected,
+}
+
+impl WorkerPresentationSenderStartStatus {
+    const fn as_byte(self) -> u8 {
+        match self {
+            Self::Started => 1,
+            Self::Rejected => 2,
+        }
+    }
+
+    const fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Started),
+            2 => Some(Self::Rejected),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerPresentationSenderStartResult {
+    pub process_id: u32,
+    pub session_id: u32,
+    pub presentation_id: u64,
+    pub stream_id: u32,
+    pub epoch: u32,
+    pub status: WorkerPresentationSenderStartStatus,
+}
+
+impl WorkerPresentationSenderStartResult {
+    fn validate(self) -> Result<(), IpcMessageError> {
+        if self.process_id == 0
+            || self.session_id == 0
+            || self.presentation_id == 0
+            || self.stream_id == 0
+            || self.epoch == 0
+        {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        Ok(())
     }
 }
 
@@ -698,6 +783,8 @@ pub enum IpcMessage {
     ServiceMediaFeedback(FeedbackMessage),
     ServicePresentationKeyframeRequest(PresentationKeyframeRequest),
     ServicePresentationSenderUnicastAction(ServicePresentationSenderUnicastAction),
+    ServicePresentationSenderStart(ServicePresentationSenderStart),
+    WorkerPresentationSenderStartResult(WorkerPresentationSenderStartResult),
     WorkerPresentationKeyInstallResult(WorkerPresentationKeyInstallResult),
     ServicePresentationKeyClear(ServicePresentationKeyClear),
     WorkerPresentationFeedback(WorkerPresentationFeedback),
@@ -1028,6 +1115,49 @@ impl IpcFrame {
         debug_assert_eq!(payload.len(), SERVICE_PRESENTATION_KEYFRAME_REQUEST_LEN);
         Ok(Self::new(
             MESSAGE_SERVICE_PRESENTATION_KEYFRAME_REQUEST,
+            payload,
+        ))
+    }
+
+    pub fn service_presentation_sender_start(
+        start: ServicePresentationSenderStart,
+    ) -> Result<Self, IpcMessageError> {
+        start.validate()?;
+        let mut payload = Vec::with_capacity(SERVICE_PRESENTATION_SENDER_START_LEN);
+        payload.extend_from_slice(&start.presentation_id.to_be_bytes());
+        payload.extend_from_slice(&start.stream_id.to_be_bytes());
+        payload.extend_from_slice(&start.epoch.to_be_bytes());
+        payload.extend_from_slice(&start.width.to_be_bytes());
+        payload.extend_from_slice(&start.height.to_be_bytes());
+        payload.push(start.fps);
+        payload.extend_from_slice(&[0_u8; 3]);
+        payload.extend_from_slice(&start.bitrate_kbps.to_be_bytes());
+        payload.extend_from_slice(&start.group.octets());
+        payload.extend_from_slice(&start.port.to_be_bytes());
+        payload.extend_from_slice(&[0_u8; 2]);
+        payload.extend_from_slice(&start.interface.octets());
+        debug_assert_eq!(payload.len(), SERVICE_PRESENTATION_SENDER_START_LEN);
+        Ok(Self::new(MESSAGE_SERVICE_PRESENTATION_SENDER_START, payload))
+    }
+
+    pub fn worker_presentation_sender_start_result(
+        result: WorkerPresentationSenderStartResult,
+    ) -> Result<Self, IpcMessageError> {
+        result.validate()?;
+        let mut payload = Vec::with_capacity(WORKER_PRESENTATION_SENDER_START_RESULT_LEN);
+        payload.extend_from_slice(&result.process_id.to_be_bytes());
+        payload.extend_from_slice(&result.session_id.to_be_bytes());
+        payload.extend_from_slice(&result.presentation_id.to_be_bytes());
+        payload.extend_from_slice(&result.stream_id.to_be_bytes());
+        payload.extend_from_slice(&result.epoch.to_be_bytes());
+        payload.push(result.status.as_byte());
+        payload.extend_from_slice(&[0_u8; 3]);
+        debug_assert_eq!(
+            payload.len(),
+            WORKER_PRESENTATION_SENDER_START_RESULT_LEN
+        );
+        Ok(Self::new(
+            MESSAGE_WORKER_PRESENTATION_SENDER_START_RESULT,
             payload,
         ))
     }
@@ -1579,6 +1709,81 @@ impl IpcFrame {
                     PresentationKeyframeRequest::new(presentation_id, stream_id, after_frame_id)
                         .map_err(|_| IpcMessageError::InvalidPayload)?;
                 Ok(IpcMessage::ServicePresentationKeyframeRequest(request))
+            }
+            MESSAGE_SERVICE_PRESENTATION_SENDER_START => {
+                if self.header.version_minor < PRESENTATION_SENDER_START_MIN_MINOR {
+                    return Err(IpcMessageError::UnsupportedVersion);
+                }
+                if self.payload.len() != SERVICE_PRESENTATION_SENDER_START_LEN
+                    || self.payload[21..24].iter().any(|byte| *byte != 0)
+                    || self.payload[34..36].iter().any(|byte| *byte != 0)
+                {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let start = ServicePresentationSenderStart {
+                    presentation_id: u64::from_be_bytes(
+                        self.payload[0..8].try_into().expect("eight bytes"),
+                    ),
+                    stream_id: u32::from_be_bytes(
+                        self.payload[8..12].try_into().expect("four bytes"),
+                    ),
+                    epoch: u32::from_be_bytes(
+                        self.payload[12..16].try_into().expect("four bytes"),
+                    ),
+                    width: u16::from_be_bytes(
+                        self.payload[16..18].try_into().expect("two bytes"),
+                    ),
+                    height: u16::from_be_bytes(
+                        self.payload[18..20].try_into().expect("two bytes"),
+                    ),
+                    fps: self.payload[20],
+                    bitrate_kbps: u32::from_be_bytes(
+                        self.payload[24..28].try_into().expect("four bytes"),
+                    ),
+                    group: Ipv4Addr::from(
+                        <[u8; 4]>::try_from(&self.payload[28..32]).expect("four bytes"),
+                    ),
+                    port: u16::from_be_bytes(
+                        self.payload[32..34].try_into().expect("two bytes"),
+                    ),
+                    interface: Ipv4Addr::from(
+                        <[u8; 4]>::try_from(&self.payload[36..40]).expect("four bytes"),
+                    ),
+                };
+                start.validate()?;
+                Ok(IpcMessage::ServicePresentationSenderStart(start))
+            }
+            MESSAGE_WORKER_PRESENTATION_SENDER_START_RESULT => {
+                if self.header.version_minor < PRESENTATION_SENDER_START_MIN_MINOR {
+                    return Err(IpcMessageError::UnsupportedVersion);
+                }
+                if self.payload.len() != WORKER_PRESENTATION_SENDER_START_RESULT_LEN
+                    || self.payload[25..28].iter().any(|byte| *byte != 0)
+                {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let status = WorkerPresentationSenderStartStatus::from_byte(self.payload[24])
+                    .ok_or(IpcMessageError::InvalidPayload)?;
+                let result = WorkerPresentationSenderStartResult {
+                    process_id: u32::from_be_bytes(
+                        self.payload[0..4].try_into().expect("four bytes"),
+                    ),
+                    session_id: u32::from_be_bytes(
+                        self.payload[4..8].try_into().expect("four bytes"),
+                    ),
+                    presentation_id: u64::from_be_bytes(
+                        self.payload[8..16].try_into().expect("eight bytes"),
+                    ),
+                    stream_id: u32::from_be_bytes(
+                        self.payload[16..20].try_into().expect("four bytes"),
+                    ),
+                    epoch: u32::from_be_bytes(
+                        self.payload[20..24].try_into().expect("four bytes"),
+                    ),
+                    status,
+                };
+                result.validate()?;
+                Ok(IpcMessage::WorkerPresentationSenderStartResult(result))
             }
             MESSAGE_SERVICE_PRESENTATION_SENDER_UNICAST_ACTION => {
                 if self.header.version_minor < PRESENTATION_SENDER_UNICAST_ACTION_MIN_MINOR {
