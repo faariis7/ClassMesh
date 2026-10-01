@@ -71,48 +71,154 @@ pub struct MonitoringScheduler {
 }
 
 impl MonitoringScheduler {
-    pub fn new(_config: MonitoringSchedulerConfig) -> Result<Self, MonitoringSchedulerError> {
-        todo!("Phase 9A RED: validate scheduler limits")
+    pub fn new(config: MonitoringSchedulerConfig) -> Result<Self, MonitoringSchedulerError> {
+        if config.max_sources == 0 {
+            return Err(MonitoringSchedulerError::InvalidMaxSources);
+        }
+        if config.max_actions_per_tick == 0 {
+            return Err(MonitoringSchedulerError::InvalidWorkBudget);
+        }
+
+        Ok(Self {
+            config,
+            sources: BTreeMap::new(),
+        })
     }
 
     pub fn add_source(
         &mut self,
-        _source_id: MonitoringSourceId,
-        _profile: MonitoringProfile,
-        _priority: MonitoringPriority,
+        source_id: MonitoringSourceId,
+        profile: MonitoringProfile,
+        priority: MonitoringPriority,
     ) -> Result<(), MonitoringSchedulerError> {
-        todo!("Phase 9A RED: add a bounded monitoring source")
+        if self.sources.contains_key(&source_id) {
+            return Err(MonitoringSchedulerError::DuplicateSource);
+        }
+        if self.sources.len() >= self.config.max_sources {
+            return Err(MonitoringSchedulerError::SourceLimitReached);
+        }
+
+        self.sources.insert(
+            source_id,
+            SourceState {
+                profile,
+                priority,
+                mode: SourceMode::Thumbnail,
+                next_due_us: None,
+            },
+        );
+        Ok(())
     }
 
-    pub fn remove_source(&mut self, _source_id: MonitoringSourceId) -> bool {
-        todo!("Phase 9A RED: remove a monitoring source")
+    pub fn remove_source(&mut self, source_id: MonitoringSourceId) -> bool {
+        self.sources.remove(&source_id).is_some()
     }
 
     pub fn set_priority(
         &mut self,
-        _source_id: MonitoringSourceId,
-        _priority: MonitoringPriority,
+        source_id: MonitoringSourceId,
+        priority: MonitoringPriority,
     ) -> Result<(), MonitoringSchedulerError> {
-        todo!("Phase 9A RED: update monitoring priority")
+        let state = self
+            .sources
+            .get_mut(&source_id)
+            .ok_or(MonitoringSchedulerError::UnknownSource)?;
+        state.priority = priority;
+        Ok(())
     }
 
     pub fn request_interactive_promotion(
         &mut self,
-        _source_id: MonitoringSourceId,
+        source_id: MonitoringSourceId,
     ) -> Result<(), MonitoringSchedulerError> {
-        todo!("Phase 9A RED: request interactive promotion")
+        let state = self
+            .sources
+            .get_mut(&source_id)
+            .ok_or(MonitoringSchedulerError::UnknownSource)?;
+        if state.mode == SourceMode::Thumbnail {
+            state.mode = SourceMode::PromotionRequested;
+            state.next_due_us = None;
+        }
+        Ok(())
     }
 
     pub fn resume_thumbnail(
         &mut self,
-        _source_id: MonitoringSourceId,
+        source_id: MonitoringSourceId,
     ) -> Result<(), MonitoringSchedulerError> {
-        todo!("Phase 9A RED: resume thumbnail scheduling")
+        let state = self
+            .sources
+            .get_mut(&source_id)
+            .ok_or(MonitoringSchedulerError::UnknownSource)?;
+        state.mode = SourceMode::Thumbnail;
+        state.next_due_us = None;
+        Ok(())
     }
 
     #[must_use]
-    pub fn poll(&mut self, _now_us: u64) -> Vec<MonitoringScheduleAction> {
-        todo!("Phase 9A RED: schedule bounded thumbnail work")
+    pub fn poll(&mut self, now_us: u64) -> Vec<MonitoringScheduleAction> {
+        let mut actions = Vec::with_capacity(self.config.max_actions_per_tick);
+
+        let promotions: Vec<MonitoringSourceId> = self
+            .sources
+            .iter()
+            .filter_map(|(&source_id, state)| {
+                (state.mode == SourceMode::PromotionRequested).then_some(source_id)
+            })
+            .collect();
+        for source_id in promotions
+            .into_iter()
+            .take(self.config.max_actions_per_tick)
+        {
+            let Some(state) = self.sources.get_mut(&source_id) else {
+                continue;
+            };
+            state.mode = SourceMode::PromotedInteractive;
+            state.next_due_us = None;
+            actions.push(MonitoringScheduleAction::PromoteInteractive { source_id });
+        }
+
+        let remaining = self
+            .config
+            .max_actions_per_tick
+            .saturating_sub(actions.len());
+        if remaining == 0 {
+            return actions;
+        }
+
+        let mut due: Vec<(u8, u64, MonitoringSourceId)> = self
+            .sources
+            .iter()
+            .filter_map(|(&source_id, state)| {
+                if state.mode != SourceMode::Thumbnail {
+                    return None;
+                }
+                let due_at = state.next_due_us.unwrap_or(0);
+                if now_us < due_at {
+                    return None;
+                }
+                let priority_rank = match state.priority {
+                    MonitoringPriority::Visible => 0,
+                    MonitoringPriority::Background => 1,
+                };
+                Some((priority_rank, due_at, source_id))
+            })
+            .collect();
+        due.sort_unstable();
+
+        for (_, _, source_id) in due.into_iter().take(remaining) {
+            let Some(state) = self.sources.get_mut(&source_id) else {
+                continue;
+            };
+            let interval_us = 1_000_000 / u64::from(state.profile.fps());
+            state.next_due_us = Some(now_us.saturating_add(interval_us));
+            actions.push(MonitoringScheduleAction::CaptureThumbnail {
+                source_id,
+                profile: state.profile,
+            });
+        }
+
+        actions
     }
 
     #[must_use]
