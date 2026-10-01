@@ -19,18 +19,29 @@ pub enum MonitoringProfileError {
 
 impl MonitoringProfile {
     pub fn for_thumbnail(
-        _tile_width: u16,
-        _tile_height: u16,
+        tile_width: u16,
+        tile_height: u16,
     ) -> Result<Self, MonitoringProfileError> {
-        todo!("Phase 9A RED: derive the default low-cost thumbnail profile")
+        Self::for_thumbnail_at_fps(tile_width, tile_height, DEFAULT_MONITORING_FPS)
     }
 
     pub fn for_thumbnail_at_fps(
-        _tile_width: u16,
-        _tile_height: u16,
-        _fps: u8,
+        tile_width: u16,
+        tile_height: u16,
+        fps: u8,
     ) -> Result<Self, MonitoringProfileError> {
-        todo!("Phase 9A RED: derive a bounded low-cost thumbnail profile")
+        if tile_width == 0 || tile_height == 0 {
+            return Err(MonitoringProfileError::InvalidTileSize);
+        }
+        if !(MIN_MONITORING_FPS..=MAX_MONITORING_FPS).contains(&fps) {
+            return Err(MonitoringProfileError::InvalidFps(fps));
+        }
+
+        Ok(Self {
+            width: tile_width.min(MAX_THUMBNAIL_WIDTH),
+            height: tile_height.min(MAX_THUMBNAIL_HEIGHT),
+            fps,
+        })
     }
 
     #[must_use]
