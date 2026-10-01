@@ -648,6 +648,39 @@ mod tests {
         let _ = assert_contract;
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn authenticated_recovery_orchestration_exposes_exact_contract() {
+        use classmesh_control::authorization::AuthenticatedControlGuard;
+        use classmesh_control::group_media_delivery::TeacherGroupMediaDeliveryManager;
+        use classmesh_control::group_media_feedback::PresentationRecoveryPlanRequest;
+        use classmesh_control::presentation_recovery::PresentationRecoveryCoordinator;
+        use classmesh_security::AuthorizationStore;
+
+        fn assert_contract(
+            delivery: &TeacherGroupMediaDeliveryManager,
+            request: PresentationRecoveryPlanRequest<'_>,
+            guard: &mut AuthenticatedControlGuard,
+            authorization: &AuthorizationStore,
+            now_unix_ms: u64,
+            recovery: &mut PresentationRecoveryCoordinator,
+            lifecycle: &mut TeacherVideoEngineLifecycle,
+        ) {
+            let _: Result<bool, TeacherVideoRecoveryApplyError> =
+                accept_plan_and_apply_presentation_feedback(
+                    delivery,
+                    request,
+                    guard,
+                    authorization,
+                    now_unix_ms,
+                    recovery,
+                    lifecycle,
+                );
+        }
+
+        let _ = assert_contract;
+    }
+
     #[test]
     fn granted_keyframe_is_forwarded_without_control_identity() {
         let request = PresentationKeyframeRequest::new(55, 7, 42).expect("valid keyframe request");
