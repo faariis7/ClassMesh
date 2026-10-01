@@ -42,12 +42,27 @@ impl TeacherPresentationOutlierBinding {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedTeacherPresentationUnicastTarget {
+    revision: u64,
+    target: PresentationUnicastSenderTarget,
+    actions: Vec<TeacherPresentationSenderAction>,
+}
+
+impl PreparedTeacherPresentationUnicastTarget {
+    #[must_use]
+    pub fn actions(&self) -> &[TeacherPresentationSenderAction] {
+        &self.actions
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeacherPresentationSenderPlanError {
     InvalidReceiverLimit,
     InvalidRuntimeSlot,
     ReceiverLimitReached,
     RuntimeSlotExhausted,
+    PlanChanged,
 }
 
 #[derive(Debug)]
@@ -55,6 +70,7 @@ pub struct TeacherPresentationSenderPlan {
     targets: BTreeMap<PrincipalId, TeacherPresentationOutlierBinding>,
     max_receivers: usize,
     next_slot_id: u64,
+    revision: u64,
 }
 
 impl Default for TeacherPresentationSenderPlan {
@@ -63,6 +79,7 @@ impl Default for TeacherPresentationSenderPlan {
             targets: BTreeMap::new(),
             max_receivers: MAX_GROUP_MEDIA_RECEIVERS,
             next_slot_id: 1,
+            revision: 0,
         }
     }
 }
@@ -76,6 +93,7 @@ impl TeacherPresentationSenderPlan {
             targets: BTreeMap::new(),
             max_receivers,
             next_slot_id: 1,
+            revision: 0,
         })
     }
 
@@ -89,19 +107,69 @@ impl TeacherPresentationSenderPlan {
         self.targets.is_empty()
     }
 
+    pub fn prepare_unicast_target(
+        &self,
+        target: PresentationUnicastSenderTarget,
+    ) -> Result<PreparedTeacherPresentationUnicastTarget, TeacherPresentationSenderPlanError> {
+        let actions = match self.targets.get(&target.receiver).copied() {
+            Some(previous) if previous.target == target => Vec::new(),
+            Some(previous) => {
+                let replacement = TeacherPresentationOutlierBinding::new(previous.slot_id, target)?;
+                vec![
+                    TeacherPresentationSenderAction::DetachUnicast(previous),
+                    TeacherPresentationSenderAction::AttachUnicast(replacement),
+                ]
+            }
+            None => {
+                if self.targets.len() >= self.max_receivers {
+                    return Err(TeacherPresentationSenderPlanError::ReceiverLimitReached);
+                }
+                self.next_slot_id
+                    .checked_add(1)
+                    .ok_or(TeacherPresentationSenderPlanError::RuntimeSlotExhausted)?;
+                let binding = TeacherPresentationOutlierBinding::new(self.next_slot_id, target)?;
+                vec![TeacherPresentationSenderAction::AttachUnicast(binding)]
+            }
+        };
+        Ok(PreparedTeacherPresentationUnicastTarget {
+            revision: self.revision,
+            target,
+            actions,
+        })
+    }
+
+    pub fn commit_unicast_target(
+        &mut self,
+        prepared: PreparedTeacherPresentationUnicastTarget,
+    ) -> Result<(), TeacherPresentationSenderPlanError> {
+        if self.revision != prepared.revision {
+            return Err(TeacherPresentationSenderPlanError::PlanChanged);
+        }
+        self.apply_unicast_target_committed(prepared.target)?;
+        Ok(())
+    }
+
     pub fn apply_unicast_target(
         &mut self,
         target: PresentationUnicastSenderTarget,
     ) -> Result<Vec<TeacherPresentationSenderAction>, TeacherPresentationSenderPlanError> {
+        let prepared = self.prepare_unicast_target(target)?;
+        let actions = prepared.actions.clone();
+        self.commit_unicast_target(prepared)?;
+        Ok(actions)
+    }
+
+    fn apply_unicast_target_committed(
+        &mut self,
+        target: PresentationUnicastSenderTarget,
+    ) -> Result<(), TeacherPresentationSenderPlanError> {
         match self.targets.get(&target.receiver).copied() {
-            Some(previous) if previous.target == target => Ok(Vec::new()),
+            Some(previous) if previous.target == target => Ok(()),
             Some(previous) => {
                 let replacement = TeacherPresentationOutlierBinding::new(previous.slot_id, target)?;
                 self.targets.insert(target.receiver, replacement);
-                Ok(vec![
-                    TeacherPresentationSenderAction::DetachUnicast(previous),
-                    TeacherPresentationSenderAction::AttachUnicast(replacement),
-                ])
+                self.revision = self.revision.wrapping_add(1);
+                Ok(())
             }
             None => {
                 if self.targets.len() >= self.max_receivers {
@@ -114,9 +182,8 @@ impl TeacherPresentationSenderPlan {
                 let binding = TeacherPresentationOutlierBinding::new(slot_id, target)?;
                 self.next_slot_id = next_slot_id;
                 self.targets.insert(target.receiver, binding);
-                Ok(vec![TeacherPresentationSenderAction::AttachUnicast(
-                    binding,
-                )])
+                self.revision = self.revision.wrapping_add(1);
+                Ok(())
             }
         }
     }
@@ -125,9 +192,11 @@ impl TeacherPresentationSenderPlan {
         &mut self,
         receiver: PrincipalId,
     ) -> Option<TeacherPresentationSenderAction> {
-        self.targets
-            .remove(&receiver)
-            .map(TeacherPresentationSenderAction::DetachUnicast)
+        let removed = self.targets.remove(&receiver);
+        if removed.is_some() {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        removed.map(TeacherPresentationSenderAction::DetachUnicast)
     }
 
     #[must_use]
@@ -198,6 +267,45 @@ mod tests {
                         .expect("same stable runtime slot"),
                 ),
             ]
+        );
+        assert_eq!(plan.len(), 1);
+    }
+
+    #[test]
+    fn prepared_target_does_not_mutate_plan_until_exact_commit() {
+        let mut plan = TeacherPresentationSenderPlan::with_limit(2).expect("bounded plan");
+        let first = target(7, 49_000, 1);
+        let prepared = plan
+            .prepare_unicast_target(first)
+            .expect("prepare first target");
+
+        assert!(plan.is_empty());
+        assert_eq!(
+            prepared.actions(),
+            &[TeacherPresentationSenderAction::AttachUnicast(
+                TeacherPresentationOutlierBinding::new(1, first).expect("stable first slot"),
+            )]
+        );
+
+        plan.commit_unicast_target(prepared)
+            .expect("commit prepared target");
+        assert_eq!(plan.len(), 1);
+    }
+
+    #[test]
+    fn prepared_target_rejects_commit_after_plan_state_changes() {
+        let mut plan = TeacherPresentationSenderPlan::with_limit(2).expect("bounded plan");
+        let first = target(7, 49_000, 1);
+        let prepared = plan
+            .prepare_unicast_target(first)
+            .expect("prepare first target");
+
+        plan.apply_unicast_target(target(8, 49_001, 1))
+            .expect("intervening mutation");
+
+        assert_eq!(
+            plan.commit_unicast_target(prepared),
+            Err(TeacherPresentationSenderPlanError::PlanChanged)
         );
         assert_eq!(plan.len(), 1);
     }
