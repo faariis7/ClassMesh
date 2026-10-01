@@ -177,6 +177,109 @@ impl TeacherVideoEngineLifecycle {
     }
 }
 
+#[cfg(windows)]
+#[derive(Debug)]
+pub enum TeacherVideoEngineLifecycleError {
+    NoActiveRuntime,
+    AlreadyActiveRuntime,
+    InvalidUnicastQueueCapacity,
+    Apply(TeacherVideoEngineApplyError),
+}
+
+#[cfg(windows)]
+impl std::fmt::Display for TeacherVideoEngineLifecycleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoActiveRuntime => formatter.write_str("Teacher video engine has no active runtime"),
+            Self::AlreadyActiveRuntime => {
+                formatter.write_str("Teacher video engine runtime is already active")
+            }
+            Self::InvalidUnicastQueueCapacity => {
+                formatter.write_str("Teacher video engine unicast queue capacity must be non-zero")
+            }
+            Self::Apply(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl std::error::Error for TeacherVideoEngineLifecycleError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Apply(error) => Some(error),
+            Self::NoActiveRuntime
+            | Self::AlreadyActiveRuntime
+            | Self::InvalidUnicastQueueCapacity => None,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl From<TeacherVideoEngineApplyError> for TeacherVideoEngineLifecycleError {
+    fn from(value: TeacherVideoEngineApplyError) -> Self {
+        Self::Apply(value)
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug, Default)]
+pub struct TeacherVideoEngineLifecycle {
+    runtime: Option<PresentationMulticastSendRuntime>,
+    unicast_queue_capacity: usize,
+}
+
+#[cfg(windows)]
+impl TeacherVideoEngineLifecycle {
+    pub fn start(
+        &mut self,
+        runtime: PresentationMulticastSendRuntime,
+        unicast_queue_capacity: usize,
+    ) -> Result<(), TeacherVideoEngineLifecycleError> {
+        if self.runtime.is_some() {
+            return Err(TeacherVideoEngineLifecycleError::AlreadyActiveRuntime);
+        }
+        if unicast_queue_capacity == 0 {
+            return Err(TeacherVideoEngineLifecycleError::InvalidUnicastQueueCapacity);
+        }
+        self.runtime = Some(runtime);
+        self.unicast_queue_capacity = unicast_queue_capacity;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn active_binding(&self) -> Option<PresentationMulticastSendBinding> {
+        self.runtime.as_ref().map(PresentationMulticastSendRuntime::binding)
+    }
+
+    pub fn apply(
+        &mut self,
+        directive: TeacherVideoEngineDirective,
+    ) -> Result<bool, TeacherVideoEngineLifecycleError> {
+        let runtime = self
+            .runtime
+            .as_mut()
+            .ok_or(TeacherVideoEngineLifecycleError::NoActiveRuntime)?;
+        directive
+            .apply(runtime, self.unicast_queue_capacity)
+            .map_err(Into::into)
+    }
+
+    pub fn stop(
+        &mut self,
+        binding: PresentationMulticastSendBinding,
+    ) -> Result<bool, TeacherVideoEngineLifecycleError> {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return Ok(false);
+        };
+        if runtime.binding() != binding {
+            return Ok(false);
+        }
+        self.runtime = None;
+        self.unicast_queue_capacity = 0;
+        Ok(true)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeacherVideoEngineDirective {
     Unicast(ServicePresentationSenderUnicastAction),
