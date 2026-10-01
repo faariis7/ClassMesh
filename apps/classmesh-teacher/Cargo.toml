@@ -1,0 +1,18 @@
+[package]
+name = "classmesh-teacher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+classmesh-control = { path = "../../crates/classmesh-control" }
+classmesh-core = { path = "../../crates/classmesh-core" }
+classmesh-windows-runtime = { path = "../../crates/classmesh-windows-runtime" }
+
+[dev-dependencies]
+classmesh-security = { path = "../../crates/classmesh-security" }
+
+[lints]
+workspace = true

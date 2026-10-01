@@ -16,6 +16,7 @@ members = [
     "crates/classmesh-win32",
     "apps/classmesh-service",
     "apps/classmesh-worker",
+    "apps/classmesh-teacher",
     "tools/classmesh-lab",
 ]
 
