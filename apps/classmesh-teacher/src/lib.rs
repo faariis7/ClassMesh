@@ -284,11 +284,18 @@ fn rollback_applied_sender_actions(
         let changed = lifecycle
             .apply(TeacherVideoEngineDirective::from_sender_action(action))
             .map_err(TeacherVideoFallbackApplyError::Rollback)?;
-        if !changed {
-            return Err(TeacherVideoFallbackApplyError::RollbackDidNotChangeState);
-        }
+        require_rollback_change(changed)?;
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn require_rollback_change(changed: bool) -> Result<(), TeacherVideoFallbackApplyError> {
+    if changed {
+        Ok(())
+    } else {
+        Err(TeacherVideoFallbackApplyError::RollbackDidNotChangeState)
+    }
 }
 
 #[must_use]
@@ -534,6 +541,16 @@ mod tests {
             inverse_sender_action(TeacherPresentationSenderAction::RequestKeyframe(keyframe)),
             None
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rollback_requires_an_actual_runtime_state_change() {
+        assert!(require_rollback_change(true).is_ok());
+        assert!(matches!(
+            require_rollback_change(false),
+            Err(TeacherVideoFallbackApplyError::RollbackDidNotChangeState)
+        ));
     }
 
     #[cfg(windows)]
