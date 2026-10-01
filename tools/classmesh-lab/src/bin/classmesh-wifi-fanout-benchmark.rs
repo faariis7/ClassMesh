@@ -1,9 +1,7 @@
 use std::env;
 use std::process::ExitCode;
 
-use classmesh_lab::wifi_direct_fanout::{
-    DirectFanoutBenchmarkConfig, run_direct_fanout_benchmark,
-};
+use classmesh_lab::wifi_direct_fanout::{DirectFanoutBenchmarkConfig, run_direct_fanout_benchmark};
 use classmesh_lab::wifi_fanout_benchmark::{
     WIFI_FANOUT_EVIDENCE_VERSION, WIFI_FANOUT_SCALE_POINTS, WifiFanoutBenchmarkPlan,
 };
@@ -109,10 +107,7 @@ fn duration_seconds_for_frames(frames: u64) -> u32 {
     u32::try_from(seconds.clamp(1, u64::from(u32::MAX))).unwrap_or(u32::MAX)
 }
 
-fn parse_next<T>(
-    args: &mut impl Iterator<Item = String>,
-    name: &str,
-) -> Result<T, String>
+fn parse_next<T>(args: &mut impl Iterator<Item = String>, name: &str) -> Result<T, String>
 where
     T: std::str::FromStr,
 {
