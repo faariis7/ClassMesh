@@ -250,8 +250,8 @@ pub fn apply_unicast_target_transactionally(
     let mut rollback_actions = Vec::with_capacity(actions.len());
 
     for action in actions {
-        let inverse =
-            inverse_sender_action(action).ok_or(TeacherVideoFallbackApplyError::UnexpectedPreparedAction)?;
+        let inverse = inverse_sender_action(action)
+            .ok_or(TeacherVideoFallbackApplyError::UnexpectedPreparedAction)?;
         match lifecycle.apply(TeacherVideoEngineDirective::from_sender_action(action)) {
             Ok(true) => rollback_actions.push(inverse),
             Ok(false) => {}
