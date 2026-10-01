@@ -1,6 +1,3 @@
-use classmesh_control::presentation_sender_plan::{
-    TeacherPresentationOutlierBinding, TeacherPresentationSenderAction,
-};
 #[cfg(windows)]
 use classmesh_control::group_media_delivery::{
     PresentationUnicastSenderTargetRequest, TeacherGroupMediaDeliveryError,
@@ -8,6 +5,9 @@ use classmesh_control::group_media_delivery::{
 };
 #[cfg(windows)]
 use classmesh_control::presentation_fallback::PresentationFallbackCoordinator;
+use classmesh_control::presentation_sender_plan::{
+    TeacherPresentationOutlierBinding, TeacherPresentationSenderAction,
+};
 #[cfg(windows)]
 use classmesh_control::presentation_sender_plan::{
     TeacherPresentationSenderPlan, TeacherPresentationSenderPlanError,
@@ -253,13 +253,7 @@ pub fn apply_authorized_unicast_fallback(
     lifecycle: &mut TeacherVideoEngineLifecycle,
 ) -> Result<usize, TeacherVideoAuthorizedFallbackError> {
     let target = delivery
-        .build_unicast_sender_target(
-            fallback,
-            coordinator,
-            authorization,
-            ownership,
-            request,
-        )
+        .build_unicast_sender_target(fallback, coordinator, authorization, ownership, request)
         .map_err(TeacherVideoAuthorizedFallbackError::Validation)?;
     apply_unicast_target_transactionally(plan, lifecycle, target)
         .map_err(TeacherVideoAuthorizedFallbackError::Apply)
