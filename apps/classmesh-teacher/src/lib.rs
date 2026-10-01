@@ -7,11 +7,17 @@ use classmesh_windows_runtime::ipc::{
 };
 
 #[cfg(windows)]
+use classmesh_capture_win::{CapturedFrameMeta, DxgiFrame};
+#[cfg(windows)]
+use classmesh_security::AuthorizationStore;
+#[cfg(windows)]
+use classmesh_security::group_media_coordinator::GroupMediaCoordinator;
+#[cfg(windows)]
 use classmesh_video::distributor::DEFAULT_MAX_QUEUE_DEPTH;
 #[cfg(windows)]
 use classmesh_worker::presentation_multicast_send::{
     PresentationMulticastSendBinding, PresentationMulticastSendRuntime,
-    PresentationMulticastSendRuntimeError,
+    PresentationMulticastSendRuntimeError, PresentationMulticastSendStep,
 };
 
 #[cfg(windows)]
@@ -156,6 +162,24 @@ impl TeacherVideoEngineLifecycle {
             .ok_or(TeacherVideoEngineLifecycleError::NoActiveRuntime)?;
         directive
             .apply(&mut active.runtime, active.unicast_queue_capacity)
+            .map_err(Into::into)
+    }
+
+    pub fn process_frame(
+        &mut self,
+        meta: CapturedFrameMeta,
+        frame: DxgiFrame,
+        coordinator: &mut GroupMediaCoordinator,
+        authorization: &AuthorizationStore,
+    ) -> Result<PresentationMulticastSendStep, TeacherVideoEngineLifecycleError> {
+        let active = self
+            .active
+            .as_mut()
+            .ok_or(TeacherVideoEngineLifecycleError::NoActiveRuntime)?;
+        active
+            .runtime
+            .process_frame(meta, frame, coordinator, authorization)
+            .map_err(TeacherVideoEngineApplyError::from)
             .map_err(Into::into)
     }
 
@@ -354,6 +378,35 @@ mod tests {
                 PresentationMulticastSendRuntime,
                 PresentationMulticastSendBinding,
                 TeacherVideoEngineDirective,
+            );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lifecycle_exposes_caller_owned_frame_processing_contract() {
+        use classmesh_capture_win::{CapturedFrameMeta, DxgiFrame};
+        use classmesh_security::AuthorizationStore;
+        use classmesh_security::group_media_coordinator::GroupMediaCoordinator;
+        use classmesh_worker::presentation_multicast_send::PresentationMulticastSendStep;
+
+        fn assert_process_frame(
+            lifecycle: &mut TeacherVideoEngineLifecycle,
+            meta: CapturedFrameMeta,
+            frame: DxgiFrame,
+            coordinator: &mut GroupMediaCoordinator,
+            authorization: &AuthorizationStore,
+        ) {
+            let _: Result<PresentationMulticastSendStep, TeacherVideoEngineLifecycleError> =
+                lifecycle.process_frame(meta, frame, coordinator, authorization);
+        }
+
+        let _ = assert_process_frame
+            as fn(
+                &mut TeacherVideoEngineLifecycle,
+                CapturedFrameMeta,
+                DxgiFrame,
+                &mut GroupMediaCoordinator,
+                &AuthorizationStore,
             );
     }
 

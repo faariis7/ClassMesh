@@ -12,6 +12,8 @@ classmesh-core = { path = "../../crates/classmesh-core" }
 classmesh-windows-runtime = { path = "../../crates/classmesh-windows-runtime" }
 
 [target.'cfg(windows)'.dependencies]
+classmesh-capture-win = { path = "../../crates/classmesh-capture-win" }
+classmesh-security = { path = "../../crates/classmesh-security" }
 classmesh-video = { path = "../../crates/classmesh-video" }
 classmesh-worker = { path = "../classmesh-worker" }
 
