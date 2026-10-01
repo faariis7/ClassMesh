@@ -54,7 +54,10 @@ impl fmt::Display for RelayFanoutBenchmarkError {
             }
             Self::Distributor(error) => write!(formatter, "relay fanout distributor: {error:?}"),
             Self::MissingSinkStats(receiver_id) => {
-                write!(formatter, "missing relay sink stats for receiver {receiver_id:?}")
+                write!(
+                    formatter,
+                    "missing relay sink stats for receiver {receiver_id:?}"
+                )
             }
         }
     }
