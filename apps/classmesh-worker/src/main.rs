@@ -1573,6 +1573,52 @@ mod focused_profile_tests {
     }
 
     #[test]
+    fn presentation_keyframe_request_routes_as_typed_worker_event() {
+        use classmesh_core::keyframe::PresentationKeyframeRequest;
+        use classmesh_windows_runtime::ipc::IpcFrame;
+        use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+
+        let request =
+            PresentationKeyframeRequest::new(55, 7, 42).expect("valid keyframe directive");
+        let frame = IpcFrame::service_presentation_keyframe_request(request)
+            .expect("valid keyframe directive frame");
+        let event = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
+            .expect("keyframe directive routes");
+
+        let WorkerEvent::PresentationKeyframeRequest(received) = event else {
+            panic!("expected presentation keyframe request event");
+        };
+        assert_eq!(received, request);
+    }
+
+    #[test]
+    fn presentation_sender_unicast_action_routes_as_typed_worker_event() {
+        use classmesh_windows_runtime::ipc::{
+            IpcFrame, ServicePresentationSenderUnicastAction,
+            ServicePresentationSenderUnicastActionKind,
+        };
+        use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+
+        let action = ServicePresentationSenderUnicastAction {
+            kind: ServicePresentationSenderUnicastActionKind::Attach,
+            slot_id: 11,
+            presentation_id: 55,
+            stream_id: 7,
+            epoch: 3,
+            destination: "192.0.2.44:49001".parse().expect("valid destination"),
+        };
+        let frame = IpcFrame::service_presentation_sender_unicast_action(action)
+            .expect("valid sender action frame");
+        let event = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
+            .expect("sender action routes");
+
+        let WorkerEvent::PresentationSenderUnicastAction(received) = event else {
+            panic!("expected presentation sender unicast action event");
+        };
+        assert_eq!(received, action);
+    }
+
+    #[test]
     fn service_cannot_send_worker_unicast_result_back_to_worker() {
         use classmesh_windows_runtime::ipc::{
             IpcFrame, WorkerPresentationUnicastStartResult, WorkerPresentationUnicastStartStatus,
