@@ -644,14 +644,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn authorized_fallback_orchestration_exposes_exact_contract() {
-        use classmesh_control::group_media_delivery::{
-            PresentationUnicastSenderTargetRequest, TeacherGroupMediaDeliveryManager,
-        };
-        use classmesh_control::presentation_fallback::PresentationFallbackCoordinator;
+        use classmesh_control::group_media_delivery::PresentationUnicastSenderTargetRequest;
         use classmesh_control::presentation_sender_plan::TeacherPresentationSenderPlan;
-        use classmesh_control::presentation_state::PresentationOwnership;
-        use classmesh_security::AuthorizationStore;
-        use classmesh_security::group_media_coordinator::GroupMediaCoordinator;
 
         fn assert_contract(
             context: TeacherAuthorizedFallbackContext<'_>,
