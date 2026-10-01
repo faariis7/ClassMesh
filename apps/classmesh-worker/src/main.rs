@@ -237,6 +237,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            Ok(WorkerEvent::PresentationKeyframeRequest(request)) => {
+                eprintln!(
+                    "ClassMesh Worker rejected Teacher presentation keyframe directive without an active sender runtime: presentation={}, stream={}, after_frame={}; control remains active",
+                    request.presentation_id(),
+                    request.stream_id(),
+                    request.after_frame_id()
+                );
+                continue;
+            }
+            Ok(WorkerEvent::PresentationSenderUnicastAction(action)) => {
+                eprintln!(
+                    "ClassMesh Worker rejected Teacher presentation unicast sender action without an active sender runtime: slot={}, presentation={}, stream={}, epoch={}, destination={}; control remains active",
+                    action.slot_id,
+                    action.presentation_id,
+                    action.stream_id,
+                    action.epoch,
+                    action.destination
+                );
+                continue;
+            }
             Ok(WorkerEvent::StreamReconfigure(reconfigure)) => {
                 match FocusedWorkerProfile::from_reconfigure(&reconfigure) {
                     Ok(profile) => {
@@ -891,6 +911,10 @@ enum WorkerEvent {
     PresentationKeyClear(classmesh_windows_runtime::ipc::ServicePresentationKeyClear),
     PresentationMulticastStart(classmesh_windows_runtime::ipc::ServicePresentationMulticastStart),
     PresentationUnicastStart(classmesh_windows_runtime::ipc::ServicePresentationUnicastStart),
+    PresentationKeyframeRequest(classmesh_core::keyframe::PresentationKeyframeRequest),
+    PresentationSenderUnicastAction(
+        classmesh_windows_runtime::ipc::ServicePresentationSenderUnicastAction,
+    ),
     IpcFailure(String),
 }
 
@@ -1325,6 +1349,12 @@ fn worker_event_from_decoded_frame(
             Ok(IpcMessage::ServicePresentationUnicastStart(start)) => {
                 Ok(WorkerEvent::PresentationUnicastStart(start))
             }
+            Ok(IpcMessage::ServicePresentationKeyframeRequest(request)) => {
+                Ok(WorkerEvent::PresentationKeyframeRequest(request))
+            }
+            Ok(IpcMessage::ServicePresentationSenderUnicastAction(action)) => {
+                Ok(WorkerEvent::PresentationSenderUnicastAction(action))
+            }
             Ok(IpcMessage::ServiceEncoderCacheResult(result)) => {
                 Ok(WorkerEvent::EncoderCacheResult(result))
             }
@@ -1570,6 +1600,52 @@ mod focused_profile_tests {
             panic!("expected presentation unicast start event");
         };
         assert_eq!(received, start);
+    }
+
+    #[test]
+    fn presentation_keyframe_request_routes_as_typed_worker_event() {
+        use classmesh_core::keyframe::PresentationKeyframeRequest;
+        use classmesh_windows_runtime::ipc::IpcFrame;
+        use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+
+        let request =
+            PresentationKeyframeRequest::new(55, 7, 42).expect("valid keyframe directive");
+        let frame = IpcFrame::service_presentation_keyframe_request(request)
+            .expect("valid keyframe directive frame");
+        let event = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
+            .expect("keyframe directive routes");
+
+        let WorkerEvent::PresentationKeyframeRequest(received) = event else {
+            panic!("expected presentation keyframe request event");
+        };
+        assert_eq!(received, request);
+    }
+
+    #[test]
+    fn presentation_sender_unicast_action_routes_as_typed_worker_event() {
+        use classmesh_windows_runtime::ipc::{
+            IpcFrame, ServicePresentationSenderUnicastAction,
+            ServicePresentationSenderUnicastActionKind,
+        };
+        use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+
+        let action = ServicePresentationSenderUnicastAction {
+            kind: ServicePresentationSenderUnicastActionKind::Attach,
+            slot_id: 11,
+            presentation_id: 55,
+            stream_id: 7,
+            epoch: 3,
+            destination: "192.0.2.44:49001".parse().expect("valid destination"),
+        };
+        let frame = IpcFrame::service_presentation_sender_unicast_action(action)
+            .expect("valid sender action frame");
+        let event = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
+            .expect("sender action routes");
+
+        let WorkerEvent::PresentationSenderUnicastAction(received) = event else {
+            panic!("expected presentation sender unicast action event");
+        };
+        assert_eq!(received, action);
     }
 
     #[test]
