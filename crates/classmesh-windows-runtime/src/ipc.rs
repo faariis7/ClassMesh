@@ -1137,7 +1137,10 @@ impl IpcFrame {
         payload.extend_from_slice(&[0_u8; 2]);
         payload.extend_from_slice(&start.interface.octets());
         debug_assert_eq!(payload.len(), SERVICE_PRESENTATION_SENDER_START_LEN);
-        Ok(Self::new(MESSAGE_SERVICE_PRESENTATION_SENDER_START, payload))
+        Ok(Self::new(
+            MESSAGE_SERVICE_PRESENTATION_SENDER_START,
+            payload,
+        ))
     }
 
     pub fn worker_presentation_sender_start_result(
@@ -1152,10 +1155,7 @@ impl IpcFrame {
         payload.extend_from_slice(&result.epoch.to_be_bytes());
         payload.push(result.status.as_byte());
         payload.extend_from_slice(&[0_u8; 3]);
-        debug_assert_eq!(
-            payload.len(),
-            WORKER_PRESENTATION_SENDER_START_RESULT_LEN
-        );
+        debug_assert_eq!(payload.len(), WORKER_PRESENTATION_SENDER_START_RESULT_LEN);
         Ok(Self::new(
             MESSAGE_WORKER_PRESENTATION_SENDER_START_RESULT,
             payload,
@@ -1727,15 +1727,9 @@ impl IpcFrame {
                     stream_id: u32::from_be_bytes(
                         self.payload[8..12].try_into().expect("four bytes"),
                     ),
-                    epoch: u32::from_be_bytes(
-                        self.payload[12..16].try_into().expect("four bytes"),
-                    ),
-                    width: u16::from_be_bytes(
-                        self.payload[16..18].try_into().expect("two bytes"),
-                    ),
-                    height: u16::from_be_bytes(
-                        self.payload[18..20].try_into().expect("two bytes"),
-                    ),
+                    epoch: u32::from_be_bytes(self.payload[12..16].try_into().expect("four bytes")),
+                    width: u16::from_be_bytes(self.payload[16..18].try_into().expect("two bytes")),
+                    height: u16::from_be_bytes(self.payload[18..20].try_into().expect("two bytes")),
                     fps: self.payload[20],
                     bitrate_kbps: u32::from_be_bytes(
                         self.payload[24..28].try_into().expect("four bytes"),
@@ -1743,9 +1737,7 @@ impl IpcFrame {
                     group: Ipv4Addr::from(
                         <[u8; 4]>::try_from(&self.payload[28..32]).expect("four bytes"),
                     ),
-                    port: u16::from_be_bytes(
-                        self.payload[32..34].try_into().expect("two bytes"),
-                    ),
+                    port: u16::from_be_bytes(self.payload[32..34].try_into().expect("two bytes")),
                     interface: Ipv4Addr::from(
                         <[u8; 4]>::try_from(&self.payload[36..40]).expect("four bytes"),
                     ),
@@ -1777,9 +1769,7 @@ impl IpcFrame {
                     stream_id: u32::from_be_bytes(
                         self.payload[16..20].try_into().expect("four bytes"),
                     ),
-                    epoch: u32::from_be_bytes(
-                        self.payload[20..24].try_into().expect("four bytes"),
-                    ),
+                    epoch: u32::from_be_bytes(self.payload[20..24].try_into().expect("four bytes")),
                     status,
                 };
                 result.validate()?;
