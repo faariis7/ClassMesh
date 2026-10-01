@@ -32,15 +32,17 @@ mod tests {
     fn attach_is_sanitized_to_exact_video_engine_binding() {
         let binding =
             TeacherPresentationOutlierBinding::new(11, target(7, 49_000, 3)).expect("binding");
-        let directive =
-            TeacherVideoEngineDirective::from_sender_action(
-                TeacherPresentationSenderAction::AttachUnicast(binding),
-            );
+        let directive = TeacherVideoEngineDirective::from_sender_action(
+            TeacherPresentationSenderAction::AttachUnicast(binding),
+        );
 
         let TeacherVideoEngineDirective::Unicast(action) = directive else {
             panic!("expected unicast directive");
         };
-        assert_eq!(action.kind, ServicePresentationSenderUnicastActionKind::Attach);
+        assert_eq!(
+            action.kind,
+            ServicePresentationSenderUnicastActionKind::Attach
+        );
         assert_eq!(action.slot_id, 11);
         assert_eq!(action.presentation_id, 55);
         assert_eq!(action.stream_id, 7);
@@ -52,15 +54,17 @@ mod tests {
     fn detach_keeps_exact_old_binding_without_receiver_identity() {
         let binding =
             TeacherPresentationOutlierBinding::new(11, target(9, 49_001, 4)).expect("binding");
-        let directive =
-            TeacherVideoEngineDirective::from_sender_action(
-                TeacherPresentationSenderAction::DetachUnicast(binding),
-            );
+        let directive = TeacherVideoEngineDirective::from_sender_action(
+            TeacherPresentationSenderAction::DetachUnicast(binding),
+        );
 
         let TeacherVideoEngineDirective::Unicast(action) = directive else {
             panic!("expected unicast directive");
         };
-        assert_eq!(action.kind, ServicePresentationSenderUnicastActionKind::Detach);
+        assert_eq!(
+            action.kind,
+            ServicePresentationSenderUnicastActionKind::Detach
+        );
         assert_eq!(action.slot_id, 11);
         assert_eq!(action.presentation_id, 55);
         assert_eq!(action.stream_id, 7);
@@ -70,12 +74,10 @@ mod tests {
 
     #[test]
     fn granted_keyframe_is_forwarded_without_control_identity() {
-        let request =
-            PresentationKeyframeRequest::new(55, 7, 42).expect("valid keyframe request");
-        let directive =
-            TeacherVideoEngineDirective::from_sender_action(
-                TeacherPresentationSenderAction::RequestKeyframe(request),
-            );
+        let request = PresentationKeyframeRequest::new(55, 7, 42).expect("valid keyframe request");
+        let directive = TeacherVideoEngineDirective::from_sender_action(
+            TeacherPresentationSenderAction::RequestKeyframe(request),
+        );
         assert_eq!(directive, TeacherVideoEngineDirective::Keyframe(request));
     }
 }
