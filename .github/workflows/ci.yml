@@ -124,9 +124,13 @@ jobs:
           $results = Join-Path $env:RUNNER_TEMP "phase7h-selftest"
           .\scripts\phase7h-scale.ps1 -Mode Init -ReceiverCount 2 -ReceiverId student-01,student-02 -ResultsDir $results
           $receiverDir = Join-Path $results "receivers"
+          Set-Content -LiteralPath (Join-Path $results "teacher.log") -Value "synthetic-ci-teacher-evidence"
           Set-Content -LiteralPath (Join-Path $receiverDir "student-01.log") -Value "synthetic-ci-evidence"
           Set-Content -LiteralPath (Join-Path $receiverDir "student-02.log") -Value "synthetic-ci-evidence"
           .\scripts\phase7h-scale.ps1 -Mode ValidateEvidence -ResultsDir $results
+          if (-not (Test-Path -LiteralPath (Join-Path $results "evidence-index.json"))) {
+            throw "Phase 7H evidence index was not created"
+          }
 
       - name: Stage Phase 4 qualification bundle
         shell: pwsh
