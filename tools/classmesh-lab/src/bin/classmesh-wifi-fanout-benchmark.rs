@@ -89,6 +89,10 @@ fn run() -> Result<(), String> {
             println!("physical_wifi=false");
             println!("strategy_selection=false");
             println!("receivers={}", report.receivers.len());
+            println!(
+                "teacher_uplink_replication_factor={}",
+                report.receivers.len()
+            );
             println!("frames_published={}", report.frames_published);
             println!("payload_bytes_per_frame={}", report.payload_bytes_per_frame);
             println!(
@@ -104,6 +108,7 @@ fn run() -> Result<(), String> {
             println!("physical_wifi=false");
             println!("strategy_selection=false");
             println!("receivers={}", report.receivers.len());
+            println!("teacher_uplink_replication_factor=1");
             println!("teacher_frames_to_relay={}", report.teacher_frames_to_relay);
             println!("teacher_payload_bytes={}", report.teacher_payload_bytes);
             println!("relay_frames_published={}", report.relay_frames_published);
