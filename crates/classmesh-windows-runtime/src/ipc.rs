@@ -2010,8 +2010,8 @@ mod tests {
             port: 49_000,
             interface: Ipv4Addr::new(192, 0, 2, 10),
         };
-        let frame = IpcFrame::service_presentation_sender_start(start)
-            .expect("valid Teacher sender start");
+        let frame =
+            IpcFrame::service_presentation_sender_start(start).expect("valid Teacher sender start");
         assert_eq!(
             frame.message().expect("typed Teacher sender start"),
             IpcMessage::ServicePresentationSenderStart(start)
