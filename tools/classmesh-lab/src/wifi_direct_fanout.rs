@@ -213,7 +213,9 @@ pub fn run_direct_fanout_benchmark(
     })
 }
 
-pub(crate) fn validate_config(config: DirectFanoutBenchmarkConfig) -> Result<(), DirectFanoutBenchmarkError> {
+pub(crate) fn validate_config(
+    config: DirectFanoutBenchmarkConfig,
+) -> Result<(), DirectFanoutBenchmarkError> {
     if config.frame_count == 0 || config.frame_count > MAX_SYNTHETIC_FRAME_COUNT {
         return Err(DirectFanoutBenchmarkError::InvalidFrameCount(
             config.frame_count,
