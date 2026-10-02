@@ -49,9 +49,7 @@ impl RenditionSfuCapabilities {
             return Err(RenditionSfuCapabilityError::NoMeasuredRenditionCapacity);
         }
         if self.measured_max_renditions > self.hardware_encoder_slots {
-            return Err(
-                RenditionSfuCapabilityError::MeasuredRenditionsExceedHardwareSlots,
-            );
+            return Err(RenditionSfuCapabilityError::MeasuredRenditionsExceedHardwareSlots);
         }
         Ok(self)
     }
@@ -233,22 +231,17 @@ mod tests {
 
         assert_eq!(
             evaluate_rendition_sfu_candidate(candidate, 10, capabilities(), evidence).unwrap(),
-            RenditionSfuCandidateStatus::Blocked(
-                RenditionSfuBlockReason::MultiRenditionGate(PhysicalGateStatus::Pending)
-            )
+            RenditionSfuCandidateStatus::Blocked(RenditionSfuBlockReason::MultiRenditionGate(
+                PhysicalGateStatus::Pending
+            ))
         );
 
         let mut limited = capabilities();
         limited.hardware_encoder_slots = 1;
         limited.measured_max_renditions = 1;
         assert_eq!(
-            evaluate_rendition_sfu_candidate(
-                candidate,
-                10,
-                limited,
-                qualified_evidence(),
-            )
-            .unwrap(),
+            evaluate_rendition_sfu_candidate(candidate, 10, limited, qualified_evidence(),)
+                .unwrap(),
             RenditionSfuCandidateStatus::Blocked(
                 RenditionSfuBlockReason::InsufficientEncoderSlots {
                     requested: 2,
@@ -263,13 +256,8 @@ mod tests {
             measured_max_relay_receivers: 20,
         };
         assert_eq!(
-            evaluate_rendition_sfu_candidate(
-                candidate,
-                10,
-                measured,
-                qualified_evidence(),
-            )
-            .unwrap(),
+            evaluate_rendition_sfu_candidate(candidate, 10, measured, qualified_evidence(),)
+                .unwrap(),
             RenditionSfuCandidateStatus::Blocked(
                 RenditionSfuBlockReason::ExceedsMeasuredRenditions {
                     requested: 2,
@@ -292,13 +280,8 @@ mod tests {
         };
 
         assert_eq!(
-            evaluate_rendition_sfu_candidate(
-                candidate,
-                10,
-                limited,
-                qualified_evidence(),
-            )
-            .unwrap(),
+            evaluate_rendition_sfu_candidate(candidate, 10, limited, qualified_evidence(),)
+                .unwrap(),
             RenditionSfuCandidateStatus::Blocked(
                 RenditionSfuBlockReason::ExceedsMeasuredRelayReceivers {
                     requested: 10,
@@ -315,13 +298,8 @@ mod tests {
             max_renditions: 2,
         };
         assert_eq!(
-            evaluate_rendition_sfu_candidate(
-                candidate,
-                20,
-                capabilities(),
-                qualified_evidence(),
-            )
-            .unwrap(),
+            evaluate_rendition_sfu_candidate(candidate, 20, capabilities(), qualified_evidence(),)
+                .unwrap(),
             RenditionSfuCandidateStatus::Eligible
         );
     }
@@ -360,9 +338,7 @@ mod tests {
                 qualified_evidence(),
             )
             .unwrap(),
-            RenditionSfuCandidateStatus::Blocked(
-                RenditionSfuBlockReason::InvalidRenditionCount
-            )
+            RenditionSfuCandidateStatus::Blocked(RenditionSfuBlockReason::InvalidRenditionCount)
         );
         assert_eq!(
             evaluate_rendition_sfu_candidate(
@@ -375,9 +351,7 @@ mod tests {
                 qualified_evidence(),
             )
             .unwrap(),
-            RenditionSfuCandidateStatus::Blocked(
-                RenditionSfuBlockReason::InvalidRenditionCount
-            )
+            RenditionSfuCandidateStatus::Blocked(RenditionSfuBlockReason::InvalidRenditionCount)
         );
         assert_eq!(
             evaluate_rendition_sfu_candidate(
@@ -390,9 +364,7 @@ mod tests {
                 qualified_evidence(),
             )
             .unwrap(),
-            RenditionSfuCandidateStatus::Blocked(
-                RenditionSfuBlockReason::InvalidReceiverCount
-            )
+            RenditionSfuCandidateStatus::Blocked(RenditionSfuBlockReason::InvalidReceiverCount)
         );
     }
 }
