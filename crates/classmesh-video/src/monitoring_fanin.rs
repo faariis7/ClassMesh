@@ -126,6 +126,10 @@ impl MonitoringFanIn {
         }
     }
 
+    pub fn discard_source(&mut self, source_id: MonitoringSourceId) -> bool {
+        self.pending.remove(&source_id).is_some()
+    }
+
     #[must_use]
     pub fn drain(&mut self) -> Vec<MonitoringThumbnailUpdate> {
         if self.pending.is_empty() {
