@@ -59,8 +59,8 @@ impl TeacherMonitoringCoordinator {
         scheduler_config: MonitoringSchedulerConfig,
         fanin_config: MonitoringFanInConfig,
     ) -> Result<Self, TeacherMonitoringPromotionError> {
-        let scheduler =
-            MonitoringScheduler::new(scheduler_config).map_err(TeacherMonitoringPromotionError::Scheduler)?;
+        let scheduler = MonitoringScheduler::new(scheduler_config)
+            .map_err(TeacherMonitoringPromotionError::Scheduler)?;
         let aggregator = TeacherMonitoringAggregator::new(fanin_config)
             .map_err(TeacherMonitoringPromotionError::FanIn)?;
         Ok(Self {
@@ -204,9 +204,7 @@ impl TeacherMonitoringCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use classmesh_protocol::control_wire::{
-        MediaTransport, StreamKind, VideoCodec, VideoProfile,
-    };
+    use classmesh_protocol::control_wire::{MediaTransport, StreamKind, VideoCodec, VideoProfile};
     use classmesh_video::distributor::SharedEncodedFrame;
     use classmesh_video::{Codec, EncodedFrameMeta};
 
