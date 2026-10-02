@@ -17,10 +17,12 @@ pub struct MonitoringPipeline {
 
 impl MonitoringPipeline {
     pub fn from_first_frame(
-        _frame: &DxgiFrame,
-        _profile: MonitoringProfile,
+        frame: &DxgiFrame,
+        profile: MonitoringProfile,
     ) -> Result<Self, PresentationError> {
-        todo!("Phase 9B RED: wrap the existing GPU-native presentation pipeline")
+        let inner =
+            PresentationPipeline::from_first_frame_with_target(frame, target_for_monitoring(profile))?;
+        Ok(Self { inner })
     }
 
     #[must_use]
@@ -46,12 +48,30 @@ impl MonitoringPipeline {
     }
 }
 
-fn target_for_monitoring(_profile: MonitoringProfile) -> PresentationTarget {
-    todo!("Phase 9B RED: derive a bounded monitoring target")
+fn target_for_monitoring(profile: MonitoringProfile) -> PresentationTarget {
+    PresentationTarget {
+        max_width: u32::from(profile.width()),
+        max_height: u32::from(profile.height()),
+        fps: u32::from(profile.fps()),
+        bitrate_bps: monitoring_bitrate_bps(profile),
+    }
 }
 
-fn monitoring_bitrate_bps(_profile: MonitoringProfile) -> u32 {
-    todo!("Phase 9B RED: derive bounded low-cost bitrate")
+fn monitoring_bitrate_bps(profile: MonitoringProfile) -> u32 {
+    const MAX_PIXEL_RATE: u64 = 640 * 360 * 5;
+    const BITRATE_SPAN_BPS: u64 =
+        (MAX_MONITORING_BITRATE_BPS - MIN_MONITORING_BITRATE_BPS) as u64;
+
+    let pixel_rate = u64::from(profile.width())
+        .saturating_mul(u64::from(profile.height()))
+        .saturating_mul(u64::from(profile.fps()));
+    let scaled = pixel_rate
+        .saturating_mul(BITRATE_SPAN_BPS)
+        .checked_div(MAX_PIXEL_RATE)
+        .unwrap_or(0);
+    let bitrate = u64::from(MIN_MONITORING_BITRATE_BPS).saturating_add(scaled);
+    u32::try_from(bitrate.min(u64::from(MAX_MONITORING_BITRATE_BPS)))
+        .unwrap_or(MAX_MONITORING_BITRATE_BPS)
 }
 
 #[cfg(test)]
