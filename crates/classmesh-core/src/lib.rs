@@ -7,6 +7,7 @@ pub mod metrics;
 pub mod presence;
 pub mod quality_sample;
 pub mod queue;
+pub mod receiver_cohort;
 pub mod receiver_quality;
 pub mod recovery;
 
