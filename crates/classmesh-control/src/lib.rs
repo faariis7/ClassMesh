@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod adaptive_media_recovery;
 pub mod authorization;
 pub mod bootstrap;
 pub mod client_session;
