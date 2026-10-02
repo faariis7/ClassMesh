@@ -48,6 +48,9 @@ jobs:
       - name: Synthetic monitoring grid baseline
         run: cargo run -p classmesh-lab --bin classmesh-monitoring-grid-benchmark -- --sources 30 --rounds 30
 
+      - name: Synthetic adaptive controller baseline
+        run: cargo run -p classmesh-lab --bin classmesh-adaptive-controller-benchmark -- --receivers 30 --rounds 30
+
   windows:
     name: Windows Build
     runs-on: windows-latest
@@ -84,6 +87,9 @@ jobs:
 
       - name: Build monitoring grid benchmark
         run: cargo build -p classmesh-lab --bin classmesh-monitoring-grid-benchmark --release
+
+      - name: Build adaptive controller benchmark
+        run: cargo build -p classmesh-lab --bin classmesh-adaptive-controller-benchmark --release
 
       - name: Build Phase 7 multicast probe
         run: cargo build -p classmesh-lab --bin classmesh-multicast-probe --release
@@ -141,6 +147,22 @@ jobs:
           }
           if ($output -notcontains "synthetic_invariants_passed=true") {
             throw "Phase 9 synthetic baseline did not pass its bounded invariants"
+          }
+
+      - name: Validate Phase 10 synthetic adaptive baseline
+        shell: pwsh
+        run: |
+          .\target\release\classmesh-adaptive-controller-benchmark.exe --help
+          $output = .\target\release\classmesh-adaptive-controller-benchmark.exe --receivers 30 --rounds 30
+          $output | Write-Host
+          if ($output -notcontains "physical_qualification=false") {
+            throw "Phase 10 synthetic baseline must not claim physical qualification"
+          }
+          if ($output -notcontains "production_default_selected=false") {
+            throw "Phase 10 synthetic baseline must not select a production default"
+          }
+          if ($output -notcontains "synthetic_invariants_passed=true") {
+            throw "Phase 10 synthetic baseline did not pass its adaptive invariants"
           }
 
       - name: Validate Phase 7H physical runner
@@ -215,6 +237,40 @@ jobs:
           }
           if ($null -eq $index.teacher_ui -or [string]::IsNullOrWhiteSpace([string]$index.teacher_ui.sha256)) {
             throw "Phase 9F self-test did not index optional UI evidence"
+          }
+
+      - name: Validate Phase 10G adaptive runner
+        shell: pwsh
+        run: |
+          .\scripts\phase10g-adaptive.ps1 -Mode Help
+          $results = Join-Path $env:RUNNER_TEMP "phase10g-selftest"
+          $ids = @("student-01","student-02","student-03","student-04","student-05")
+          .\scripts\phase10g-adaptive.ps1 -Mode Init -ReceiverCount 5 -ReceiverId $ids -ResultsDir $results
+          $receiverDir = Join-Path $results "receivers"
+          Set-Content -LiteralPath (Join-Path $results "teacher.log") -Value "synthetic-ci-teacher-adaptive-evidence"
+          Set-Content -LiteralPath (Join-Path $results "network.log") -Value "synthetic-ci-network-evidence"
+          Set-Content -LiteralPath (Join-Path $results "topology.log") -Value "synthetic-ci-topology-evidence"
+          Set-Content -LiteralPath (Join-Path $results "recovery.log") -Value "synthetic-ci-recovery-evidence"
+          Set-Content -LiteralPath (Join-Path $results "encoder.log") -Value "synthetic-ci-encoder-evidence"
+          foreach ($id in $ids) {
+            Set-Content -LiteralPath (Join-Path $receiverDir "$id.log") -Value "synthetic-ci-receiver-adaptive-evidence"
+          }
+          .\scripts\phase10g-adaptive.ps1 -Mode ValidateEvidence -ResultsDir $results
+          $indexPath = Join-Path $results "evidence-index.json"
+          if (-not (Test-Path -LiteralPath $indexPath)) {
+            throw "Phase 10G evidence index was not created"
+          }
+          $index = Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json
+          if ($null -ne $index.qualification_passed) {
+            throw "Phase 10G self-test must not claim physical qualification"
+          }
+          if ($index.production_default_selected -ne $false) {
+            throw "Phase 10G self-test must not select production defaults"
+          }
+          foreach ($field in @("network","topology","recovery","encoder")) {
+            if ($null -eq $index.$field -or [string]::IsNullOrWhiteSpace([string]$index.$field.sha256)) {
+              throw "Phase 10G self-test did not index optional $field evidence"
+            }
           }
 
       - name: Stage Phase 4 qualification bundle
@@ -324,6 +380,23 @@ jobs:
         with:
           name: classmesh-phase9f-monitoring-qualification-windows-x64
           path: phase9f-bundle/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
+
+      - name: Stage Phase 10G adaptive qualification bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path phase10g-bundle -Force | Out-Null
+          Copy-Item target/release/classmesh-adaptive-controller-benchmark.exe phase10g-bundle/
+          Copy-Item scripts/phase10g-adaptive.ps1 phase10g-bundle/
+          Copy-Item docs/PHASE10_ADAPTIVE_QUALIFICATION.md phase10g-bundle/
+          Copy-Item docs/PHASE10_ADAPTIVE_RESULTS.md phase10g-bundle/
+
+      - name: Upload Phase 10G adaptive qualification bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-phase10g-adaptive-qualification-windows-x64
+          path: phase10g-bundle/
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
