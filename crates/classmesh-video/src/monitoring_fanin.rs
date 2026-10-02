@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{btree_map::Entry, BTreeMap};
 
 use crate::distributor::SharedEncodedFrame;
 use crate::monitoring_scheduler::{DEFAULT_MAX_MONITORING_SOURCES, MonitoringSourceId};
@@ -104,22 +104,26 @@ impl MonitoringFanIn {
         update: MonitoringThumbnailUpdate,
     ) -> Result<MonitoringFanInPush, MonitoringFanInError> {
         let source_id = update.source_id();
+        let at_capacity = self.pending.len() >= self.config.max_sources;
 
-        if self.pending.contains_key(&source_id) {
-            self.pending.insert(source_id, update.into_frame());
-            self.accepted_updates = self.accepted_updates.saturating_add(1);
-            self.superseded_updates = self.superseded_updates.saturating_add(1);
-            return Ok(MonitoringFanInPush::Replaced);
+        match self.pending.entry(source_id) {
+            Entry::Occupied(mut existing) => {
+                existing.insert(update.into_frame());
+                self.accepted_updates = self.accepted_updates.saturating_add(1);
+                self.superseded_updates = self.superseded_updates.saturating_add(1);
+                Ok(MonitoringFanInPush::Replaced)
+            }
+            Entry::Vacant(vacant) => {
+                if at_capacity {
+                    self.rejected_updates = self.rejected_updates.saturating_add(1);
+                    return Err(MonitoringFanInError::SourceLimitReached);
+                }
+
+                vacant.insert(update.into_frame());
+                self.accepted_updates = self.accepted_updates.saturating_add(1);
+                Ok(MonitoringFanInPush::Inserted)
+            }
         }
-
-        if self.pending.len() >= self.config.max_sources {
-            self.rejected_updates = self.rejected_updates.saturating_add(1);
-            return Err(MonitoringFanInError::SourceLimitReached);
-        }
-
-        self.pending.insert(source_id, update.into_frame());
-        self.accepted_updates = self.accepted_updates.saturating_add(1);
-        Ok(MonitoringFanInPush::Inserted)
     }
 
     #[must_use]
