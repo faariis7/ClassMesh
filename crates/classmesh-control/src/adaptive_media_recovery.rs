@@ -22,18 +22,37 @@ pub enum ReceiverMediaRecoveryPlanError {
 }
 
 pub fn plan_receiver_media_recovery(
-    _sample: ReceiverQualitySample,
-    _observation: ReceiverQualityObservation,
-    _quality_policy: ReceiverQualityPolicy,
-    _recovery: Option<PresentationRecoveryDecision>,
+    sample: ReceiverQualitySample,
+    observation: ReceiverQualityObservation,
+    quality_policy: ReceiverQualityPolicy,
+    recovery: Option<PresentationRecoveryDecision>,
 ) -> Result<ReceiverMediaRecoveryPlan, ReceiverMediaRecoveryPlanError> {
-    todo!("Phase 10E RED: plan bounded receiver recovery actions")
+    let quality_policy = quality_policy
+        .validate()
+        .map_err(ReceiverMediaRecoveryPlanError::InvalidQualityPolicy)?;
+
+    let sample_is_valid = sample.validate().is_ok();
+    let accepted = observation.status == ReceiverQualitySampleStatus::Accepted;
+    let queue_pressure = sample.queue_depth >= quality_policy.degraded_queue_depth
+        || sample.queue_drop_rate >= quality_policy.degraded_queue_drop_rate;
+
+    Ok(ReceiverMediaRecoveryPlan {
+        catch_up_latest: accepted && sample_is_valid && queue_pressure,
+        keyframe_request: recovery.and_then(sanitized_keyframe_request),
+    })
 }
 
 fn sanitized_keyframe_request(
-    _recovery: PresentationRecoveryDecision,
+    recovery: PresentationRecoveryDecision,
 ) -> Option<PresentationKeyframeRequest> {
-    todo!("Phase 10E RED: reuse the existing sanitized sender recovery action")
+    match TeacherPresentationSenderPlan::recovery_action(recovery) {
+        Some(TeacherPresentationSenderAction::RequestKeyframe(request)) => Some(request),
+        Some(
+            TeacherPresentationSenderAction::AttachUnicast(_)
+            | TeacherPresentationSenderAction::DetachUnicast(_),
+        )
+        | None => None,
+    }
 }
 
 #[cfg(test)]
