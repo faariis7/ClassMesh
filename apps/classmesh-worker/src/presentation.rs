@@ -359,6 +359,18 @@ impl PresentationPipeline {
         Ok(encoded)
     }
 
+    /// Returns H.264 access units already completed by the asynchronous encoder without
+    /// submitting another capture frame.
+    ///
+    /// Low-cost monitoring uses this when an unchanged capture is intentionally suppressed so
+    /// output from an earlier submission is never held until the next heartbeat/change.
+    pub fn poll_ready(&mut self) -> Result<Vec<SharedEncodedFrame>, PresentationError> {
+        let mut encoded = Vec::new();
+        let ready = self.encoder.poll_ready()?;
+        self.consume_outputs(ready, &mut encoded)?;
+        Ok(encoded.into_iter().map(|output| output.frame).collect())
+    }
+
     /// Drains the encoder at the end of a probe/session and returns its final access units.
     pub fn finish(&mut self) -> Result<Vec<SharedEncodedFrame>, PresentationError> {
         Ok(self
