@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::distributor::SharedEncodedFrame;
-use crate::monitoring_scheduler::{MonitoringSourceId, DEFAULT_MAX_MONITORING_SOURCES};
+use crate::monitoring_scheduler::{DEFAULT_MAX_MONITORING_SOURCES, MonitoringSourceId};
 
 pub const DEFAULT_MAX_MONITORING_FANIN_SOURCES: usize = DEFAULT_MAX_MONITORING_SOURCES;
 pub const DEFAULT_MONITORING_DRAIN_BUDGET: usize = 8;
@@ -129,9 +129,9 @@ impl MonitoringFanIn {
         }
 
         let keys: Vec<MonitoringSourceId> = self.pending.keys().copied().collect();
-        let start = self
-            .cursor
-            .map_or(0, |cursor| keys.partition_point(|source_id| *source_id <= cursor));
+        let start = self.cursor.map_or(0, |cursor| {
+            keys.partition_point(|source_id| *source_id <= cursor)
+        });
         let selected: Vec<MonitoringSourceId> = keys[start..]
             .iter()
             .chain(keys[..start].iter())
