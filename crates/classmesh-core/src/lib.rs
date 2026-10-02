@@ -10,6 +10,7 @@ pub mod queue;
 pub mod receiver_cohort;
 pub mod receiver_quality;
 pub mod recovery;
+pub mod rendition_sfu;
 pub mod transport_topology;
 
 /// High-level media workloads supported by ClassMesh.
