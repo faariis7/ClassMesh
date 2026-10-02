@@ -111,7 +111,7 @@ impl AdaptationPolicy {
         }
     }
 
-    fn quality_tier(self, metrics: NetworkMetrics) -> QualityTier {
+    pub(crate) fn quality_tier(self, metrics: NetworkMetrics) -> QualityTier {
         if !metrics.is_valid()
             || metrics.packet_loss >= self.severe_loss
             || metrics.rtt_ms >= self.severe_rtt_ms
@@ -245,7 +245,10 @@ impl FocusedProfileController {
     }
 
     pub fn observe(&mut self, metrics: NetworkMetrics) -> FocusedProfileDecision {
-        let candidate = self.policy.quality_tier(metrics);
+        self.observe_tier(self.policy.quality_tier(metrics))
+    }
+
+    pub(crate) fn observe_tier(&mut self, candidate: QualityTier) -> FocusedProfileDecision {
         let Some(current) = self.current_tier else {
             self.current_tier = Some(candidate);
             return FocusedProfileDecision {
