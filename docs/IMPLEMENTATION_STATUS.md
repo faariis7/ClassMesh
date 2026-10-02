@@ -1,6 +1,6 @@
 # ClassMesh Implementation Status
 
-Last updated: 2026-10-01
+Last updated: 2026-10-03
 
 This file distinguishes **implemented code**, **hosted-CI validation**, **real-hardware validation still required**, and **future product work**. Architecture documents must not be read as claims that every planned feature is already production-ready.
 
@@ -13,6 +13,12 @@ Phase 4 physical acceptance remains pending. Issue #3 must remain open until two
 Phase 5 is complete under Issue #32 through PR #107. Phase 6 implementation is complete through 6E under Issue #108: authenticated input/lifecycle/secure-desktop handling is merged; the focused interactive media path now includes measured and Service-owned H.264 capability evidence/cache validation, peer-bound UDP stream dispatch, production Worker H.264 sending, profile adaptation, and bounded authenticated NACK/keyframe recovery through PR #145 (CI #619 green); the typed bounded clipboard skeleton is merged in PR #116. Phase 6F remains a physical interactive-control validation gate and is not satisfied by hosted CI.
 
 Phase 7 software implementation is complete through 7G: the live protected multicast sender/receiver path, authenticated group-media security, bounded unicast outlier fallback and coordinated/rate-limited recovery are merged through PR #272. PR #273 adds the CI-tested Phase 7H evidence harness and qualification bundle. Physical 7D multicast viability and 7H classroom-scale evidence remain open and cannot be closed by hosted CI.
+
+Phase 8 software comparison/tooling is complete through PR #280. PR #279 provides comparable direct-unicast and dependency-neutral relay synthetic baselines using one encoded rendition and bounded per-receiver queues; PR #280 provides the physical Wi-Fi evidence harness and qualification bundle for 5/10/20/30 receivers. The production Wi-Fi strategy remains deliberately unselected until reviewed physical evidence exists.
+
+Phase 9 monitoring-grid software is complete through 9E, with 9F qualification tooling merged in PR #287. The monitoring path is bounded to low-resolution 2–5 FPS thumbnail work, reuses the GPU-native Worker encode path, suppresses unchanged work with bounded heartbeat freshness, keeps Teacher fan-in bounded/latest-only, and promotes a selected student into the existing interactive path rather than creating a duplicate full-resolution monitoring stream. Classroom-scale physical qualification remains pending.
+
+Phase 10 adaptive networking is active under Issue #288. PR #289–#293 have merged the versioned receiver-health sample, stateful per-receiver quality controller, independent cohort planner, physical-gated transport/topology seam, and recovery/latest-frame-wins integration. PR #294 is in review for evidence-gated optional rendition/SFU eligibility; Phase 10G qualification tooling remains next. Hosted CI must not turn pending Phase 4/7/8/9 physical gates into selected production defaults.
 
 The hosted CI baseline covers Portable Rust / Ubuntu rustfmt, Clippy with warnings denied, full workspace tests and `classmesh-lab`, plus Windows workspace Clippy/tests and release builds for the media qualification executables. Hosted runners do not replace real interactive GPU/driver or two-PC validation.
 
@@ -145,7 +151,8 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 
 ## Next implementation sequence
 
-1. Keep Issue #3 open and perform Phase 4 physical qualification when two Windows PCs are available; do not select the default one-to-one UDP-vs-QUIC-Datagram transport before that evidence exists.
-2. Run Phase 6F physical interactive-control validation, including degraded/lost media while authenticated control remains responsive, stuck-input cleanup, secure-desktop diagnostics and bounded focused-media recovery.
-3. Execute Phase 7 physical qualification when hardware is available: first retain Phase 7D two-PC multicast evidence on the intended wired path, then use the PR #273 Phase 7H harness/runbook for the feasible 2/5/10/20/30-receiver checkpoints. Keep all unexecuted scale points pending and never treat hosted CI as physical evidence.
-4. Continue later production security, Wi-Fi fan-out, monitoring-grid, installer/update and UI work in roadmap order.
+1. Finish Phase 10F after full Portable + Windows CI and implement 10G adaptive-controller qualification tooling/evidence without auto-selecting unresolved transport/topology/rendition defaults.
+2. Keep Issue #3 open and run the Phase 4 two-PC qualification before selecting the default one-to-one UDP-vs-QUIC-Datagram transport.
+3. Run Phase 6F physical interactive-control validation.
+4. Execute the remaining Phase 7D/7H, Phase 8D and Phase 9F physical evidence gates when hardware is available; hosted CI cannot close them.
+5. Continue to Phase 11 Teacher UI only after the current engine/software gates are complete, while preserving later installer/update and 1.0 hardening work.
