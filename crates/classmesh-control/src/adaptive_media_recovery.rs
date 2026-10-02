@@ -64,9 +64,7 @@ mod tests {
         RECEIVER_QUALITY_SAMPLE_VERSION, ReceiverCapabilityHealth,
     };
     use classmesh_core::receiver_quality::ReceiverQualitySampleStatus;
-    use classmesh_video::distributor::{
-        FrameDistributor, SharedEncodedFrame, SinkId, SinkMode,
-    };
+    use classmesh_video::distributor::{FrameDistributor, SharedEncodedFrame, SinkId, SinkMode};
     use classmesh_video::{Codec, EncodedFrameMeta};
 
     fn sample() -> ReceiverQualitySample {
@@ -151,13 +149,8 @@ mod tests {
             ReceiverQualitySampleStatus::NonMonotonicSequence,
             ReceiverQualitySampleStatus::FutureObservation,
         ] {
-            let plan = plan_receiver_media_recovery(
-                congested,
-                observation(status),
-                policy,
-                None,
-            )
-            .unwrap();
+            let plan =
+                plan_receiver_media_recovery(congested, observation(status), policy, None).unwrap();
             assert!(!plan.catch_up_latest);
         }
 
@@ -175,7 +168,7 @@ mod tests {
     #[test]
     fn only_existing_sanitized_granted_recovery_produces_keyframe_action() {
         use crate::presentation_recovery::{
-            PresentationRecoveryOutcome, PresentationRecoveryDecision,
+            PresentationRecoveryDecision, PresentationRecoveryOutcome,
         };
 
         let request = PresentationKeyframeRequest::new(55, 7, 91).unwrap();
