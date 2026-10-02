@@ -9,6 +9,7 @@ pub mod quality_sample;
 pub mod queue;
 pub mod receiver_cohort;
 pub mod receiver_quality;
+pub mod rendition_sfu;
 pub mod recovery;
 pub mod transport_topology;
 
