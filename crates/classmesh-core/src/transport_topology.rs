@@ -137,7 +137,7 @@ impl TransportTopologyController {
             return self.observation(false, MediaPathCandidateStatus::Current);
         }
 
-        if let Some((gate, gate_status)) = first_blocking_gate(candidate, evidence) {
+        if let Some((gate, gate_status)) = media_path_blocking_gate(candidate, evidence) {
             self.clear_pending();
             return self.observation(
                 false,
@@ -185,7 +185,7 @@ impl TransportTopologyController {
     }
 }
 
-fn first_blocking_gate(
+pub fn media_path_blocking_gate(
     candidate: MediaPath,
     evidence: TransportTopologyEvidence,
 ) -> Option<(PhysicalPathGate, PhysicalGateStatus)> {
