@@ -6,8 +6,8 @@ use classmesh_core::quality_sample::{
 use classmesh_core::receiver_cohort::{ReceiverCohortPlanner, ReceiverCohortPlannerConfig};
 use classmesh_core::receiver_quality::{ReceiverQualityPolicy, ReceiverQualitySampleStatus};
 use classmesh_core::rendition_sfu::{
-    RenditionSfuCandidate, RenditionSfuCandidateStatus, RenditionSfuCapabilities,
-    RenditionSfuEvidence, evaluate_rendition_sfu_candidate,
+    RenditionSfuBlockReason, RenditionSfuCandidate, RenditionSfuCandidateStatus,
+    RenditionSfuCapabilities, RenditionSfuEvidence, evaluate_rendition_sfu_candidate,
 };
 use classmesh_core::transport_topology::{
     MediaPath, MediaPathCandidateStatus, MediaTopology, PhysicalGateStatus,
@@ -243,12 +243,17 @@ pub fn run_adaptive_controller_benchmark(
         },
         config.receivers,
         rendition_capabilities,
-        RenditionSfuEvidence::default(),
+        RenditionSfuEvidence {
+            transport_topology: qualified_transport_evidence(),
+            multi_rendition: PhysicalGateStatus::Pending,
+        },
     )
     .map_err(|_| AdaptiveControllerBenchmarkError::Invariant("rendition capabilities"))?;
     let unresolved_rendition_blocked = matches!(
         unresolved_rendition,
-        RenditionSfuCandidateStatus::Blocked(_)
+        RenditionSfuCandidateStatus::Blocked(RenditionSfuBlockReason::MultiRenditionGate(
+            PhysicalGateStatus::Pending
+        ))
     );
     if !unresolved_rendition_blocked {
         return Err(AdaptiveControllerBenchmarkError::Invariant(
