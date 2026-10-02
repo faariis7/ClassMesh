@@ -175,11 +175,7 @@ impl TransportTopologyController {
         self.pending_samples = 0;
     }
 
-    fn observation(
-        &self,
-        changed: bool,
-        status: MediaPathCandidateStatus,
-    ) -> MediaPathObservation {
+    fn observation(&self, changed: bool, status: MediaPathCandidateStatus) -> MediaPathObservation {
         MediaPathObservation {
             active: self.active,
             changed,
@@ -201,10 +197,9 @@ fn first_blocking_gate(
         MediaTransport::UdpUnicast => {
             Some((PhysicalPathGate::Phase4UdpUnicast, evidence.udp_unicast))
         }
-        MediaTransport::QuicDatagram => Some((
-            PhysicalPathGate::Phase4QuicDatagram,
-            evidence.quic_datagram,
-        )),
+        MediaTransport::QuicDatagram => {
+            Some((PhysicalPathGate::Phase4QuicDatagram, evidence.quic_datagram))
+        }
         MediaTransport::WebRtc => Some((PhysicalPathGate::WebRtc, evidence.web_rtc)),
         MediaTransport::ReliableFallback => None,
     };
@@ -292,10 +287,7 @@ mod tests {
         for expected_pending in [1, 2] {
             let observed = controller.observe(DIRECT_QUIC, qualified());
             assert_eq!(observed.active, DIRECT_UDP);
-            assert_eq!(
-                observed.status,
-                MediaPathCandidateStatus::PendingHysteresis
-            );
+            assert_eq!(observed.status, MediaPathCandidateStatus::PendingHysteresis);
             assert_eq!(observed.pending_samples, expected_pending);
         }
 
@@ -317,7 +309,9 @@ mod tests {
             1
         );
         assert_eq!(
-            controller.observe(WIRED_MULTICAST, qualified()).pending_samples,
+            controller
+                .observe(WIRED_MULTICAST, qualified())
+                .pending_samples,
             1
         );
         assert_eq!(
