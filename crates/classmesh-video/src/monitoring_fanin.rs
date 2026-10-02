@@ -81,20 +81,73 @@ pub struct MonitoringFanIn {
 }
 
 impl MonitoringFanIn {
-    pub fn new(_config: MonitoringFanInConfig) -> Result<Self, MonitoringFanInError> {
-        todo!("Phase 9D RED: validate bounded fan-in configuration")
+    pub fn new(config: MonitoringFanInConfig) -> Result<Self, MonitoringFanInError> {
+        if config.max_sources == 0 {
+            return Err(MonitoringFanInError::InvalidMaxSources);
+        }
+        if config.max_updates_per_drain == 0 {
+            return Err(MonitoringFanInError::InvalidDrainBudget);
+        }
+
+        Ok(Self {
+            config,
+            pending: BTreeMap::new(),
+            cursor: None,
+            accepted_updates: 0,
+            superseded_updates: 0,
+            rejected_updates: 0,
+        })
     }
 
     pub fn push(
         &mut self,
-        _update: MonitoringThumbnailUpdate,
+        update: MonitoringThumbnailUpdate,
     ) -> Result<MonitoringFanInPush, MonitoringFanInError> {
-        todo!("Phase 9D RED: keep only the latest frame for each bounded source")
+        let source_id = update.source_id();
+
+        if self.pending.contains_key(&source_id) {
+            self.pending.insert(source_id, update.into_frame());
+            self.accepted_updates = self.accepted_updates.saturating_add(1);
+            self.superseded_updates = self.superseded_updates.saturating_add(1);
+            return Ok(MonitoringFanInPush::Replaced);
+        }
+
+        if self.pending.len() >= self.config.max_sources {
+            self.rejected_updates = self.rejected_updates.saturating_add(1);
+            return Err(MonitoringFanInError::SourceLimitReached);
+        }
+
+        self.pending.insert(source_id, update.into_frame());
+        self.accepted_updates = self.accepted_updates.saturating_add(1);
+        Ok(MonitoringFanInPush::Inserted)
     }
 
     #[must_use]
     pub fn drain(&mut self) -> Vec<MonitoringThumbnailUpdate> {
-        todo!("Phase 9D RED: drain a fair bounded batch")
+        if self.pending.is_empty() {
+            return Vec::new();
+        }
+
+        let keys: Vec<MonitoringSourceId> = self.pending.keys().copied().collect();
+        let start = self
+            .cursor
+            .map_or(0, |cursor| keys.partition_point(|source_id| *source_id <= cursor));
+        let selected: Vec<MonitoringSourceId> = keys[start..]
+            .iter()
+            .chain(keys[..start].iter())
+            .copied()
+            .take(self.config.max_updates_per_drain)
+            .collect();
+
+        let mut drained = Vec::with_capacity(selected.len());
+        for source_id in selected {
+            let Some(frame) = self.pending.remove(&source_id) else {
+                continue;
+            };
+            self.cursor = Some(source_id);
+            drained.push(MonitoringThumbnailUpdate::new(source_id, frame));
+        }
+        drained
     }
 
     #[must_use]
