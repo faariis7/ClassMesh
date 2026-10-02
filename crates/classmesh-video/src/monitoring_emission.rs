@@ -46,17 +46,43 @@ impl Default for MonitoringEmissionPolicy {
 }
 
 impl MonitoringEmissionPolicy {
-    pub fn new(_heartbeat_interval_us: u64) -> Result<Self, MonitoringEmissionError> {
-        todo!("Phase 9C RED: validate bounded freshness heartbeat")
+    pub fn new(heartbeat_interval_us: u64) -> Result<Self, MonitoringEmissionError> {
+        if heartbeat_interval_us == 0 {
+            return Err(MonitoringEmissionError::InvalidHeartbeatInterval);
+        }
+        Ok(Self {
+            heartbeat_interval_us,
+            last_emitted_us: None,
+        })
     }
 
     #[must_use]
     pub fn observe(
         &mut self,
-        _now_us: u64,
-        _change: MonitoringChangeHint,
+        now_us: u64,
+        change: MonitoringChangeHint,
     ) -> MonitoringEmissionDecision {
-        todo!("Phase 9C RED: suppress unchanged frames until change or heartbeat")
+        let reason = if self.last_emitted_us.is_none() {
+            Some(MonitoringEmissionReason::Initial)
+        } else if change.has_region_change() {
+            Some(MonitoringEmissionReason::RegionChange)
+        } else if self
+            .last_emitted_us
+            .is_some_and(|last| now_us.saturating_sub(last) >= self.heartbeat_interval_us)
+        {
+            Some(MonitoringEmissionReason::Heartbeat)
+        } else {
+            None
+        };
+
+        if reason.is_some() {
+            self.last_emitted_us = Some(now_us);
+        }
+
+        MonitoringEmissionDecision {
+            emit: reason.is_some(),
+            reason,
+        }
     }
 
     #[must_use]
