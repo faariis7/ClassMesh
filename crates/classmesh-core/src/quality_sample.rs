@@ -47,8 +47,49 @@ pub enum ReceiverQualitySampleError {
 
 impl ReceiverQualitySample {
     pub fn validate(self) -> Result<Self, ReceiverQualitySampleError> {
-        todo!("Phase 10A RED: validate the complete per-receiver quality sample")
+        if self.schema_version != RECEIVER_QUALITY_SAMPLE_VERSION {
+            return Err(ReceiverQualitySampleError::UnsupportedVersion(
+                self.schema_version,
+            ));
+        }
+        if self.sample_sequence == 0 {
+            return Err(ReceiverQualitySampleError::InvalidSequence);
+        }
+        if !network_metrics_are_strictly_valid(self.network) {
+            return Err(ReceiverQualitySampleError::InvalidNetworkMetrics);
+        }
+        if !valid_rate(self.reordered_packet_rate) {
+            return Err(ReceiverQualitySampleError::InvalidReorderedPacketRate);
+        }
+        if !valid_delay(self.decode_delay_ms) {
+            return Err(ReceiverQualitySampleError::InvalidDecodeDelay);
+        }
+        if !valid_delay(self.render_delay_ms) {
+            return Err(ReceiverQualitySampleError::InvalidRenderDelay);
+        }
+        if !valid_rate(self.queue_drop_rate) {
+            return Err(ReceiverQualitySampleError::InvalidQueueDropRate);
+        }
+        Ok(self)
     }
+}
+
+fn network_metrics_are_strictly_valid(metrics: NetworkMetrics) -> bool {
+    metrics.is_valid()
+        && metrics.rtt_ms.is_finite()
+        && metrics.packet_loss.is_finite()
+        && metrics.jitter_ms.is_finite()
+        && metrics.decode_fps.is_finite()
+        && metrics.queue_delay_ms.is_finite()
+        && metrics.estimated_mbps.is_finite()
+}
+
+fn valid_rate(value: f32) -> bool {
+    value.is_finite() && (0.0..=1.0).contains(&value)
+}
+
+fn valid_delay(value: f32) -> bool {
+    value.is_finite() && value >= 0.0
 }
 
 #[cfg(test)]
