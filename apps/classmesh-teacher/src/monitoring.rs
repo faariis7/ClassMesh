@@ -2,6 +2,7 @@ use classmesh_video::monitoring_fanin::{
     MonitoringFanIn, MonitoringFanInConfig, MonitoringFanInError, MonitoringFanInPush,
     MonitoringFanInStats, MonitoringThumbnailUpdate,
 };
+use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 #[derive(Debug)]
 pub struct TeacherMonitoringAggregator {
