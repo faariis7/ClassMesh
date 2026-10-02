@@ -1,6 +1,9 @@
 use classmesh_capture_win::{CapturedFrameMeta, DxgiFrame};
 use classmesh_video::distributor::SharedEncodedFrame;
 use classmesh_video::monitoring::MonitoringProfile;
+use classmesh_video::monitoring_emission::{
+    MonitoringChangeHint, MonitoringEmissionPolicy, MonitoringEmissionReason,
+};
 
 use crate::presentation::{
     PresentationError, PresentationPipeline, PresentationProfile, PresentationStats,
@@ -10,9 +13,21 @@ use crate::presentation::{
 pub const MIN_MONITORING_BITRATE_BPS: u32 = 200_000;
 pub const MAX_MONITORING_BITRATE_BPS: u32 = 800_000;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MonitoringStats {
+    pub media: PresentationStats,
+    pub suppressed_unchanged_frames: u64,
+    pub region_change_frames: u64,
+    pub heartbeat_frames: u64,
+}
+
 #[derive(Debug)]
 pub struct MonitoringPipeline {
     inner: PresentationPipeline,
+    emission: MonitoringEmissionPolicy,
+    suppressed_unchanged_frames: u64,
+    region_change_frames: u64,
+    heartbeat_frames: u64,
 }
 
 impl MonitoringPipeline {
@@ -24,7 +39,13 @@ impl MonitoringPipeline {
             frame,
             target_for_monitoring(profile),
         )?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            emission: MonitoringEmissionPolicy::default(),
+            suppressed_unchanged_frames: 0,
+            region_change_frames: 0,
+            heartbeat_frames: 0,
+        })
     }
 
     #[must_use]
@@ -33,8 +54,13 @@ impl MonitoringPipeline {
     }
 
     #[must_use]
-    pub fn stats(&self) -> PresentationStats {
-        self.inner.stats()
+    pub fn stats(&self) -> MonitoringStats {
+        MonitoringStats {
+            media: self.inner.stats(),
+            suppressed_unchanged_frames: self.suppressed_unchanged_frames,
+            region_change_frames: self.region_change_frames,
+            heartbeat_frames: self.heartbeat_frames,
+        }
     }
 
     pub fn process_frame(
@@ -42,6 +68,29 @@ impl MonitoringPipeline {
         meta: CapturedFrameMeta,
         frame: DxgiFrame,
     ) -> Result<Vec<SharedEncodedFrame>, PresentationError> {
+        let decision = self.emission.observe(
+            meta.capture_timestamp_us,
+            MonitoringChangeHint {
+                region_metadata_bytes: frame.region_metadata_bytes(),
+            },
+        );
+
+        if !decision.emit {
+            self.suppressed_unchanged_frames = self.suppressed_unchanged_frames.saturating_add(1);
+            drop(frame);
+            return self.inner.poll_ready();
+        }
+
+        match decision.reason {
+            Some(MonitoringEmissionReason::RegionChange) => {
+                self.region_change_frames = self.region_change_frames.saturating_add(1);
+            }
+            Some(MonitoringEmissionReason::Heartbeat) => {
+                self.heartbeat_frames = self.heartbeat_frames.saturating_add(1);
+            }
+            Some(MonitoringEmissionReason::Initial) | None => {}
+        }
+
         self.inner.process_frame(meta, frame)
     }
 
