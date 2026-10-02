@@ -1,7 +1,7 @@
 #[cfg(windows)]
 mod control_runtime;
 #[cfg(windows)]
-mod monitoring;
+pub mod monitoring;
 
 #[cfg(windows)]
 mod windows_service_app {
