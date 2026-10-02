@@ -25,6 +25,7 @@ use crate::{
 pub struct DxgiFrame {
     texture: ID3D11Texture2D,
     duplication: IDXGIOutputDuplication,
+    region_metadata_bytes: u32,
     release_pending: bool,
 }
 
@@ -32,6 +33,15 @@ impl DxgiFrame {
     #[must_use]
     pub const fn texture(&self) -> &ID3D11Texture2D {
         &self.texture
+    }
+
+    /// Number of bytes of DXGI move/dirty-region metadata reported for this acquired frame.
+    ///
+    /// A zero value is treated only as "no region metadata reported", not proof that the desktop
+    /// can never need refreshing. Monitoring keeps a bounded heartbeat for that reason.
+    #[must_use]
+    pub const fn region_metadata_bytes(&self) -> u32 {
+        self.region_metadata_bytes
     }
 }
 
@@ -162,6 +172,7 @@ impl CaptureBackend for DxgiCaptureBackend {
             DxgiFrame {
                 texture,
                 duplication: self.duplication.clone(),
+                region_metadata_bytes: frame_info.TotalMetadataBufferSize,
                 release_pending: true,
             },
         ))
