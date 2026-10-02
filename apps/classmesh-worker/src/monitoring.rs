@@ -76,8 +76,7 @@ impl MonitoringPipeline {
         );
 
         if !decision.emit {
-            self.suppressed_unchanged_frames =
-                self.suppressed_unchanged_frames.saturating_add(1);
+            self.suppressed_unchanged_frames = self.suppressed_unchanged_frames.saturating_add(1);
             drop(frame);
             return self.inner.poll_ready();
         }
