@@ -270,7 +270,6 @@ mod tests {
         assert!(Arc::ptr_eq(&allocation, &drained[0].frame().data));
     }
 
-
     #[test]
     fn discard_source_removes_only_selected_pending_thumbnail() {
         let mut fanin = MonitoringFanIn::new(MonitoringFanInConfig::default()).unwrap();
