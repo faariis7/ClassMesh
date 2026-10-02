@@ -7,7 +7,7 @@ use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 /// This intentionally does not use the reliable control envelope/channel. The eventual monitoring
 /// transport may backpressure or drop independently without delaying authenticated control traffic.
 #[must_use]
-pub(crate) const fn build_monitoring_thumbnail_update(
+pub(crate) fn build_monitoring_thumbnail_update(
     source_id: MonitoringSourceId,
     frame: SharedEncodedFrame,
 ) -> MonitoringThumbnailUpdate {
