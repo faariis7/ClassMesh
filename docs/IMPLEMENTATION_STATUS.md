@@ -18,7 +18,7 @@ Phase 8 software comparison/tooling is complete through PR #280. PR #279 provide
 
 Phase 9 monitoring-grid software is complete through 9E, with 9F qualification tooling merged in PR #287. The monitoring path is bounded to low-resolution 2–5 FPS thumbnail work, reuses the GPU-native Worker encode path, suppresses unchanged work with bounded heartbeat freshness, keeps Teacher fan-in bounded/latest-only, and promotes a selected student into the existing interactive path rather than creating a duplicate full-resolution monitoring stream. Classroom-scale physical qualification remains pending.
 
-Phase 10 adaptive networking is active under Issue #288. PR #289–#293 have merged the versioned receiver-health sample, stateful per-receiver quality controller, independent cohort planner, physical-gated transport/topology seam, and recovery/latest-frame-wins integration. PR #294 is in review for evidence-gated optional rendition/SFU eligibility; Phase 10G qualification tooling remains next. Hosted CI must not turn pending Phase 4/7/8/9 physical gates into selected production defaults.
+Phase 10 adaptive networking is active under Issue #288. PR #289–#293 have merged the versioned receiver-health sample, stateful per-receiver quality controller, independent cohort planner, physical-gated transport/topology seam, and recovery/latest-frame-wins integration. PR #294 merged evidence-gated optional rendition/SFU eligibility; Phase 10G qualification tooling is now the active slice. Hosted CI must not turn pending Phase 4/7/8/9 physical gates into selected production defaults.
 
 The hosted CI baseline covers Portable Rust / Ubuntu rustfmt, Clippy with warnings denied, full workspace tests and `classmesh-lab`, plus Windows workspace Clippy/tests and release builds for the media qualification executables. Hosted runners do not replace real interactive GPU/driver or two-PC validation.
 
@@ -151,7 +151,7 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 
 ## Next implementation sequence
 
-1. Finish Phase 10F after full Portable + Windows CI and implement 10G adaptive-controller qualification tooling/evidence without auto-selecting unresolved transport/topology/rendition defaults.
+1. Implement Phase 10G adaptive-controller qualification tooling/evidence without auto-selecting unresolved transport/topology/rendition defaults.
 2. Keep Issue #3 open and run the Phase 4 two-PC qualification before selecting the default one-to-one UDP-vs-QUIC-Datagram transport.
 3. Run Phase 6F physical interactive-control validation.
 4. Execute the remaining Phase 7D/7H, Phase 8D and Phase 9F physical evidence gates when hardware is available; hosted CI cannot close them.
