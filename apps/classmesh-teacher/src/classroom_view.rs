@@ -150,8 +150,8 @@ impl TeacherClassroomViewModel {
 
 #[cfg(test)]
 mod tests {
-    use classmesh_core::presence::PresenceState;
     use classmesh_core::MediaState;
+    use classmesh_core::presence::PresenceState;
 
     use super::*;
 
@@ -200,7 +200,8 @@ mod tests {
 
     #[test]
     fn device_state_is_bounded_and_updates_do_not_consume_capacity() {
-        let mut model = TeacherClassroomViewModel::new(ClassroomViewConfig { max_devices: 2 }).unwrap();
+        let mut model =
+            TeacherClassroomViewModel::new(ClassroomViewConfig { max_devices: 2 }).unwrap();
         model
             .upsert(device(1, "A", PresenceState::Online, MediaState::Idle))
             .unwrap();
@@ -208,7 +209,12 @@ mod tests {
             .upsert(device(2, "B", PresenceState::Online, MediaState::Idle))
             .unwrap();
         model
-            .upsert(device(1, "A updated", PresenceState::Online, MediaState::Streaming))
+            .upsert(device(
+                1,
+                "A updated",
+                PresenceState::Online,
+                MediaState::Streaming,
+            ))
             .unwrap();
 
         assert_eq!(model.len(), 2);
@@ -222,7 +228,12 @@ mod tests {
     fn selection_survives_updates_and_is_cleared_when_device_is_removed() {
         let mut model = TeacherClassroomViewModel::new(ClassroomViewConfig::default()).unwrap();
         model
-            .upsert(device(7, "Student 07", PresenceState::Online, MediaState::Idle))
+            .upsert(device(
+                7,
+                "Student 07",
+                PresenceState::Online,
+                MediaState::Idle,
+            ))
             .unwrap();
         model.select(Some(MonitoringSourceId(7))).unwrap();
         model
