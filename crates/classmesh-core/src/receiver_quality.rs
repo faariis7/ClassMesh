@@ -1,9 +1,9 @@
+use crate::StreamKind;
 use crate::adaptation::{
     AdaptationPolicy, FocusedProfileController, FocusedProfileDecision, HysteresisConfig,
     QualityTier,
 };
 use crate::quality_sample::{ReceiverQualitySample, ReceiverQualitySampleError};
-use crate::StreamKind;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReceiverQualityPolicy {
@@ -50,20 +50,17 @@ impl ReceiverQualityPolicy {
             return Err(ReceiverQualityPolicyError::InvalidSampleAge);
         }
 
-        let valid_rates = valid_rate_thresholds(
-            self.degraded_reordered_packet_rate,
-            self.severe_reordered_packet_rate,
-        ) && valid_rate_thresholds(
-            self.degraded_queue_drop_rate,
-            self.severe_queue_drop_rate,
-        );
-        let valid_delays = valid_delay_thresholds(
-            self.degraded_decode_delay_ms,
-            self.severe_decode_delay_ms,
-        ) && valid_delay_thresholds(
-            self.degraded_render_delay_ms,
-            self.severe_render_delay_ms,
-        );
+        let valid_rates =
+            valid_rate_thresholds(
+                self.degraded_reordered_packet_rate,
+                self.severe_reordered_packet_rate,
+            ) && valid_rate_thresholds(self.degraded_queue_drop_rate, self.severe_queue_drop_rate);
+        let valid_delays =
+            valid_delay_thresholds(self.degraded_decode_delay_ms, self.severe_decode_delay_ms)
+                && valid_delay_thresholds(
+                    self.degraded_render_delay_ms,
+                    self.severe_render_delay_ms,
+                );
         let valid_depths = self.degraded_queue_depth <= self.severe_queue_depth;
 
         if !valid_rates || !valid_delays || !valid_depths {
@@ -144,11 +141,7 @@ impl ReceiverQualityController {
         Ok(Self {
             adaptation_policy,
             quality_policy,
-            profile_controller: FocusedProfileController::new(
-                kind,
-                adaptation_policy,
-                hysteresis,
-            ),
+            profile_controller: FocusedProfileController::new(kind, adaptation_policy, hysteresis),
             last_sequence: None,
             last_observed_at_us: None,
         })
@@ -234,10 +227,8 @@ fn valid_delay_thresholds(degraded: f32, severe: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quality_sample::{
-        ReceiverCapabilityHealth, RECEIVER_QUALITY_SAMPLE_VERSION,
-    };
     use crate::NetworkMetrics;
+    use crate::quality_sample::{RECEIVER_QUALITY_SAMPLE_VERSION, ReceiverCapabilityHealth};
 
     fn healthy_sample(sequence: u64, observed_at_us: u64) -> ReceiverQualitySample {
         ReceiverQualitySample {
@@ -359,8 +350,10 @@ mod tests {
         );
 
         for sequence in 2..=3 {
-            let observed =
-                controller.observe(healthy_sample(sequence, 1_000_000 + sequence * 100_000), 1_500_000);
+            let observed = controller.observe(
+                healthy_sample(sequence, 1_000_000 + sequence * 100_000),
+                1_500_000,
+            );
             assert_eq!(observed.status, ReceiverQualitySampleStatus::Accepted);
             assert_eq!(observed.decision.tier, QualityTier::Emergency);
         }
@@ -385,7 +378,10 @@ mod tests {
         assert_eq!(controller.last_sequence(), Some(1));
 
         let future = controller.observe(healthy_sample(2, 2_000_000), 1_900_000);
-        assert_eq!(future.status, ReceiverQualitySampleStatus::FutureObservation);
+        assert_eq!(
+            future.status,
+            ReceiverQualitySampleStatus::FutureObservation
+        );
         assert_eq!(controller.last_sequence(), Some(1));
     }
 
