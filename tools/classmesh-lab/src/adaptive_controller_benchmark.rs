@@ -3,12 +3,10 @@ use classmesh_core::cohort::{CohortKey, CohortKind, ReceiverId};
 use classmesh_core::quality_sample::{
     RECEIVER_QUALITY_SAMPLE_VERSION, ReceiverCapabilityHealth, ReceiverQualitySample,
 };
-use classmesh_core::receiver_cohort::{
-    ReceiverCohortPlanner, ReceiverCohortPlannerConfig,
-};
+use classmesh_core::receiver_cohort::{ReceiverCohortPlanner, ReceiverCohortPlannerConfig};
 use classmesh_core::receiver_quality::{ReceiverQualityPolicy, ReceiverQualitySampleStatus};
 use classmesh_core::rendition_sfu::{
-    RenditionSfuCapabilities, RenditionSfuCandidate, RenditionSfuCandidateStatus,
+    RenditionSfuCandidate, RenditionSfuCandidateStatus, RenditionSfuCapabilities,
     RenditionSfuEvidence, evaluate_rendition_sfu_candidate,
 };
 use classmesh_core::transport_topology::{
@@ -160,7 +158,11 @@ pub fn run_adaptive_controller_benchmark(
             .observed_at_us
             .saturating_add(u64::from(offset).saturating_mul(100_000));
         let recovered = planner
-            .observe(weak_id, healthy_sample(sequence, observed_at_us), observed_at_us)
+            .observe(
+                weak_id,
+                healthy_sample(sequence, observed_at_us),
+                observed_at_us,
+            )
             .map_err(|_| AdaptiveControllerBenchmarkError::Invariant("weak recovery sample"))?;
         weak_recovered_tier = recovered.quality.decision.tier;
     }
@@ -174,7 +176,8 @@ pub fn run_adaptive_controller_benchmark(
         .observe(
             weak_id,
             healthy_sample(
-                weak.sample_sequence.saturating_add(u64::from(hysteresis.recover_samples)),
+                weak.sample_sequence
+                    .saturating_add(u64::from(hysteresis.recover_samples)),
                 weak.observed_at_us.saturating_add(999_999),
             ),
             weak.observed_at_us.saturating_add(999_999),
@@ -194,11 +197,9 @@ pub fn run_adaptive_controller_benchmark(
         transport: MediaTransport::UdpUnicast,
         topology: MediaTopology::Direct,
     };
-    let mut topology = TransportTopologyController::new(
-        fallback,
-        TransportTopologyHysteresis::default(),
-    )
-    .map_err(|_| AdaptiveControllerBenchmarkError::Invariant("static topology config"))?;
+    let mut topology =
+        TransportTopologyController::new(fallback, TransportTopologyHysteresis::default())
+            .map_err(|_| AdaptiveControllerBenchmarkError::Invariant("static topology config"))?;
 
     let unresolved = topology.observe(direct_udp, TransportTopologyEvidence::default());
     let unresolved_transport_blocked = matches!(
@@ -218,12 +219,12 @@ pub fn run_adaptive_controller_benchmark(
     let first = topology.observe(direct_udp, qualified);
     let second = topology.observe(direct_udp, qualified);
     let third = topology.observe(direct_udp, qualified);
-    let qualified_switch_required_hysteresis =
-        first.status == MediaPathCandidateStatus::PendingHysteresis
-            && second.status == MediaPathCandidateStatus::PendingHysteresis
-            && third.status == MediaPathCandidateStatus::Applied
-            && third.changed
-            && third.active == direct_udp;
+    let qualified_switch_required_hysteresis = first.status
+        == MediaPathCandidateStatus::PendingHysteresis
+        && second.status == MediaPathCandidateStatus::PendingHysteresis
+        && third.status == MediaPathCandidateStatus::Applied
+        && third.changed
+        && third.active == direct_udp;
     if !qualified_switch_required_hysteresis {
         return Err(AdaptiveControllerBenchmarkError::Invariant(
             "transport hysteresis invariant",
@@ -245,29 +246,30 @@ pub fn run_adaptive_controller_benchmark(
         RenditionSfuEvidence::default(),
     )
     .map_err(|_| AdaptiveControllerBenchmarkError::Invariant("rendition capabilities"))?;
-    let unresolved_rendition_blocked =
-        matches!(unresolved_rendition, RenditionSfuCandidateStatus::Blocked(_));
+    let unresolved_rendition_blocked = matches!(
+        unresolved_rendition,
+        RenditionSfuCandidateStatus::Blocked(_)
+    );
     if !unresolved_rendition_blocked {
         return Err(AdaptiveControllerBenchmarkError::Invariant(
             "unresolved rendition was eligible",
         ));
     }
 
-    let reliable_fallback =
-        evaluate_rendition_sfu_candidate(
-            RenditionSfuCandidate {
-                path: fallback,
-                max_renditions: 1,
-            },
-            1,
-            RenditionSfuCapabilities {
-                hardware_encoder_slots: 1,
-                measured_max_renditions: 1,
-                measured_max_relay_receivers: 0,
-            },
-            RenditionSfuEvidence::default(),
-        )
-        .map_err(|_| AdaptiveControllerBenchmarkError::Invariant("fallback capabilities"))?;
+    let reliable_fallback = evaluate_rendition_sfu_candidate(
+        RenditionSfuCandidate {
+            path: fallback,
+            max_renditions: 1,
+        },
+        1,
+        RenditionSfuCapabilities {
+            hardware_encoder_slots: 1,
+            measured_max_renditions: 1,
+            measured_max_relay_receivers: 0,
+        },
+        RenditionSfuEvidence::default(),
+    )
+    .map_err(|_| AdaptiveControllerBenchmarkError::Invariant("fallback capabilities"))?;
     let reliable_fallback_eligible_without_default_selection =
         reliable_fallback == RenditionSfuCandidateStatus::Eligible;
 
@@ -374,7 +376,9 @@ mod tests {
                 receivers: 3,
                 rounds: 30,
             }),
-            Err(AdaptiveControllerBenchmarkError::UnsupportedReceiverCount(3))
+            Err(AdaptiveControllerBenchmarkError::UnsupportedReceiverCount(
+                3
+            ))
         );
         assert_eq!(
             run_adaptive_controller_benchmark(AdaptiveControllerBenchmarkConfig {
