@@ -2,6 +2,7 @@
 
 pub mod distributor;
 pub mod monitoring;
+pub mod monitoring_emission;
 pub mod monitoring_scheduler;
 pub mod rendition;
 
