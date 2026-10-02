@@ -22,7 +22,7 @@ impl TeacherMonitoringAggregator {
         self.fanin.push(update)
     }
 
-    pub fn discard(&mut self, source_id: classmesh_video::monitoring_scheduler::MonitoringSourceId) -> bool {
+    pub fn discard(&mut self, source_id: MonitoringSourceId) -> bool {
         self.fanin.discard_source(source_id)
     }
 
