@@ -22,6 +22,10 @@ impl TeacherMonitoringAggregator {
         self.fanin.push(update)
     }
 
+    pub fn discard(&mut self, source_id: classmesh_video::monitoring_scheduler::MonitoringSourceId) -> bool {
+        self.fanin.discard_source(source_id)
+    }
+
     #[must_use]
     pub fn drain(&mut self) -> Vec<MonitoringThumbnailUpdate> {
         self.fanin.drain()
