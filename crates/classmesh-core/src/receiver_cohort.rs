@@ -101,13 +101,8 @@ impl ReceiverCohortPlanner {
             self.quality_policy,
         )
         .map_err(ReceiverCohortPlannerError::InvalidQualityPolicy)?;
-        self.receivers.insert(
-            receiver,
-            ReceiverState {
-                transport,
-                quality,
-            },
-        );
+        self.receivers
+            .insert(receiver, ReceiverState { transport, quality });
         Ok(())
     }
 
@@ -250,10 +245,7 @@ mod tests {
         weak.observed_at_us = 1_200_000;
         let degraded = planner.observe(ReceiverId(3), weak, 1_200_000).unwrap();
         assert_eq!(degraded.quality.decision.tier, QualityTier::Emergency);
-        assert_eq!(
-            planner.members(high),
-            vec![ReceiverId(1), ReceiverId(2)]
-        );
+        assert_eq!(planner.members(high), vec![ReceiverId(1), ReceiverId(2)]);
         assert_eq!(planner.route(ReceiverId(1)), Some(high));
         assert_eq!(planner.route(ReceiverId(2)), Some(high));
         assert_eq!(
