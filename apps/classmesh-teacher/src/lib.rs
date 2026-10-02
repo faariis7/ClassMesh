@@ -1,4 +1,5 @@
 pub mod monitoring;
+pub mod monitoring_promotion;
 
 #[cfg(windows)]
 use classmesh_control::authorization::AuthenticatedControlGuard;
