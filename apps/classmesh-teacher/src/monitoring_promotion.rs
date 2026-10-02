@@ -48,6 +48,7 @@ pub enum TeacherMonitoringPromotionError {
 pub struct TeacherMonitoringCoordinator {
     scheduler: MonitoringScheduler,
     aggregator: TeacherMonitoringAggregator,
+    registered_sources: BTreeSet<MonitoringSourceId>,
     pending_promotions: BTreeMap<MonitoringSourceId, ValidatedInteractiveStreamOffer>,
     promoted: BTreeSet<MonitoringSourceId>,
     suppressed_updates: u64,
@@ -55,53 +56,139 @@ pub struct TeacherMonitoringCoordinator {
 
 impl TeacherMonitoringCoordinator {
     pub fn new(
-        _scheduler_config: MonitoringSchedulerConfig,
-        _fanin_config: MonitoringFanInConfig,
+        scheduler_config: MonitoringSchedulerConfig,
+        fanin_config: MonitoringFanInConfig,
     ) -> Result<Self, TeacherMonitoringPromotionError> {
-        todo!("Phase 9E RED: compose monitoring scheduler and fan-in")
+        let scheduler =
+            MonitoringScheduler::new(scheduler_config).map_err(TeacherMonitoringPromotionError::Scheduler)?;
+        let aggregator = TeacherMonitoringAggregator::new(fanin_config)
+            .map_err(TeacherMonitoringPromotionError::FanIn)?;
+        Ok(Self {
+            scheduler,
+            aggregator,
+            registered_sources: BTreeSet::new(),
+            pending_promotions: BTreeMap::new(),
+            promoted: BTreeSet::new(),
+            suppressed_updates: 0,
+        })
     }
 
     pub fn add_source(
         &mut self,
-        _source_id: MonitoringSourceId,
-        _profile: MonitoringProfile,
-        _priority: MonitoringPriority,
+        source_id: MonitoringSourceId,
+        profile: MonitoringProfile,
+        priority: MonitoringPriority,
     ) -> Result<(), TeacherMonitoringPromotionError> {
-        todo!("Phase 9E RED: register monitoring source")
+        self.scheduler
+            .add_source(source_id, profile, priority)
+            .map_err(TeacherMonitoringPromotionError::Scheduler)?;
+        self.registered_sources.insert(source_id);
+        Ok(())
     }
 
-    pub fn remove_source(&mut self, _source_id: MonitoringSourceId) -> bool {
-        todo!("Phase 9E RED: remove source from monitoring and promotion state")
+    pub fn remove_source(&mut self, source_id: MonitoringSourceId) -> bool {
+        let removed = self.scheduler.remove_source(source_id);
+        self.registered_sources.remove(&source_id);
+        self.pending_promotions.remove(&source_id);
+        self.promoted.remove(&source_id);
+        self.aggregator.discard(source_id);
+        removed
     }
 
     pub fn accept(
         &mut self,
-        _update: MonitoringThumbnailUpdate,
+        update: MonitoringThumbnailUpdate,
     ) -> Result<TeacherMonitoringUpdateDisposition, TeacherMonitoringPromotionError> {
-        todo!("Phase 9E RED: suppress late thumbnails during interactive promotion")
+        let source_id = update.source_id();
+        if !self.registered_sources.contains(&source_id) {
+            return Err(TeacherMonitoringPromotionError::Scheduler(
+                MonitoringSchedulerError::UnknownSource,
+            ));
+        }
+        if self.pending_promotions.contains_key(&source_id) || self.promoted.contains(&source_id) {
+            self.suppressed_updates = self.suppressed_updates.saturating_add(1);
+            return Ok(TeacherMonitoringUpdateDisposition::SuppressedForInteractive);
+        }
+
+        self.aggregator
+            .accept(update)
+            .map(TeacherMonitoringUpdateDisposition::Accepted)
+            .map_err(TeacherMonitoringPromotionError::FanIn)
     }
 
     pub fn request_interactive_promotion(
         &mut self,
-        _source_id: MonitoringSourceId,
-        _offer: &StreamOffer,
-        _negotiated_capabilities: &BTreeSet<Capability>,
+        source_id: MonitoringSourceId,
+        offer: &StreamOffer,
+        negotiated_capabilities: &BTreeSet<Capability>,
     ) -> Result<(), TeacherMonitoringPromotionError> {
-        todo!("Phase 9E RED: validate existing interactive offer before suppressing monitoring")
+        if !self.registered_sources.contains(&source_id) {
+            return Err(TeacherMonitoringPromotionError::Scheduler(
+                MonitoringSchedulerError::UnknownSource,
+            ));
+        }
+        if self.pending_promotions.contains_key(&source_id) {
+            return Err(TeacherMonitoringPromotionError::PromotionAlreadyPending);
+        }
+        if self.promoted.contains(&source_id) {
+            return Err(TeacherMonitoringPromotionError::PromotionAlreadyActive);
+        }
+
+        let validated = validate_interactive_stream_offer(offer, negotiated_capabilities)
+            .map_err(TeacherMonitoringPromotionError::InvalidInteractiveOffer)?;
+        self.scheduler
+            .request_interactive_promotion(source_id)
+            .map_err(TeacherMonitoringPromotionError::Scheduler)?;
+
+        // Remove any already-queued low-cost thumbnail immediately. Once selected, this source is
+        // represented by the existing interactive path instead of a parallel full-resolution
+        // monitoring stream.
+        self.aggregator.discard(source_id);
+        self.pending_promotions.insert(source_id, validated);
+        Ok(())
     }
 
     pub fn resume_thumbnail(
         &mut self,
-        _source_id: MonitoringSourceId,
+        source_id: MonitoringSourceId,
     ) -> Result<(), TeacherMonitoringPromotionError> {
-        todo!("Phase 9E RED: resume monitoring after interactive end/failure")
+        if !self.registered_sources.contains(&source_id) {
+            return Err(TeacherMonitoringPromotionError::Scheduler(
+                MonitoringSchedulerError::UnknownSource,
+            ));
+        }
+        self.pending_promotions.remove(&source_id);
+        self.promoted.remove(&source_id);
+        self.scheduler
+            .resume_thumbnail(source_id)
+            .map_err(TeacherMonitoringPromotionError::Scheduler)
     }
 
     pub fn poll(
         &mut self,
-        _now_us: u64,
+        now_us: u64,
     ) -> Result<Vec<TeacherMonitoringAction>, TeacherMonitoringPromotionError> {
-        todo!("Phase 9E RED: emit existing interactive action exactly once")
+        let scheduled = self.scheduler.poll(now_us);
+        let mut actions = Vec::with_capacity(scheduled.len());
+
+        for action in scheduled {
+            match action {
+                MonitoringScheduleAction::CaptureThumbnail { source_id, profile } => {
+                    actions.push(TeacherMonitoringAction::CaptureThumbnail { source_id, profile });
+                }
+                MonitoringScheduleAction::PromoteInteractive { source_id } => {
+                    let offer = self
+                        .pending_promotions
+                        .remove(&source_id)
+                        .ok_or(TeacherMonitoringPromotionError::MissingPreparedPromotion)?;
+                    self.aggregator.discard(source_id);
+                    self.promoted.insert(source_id);
+                    actions.push(TeacherMonitoringAction::StartInteractive { source_id, offer });
+                }
+            }
+        }
+
+        Ok(actions)
     }
 
     #[must_use]
