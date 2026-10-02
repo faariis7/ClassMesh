@@ -1,6 +1,6 @@
 # ClassMesh Living Work Plan
 
-Last updated: 2026-10-01
+Last updated: 2026-10-03
 
 This is the active execution plan for ClassMesh. It is updated as implementation evidence changes so roadmap intent, code status, hosted-CI evidence, and physical validation are not confused.
 
@@ -19,9 +19,19 @@ This is the active execution plan for ClassMesh. It is updated as implementation
 | Phase 5F — hardening | **Complete — through PR #107** | Fuzzing, malformed-envelope coverage, stable diagnostics, durable authorization/identity state, protected CNG server credentials, fail-closed Service startup, enrolled QUIC runtime, authenticated post-Hello session handling, centralized privileged dispatch, and end-to-end authorized input forwarding are merged; PR #107 CI #427 green |
 | Phase 6 — interactive remote control | **Implementation complete through 6E; physical validation pending — Issue #108** | 6A–6C are merged; 6D production focused-stream adaptation/media is complete through PR #145 (CI #619 green), including measured/cached H.264 capability evidence, peer-bound UDP stream start, bounded Worker H.264 sender, authenticated StreamAnswer acceptance, and bounded NACK/keyframe recovery forwarding; 6E clipboard skeleton merged in PR #116; only 6F physical interactive-control validation remains |
 | Phase 7 — wired-classroom Teacher Presentation | **7A–7G software complete; 7H physical scale qualification pending — Issue #153** | Production protected multicast, bounded unicast outlier fallback and coordinated/rate-limited recovery are wired through PR #272. PR #273 adds the repeatable 2/5/10/20/30-receiver evidence harness/runbook and CI-tested qualification bundle; hosted CI does not satisfy 7D multicast viability or 7H physical scale evidence |
+| Phase 8 — Wi-Fi fan-out benchmark / optional relay | **Software baselines + qualification tooling complete; physical strategy decision pending — Issue #276** | Direct and relay synthetic baselines are merged through PR #279; PR #280 adds the physical 5/10/20/30-receiver Wi-Fi evidence harness. Hosted CI does not select the production Wi-Fi strategy. |
+| Phase 9 — monitoring grid | **9A–9E software complete; 9F physical qualification pending — Issue #281** | Low-cost 2–5 FPS monitoring profile/scheduler, GPU-native Worker thumbnail encode path, change-aware heartbeat, bounded Teacher fan-in and interactive promotion are merged through PR #286. PR #287 adds synthetic/classroom qualification tooling; physical 5/10/20/30-source evidence remains pending. |
+| Phase 10 — adaptive networking / quality controller | **10A–10E merged; 10F in review; 10G next — Issue #288** | Per-receiver health sampling, hysteretic profile adaptation, independent cohort routing, physical-gated transport/topology decisions, and recovery/latest-frame-wins integration are merged through PR #293. PR #294 adds evidence-gated rendition/SFU eligibility without selecting a topology. |
 | AI quality workflow | **Active** | Project skills + official plugins documented in `docs/AI_QUALITY_STACK.md` |
 
-Phase 5 tracking issue #32 is complete. Active physical/qualification tracking remains under Phase 6 Issue #108 and Phase 7 Issue #153.
+Phase 5 tracking issue #32 is complete. Active physical/qualification tracking remains under Phase 6 Issue #108, Phase 7 Issue #153, Phase 8 Issue #276, Phase 9 Issue #281, and Phase 10 Issue #288.
+
+## Current priority
+
+1. Finish Phase 10F only after Portable + Windows CI are green.
+2. Implement Phase 10G qualification tooling/evidence without auto-selecting unresolved transport, topology, relay, or multi-rendition defaults.
+3. Keep Phase 4, 6F, 7D/7H, 8D, and 9F physical gates open until real hardware evidence exists.
+4. Move to Phase 11 Teacher UI only after the current engine/software gates are complete.
 
 ## Rules while Phase 4 hardware is unavailable
 
