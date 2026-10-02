@@ -56,26 +56,55 @@ pub struct TeacherClassroomViewModel {
 }
 
 impl TeacherClassroomViewModel {
-    pub fn new(_config: ClassroomViewConfig) -> Result<Self, ClassroomViewError> {
-        todo!("Phase 11A RED: validate bounded classroom view state")
+    pub fn new(config: ClassroomViewConfig) -> Result<Self, ClassroomViewError> {
+        if config.max_devices == 0 {
+            return Err(ClassroomViewError::InvalidMaxDevices);
+        }
+        Ok(Self {
+            config,
+            devices: BTreeMap::new(),
+            selected: None,
+        })
     }
 
     pub fn upsert(
         &mut self,
-        _snapshot: ClassroomDeviceSnapshot,
+        mut snapshot: ClassroomDeviceSnapshot,
     ) -> Result<(), ClassroomViewError> {
-        todo!("Phase 11A RED: insert/update bounded device projection")
+        let display_name = snapshot.display_name.trim();
+        if display_name.is_empty() {
+            return Err(ClassroomViewError::EmptyDisplayName);
+        }
+        if !self.devices.contains_key(&snapshot.source_id)
+            && self.devices.len() >= self.config.max_devices
+        {
+            return Err(ClassroomViewError::DeviceLimitReached);
+        }
+
+        snapshot.display_name = display_name.to_owned();
+        self.devices.insert(snapshot.source_id, snapshot);
+        Ok(())
     }
 
-    pub fn remove(&mut self, _source_id: MonitoringSourceId) -> bool {
-        todo!("Phase 11A RED: remove device and clear stale selection")
+    pub fn remove(&mut self, source_id: MonitoringSourceId) -> bool {
+        let removed = self.devices.remove(&source_id).is_some();
+        if removed && self.selected == Some(source_id) {
+            self.selected = None;
+        }
+        removed
     }
 
     pub fn select(
         &mut self,
-        _source_id: Option<MonitoringSourceId>,
+        source_id: Option<MonitoringSourceId>,
     ) -> Result<(), ClassroomViewError> {
-        todo!("Phase 11A RED: select only known device")
+        if let Some(source_id) = source_id {
+            if !self.devices.contains_key(&source_id) {
+                return Err(ClassroomViewError::UnknownDevice);
+            }
+        }
+        self.selected = source_id;
+        Ok(())
     }
 
     #[must_use]
@@ -95,7 +124,27 @@ impl TeacherClassroomViewModel {
 
     #[must_use]
     pub fn rows(&self) -> Vec<ClassroomDeviceRow> {
-        todo!("Phase 11A RED: deterministic UI projection")
+        let mut rows: Vec<_> = self
+            .devices
+            .values()
+            .map(|device| ClassroomDeviceRow {
+                source_id: device.source_id,
+                display_name: device.display_name.clone(),
+                health: device.health,
+                quality_tier: device.quality_tier,
+                thumbnail_available: device.thumbnail_available,
+                interactive_active: device.interactive_active,
+                selected: self.selected == Some(device.source_id),
+            })
+            .collect();
+
+        rows.sort_by(|left, right| {
+            left.display_name
+                .to_lowercase()
+                .cmp(&right.display_name.to_lowercase())
+                .then_with(|| left.source_id.cmp(&right.source_id))
+        });
+        rows
     }
 }
 
