@@ -6,8 +6,8 @@ pub mod keyframe;
 pub mod metrics;
 pub mod presence;
 pub mod quality_sample;
-pub mod receiver_quality;
 pub mod queue;
+pub mod receiver_quality;
 pub mod recovery;
 
 /// High-level media workloads supported by ClassMesh.
