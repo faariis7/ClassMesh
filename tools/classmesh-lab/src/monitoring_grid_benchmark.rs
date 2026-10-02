@@ -58,9 +58,13 @@ impl fmt::Display for MonitoringGridBenchmarkError {
             Self::InvalidDrainBudget => write!(formatter, "drain budget must be non-zero"),
             Self::Scheduler(error) => write!(formatter, "monitoring scheduler error: {error:?}"),
             Self::FanIn(error) => write!(formatter, "monitoring fan-in error: {error:?}"),
-            Self::FairnessViolation => write!(formatter, "not every monitoring source was observed"),
+            Self::FairnessViolation => {
+                write!(formatter, "not every monitoring source was observed")
+            }
             Self::PromotionInvariant => write!(formatter, "interactive promotion invariant failed"),
-            Self::BudgetViolation => write!(formatter, "bounded monitoring work budget was exceeded"),
+            Self::BudgetViolation => {
+                write!(formatter, "bounded monitoring work budget was exceeded")
+            }
         }
     }
 }
@@ -215,7 +219,9 @@ pub fn run_monitoring_grid_benchmark(
     })
 }
 
-fn validate_config(config: MonitoringGridBenchmarkConfig) -> Result<(), MonitoringGridBenchmarkError> {
+fn validate_config(
+    config: MonitoringGridBenchmarkConfig,
+) -> Result<(), MonitoringGridBenchmarkError> {
     if !MONITORING_GRID_SCALE_POINTS.contains(&config.sources) {
         return Err(MonitoringGridBenchmarkError::UnsupportedSourceCount(
             config.sources,
@@ -292,7 +298,11 @@ mod tests {
             assert_eq!(report.rejected_updates, 0);
             assert_eq!(report.promotion_actions, 1);
             assert_eq!(
-                (report.profile_width, report.profile_height, report.profile_fps),
+                (
+                    report.profile_width,
+                    report.profile_height,
+                    report.profile_fps
+                ),
                 (320, 180, 3)
             );
         }
