@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use crate::distributor::SharedEncodedFrame;
-use crate::monitoring_scheduler::MonitoringSourceId;
+use crate::monitoring_scheduler::{MonitoringSourceId, DEFAULT_MAX_MONITORING_SOURCES};
 
-pub const DEFAULT_MAX_MONITORING_FANIN_SOURCES: usize = 64;
+pub const DEFAULT_MAX_MONITORING_FANIN_SOURCES: usize = DEFAULT_MAX_MONITORING_SOURCES;
 pub const DEFAULT_MONITORING_DRAIN_BUDGET: usize = 8;
 
 #[derive(Debug, Clone)]
@@ -14,7 +14,7 @@ pub struct MonitoringThumbnailUpdate {
 
 impl MonitoringThumbnailUpdate {
     #[must_use]
-    pub const fn new(source_id: MonitoringSourceId, frame: SharedEncodedFrame) -> Self {
+    pub fn new(source_id: MonitoringSourceId, frame: SharedEncodedFrame) -> Self {
         Self { source_id, frame }
     }
 
