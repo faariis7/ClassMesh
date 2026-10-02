@@ -45,6 +45,9 @@ jobs:
       - name: Synthetic Wi-Fi relay fanout baseline
         run: cargo run -p classmesh-lab --bin classmesh-wifi-fanout-benchmark -- --strategy relay --receivers 5 --frames 120
 
+      - name: Synthetic monitoring grid baseline
+        run: cargo run -p classmesh-lab --bin classmesh-monitoring-grid-benchmark -- --sources 30 --rounds 30
+
   windows:
     name: Windows Build
     runs-on: windows-latest
@@ -78,6 +81,9 @@ jobs:
 
       - name: Build Wi-Fi fanout benchmark
         run: cargo build -p classmesh-lab --bin classmesh-wifi-fanout-benchmark --release
+
+      - name: Build monitoring grid benchmark
+        run: cargo build -p classmesh-lab --bin classmesh-monitoring-grid-benchmark --release
 
       - name: Build Phase 7 multicast probe
         run: cargo build -p classmesh-lab --bin classmesh-multicast-probe --release
@@ -121,6 +127,22 @@ jobs:
           .\target\release\classmesh-wifi-fanout-benchmark.exe --strategy direct-unicast --receivers 5 --frames 120
           .\target\release\classmesh-wifi-fanout-benchmark.exe --strategy relay --receivers 5 --frames 120
 
+      - name: Validate Phase 9 synthetic monitoring baseline
+        shell: pwsh
+        run: |
+          .\target\release\classmesh-monitoring-grid-benchmark.exe --help
+          $output = .\target\release\classmesh-monitoring-grid-benchmark.exe --sources 30 --rounds 30
+          $output | Write-Host
+          if ($output -notcontains "physical_classroom=false") {
+            throw "Phase 9 synthetic baseline must not claim physical classroom evidence"
+          }
+          if ($output -notcontains "physical_qualification=false") {
+            throw "Phase 9 synthetic baseline must not claim physical qualification"
+          }
+          if ($output -notcontains "synthetic_invariants_passed=true") {
+            throw "Phase 9 synthetic baseline did not pass its bounded invariants"
+          }
+
       - name: Validate Phase 7H physical runner
         shell: pwsh
         run: |
@@ -160,6 +182,39 @@ jobs:
           }
           if ($null -eq $index.ap -or [string]::IsNullOrWhiteSpace([string]$index.ap.sha256)) {
             throw "Phase 8D self-test did not index AP evidence"
+          }
+
+      - name: Validate Phase 9F monitoring runner
+        shell: pwsh
+        run: |
+          .\scripts\phase9f-monitoring.ps1 -Mode Help
+          $results = Join-Path $env:RUNNER_TEMP "phase9f-selftest"
+          $ids = @("student-01","student-02","student-03","student-04","student-05")
+          .\scripts\phase9f-monitoring.ps1 -Mode Init -ReceiverCount 5 -ReceiverId $ids -ResultsDir $results
+          $receiverDir = Join-Path $results "receivers"
+          Set-Content -LiteralPath (Join-Path $results "teacher.log") -Value "synthetic-ci-teacher-monitoring-evidence"
+          Set-Content -LiteralPath (Join-Path $results "network.log") -Value "synthetic-ci-network-evidence"
+          Set-Content -LiteralPath (Join-Path $results "teacher-ui.log") -Value "synthetic-ci-ui-evidence"
+          foreach ($id in $ids) {
+            Set-Content -LiteralPath (Join-Path $receiverDir "$id.log") -Value "synthetic-ci-receiver-monitoring-evidence"
+          }
+          .\scripts\phase9f-monitoring.ps1 -Mode ValidateEvidence -ResultsDir $results
+          $indexPath = Join-Path $results "evidence-index.json"
+          if (-not (Test-Path -LiteralPath $indexPath)) {
+            throw "Phase 9F evidence index was not created"
+          }
+          $index = Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json
+          if ($null -ne $index.qualification_passed) {
+            throw "Phase 9F self-test must not claim physical qualification"
+          }
+          if ($index.receiver_count -ne 5 -or $index.tile_width -ne 320 -or $index.tile_height -ne 180 -or $index.fps -ne 3) {
+            throw "Phase 9F evidence index does not preserve the expected monitoring contract"
+          }
+          if ($null -eq $index.network -or [string]::IsNullOrWhiteSpace([string]$index.network.sha256)) {
+            throw "Phase 9F self-test did not index optional network evidence"
+          }
+          if ($null -eq $index.teacher_ui -or [string]::IsNullOrWhiteSpace([string]$index.teacher_ui.sha256)) {
+            throw "Phase 9F self-test did not index optional UI evidence"
           }
 
       - name: Stage Phase 4 qualification bundle
@@ -252,6 +307,23 @@ jobs:
         with:
           name: classmesh-phase8d-wifi-qualification-windows-x64
           path: phase8d-bundle/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
+
+      - name: Stage Phase 9F monitoring qualification bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path phase9f-bundle -Force | Out-Null
+          Copy-Item target/release/classmesh-monitoring-grid-benchmark.exe phase9f-bundle/
+          Copy-Item scripts/phase9f-monitoring.ps1 phase9f-bundle/
+          Copy-Item docs/PHASE9_MONITORING_QUALIFICATION.md phase9f-bundle/
+          Copy-Item docs/PHASE9_MONITORING_RESULTS.md phase9f-bundle/
+
+      - name: Upload Phase 9F monitoring qualification bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-phase9f-monitoring-qualification-windows-x64
+          path: phase9f-bundle/
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
