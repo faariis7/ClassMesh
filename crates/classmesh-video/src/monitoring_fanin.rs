@@ -1,4 +1,4 @@
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::collections::{BTreeMap, btree_map::Entry};
 
 use crate::distributor::SharedEncodedFrame;
 use crate::monitoring_scheduler::{DEFAULT_MAX_MONITORING_SOURCES, MonitoringSourceId};
