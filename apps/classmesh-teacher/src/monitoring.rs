@@ -2,6 +2,7 @@ use classmesh_video::monitoring_fanin::{
     MonitoringFanIn, MonitoringFanInConfig, MonitoringFanInError, MonitoringFanInPush,
     MonitoringFanInStats, MonitoringThumbnailUpdate,
 };
+use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 #[derive(Debug)]
 pub struct TeacherMonitoringAggregator {
@@ -20,6 +21,10 @@ impl TeacherMonitoringAggregator {
         update: MonitoringThumbnailUpdate,
     ) -> Result<MonitoringFanInPush, MonitoringFanInError> {
         self.fanin.push(update)
+    }
+
+    pub fn discard(&mut self, source_id: MonitoringSourceId) -> bool {
+        self.fanin.discard_source(source_id)
     }
 
     #[must_use]

@@ -126,6 +126,10 @@ impl MonitoringFanIn {
         }
     }
 
+    pub fn discard_source(&mut self, source_id: MonitoringSourceId) -> bool {
+        self.pending.remove(&source_id).is_some()
+    }
+
     #[must_use]
     pub fn drain(&mut self) -> Vec<MonitoringThumbnailUpdate> {
         if self.pending.is_empty() {
@@ -264,6 +268,20 @@ mod tests {
 
         let drained = fanin.drain();
         assert!(Arc::ptr_eq(&allocation, &drained[0].frame().data));
+    }
+
+    #[test]
+    fn discard_source_removes_only_selected_pending_thumbnail() {
+        let mut fanin = MonitoringFanIn::new(MonitoringFanInConfig::default()).unwrap();
+        fanin.push(update(7, 1)).unwrap();
+        fanin.push(update(8, 1)).unwrap();
+
+        assert!(fanin.discard_source(MonitoringSourceId(7)));
+        assert!(!fanin.discard_source(MonitoringSourceId(7)));
+
+        let drained = fanin.drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].source_id(), MonitoringSourceId(8));
     }
 
     #[test]
