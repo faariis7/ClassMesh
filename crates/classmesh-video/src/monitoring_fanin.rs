@@ -266,6 +266,21 @@ mod tests {
         assert!(Arc::ptr_eq(&allocation, &drained[0].frame().data));
     }
 
+
+    #[test]
+    fn discard_source_removes_only_selected_pending_thumbnail() {
+        let mut fanin = MonitoringFanIn::new(MonitoringFanInConfig::default()).unwrap();
+        fanin.push(update(7, 1)).unwrap();
+        fanin.push(update(8, 1)).unwrap();
+
+        assert!(fanin.discard_source(MonitoringSourceId(7)));
+        assert!(!fanin.discard_source(MonitoringSourceId(7)));
+
+        let drained = fanin.drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].source_id(), MonitoringSourceId(8));
+    }
+
     #[test]
     fn invalid_limits_fail_closed() {
         assert!(matches!(
