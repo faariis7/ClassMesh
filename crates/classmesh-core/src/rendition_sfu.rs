@@ -42,7 +42,18 @@ pub enum RenditionSfuCapabilityError {
 
 impl RenditionSfuCapabilities {
     pub fn validate(self) -> Result<Self, RenditionSfuCapabilityError> {
-        todo!("Phase 10F RED: validate retained capability evidence")
+        if self.hardware_encoder_slots == 0 {
+            return Err(RenditionSfuCapabilityError::NoHardwareEncoderSlots);
+        }
+        if self.measured_max_renditions == 0 {
+            return Err(RenditionSfuCapabilityError::NoMeasuredRenditionCapacity);
+        }
+        if self.measured_max_renditions > self.hardware_encoder_slots {
+            return Err(
+                RenditionSfuCapabilityError::MeasuredRenditionsExceedHardwareSlots,
+            );
+        }
+        Ok(self)
     }
 }
 
@@ -76,12 +87,71 @@ pub enum RenditionSfuCandidateStatus {
 }
 
 pub fn evaluate_rendition_sfu_candidate(
-    _candidate: RenditionSfuCandidate,
-    _receiver_count: usize,
-    _capabilities: RenditionSfuCapabilities,
-    _evidence: RenditionSfuEvidence,
+    candidate: RenditionSfuCandidate,
+    receiver_count: usize,
+    capabilities: RenditionSfuCapabilities,
+    evidence: RenditionSfuEvidence,
 ) -> Result<RenditionSfuCandidateStatus, RenditionSfuCapabilityError> {
-    todo!("Phase 10F RED: evaluate caller-supplied rendition/SFU candidate")
+    let capabilities = capabilities.validate()?;
+
+    if receiver_count == 0 {
+        return Ok(RenditionSfuCandidateStatus::Blocked(
+            RenditionSfuBlockReason::InvalidReceiverCount,
+        ));
+    }
+    if candidate.max_renditions == 0 || candidate.max_renditions > MAX_OPTIONAL_RENDITIONS {
+        return Ok(RenditionSfuCandidateStatus::Blocked(
+            RenditionSfuBlockReason::InvalidRenditionCount,
+        ));
+    }
+
+    if let Some((gate, gate_evidence)) =
+        media_path_blocking_gate(candidate.path, evidence.transport_topology)
+    {
+        return Ok(RenditionSfuCandidateStatus::Blocked(
+            RenditionSfuBlockReason::TransportTopologyGate {
+                gate,
+                evidence: gate_evidence,
+            },
+        ));
+    }
+
+    if candidate.max_renditions > 1 {
+        if evidence.multi_rendition != PhysicalGateStatus::Qualified {
+            return Ok(RenditionSfuCandidateStatus::Blocked(
+                RenditionSfuBlockReason::MultiRenditionGate(evidence.multi_rendition),
+            ));
+        }
+        if candidate.max_renditions > capabilities.hardware_encoder_slots {
+            return Ok(RenditionSfuCandidateStatus::Blocked(
+                RenditionSfuBlockReason::InsufficientEncoderSlots {
+                    requested: candidate.max_renditions,
+                    available: capabilities.hardware_encoder_slots,
+                },
+            ));
+        }
+        if candidate.max_renditions > capabilities.measured_max_renditions {
+            return Ok(RenditionSfuCandidateStatus::Blocked(
+                RenditionSfuBlockReason::ExceedsMeasuredRenditions {
+                    requested: candidate.max_renditions,
+                    measured: capabilities.measured_max_renditions,
+                },
+            ));
+        }
+    }
+
+    if candidate.path.topology == MediaTopology::Relay
+        && receiver_count > capabilities.measured_max_relay_receivers
+    {
+        return Ok(RenditionSfuCandidateStatus::Blocked(
+            RenditionSfuBlockReason::ExceedsMeasuredRelayReceivers {
+                requested: receiver_count,
+                measured: capabilities.measured_max_relay_receivers,
+            },
+        ));
+    }
+
+    Ok(RenditionSfuCandidateStatus::Eligible)
 }
 
 #[cfg(test)]
