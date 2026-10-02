@@ -1,3 +1,4 @@
+pub mod classroom_view;
 pub mod monitoring;
 pub mod monitoring_promotion;
 
