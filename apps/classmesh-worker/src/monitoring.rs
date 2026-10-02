@@ -20,8 +20,10 @@ impl MonitoringPipeline {
         frame: &DxgiFrame,
         profile: MonitoringProfile,
     ) -> Result<Self, PresentationError> {
-        let inner =
-            PresentationPipeline::from_first_frame_with_target(frame, target_for_monitoring(profile))?;
+        let inner = PresentationPipeline::from_first_frame_with_target(
+            frame,
+            target_for_monitoring(profile),
+        )?;
         Ok(Self { inner })
     }
 
@@ -59,8 +61,7 @@ fn target_for_monitoring(profile: MonitoringProfile) -> PresentationTarget {
 
 fn monitoring_bitrate_bps(profile: MonitoringProfile) -> u32 {
     const MAX_PIXEL_RATE: u64 = 640 * 360 * 5;
-    const BITRATE_SPAN_BPS: u64 =
-        (MAX_MONITORING_BITRATE_BPS - MIN_MONITORING_BITRATE_BPS) as u64;
+    const BITRATE_SPAN_BPS: u64 = (MAX_MONITORING_BITRATE_BPS - MIN_MONITORING_BITRATE_BPS) as u64;
 
     let pixel_rate = u64::from(profile.width())
         .saturating_mul(u64::from(profile.height()))
@@ -93,7 +94,10 @@ mod tests {
     fn largest_monitoring_profile_never_requests_presentation_resolution_or_rate() {
         let profile = MonitoringProfile::for_thumbnail_at_fps(640, 360, 5).unwrap();
         let target = target_for_monitoring(profile);
-        assert_eq!((target.max_width, target.max_height, target.fps), (640, 360, 5));
+        assert_eq!(
+            (target.max_width, target.max_height, target.fps),
+            (640, 360, 5)
+        );
         assert_eq!(target.bitrate_bps, MAX_MONITORING_BITRATE_BPS);
         assert!(target.max_width < PresentationTarget::default().max_width);
         assert!(target.max_height < PresentationTarget::default().max_height);
