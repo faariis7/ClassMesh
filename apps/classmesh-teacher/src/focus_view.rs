@@ -70,7 +70,9 @@ impl TeacherFocusViewModel {
         classroom: &TeacherClassroomViewModel,
         monitoring: &mut TeacherMonitoringCoordinator,
     ) -> Result<(), FocusViewError> {
-        let source_id = classroom.selected().ok_or(FocusViewError::NoSelectedDevice)?;
+        let source_id = classroom
+            .selected()
+            .ok_or(FocusViewError::NoSelectedDevice)?;
         monitoring.resume_thumbnail(source_id).map_err(Into::into)
     }
 }
