@@ -122,6 +122,30 @@ fn placeholder(ui: &mut egui::Ui, heading: &str, description: &str) {
     ui.label(description);
 }
 
+#[cfg(test)]
+mod tests {
+    use classmesh_video::monitoring_scheduler::MonitoringSourceId;
+
+    use crate::ui_shell::TeacherFocusUiAction;
+
+    use super::*;
+
+    #[test]
+    fn pending_action_slot_is_bounded_and_preserves_oldest_action() {
+        let mut app = TeacherEguiShell::default();
+        let first = TeacherUiAction::SelectDevice(Some(MonitoringSourceId(7)));
+        let second = TeacherUiAction::Focus(TeacherFocusUiAction::RequestInteractive {
+            source_id: MonitoringSourceId(7),
+        });
+
+        app.queue_action(first);
+        app.queue_action(second);
+
+        assert_eq!(app.take_pending_action(), Some(first));
+        assert_eq!(app.take_pending_action(), None);
+    }
+}
+
 pub fn run_teacher_ui() -> eframe::Result<()> {
     eframe::run_native(
         APP_TITLE,
