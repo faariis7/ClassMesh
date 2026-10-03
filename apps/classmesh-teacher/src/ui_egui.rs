@@ -64,9 +64,10 @@ impl TeacherEguiShell {
             presentation: TeacherPresentationViewModel::state(
                 PresentationRuntimeSnapshot::default(),
             ),
-            diagnostics_model:
-                TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default())
-                    .expect("default diagnostics view configuration is valid"),
+            diagnostics_model: TeacherDeviceDiagnosticsViewModel::new(
+                DeviceDiagnosticsConfig::default(),
+            )
+            .expect("default diagnostics view configuration is valid"),
             diagnostics: None,
             diagnostics_draft: DiagnosticsOverrideDraft::default(),
             pending_action: None,
