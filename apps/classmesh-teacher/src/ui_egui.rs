@@ -2,10 +2,10 @@ use eframe::egui;
 
 use crate::classroom_grid::{MonitoringGridViewConfig, TeacherMonitoringGridViewModel};
 use crate::classroom_view::{ClassroomViewConfig, TeacherClassroomViewModel};
-use crate::ui_classroom::show_classroom;
 use crate::presentation_view::{
     PresentationRuntimeSnapshot, PresentationViewState, TeacherPresentationViewModel,
 };
+use crate::ui_classroom::show_classroom;
 use crate::ui_focus::show_focus;
 use crate::ui_presentation::show_presentation;
 use crate::ui_shell::{TeacherUiAction, TeacherUiMessage, TeacherUiSection, TeacherUiShellState};
@@ -178,7 +178,10 @@ mod tests {
             },
         });
 
-        assert_eq!(app.presentation.media_state, classmesh_core::MediaState::Streaming);
+        assert_eq!(
+            app.presentation.media_state,
+            classmesh_core::MediaState::Streaming
+        );
         assert_eq!(app.presentation.binding.unwrap().presentation_id, 700);
         assert_eq!(app.presentation.metrics.encoded_frames, 12);
     }
