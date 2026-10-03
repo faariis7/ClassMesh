@@ -314,7 +314,7 @@ mod tests {
     use classmesh_core::transport_topology::{
         MediaPath, MediaTopology, PhysicalGateStatus, PhysicalPathGate,
     };
-    use classmesh_core::MediaTransport;
+    use classmesh_core::MediaTransport as CoreMediaTransport;
     use classmesh_protocol::control_wire::{MediaTransport, StreamKind, VideoCodec, VideoProfile};
     use classmesh_video::monitoring::MonitoringProfile;
     use classmesh_video::monitoring_fanin::MonitoringFanInConfig;
@@ -633,7 +633,7 @@ mod tests {
             TeacherDeviceDiagnosticsViewModel::new(crate::device_diagnostics::DeviceDiagnosticsConfig::default())
                 .unwrap();
         let path = MediaPath {
-            transport: MediaTransport::UdpUnicast,
+            transport: CoreMediaTransport::UdpUnicast,
             topology: MediaTopology::Direct,
         };
         let action = TeacherDiagnosticsUiAction {
