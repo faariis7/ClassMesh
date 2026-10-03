@@ -9,6 +9,8 @@ pub mod presentation_view;
 pub mod ui_classroom;
 #[cfg(windows)]
 pub mod ui_egui;
+#[cfg(windows)]
+pub mod ui_focus;
 pub mod ui_shell;
 
 #[cfg(windows)]
