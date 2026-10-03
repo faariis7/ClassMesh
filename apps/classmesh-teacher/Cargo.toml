@@ -17,6 +17,7 @@ classmesh-windows-runtime = { path = "../../crates/classmesh-windows-runtime" }
 classmesh-capture-win = { path = "../../crates/classmesh-capture-win" }
 classmesh-security = { path = "../../crates/classmesh-security" }
 classmesh-worker = { path = "../classmesh-worker" }
+eframe = { version = "=0.32.3", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 
 [dev-dependencies]
 classmesh-security = { path = "../../crates/classmesh-security" }
