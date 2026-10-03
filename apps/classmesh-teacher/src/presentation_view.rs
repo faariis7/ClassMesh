@@ -176,7 +176,10 @@ mod tests {
         assert_eq!(state.run_state, PresentationRunState::Idle);
         assert_eq!(state.binding, None);
         assert_eq!(state.profile, None);
-        assert_eq!(TeacherPresentationViewModel::stop(&mut lifecycle), Ok(false));
+        assert_eq!(
+            TeacherPresentationViewModel::stop(&mut lifecycle),
+            Ok(false)
+        );
     }
 
     #[cfg(windows)]
