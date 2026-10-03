@@ -100,6 +100,10 @@ jobs:
           rustup toolchain install 1.85.0 --profile minimal --no-self-update
           cargo +1.85.0 check -p classmesh-teacher --bin classmesh-teacher-ui
 
+      - name: Validate Phase 11F4 Teacher UI smoke helper
+        shell: pwsh
+        run: .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode Help
+
       - name: Build Phase 7 multicast probe
         run: cargo build -p classmesh-lab --bin classmesh-multicast-probe --release
 
@@ -406,6 +410,25 @@ jobs:
         with:
           name: classmesh-phase10g-adaptive-qualification-windows-x64
           path: phase10g-bundle/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
+
+      - name: Stage Phase 11F4 Teacher UI bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path phase11f4-teacher-ui-bundle -Force | Out-Null
+          Copy-Item target/release/classmesh-teacher-ui.exe phase11f4-teacher-ui-bundle/
+          Copy-Item scripts/phase11f4-teacher-ui-smoke.ps1 phase11f4-teacher-ui-bundle/
+          Copy-Item docs/PHASE11_TEACHER_UI_SMOKE.md phase11f4-teacher-ui-bundle/
+          Copy-Item docs/PHASE11_TEACHER_UI_SMOKE_RESULTS.md phase11f4-teacher-ui-bundle/
+          .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode IndexBundle -BundleDir phase11f4-teacher-ui-bundle
+          .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode ValidateBundle -BundleDir phase11f4-teacher-ui-bundle
+
+      - name: Upload Phase 11F4 Teacher UI bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-phase11f4-teacher-ui-windows-x64
+          path: phase11f4-teacher-ui-bundle/
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
