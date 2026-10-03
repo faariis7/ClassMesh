@@ -162,8 +162,14 @@ mod tests {
     fn latest_thumbnail_replaces_stale_frame_without_growing_grid() {
         let mut grid =
             TeacherMonitoringGridViewModel::new(MonitoringGridViewConfig::default()).unwrap();
-        assert_eq!(grid.accept(update(7, 1)), Ok(MonitoringGridUpdate::Inserted));
-        assert_eq!(grid.accept(update(7, 2)), Ok(MonitoringGridUpdate::Replaced));
+        assert_eq!(
+            grid.accept(update(7, 1)),
+            Ok(MonitoringGridUpdate::Inserted)
+        );
+        assert_eq!(
+            grid.accept(update(7, 2)),
+            Ok(MonitoringGridUpdate::Replaced)
+        );
 
         let classroom = classroom(&[7]);
         let tiles = grid.tiles(&classroom);
@@ -196,7 +202,10 @@ mod tests {
             grid.accept(update(3, 1)),
             Err(MonitoringGridViewError::TileLimitReached)
         );
-        assert_eq!(grid.accept(update(1, 2)), Ok(MonitoringGridUpdate::Replaced));
+        assert_eq!(
+            grid.accept(update(1, 2)),
+            Ok(MonitoringGridUpdate::Replaced)
+        );
         assert_eq!(grid.len(), 2);
     }
 
