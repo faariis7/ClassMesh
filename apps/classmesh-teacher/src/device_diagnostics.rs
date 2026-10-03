@@ -393,6 +393,42 @@ mod tests {
     }
 
     #[test]
+    fn automatic_override_preserves_engine_ownership() {
+        let model = TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default())
+            .unwrap();
+        assert_eq!(
+            model
+                .validate_override(
+                    TroubleshootingOverrideRequest::Automatic,
+                    TransportTopologyEvidence::default(),
+                )
+                .unwrap(),
+            ValidatedTroubleshootingOverride::Automatic
+        );
+    }
+
+    #[test]
+    fn relay_override_remains_blocked_by_relay_topology_gate() {
+        let model = TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default())
+            .unwrap();
+        let relay = MediaPath {
+            transport: MediaTransport::ReliableFallback,
+            topology: MediaTopology::Relay,
+        };
+
+        assert_eq!(
+            model.validate_override(
+                TroubleshootingOverrideRequest::MediaPath(relay),
+                TransportTopologyEvidence::default(),
+            ),
+            Err(TroubleshootingOverrideError::BlockedMediaPath {
+                gate: PhysicalPathGate::Phase8RelayTopology,
+                evidence: PhysicalGateStatus::Pending,
+            })
+        );
+    }
+
+    #[test]
     fn invalid_zero_diagnostic_capacity_is_rejected() {
         assert!(matches!(
             TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig {
