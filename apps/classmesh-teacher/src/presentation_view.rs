@@ -170,6 +170,17 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn idle_windows_lifecycle_projects_idle_and_stop_is_noop() {
+        let mut lifecycle = crate::TeacherVideoEngineLifecycle::default();
+        let state = TeacherPresentationViewModel::state_from_lifecycle(&lifecycle);
+        assert_eq!(state.run_state, PresentationRunState::Idle);
+        assert_eq!(state.binding, None);
+        assert_eq!(state.profile, None);
+        assert_eq!(TeacherPresentationViewModel::stop(&mut lifecycle), Ok(false));
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_view_contract_delegates_to_existing_lifecycle() {
         use classmesh_worker::presentation_multicast_send::PresentationMulticastSendRuntime;
 
