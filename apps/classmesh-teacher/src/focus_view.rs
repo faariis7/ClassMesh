@@ -7,9 +7,7 @@ use classmesh_protocol::control_wire::StreamOffer;
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::classroom_view::TeacherClassroomViewModel;
-use crate::monitoring_promotion::{
-    TeacherMonitoringCoordinator, TeacherMonitoringPromotionError,
-};
+use crate::monitoring_promotion::{TeacherMonitoringCoordinator, TeacherMonitoringPromotionError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FocusedDeviceView {
@@ -60,7 +58,9 @@ impl TeacherFocusViewModel {
         offer: &StreamOffer,
         negotiated_capabilities: &BTreeSet<Capability>,
     ) -> Result<(), FocusViewError> {
-        let source_id = classroom.selected().ok_or(FocusViewError::NoSelectedDevice)?;
+        let source_id = classroom
+            .selected()
+            .ok_or(FocusViewError::NoSelectedDevice)?;
         monitoring
             .request_interactive_promotion(source_id, offer, negotiated_capabilities)
             .map_err(Into::into)
@@ -82,9 +82,7 @@ mod tests {
     use classmesh_protocol::control_wire::{MediaTransport, StreamKind, VideoCodec, VideoProfile};
     use classmesh_video::monitoring::MonitoringProfile;
     use classmesh_video::monitoring_fanin::MonitoringFanInConfig;
-    use classmesh_video::monitoring_scheduler::{
-        MonitoringPriority, MonitoringSchedulerConfig,
-    };
+    use classmesh_video::monitoring_scheduler::{MonitoringPriority, MonitoringSchedulerConfig};
 
     use crate::classroom_view::{
         ClassroomDeviceSnapshot, ClassroomViewConfig, TeacherClassroomViewModel,
@@ -135,11 +133,7 @@ mod tests {
         let profile = MonitoringProfile::for_thumbnail_at_fps(320, 180, 3).unwrap();
         for id in [1_u64, 2] {
             coordinator
-                .add_source(
-                    MonitoringSourceId(id),
-                    profile,
-                    MonitoringPriority::Visible,
-                )
+                .add_source(MonitoringSourceId(id), profile, MonitoringPriority::Visible)
                 .unwrap();
         }
         coordinator
@@ -178,7 +172,9 @@ mod tests {
 
         classroom.select(Some(MonitoringSourceId(1))).unwrap();
         assert_eq!(
-            TeacherFocusViewModel::focused(&classroom).unwrap().source_id,
+            TeacherFocusViewModel::focused(&classroom)
+                .unwrap()
+                .source_id,
             MonitoringSourceId(1)
         );
     }
@@ -223,9 +219,11 @@ mod tests {
             Err(FocusViewError::NoSelectedDevice)
         );
         let actions = monitoring.poll(0).unwrap();
-        assert!(actions.iter().all(|action| {
-            !matches!(action, TeacherMonitoringAction::StartInteractive { .. })
-        }));
+        assert!(
+            actions.iter().all(|action| {
+                !matches!(action, TeacherMonitoringAction::StartInteractive { .. })
+            })
+        );
     }
 
     #[test]
