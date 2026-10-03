@@ -5,6 +5,7 @@ pub mod focus_view;
 pub mod monitoring;
 pub mod monitoring_promotion;
 pub mod presentation_view;
+pub mod ui_shell;
 
 #[cfg(windows)]
 use classmesh_control::authorization::AuthenticatedControlGuard;
