@@ -275,9 +275,7 @@ impl PresentationDecodeRuntime {
         };
 
         if open && device_lost {
-            if let Err(error) =
-                self.rebuild_gpu_pipeline("presentation window device loss")
-            {
+            if let Err(error) = self.rebuild_gpu_pipeline("presentation window device loss") {
                 eprintln!("GPU pipeline rebuild failed after window resize device loss: {error}");
             }
         }
