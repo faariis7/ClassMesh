@@ -4,9 +4,7 @@ use crate::classroom_grid::{MonitoringGridViewConfig, TeacherMonitoringGridViewM
 use crate::classroom_view::{ClassroomViewConfig, TeacherClassroomViewModel};
 use crate::ui_classroom::show_classroom;
 use crate::ui_focus::show_focus;
-use crate::ui_shell::{
-    TeacherUiAction, TeacherUiMessage, TeacherUiSection, TeacherUiShellState,
-};
+use crate::ui_shell::{TeacherUiAction, TeacherUiMessage, TeacherUiSection, TeacherUiShellState};
 
 const APP_TITLE: &str = "ClassMesh Teacher";
 
