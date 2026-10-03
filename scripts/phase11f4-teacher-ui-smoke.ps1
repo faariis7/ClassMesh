@@ -76,8 +76,10 @@ CI usage:
   .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode ValidateBundle -BundleDir .\phase11f4-teacher-ui-bundle
 
 Interactive Windows usage from the extracted artifact:
-  .\phase11f4-teacher-ui-smoke.ps1 -Mode ValidateBundle -BundleDir .
-  .\phase11f4-teacher-ui-smoke.ps1 -Mode Smoke -BundleDir . -EvidenceDir .\evidence -StartupSeconds 5 -LeaveRunning
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-smoke.ps1 -Mode ValidateBundle -BundleDir .
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-smoke.ps1 -Mode Smoke -BundleDir . -EvidenceDir .\evidence -StartupSeconds 5 -LeaveRunning
+
+The Bypass flag applies only to the launched PowerShell process; it does not change machine/user execution policy.
 
 Smoke mode:
   - requires an interactive Windows user session (Session 0 is rejected);
