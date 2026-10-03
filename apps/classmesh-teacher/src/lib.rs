@@ -182,9 +182,7 @@ impl TeacherVideoEngineLifecycle {
     }
 
     #[must_use]
-    pub fn presentation_snapshot(
-        &self,
-    ) -> crate::presentation_view::PresentationRuntimeSnapshot {
+    pub fn presentation_snapshot(&self) -> crate::presentation_view::PresentationRuntimeSnapshot {
         let Some(active) = self.active.as_ref() else {
             return crate::presentation_view::PresentationRuntimeSnapshot::default();
         };
@@ -200,12 +198,14 @@ impl TeacherVideoEngineLifecycle {
                 stream_id: binding.stream_id(),
                 epoch: binding.epoch(),
             }),
-            profile: profile.map(|profile| crate::presentation_view::PresentationProfileView {
-                width: profile.target_width,
-                height: profile.target_height,
-                fps: profile.fps,
-                bitrate_bps: profile.bitrate_bps,
-            }),
+            profile: profile.map(
+                |profile| crate::presentation_view::PresentationProfileView {
+                    width: profile.target_width,
+                    height: profile.target_height,
+                    fps: profile.fps,
+                    bitrate_bps: profile.bitrate_bps,
+                },
+            ),
             metrics: crate::presentation_view::PresentationMetricsView {
                 captured_frames: stats.captured_frames,
                 submitted_frames: stats.submitted_frames,
