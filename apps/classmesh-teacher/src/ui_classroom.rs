@@ -26,12 +26,7 @@ pub fn show_classroom(
 
     ui.columns(2, |columns| {
         device_list(&mut columns[0], &rows, &mut requested_message);
-        monitoring_grid(
-            &mut columns[1],
-            &tiles,
-            &names,
-            &mut requested_message,
-        );
+        monitoring_grid(&mut columns[1], &tiles, &names, &mut requested_message);
     });
 
     if let Some(message) = requested_message {
@@ -71,8 +66,7 @@ fn device_list(
                 );
                 let response = ui.selectable_label(row.selected, label);
                 if response.clicked() {
-                    *requested_message =
-                        Some(TeacherUiMessage::SelectDevice(Some(row.source_id)));
+                    *requested_message = Some(TeacherUiMessage::SelectDevice(Some(row.source_id)));
                 }
                 if !row.health.service_ready || !row.health.worker_ready {
                     ui.small(format!(
