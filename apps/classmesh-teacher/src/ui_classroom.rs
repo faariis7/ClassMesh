@@ -22,20 +22,20 @@ pub fn show_classroom(
         .iter()
         .map(|row| (row.source_id, row.display_name.as_str()))
         .collect();
-    let mut requested_selection = None;
+    let mut requested_message = None;
 
     ui.columns(2, |columns| {
-        device_list(&mut columns[0], &rows, &mut requested_selection);
+        device_list(&mut columns[0], &rows, &mut requested_message);
         monitoring_grid(
             &mut columns[1],
             &tiles,
             &names,
-            &mut requested_selection,
+            &mut requested_message,
         );
     });
 
-    if let Some(source_id) = requested_selection {
-        if let Some(action) = shell.handle(TeacherUiMessage::SelectDevice(Some(source_id))) {
+    if let Some(message) = requested_message {
+        if let Some(action) = shell.handle(message) {
             let _ = action.apply_to_classroom(classroom);
         }
     }
@@ -44,10 +44,13 @@ pub fn show_classroom(
 fn device_list(
     ui: &mut egui::Ui,
     rows: &[ClassroomDeviceRow],
-    requested_selection: &mut Option<MonitoringSourceId>,
+    requested_message: &mut Option<TeacherUiMessage>,
 ) {
     ui.heading("Devices");
     ui.label(format!("{} enrolled", rows.len()));
+    if rows.iter().any(|row| row.selected) && ui.button("Clear selection").clicked() {
+        *requested_message = Some(TeacherUiMessage::SelectDevice(None));
+    }
     ui.separator();
 
     if rows.is_empty() {
@@ -68,7 +71,8 @@ fn device_list(
                 );
                 let response = ui.selectable_label(row.selected, label);
                 if response.clicked() {
-                    *requested_selection = Some(row.source_id);
+                    *requested_message =
+                        Some(TeacherUiMessage::SelectDevice(Some(row.source_id)));
                 }
                 if !row.health.service_ready || !row.health.worker_ready {
                     ui.small(format!(
@@ -91,7 +95,7 @@ fn monitoring_grid(
     ui: &mut egui::Ui,
     tiles: &[crate::classroom_grid::MonitoringGridTile],
     names: &BTreeMap<MonitoringSourceId, &str>,
-    requested_selection: &mut Option<MonitoringSourceId>,
+    requested_message: &mut Option<TeacherUiMessage>,
 ) {
     ui.heading("Monitoring");
     ui.label(format!("{} latest thumbnails", tiles.len()));
@@ -107,7 +111,6 @@ fn monitoring_grid(
         .show(ui, |ui| {
             egui::Grid::new("classmesh_monitoring_tiles")
                 .num_columns(2)
-                .spacing([12.0, 12.0])
                 .show(ui, |ui| {
                     for (index, tile) in tiles.iter().enumerate() {
                         let name = names
@@ -120,10 +123,14 @@ fn monitoring_grid(
                                 tile.frame.meta.frame_id,
                                 tile.frame.data.len()
                             );
-                            if ui.selectable_label(tile.selected, title).clicked()
-                                && names.contains_key(&tile.source_id)
-                            {
-                                *requested_selection = Some(tile.source_id);
+                            if names.contains_key(&tile.source_id) {
+                                if ui.selectable_label(tile.selected, title).clicked() {
+                                    *requested_message =
+                                        Some(TeacherUiMessage::SelectDevice(Some(tile.source_id)));
+                                }
+                            } else {
+                                ui.label(title);
+                                ui.small("No matching classroom device");
                             }
                             ui.small(if tile.frame.meta.keyframe {
                                 "Encoded thumbnail ready · keyframe"
