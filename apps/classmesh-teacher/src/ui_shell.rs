@@ -339,6 +339,24 @@ mod tests {
     }
 
     #[test]
+    fn interactive_focus_request_without_engine_context_fails_closed() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let mut monitoring = monitoring();
+        let action = TeacherFocusUiAction::RequestInteractive {
+            source_id: MonitoringSourceId(7),
+        };
+
+        assert_eq!(
+            apply_focus_ui_action(action, &classroom, &mut monitoring, None),
+            Err(TeacherFocusUiActionError::MissingInteractiveContext)
+        );
+        assert!(monitoring.poll(0).unwrap().iter().all(|action| {
+            !matches!(action, TeacherMonitoringAction::StartInteractive { .. })
+        }));
+    }
+
+    #[test]
     fn stale_focus_action_fails_closed_after_selection_changes() {
         let mut classroom = classroom();
         classroom.select(Some(MonitoringSourceId(7))).unwrap();
