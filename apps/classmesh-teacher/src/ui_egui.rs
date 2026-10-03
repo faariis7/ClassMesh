@@ -40,9 +40,10 @@ impl Default for TeacherEguiShell {
             presentation: TeacherPresentationViewModel::state(
                 PresentationRuntimeSnapshot::default(),
             ),
-            diagnostics_model:
-                TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default())
-                    .expect("default diagnostics view configuration is valid"),
+            diagnostics_model: TeacherDeviceDiagnosticsViewModel::new(
+                DeviceDiagnosticsConfig::default(),
+            )
+            .expect("default diagnostics view configuration is valid"),
             diagnostics: None,
             diagnostics_draft: DiagnosticsOverrideDraft::default(),
             pending_action: None,
@@ -195,7 +196,7 @@ mod tests {
     use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
     use crate::classroom_view::ClassroomDeviceRow;
-    use crate::device_diagnostics::{DeviceDiagnosticsError, DEFAULT_MAX_DIAGNOSTIC_CODES};
+    use crate::device_diagnostics::{DEFAULT_MAX_DIAGNOSTIC_CODES, DeviceDiagnosticsError};
     use crate::ui_shell::TeacherFocusUiAction;
 
     use super::*;
