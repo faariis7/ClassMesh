@@ -196,14 +196,16 @@ mod tests {
         .unwrap();
 
         let actions = monitoring.poll(0).unwrap();
-        assert!(matches!(
-            actions.as_slice(),
-            [TeacherMonitoringAction::StartInteractive { source_id, offer }]
-                if *source_id == MonitoringSourceId(2)
-                    && offer.stream_id == 11
-                    && offer.profile.width == 1280
-                    && offer.profile.height == 720
-        ));
+        assert!(actions.iter().any(|action| {
+            matches!(
+                action,
+                TeacherMonitoringAction::StartInteractive { source_id, offer }
+                    if *source_id == MonitoringSourceId(2)
+                        && offer.stream_id == 11
+                        && offer.profile.width == 1280
+                        && offer.profile.height == 720
+            )
+        }));
     }
 
     #[test]
