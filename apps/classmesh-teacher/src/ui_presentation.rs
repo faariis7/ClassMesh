@@ -41,10 +41,7 @@ pub fn show_presentation(
         }
         None => {
             ui.label("No presentation sender is active.");
-            (
-                "Start presentation",
-                TeacherUiMessage::StartPresentation,
-            )
+            ("Start presentation", TeacherUiMessage::StartPresentation)
         }
     };
 
