@@ -16,6 +16,8 @@ use crate::ui_presentation::show_presentation;
 use crate::ui_shell::{TeacherUiAction, TeacherUiMessage, TeacherUiSection, TeacherUiShellState};
 
 const APP_TITLE: &str = "ClassMesh Teacher";
+const DEFAULT_WINDOW_SIZE: [f32; 2] = [800.0, 600.0];
+const MIN_WINDOW_SIZE: [f32; 2] = [600.0, 420.0];
 
 #[derive(Debug)]
 pub struct TeacherEguiShell {
@@ -111,10 +113,7 @@ impl TeacherEguiShell {
     }
 
     fn navigation(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading(APP_TITLE);
-            ui.separator();
-
+        ui.horizontal_wrapped(|ui| {
             for (section, label) in [
                 (TeacherUiSection::Classroom, "Classroom"),
                 (TeacherUiSection::Focus, "Focus"),
@@ -181,10 +180,20 @@ impl eframe::App for TeacherEguiShell {
     }
 }
 
+fn teacher_native_options() -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size(DEFAULT_WINDOW_SIZE)
+            .with_min_inner_size(MIN_WINDOW_SIZE)
+            .with_clamp_size_to_monitor_size(true),
+        ..Default::default()
+    }
+}
+
 pub fn run_teacher_ui() -> eframe::Result<()> {
     eframe::run_native(
         APP_TITLE,
-        eframe::NativeOptions::default(),
+        teacher_native_options(),
         Box::new(|_creation_context| Ok(Box::<TeacherEguiShell>::default())),
     )
 }
@@ -201,6 +210,21 @@ mod tests {
     use crate::ui_shell::TeacherFocusUiAction;
 
     use super::*;
+
+    #[test]
+    fn teacher_ui_viewport_has_explicit_default_and_minimum_size() {
+        let options = teacher_native_options();
+
+        assert_eq!(
+            options.viewport.inner_size,
+            Some(egui::vec2(DEFAULT_WINDOW_SIZE[0], DEFAULT_WINDOW_SIZE[1]))
+        );
+        assert_eq!(
+            options.viewport.min_inner_size,
+            Some(egui::vec2(MIN_WINDOW_SIZE[0], MIN_WINDOW_SIZE[1]))
+        );
+        assert_eq!(options.viewport.clamp_size_to_monitor_size, Some(true));
+    }
 
     #[test]
     fn presentation_snapshot_is_projected_through_existing_11d_view_model() {
