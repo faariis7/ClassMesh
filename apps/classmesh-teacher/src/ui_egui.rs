@@ -189,8 +189,13 @@ pub fn run_teacher_ui() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use classmesh_core::MediaState;
+    use classmesh_core::presence::{DeviceHealth, PresenceState};
+    use classmesh_core::transport_topology::TransportTopologyEvidence;
     use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
+    use crate::classroom_view::ClassroomDeviceRow;
+    use crate::device_diagnostics::{DeviceDiagnosticsError, DEFAULT_MAX_DIAGNOSTIC_CODES};
     use crate::ui_shell::TeacherFocusUiAction;
 
     use super::*;
@@ -222,6 +227,38 @@ mod tests {
         );
         assert_eq!(app.presentation.binding.unwrap().presentation_id, 700);
         assert_eq!(app.presentation.metrics.encoded_frames, 12);
+    }
+
+    #[test]
+    fn diagnostics_projection_enforces_11e_code_bound_before_storage() {
+        let mut app = TeacherEguiShell::default();
+        let row = ClassroomDeviceRow {
+            source_id: MonitoringSourceId(7),
+            display_name: "Student 07".into(),
+            health: DeviceHealth {
+                presence: PresenceState::Online,
+                media: MediaState::Recovering,
+                worker_ready: true,
+                service_ready: true,
+            },
+            quality_tier: None,
+            thumbnail_available: true,
+            interactive_active: false,
+            selected: true,
+        };
+        let codes = ["diagnostic.code"; DEFAULT_MAX_DIAGNOSTIC_CODES + 1];
+
+        assert_eq!(
+            app.update_diagnostics(DeviceDiagnosticsSnapshot {
+                device: &row,
+                quality_sample: None,
+                active_path: None,
+                topology_evidence: TransportTopologyEvidence::default(),
+                diagnostic_codes: &codes,
+            }),
+            Err(DeviceDiagnosticsError::TooManyDiagnosticCodes)
+        );
+        assert!(app.diagnostics.is_none());
     }
 
     #[test]
