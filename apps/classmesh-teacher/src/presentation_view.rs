@@ -55,8 +55,21 @@ pub struct TeacherPresentationViewModel;
 
 impl TeacherPresentationViewModel {
     #[must_use]
-    pub fn state(_snapshot: PresentationRuntimeSnapshot) -> PresentationViewState {
-        todo!("Phase 11D RED: project engine presentation state")
+    pub fn state(snapshot: PresentationRuntimeSnapshot) -> PresentationViewState {
+        let run_state = match snapshot.binding {
+            None => PresentationRunState::Idle,
+            Some(_) if snapshot.profile.is_some() && snapshot.metrics.encoded_frames > 0 => {
+                PresentationRunState::Streaming
+            }
+            Some(_) => PresentationRunState::Starting,
+        };
+
+        PresentationViewState {
+            run_state,
+            binding: snapshot.binding,
+            profile: snapshot.profile,
+            metrics: snapshot.metrics,
+        }
     }
 }
 
