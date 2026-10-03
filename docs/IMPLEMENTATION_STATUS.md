@@ -20,7 +20,7 @@ Phase 9 monitoring-grid software is complete through 9E, with 9F qualification t
 
 Phase 10 adaptive networking is active under Issue #288. PR #289–#293 have merged the versioned receiver-health sample, stateful per-receiver quality controller, independent cohort planner, physical-gated transport/topology seam, and recovery/latest-frame-wins integration. PR #294 merged evidence-gated optional rendition/SFU eligibility, and PR #296 merged the adaptive-controller synthetic benchmark plus physical evidence harness/qualification bundle. Phase 10 software/tooling is complete; 10G physical execution remains pending and cannot be inferred from CI. Hosted CI must not turn pending Phase 4/7/8/9 physical gates into selected production defaults.
 
-Phase 11 Teacher UI is active under Issue #298. PR #300 merged the bounded framework-neutral classroom/device-list view model, and PR #301 merged the bounded latest-thumbnail monitoring-grid projection that reuses the authoritative classroom selection. PR #302 is the current 11C focus/remote-control view slice; it must delegate interactive promotion/resume to existing engine coordinators and must not duplicate capture, transport, authorization, or adaptation policy.
+Phase 11 Teacher UI is active under Issue #298. PR #300 merged the bounded framework-neutral classroom/device-list view model, PR #301 merged the bounded latest-thumbnail monitoring-grid projection, and PR #302 merged the focus/remote-control projection that delegates interactive promotion/resume to existing engine coordinators. 11D is now the active slice: presentation start/stop state and stream-health projection must consume the existing Teacher video lifecycle without duplicating media, transport, authorization, recovery, or adaptation policy.
 
 The hosted CI baseline covers Portable Rust / Ubuntu rustfmt, Clippy with warnings denied, full workspace tests and `classmesh-lab`, plus Windows workspace Clippy/tests and release builds for the media qualification executables. Hosted runners do not replace real interactive GPU/driver or two-PC validation.
 
@@ -153,7 +153,7 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 
 ## Next implementation sequence
 
-1. Complete Phase 11C on the current live PR, then continue 11D → 11E → 11F in order, updating this plan after each merged slice.
+1. Implement Phase 11D next, then continue 11E → 11F in order, updating this plan after each merged slice.
 2. Keep all Phase 11 UI/view-model code as a thin consumer of existing engine APIs; keep capture/network/adaptation/authorization/recovery ownership below the UI boundary.
 3. Keep Issue #3 open and run the Phase 4 two-PC qualification before selecting the default one-to-one UDP-vs-QUIC-Datagram transport.
 4. Run Phase 6F physical interactive-control validation.
