@@ -3,11 +3,16 @@ use std::collections::BTreeSet;
 use classmesh_core::MediaState;
 use classmesh_core::adaptation::QualityTier;
 use classmesh_core::presence::PresenceState;
+use classmesh_core::transport_topology::TransportTopologyEvidence;
 use classmesh_protocol::Capability;
 use classmesh_protocol::control_wire::StreamOffer;
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::classroom_view::{ClassroomViewError, TeacherClassroomViewModel};
+use crate::device_diagnostics::{
+    TeacherDeviceDiagnosticsViewModel, TroubleshootingOverrideError,
+    TroubleshootingOverrideRequest, ValidatedTroubleshootingOverride,
+};
 use crate::focus_view::{FocusViewError, TeacherFocusViewModel};
 use crate::monitoring_promotion::TeacherMonitoringCoordinator;
 use crate::presentation_view::PresentationBindingView;
@@ -31,6 +36,10 @@ pub enum TeacherUiMessage {
     ResumeThumbnail(MonitoringSourceId),
     StartPresentation,
     StopPresentation(PresentationBindingView),
+    RequestTroubleshootingOverride {
+        source_id: MonitoringSourceId,
+        request: TroubleshootingOverrideRequest,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,10 +66,17 @@ pub enum TeacherPresentationUiAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TeacherDiagnosticsUiAction {
+    pub source_id: MonitoringSourceId,
+    pub request: TroubleshootingOverrideRequest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeacherUiAction {
     SelectDevice(Option<MonitoringSourceId>),
     Focus(TeacherFocusUiAction),
     Presentation(TeacherPresentationUiAction),
+    Diagnostics(TeacherDiagnosticsUiAction),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +94,7 @@ impl TeacherUiAction {
             Self::SelectDevice(source_id) => classroom
                 .select(source_id)
                 .map_err(TeacherUiClassroomActionError::Classroom),
-            Self::Focus(_) | Self::Presentation(_) => {
+            Self::Focus(_) | Self::Presentation(_) | Self::Diagnostics(_) => {
                 Err(TeacherUiClassroomActionError::NotClassroomAction)
             }
         }
@@ -189,6 +205,34 @@ pub fn apply_presentation_ui_action(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeacherDiagnosticsUiActionError {
+    SelectionChanged {
+        expected: MonitoringSourceId,
+        selected: Option<MonitoringSourceId>,
+    },
+    Validation(TroubleshootingOverrideError),
+}
+
+pub fn apply_diagnostics_ui_action(
+    action: TeacherDiagnosticsUiAction,
+    classroom: &TeacherClassroomViewModel,
+    diagnostics: &TeacherDeviceDiagnosticsViewModel,
+    live_evidence: TransportTopologyEvidence,
+) -> Result<ValidatedTroubleshootingOverride, TeacherDiagnosticsUiActionError> {
+    let selected = classroom.selected();
+    if selected != Some(action.source_id) {
+        return Err(TeacherDiagnosticsUiActionError::SelectionChanged {
+            expected: action.source_id,
+            selected,
+        });
+    }
+
+    diagnostics
+        .validate_override(action.request, live_evidence)
+        .map_err(TeacherDiagnosticsUiActionError::Validation)
+}
+
 #[must_use]
 pub const fn presence_label(presence: PresenceState) -> &'static str {
     match presence {
@@ -254,13 +298,23 @@ impl TeacherUiShellState {
             TeacherUiMessage::StopPresentation(binding) => Some(TeacherUiAction::Presentation(
                 TeacherPresentationUiAction::Stop { binding },
             )),
+            TeacherUiMessage::RequestTroubleshootingOverride { source_id, request } => {
+                Some(TeacherUiAction::Diagnostics(TeacherDiagnosticsUiAction {
+                    source_id,
+                    request,
+                }))
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use classmesh_core::MediaTransport as CoreMediaTransport;
     use classmesh_core::presence::DeviceHealth;
+    use classmesh_core::transport_topology::{
+        MediaPath, MediaTopology, PhysicalGateStatus, PhysicalPathGate,
+    };
     use classmesh_protocol::control_wire::{MediaTransport, StreamKind, VideoCodec, VideoProfile};
     use classmesh_video::monitoring::MonitoringProfile;
     use classmesh_video::monitoring_fanin::MonitoringFanInConfig;
@@ -525,6 +579,84 @@ mod tests {
                 active: None,
             }) if expected == binding
         ));
+    }
+
+    #[test]
+    fn diagnostics_message_emits_typed_source_bound_action() {
+        let mut shell = TeacherUiShellState::default();
+        let request = TroubleshootingOverrideRequest::Automatic;
+
+        assert_eq!(
+            shell.handle(TeacherUiMessage::RequestTroubleshootingOverride {
+                source_id: MonitoringSourceId(7),
+                request,
+            }),
+            Some(TeacherUiAction::Diagnostics(TeacherDiagnosticsUiAction {
+                source_id: MonitoringSourceId(7),
+                request,
+            }))
+        );
+    }
+
+    #[test]
+    fn stale_diagnostics_action_fails_closed_after_selection_changes() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let diagnostics = TeacherDeviceDiagnosticsViewModel::new(
+            crate::device_diagnostics::DeviceDiagnosticsConfig::default(),
+        )
+        .unwrap();
+        let action = TeacherDiagnosticsUiAction {
+            source_id: MonitoringSourceId(7),
+            request: TroubleshootingOverrideRequest::Automatic,
+        };
+
+        classroom.select(None).unwrap();
+        assert_eq!(
+            apply_diagnostics_ui_action(
+                action,
+                &classroom,
+                &diagnostics,
+                TransportTopologyEvidence::default(),
+            ),
+            Err(TeacherDiagnosticsUiActionError::SelectionChanged {
+                expected: MonitoringSourceId(7),
+                selected: None,
+            })
+        );
+    }
+
+    #[test]
+    fn diagnostics_action_revalidates_open_physical_gate_at_apply_time() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let diagnostics = TeacherDeviceDiagnosticsViewModel::new(
+            crate::device_diagnostics::DeviceDiagnosticsConfig::default(),
+        )
+        .unwrap();
+        let path = MediaPath {
+            transport: CoreMediaTransport::UdpUnicast,
+            topology: MediaTopology::Direct,
+        };
+        let action = TeacherDiagnosticsUiAction {
+            source_id: MonitoringSourceId(7),
+            request: TroubleshootingOverrideRequest::MediaPath(path),
+        };
+
+        assert_eq!(
+            apply_diagnostics_ui_action(
+                action,
+                &classroom,
+                &diagnostics,
+                TransportTopologyEvidence::default(),
+            ),
+            Err(TeacherDiagnosticsUiActionError::Validation(
+                TroubleshootingOverrideError::BlockedMediaPath {
+                    gate: PhysicalPathGate::Phase4UdpUnicast,
+                    evidence: PhysicalGateStatus::Pending,
+                }
+            ))
+        );
     }
 
     #[test]

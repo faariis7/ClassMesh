@@ -2,10 +2,15 @@ use eframe::egui;
 
 use crate::classroom_grid::{MonitoringGridViewConfig, TeacherMonitoringGridViewModel};
 use crate::classroom_view::{ClassroomViewConfig, TeacherClassroomViewModel};
+use crate::device_diagnostics::{
+    DeviceDiagnosticsConfig, DeviceDiagnosticsError, DeviceDiagnosticsSnapshot,
+    DeviceDiagnosticsView, TeacherDeviceDiagnosticsViewModel,
+};
 use crate::presentation_view::{
     PresentationRuntimeSnapshot, PresentationViewState, TeacherPresentationViewModel,
 };
 use crate::ui_classroom::show_classroom;
+use crate::ui_diagnostics::{DiagnosticsOverrideDraft, show_diagnostics};
 use crate::ui_focus::show_focus;
 use crate::ui_presentation::show_presentation;
 use crate::ui_shell::{TeacherUiAction, TeacherUiMessage, TeacherUiSection, TeacherUiShellState};
@@ -18,6 +23,9 @@ pub struct TeacherEguiShell {
     classroom: TeacherClassroomViewModel,
     monitoring: TeacherMonitoringGridViewModel,
     presentation: PresentationViewState,
+    diagnostics_model: TeacherDeviceDiagnosticsViewModel,
+    diagnostics: Option<DeviceDiagnosticsView>,
+    diagnostics_draft: DiagnosticsOverrideDraft,
     pending_action: Option<TeacherUiAction>,
 }
 
@@ -32,6 +40,12 @@ impl Default for TeacherEguiShell {
             presentation: TeacherPresentationViewModel::state(
                 PresentationRuntimeSnapshot::default(),
             ),
+            diagnostics_model: TeacherDeviceDiagnosticsViewModel::new(
+                DeviceDiagnosticsConfig::default(),
+            )
+            .expect("default diagnostics view configuration is valid"),
+            diagnostics: None,
+            diagnostics_draft: DiagnosticsOverrideDraft::default(),
             pending_action: None,
         }
     }
@@ -50,12 +64,35 @@ impl TeacherEguiShell {
             presentation: TeacherPresentationViewModel::state(
                 PresentationRuntimeSnapshot::default(),
             ),
+            diagnostics_model: TeacherDeviceDiagnosticsViewModel::new(
+                DeviceDiagnosticsConfig::default(),
+            )
+            .expect("default diagnostics view configuration is valid"),
+            diagnostics: None,
+            diagnostics_draft: DiagnosticsOverrideDraft::default(),
             pending_action: None,
         }
     }
 
     pub fn set_presentation_snapshot(&mut self, snapshot: PresentationRuntimeSnapshot) {
         self.presentation = TeacherPresentationViewModel::state(snapshot);
+    }
+
+    pub fn update_diagnostics(
+        &mut self,
+        snapshot: DeviceDiagnosticsSnapshot<'_>,
+    ) -> Result<(), DeviceDiagnosticsError> {
+        let view = self.diagnostics_model.project(snapshot)?;
+        if self.diagnostics.as_ref().map(|current| current.source_id) != Some(view.source_id) {
+            self.diagnostics_draft = DiagnosticsOverrideDraft::default();
+        }
+        self.diagnostics = Some(view);
+        Ok(())
+    }
+
+    pub fn clear_diagnostics(&mut self) {
+        self.diagnostics = None;
+        self.diagnostics_draft = DiagnosticsOverrideDraft::default();
     }
 
     #[must_use]
@@ -115,11 +152,19 @@ impl TeacherEguiShell {
                     }
                 }
             }
-            TeacherUiSection::Diagnostics => placeholder(
-                ui,
-                "Diagnostics",
-                "Diagnostics and typed overrides remain owned by the existing Phase 11E contracts.",
-            ),
+            TeacherUiSection::Diagnostics => {
+                if let Some(message) = show_diagnostics(
+                    ui,
+                    self.classroom.selected(),
+                    self.diagnostics.as_ref(),
+                    &mut self.diagnostics_draft,
+                    self.pending_action.is_some(),
+                ) {
+                    if let Some(action) = self.shell.handle(message) {
+                        self.queue_action(action);
+                    }
+                }
+            }
         }
     }
 }
@@ -136,11 +181,6 @@ impl eframe::App for TeacherEguiShell {
     }
 }
 
-fn placeholder(ui: &mut egui::Ui, heading: &str, description: &str) {
-    ui.heading(heading);
-    ui.label(description);
-}
-
 pub fn run_teacher_ui() -> eframe::Result<()> {
     eframe::run_native(
         APP_TITLE,
@@ -151,8 +191,13 @@ pub fn run_teacher_ui() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use classmesh_core::MediaState;
+    use classmesh_core::presence::{DeviceHealth, PresenceState};
+    use classmesh_core::transport_topology::TransportTopologyEvidence;
     use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
+    use crate::classroom_view::ClassroomDeviceRow;
+    use crate::device_diagnostics::{DEFAULT_MAX_DIAGNOSTIC_CODES, DeviceDiagnosticsError};
     use crate::ui_shell::TeacherFocusUiAction;
 
     use super::*;
@@ -184,6 +229,38 @@ mod tests {
         );
         assert_eq!(app.presentation.binding.unwrap().presentation_id, 700);
         assert_eq!(app.presentation.metrics.encoded_frames, 12);
+    }
+
+    #[test]
+    fn diagnostics_projection_enforces_11e_code_bound_before_storage() {
+        let mut app = TeacherEguiShell::default();
+        let row = ClassroomDeviceRow {
+            source_id: MonitoringSourceId(7),
+            display_name: "Student 07".into(),
+            health: DeviceHealth {
+                presence: PresenceState::Online,
+                media: MediaState::Recovering,
+                worker_ready: true,
+                service_ready: true,
+            },
+            quality_tier: None,
+            thumbnail_available: true,
+            interactive_active: false,
+            selected: true,
+        };
+        let codes = ["diagnostic.code"; DEFAULT_MAX_DIAGNOSTIC_CODES + 1];
+
+        assert_eq!(
+            app.update_diagnostics(DeviceDiagnosticsSnapshot {
+                device: &row,
+                quality_sample: None,
+                active_path: None,
+                topology_evidence: TransportTopologyEvidence::default(),
+                diagnostic_codes: &codes,
+            }),
+            Err(DeviceDiagnosticsError::TooManyDiagnosticCodes)
+        );
+        assert!(app.diagnostics.is_none());
     }
 
     #[test]
