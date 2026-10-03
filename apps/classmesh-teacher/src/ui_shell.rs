@@ -157,6 +157,12 @@ mod tests {
             Err(ClassroomViewError::UnknownDevice)
         );
         assert_eq!(classroom.selected(), Some(MonitoringSourceId(7)));
+
+        let clear = shell
+            .handle(TeacherUiMessage::SelectDevice(None))
+            .expect("selection action");
+        assert_eq!(clear.apply_to_classroom(&mut classroom), Ok(()));
+        assert_eq!(classroom.selected(), None);
     }
 
     #[test]
