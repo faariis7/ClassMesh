@@ -2,9 +2,7 @@ use eframe::egui;
 
 use crate::classroom_view::TeacherClassroomViewModel;
 use crate::focus_view::TeacherFocusViewModel;
-use crate::ui_shell::{
-    TeacherUiMessage, media_label, presence_label, quality_label,
-};
+use crate::ui_shell::{TeacherUiMessage, media_label, presence_label, quality_label};
 
 pub fn show_focus(
     ui: &mut egui::Ui,
