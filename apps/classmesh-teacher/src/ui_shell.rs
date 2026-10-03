@@ -102,8 +102,7 @@ mod tests {
     use super::*;
 
     fn classroom() -> TeacherClassroomViewModel {
-        let mut classroom =
-            TeacherClassroomViewModel::new(ClassroomViewConfig::default()).unwrap();
+        let mut classroom = TeacherClassroomViewModel::new(ClassroomViewConfig::default()).unwrap();
         classroom
             .upsert(ClassroomDeviceSnapshot {
                 source_id: MonitoringSourceId(7),
