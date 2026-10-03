@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use classmesh_control::stream::ValidatedInteractiveStreamOffer;
 use classmesh_core::adaptation::QualityTier;
 use classmesh_core::presence::DeviceHealth;
 use classmesh_protocol::Capability;
@@ -39,24 +38,40 @@ pub struct TeacherFocusViewModel;
 
 impl TeacherFocusViewModel {
     #[must_use]
-    pub fn focused(_classroom: &TeacherClassroomViewModel) -> Option<FocusedDeviceView> {
-        todo!("Phase 11C RED: project focus from authoritative classroom selection")
+    pub fn focused(classroom: &TeacherClassroomViewModel) -> Option<FocusedDeviceView> {
+        let selected = classroom.selected()?;
+        classroom
+            .rows()
+            .into_iter()
+            .find(|row| row.source_id == selected)
+            .map(|row| FocusedDeviceView {
+                source_id: row.source_id,
+                display_name: row.display_name,
+                health: row.health,
+                quality_tier: row.quality_tier,
+                thumbnail_available: row.thumbnail_available,
+                interactive_active: row.interactive_active,
+            })
     }
 
     pub fn request_interactive(
-        _classroom: &TeacherClassroomViewModel,
-        _monitoring: &mut TeacherMonitoringCoordinator,
-        _offer: &StreamOffer,
-        _negotiated_capabilities: &BTreeSet<Capability>,
+        classroom: &TeacherClassroomViewModel,
+        monitoring: &mut TeacherMonitoringCoordinator,
+        offer: &StreamOffer,
+        negotiated_capabilities: &BTreeSet<Capability>,
     ) -> Result<(), FocusViewError> {
-        todo!("Phase 11C RED: delegate selected source to existing promotion path")
+        let source_id = classroom.selected().ok_or(FocusViewError::NoSelectedDevice)?;
+        monitoring
+            .request_interactive_promotion(source_id, offer, negotiated_capabilities)
+            .map_err(Into::into)
     }
 
     pub fn resume_thumbnail(
-        _classroom: &TeacherClassroomViewModel,
-        _monitoring: &mut TeacherMonitoringCoordinator,
+        classroom: &TeacherClassroomViewModel,
+        monitoring: &mut TeacherMonitoringCoordinator,
     ) -> Result<(), FocusViewError> {
-        todo!("Phase 11C RED: resume selected source through existing monitoring path")
+        let source_id = classroom.selected().ok_or(FocusViewError::NoSelectedDevice)?;
+        monitoring.resume_thumbnail(source_id).map_err(Into::into)
     }
 }
 
@@ -274,6 +289,4 @@ mod tests {
             Err(FocusViewError::NoSelectedDevice)
         );
     }
-
-    fn _validated_offer_type_is_not_reimplemented(_: &ValidatedInteractiveStreamOffer) {}
 }
