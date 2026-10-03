@@ -1,9 +1,7 @@
 use eframe::egui;
 
 use classmesh_core::adaptation::QualityTier;
-use classmesh_core::transport_topology::{
-    MediaPath, MediaTopology, PhysicalGateStatus, TransportTopologyEvidence,
-};
+use classmesh_core::transport_topology::{MediaPath, MediaTopology, PhysicalGateStatus};
 use classmesh_core::{MediaTransport, StreamKind};
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
@@ -194,7 +192,11 @@ fn stream_kind_picker(ui: &mut egui::Ui, selected: &mut Option<StreamKind>) {
 
 fn quality_tier_picker(ui: &mut egui::Ui, selected: &mut Option<QualityTier>) {
     egui::ComboBox::from_id_salt("classmesh_diagnostics_quality_tier")
-        .selected_text(quality_label(*selected))
+        .selected_text(
+            selected
+                .map(|tier| quality_label(Some(tier)))
+                .unwrap_or("Select quality"),
+        )
         .show_ui(ui, |ui| {
             for tier in [
                 QualityTier::Emergency,
