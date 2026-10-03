@@ -310,11 +310,11 @@ impl TeacherUiShellState {
 
 #[cfg(test)]
 mod tests {
+    use classmesh_core::MediaTransport as CoreMediaTransport;
     use classmesh_core::presence::DeviceHealth;
     use classmesh_core::transport_topology::{
         MediaPath, MediaTopology, PhysicalGateStatus, PhysicalPathGate,
     };
-    use classmesh_core::MediaTransport as CoreMediaTransport;
     use classmesh_protocol::control_wire::{MediaTransport, StreamKind, VideoCodec, VideoProfile};
     use classmesh_video::monitoring::MonitoringProfile;
     use classmesh_video::monitoring_fanin::MonitoringFanInConfig;
@@ -602,9 +602,10 @@ mod tests {
     fn stale_diagnostics_action_fails_closed_after_selection_changes() {
         let mut classroom = classroom();
         classroom.select(Some(MonitoringSourceId(7))).unwrap();
-        let diagnostics =
-            TeacherDeviceDiagnosticsViewModel::new(crate::device_diagnostics::DeviceDiagnosticsConfig::default())
-                .unwrap();
+        let diagnostics = TeacherDeviceDiagnosticsViewModel::new(
+            crate::device_diagnostics::DeviceDiagnosticsConfig::default(),
+        )
+        .unwrap();
         let action = TeacherDiagnosticsUiAction {
             source_id: MonitoringSourceId(7),
             request: TroubleshootingOverrideRequest::Automatic,
@@ -629,9 +630,10 @@ mod tests {
     fn diagnostics_action_revalidates_open_physical_gate_at_apply_time() {
         let mut classroom = classroom();
         classroom.select(Some(MonitoringSourceId(7))).unwrap();
-        let diagnostics =
-            TeacherDeviceDiagnosticsViewModel::new(crate::device_diagnostics::DeviceDiagnosticsConfig::default())
-                .unwrap();
+        let diagnostics = TeacherDeviceDiagnosticsViewModel::new(
+            crate::device_diagnostics::DeviceDiagnosticsConfig::default(),
+        )
+        .unwrap();
         let path = MediaPath {
             transport: CoreMediaTransport::UdpUnicast,
             topology: MediaTopology::Direct,
