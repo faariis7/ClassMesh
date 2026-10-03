@@ -1,9 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PresentationRunState {
-    Idle,
-    Starting,
-    Streaming,
-}
+use classmesh_core::MediaState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PresentationBindingView {
@@ -44,7 +39,7 @@ pub struct PresentationRuntimeSnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PresentationViewState {
-    pub run_state: PresentationRunState,
+    pub media_state: MediaState,
     pub binding: Option<PresentationBindingView>,
     pub profile: Option<PresentationProfileView>,
     pub metrics: PresentationMetricsView,
@@ -56,16 +51,16 @@ pub struct TeacherPresentationViewModel;
 impl TeacherPresentationViewModel {
     #[must_use]
     pub fn state(snapshot: PresentationRuntimeSnapshot) -> PresentationViewState {
-        let run_state = match snapshot.binding {
-            None => PresentationRunState::Idle,
+        let media_state = match snapshot.binding {
+            None => MediaState::Idle,
             Some(_) if snapshot.profile.is_some() && snapshot.metrics.encoded_frames > 0 => {
-                PresentationRunState::Streaming
+                MediaState::Streaming
             }
-            Some(_) => PresentationRunState::Starting,
+            Some(_) => MediaState::Starting,
         };
 
         PresentationViewState {
-            run_state,
+            media_state,
             binding: snapshot.binding,
             profile: snapshot.profile,
             metrics: snapshot.metrics,
@@ -133,7 +128,7 @@ mod tests {
     #[test]
     fn idle_projection_has_no_fabricated_binding_or_profile() {
         let state = TeacherPresentationViewModel::state(PresentationRuntimeSnapshot::default());
-        assert_eq!(state.run_state, PresentationRunState::Idle);
+        assert_eq!(state.media_state, MediaState::Idle);
         assert_eq!(state.binding, None);
         assert_eq!(state.profile, None);
         assert_eq!(state.metrics, PresentationMetricsView::default());
@@ -143,7 +138,7 @@ mod tests {
     fn active_runtime_without_encoded_output_projects_starting() {
         let snapshot = active_snapshot(0);
         let state = TeacherPresentationViewModel::state(snapshot);
-        assert_eq!(state.run_state, PresentationRunState::Starting);
+        assert_eq!(state.media_state, MediaState::Starting);
         assert_eq!(state.binding, snapshot.binding);
         assert_eq!(state.profile, snapshot.profile);
     }
@@ -152,7 +147,7 @@ mod tests {
     fn encoded_output_projects_streaming_without_inventing_drop_policy() {
         let snapshot = active_snapshot(12);
         let state = TeacherPresentationViewModel::state(snapshot);
-        assert_eq!(state.run_state, PresentationRunState::Streaming);
+        assert_eq!(state.media_state, MediaState::Streaming);
         assert_eq!(state.metrics.multicast_dropped, 3);
         assert_eq!(state.metrics.multicast_queued, 1);
         assert_eq!(state.metrics.unicast_outliers, 2);
@@ -163,7 +158,7 @@ mod tests {
         let mut snapshot = active_snapshot(0);
         snapshot.profile = None;
         let state = TeacherPresentationViewModel::state(snapshot);
-        assert_eq!(state.run_state, PresentationRunState::Starting);
+        assert_eq!(state.media_state, MediaState::Starting);
         assert_eq!(state.binding, snapshot.binding);
         assert_eq!(state.profile, None);
     }
@@ -173,7 +168,7 @@ mod tests {
     fn idle_windows_lifecycle_projects_idle_and_stop_is_noop() {
         let mut lifecycle = crate::TeacherVideoEngineLifecycle::default();
         let state = TeacherPresentationViewModel::state_from_lifecycle(&lifecycle);
-        assert_eq!(state.run_state, PresentationRunState::Idle);
+        assert_eq!(state.media_state, MediaState::Idle);
         assert_eq!(state.binding, None);
         assert_eq!(state.profile, None);
         assert!(matches!(
