@@ -141,11 +141,13 @@ pub enum TeacherPresentationUiActionError {
 fn active_presentation_binding(
     lifecycle: &crate::TeacherVideoEngineLifecycle,
 ) -> Option<PresentationBindingView> {
-    lifecycle.active_binding().map(|binding| PresentationBindingView {
-        presentation_id: binding.presentation_id(),
-        stream_id: binding.stream_id(),
-        epoch: binding.epoch(),
-    })
+    lifecycle
+        .active_binding()
+        .map(|binding| PresentationBindingView {
+            presentation_id: binding.presentation_id(),
+            stream_id: binding.stream_id(),
+            epoch: binding.epoch(),
+        })
 }
 
 #[cfg(windows)]
@@ -496,11 +498,7 @@ mod tests {
         let mut lifecycle = crate::TeacherVideoEngineLifecycle::default();
 
         assert!(matches!(
-            apply_presentation_ui_action(
-                TeacherPresentationUiAction::Start,
-                &mut lifecycle,
-                None
-            ),
+            apply_presentation_ui_action(TeacherPresentationUiAction::Start, &mut lifecycle, None),
             Err(TeacherPresentationUiActionError::MissingStartContext)
         ));
         assert_eq!(lifecycle.active_binding(), None);
