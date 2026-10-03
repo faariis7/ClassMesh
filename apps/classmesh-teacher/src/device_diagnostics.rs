@@ -367,8 +367,10 @@ mod tests {
     fn qualified_path_and_reliable_fallback_can_be_validated_without_selecting_defaults() {
         let model =
             TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default()).unwrap();
-        let mut evidence = TransportTopologyEvidence::default();
-        evidence.udp_unicast = PhysicalGateStatus::Qualified;
+        let evidence = TransportTopologyEvidence {
+            udp_unicast: PhysicalGateStatus::Qualified,
+            ..TransportTopologyEvidence::default()
+        };
 
         assert_eq!(
             model
