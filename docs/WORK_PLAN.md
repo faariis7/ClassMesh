@@ -29,7 +29,7 @@ Phase 5 tracking issue #32 is complete. Active product/UI tracking is Phase 11 I
 
 ## Current priority
 
-1. Continue Phase 11 from the live state: 11A–11E are merged; **11F1 is the active implementation slice**. Pin a Windows-compatible Rust GUI framework that respects the workspace MSRV, add only the production Windows shell/framework boundary, and keep every framework message/action typed against the established view-model/action layer.
+1. Continue Phase 11 from the live state: 11A–11E are merged; **11F1 is the active implementation slice**. Pin `eframe/egui` **0.32.3** for the Windows shell: it matches the workspace Rust 1.85 MSRV and provides native AccessKit integration. Add only the production Windows shell/framework boundary, and keep every framework message/action typed against the established view-model/action layer.
 2. Keep Phase 11 framework/view-model code as a thin consumer of existing engine APIs; UI must not own capture, networking, authorization, adaptation, recovery, or transport-selection logic.
 3. Keep Phase 4, 6F, 7D/7H, 8D, 9F and 10G physical gates open until real hardware evidence exists.
 4. Do not let UI work or hosted CI silently select unresolved transport, topology, relay/SFU, rendition, or physical-qualification defaults.
