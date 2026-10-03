@@ -6,9 +6,7 @@ use classmesh_core::{MediaTransport, StreamKind};
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::device_diagnostics::{DeviceDiagnosticsView, TroubleshootingOverrideRequest};
-use crate::ui_shell::{
-    TeacherUiMessage, media_label, presence_label, quality_label,
-};
+use crate::ui_shell::{TeacherUiMessage, media_label, presence_label, quality_label};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DiagnosticsOverrideDraft {
@@ -71,7 +69,11 @@ pub fn show_diagnostics(
                         format!("{:.2}%", sample.network.packet_loss * 100.0),
                     );
                     sample_metric(ui, "Jitter", format!("{:.1} ms", sample.network.jitter_ms));
-                    sample_metric(ui, "Decode FPS", format!("{:.1}", sample.network.decode_fps));
+                    sample_metric(
+                        ui,
+                        "Decode FPS",
+                        format!("{:.1}", sample.network.decode_fps),
+                    );
                     sample_metric(
                         ui,
                         "Queue delay",
@@ -126,7 +128,9 @@ pub fn show_diagnostics(
 
     ui.separator();
     ui.heading("Troubleshooting override");
-    ui.small("Overrides are requests only; live engine evidence is revalidated before application.");
+    ui.small(
+        "Overrides are requests only; live engine evidence is revalidated before application.",
+    );
 
     if ui
         .add_enabled(!action_pending, egui::Button::new("Return to automatic"))
@@ -160,7 +164,10 @@ pub fn show_diagnostics(
     });
     if let (Some(transport), Some(topology)) = (draft.transport, draft.topology) {
         if ui
-            .add_enabled(!action_pending, egui::Button::new("Request media path override"))
+            .add_enabled(
+                !action_pending,
+                egui::Button::new("Request media path override"),
+            )
             .clicked()
         {
             return Some(TeacherUiMessage::RequestTroubleshootingOverride {
