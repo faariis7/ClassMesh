@@ -3,7 +3,11 @@ use eframe::egui;
 use crate::classroom_grid::{MonitoringGridViewConfig, TeacherMonitoringGridViewModel};
 use crate::classroom_view::{ClassroomViewConfig, TeacherClassroomViewModel};
 use crate::ui_classroom::show_classroom;
+use crate::presentation_view::{
+    PresentationRuntimeSnapshot, PresentationViewState, TeacherPresentationViewModel,
+};
 use crate::ui_focus::show_focus;
+use crate::ui_presentation::show_presentation;
 use crate::ui_shell::{TeacherUiAction, TeacherUiMessage, TeacherUiSection, TeacherUiShellState};
 
 const APP_TITLE: &str = "ClassMesh Teacher";
@@ -13,6 +17,7 @@ pub struct TeacherEguiShell {
     shell: TeacherUiShellState,
     classroom: TeacherClassroomViewModel,
     monitoring: TeacherMonitoringGridViewModel,
+    presentation: PresentationViewState,
     pending_action: Option<TeacherUiAction>,
 }
 
@@ -24,6 +29,9 @@ impl Default for TeacherEguiShell {
                 .expect("default classroom view configuration is valid"),
             monitoring: TeacherMonitoringGridViewModel::new(MonitoringGridViewConfig::default())
                 .expect("default monitoring grid configuration is valid"),
+            presentation: TeacherPresentationViewModel::state(
+                PresentationRuntimeSnapshot::default(),
+            ),
             pending_action: None,
         }
     }
@@ -39,8 +47,15 @@ impl TeacherEguiShell {
             shell: TeacherUiShellState::default(),
             classroom,
             monitoring,
+            presentation: TeacherPresentationViewModel::state(
+                PresentationRuntimeSnapshot::default(),
+            ),
             pending_action: None,
         }
+    }
+
+    pub fn set_presentation_snapshot(&mut self, snapshot: PresentationRuntimeSnapshot) {
+        self.presentation = TeacherPresentationViewModel::state(snapshot);
     }
 
     #[must_use]
@@ -91,11 +106,15 @@ impl TeacherEguiShell {
                     }
                 }
             }
-            TeacherUiSection::Presentation => placeholder(
-                ui,
-                "Presentation",
-                "Presentation lifecycle actions remain owned by the existing Phase 11D contracts.",
-            ),
+            TeacherUiSection::Presentation => {
+                if let Some(message) =
+                    show_presentation(ui, self.presentation, self.pending_action.is_some())
+                {
+                    if let Some(action) = self.shell.handle(message) {
+                        self.queue_action(action);
+                    }
+                }
+            }
             TeacherUiSection::Diagnostics => placeholder(
                 ui,
                 "Diagnostics",
@@ -137,6 +156,32 @@ mod tests {
     use crate::ui_shell::TeacherFocusUiAction;
 
     use super::*;
+
+    #[test]
+    fn presentation_snapshot_is_projected_through_existing_11d_view_model() {
+        let mut app = TeacherEguiShell::default();
+        app.set_presentation_snapshot(PresentationRuntimeSnapshot {
+            binding: Some(crate::presentation_view::PresentationBindingView {
+                presentation_id: 700,
+                stream_id: 800,
+                epoch: 4,
+            }),
+            profile: Some(crate::presentation_view::PresentationProfileView {
+                width: 1280,
+                height: 720,
+                fps: 30,
+                bitrate_bps: 2_500_000,
+            }),
+            metrics: crate::presentation_view::PresentationMetricsView {
+                encoded_frames: 12,
+                ..crate::presentation_view::PresentationMetricsView::default()
+            },
+        });
+
+        assert_eq!(app.presentation.media_state, classmesh_core::MediaState::Streaming);
+        assert_eq!(app.presentation.binding.unwrap().presentation_id, 700);
+        assert_eq!(app.presentation.metrics.encoded_frames, 12);
+    }
 
     #[test]
     fn pending_action_slot_is_bounded_and_preserves_oldest_action() {
