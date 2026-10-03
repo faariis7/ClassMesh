@@ -22,16 +22,18 @@ This is the active execution plan for ClassMesh. It is updated as implementation
 | Phase 8 — Wi-Fi fan-out benchmark / optional relay | **Software baselines + qualification tooling complete; physical strategy decision pending — Issue #276** | Direct and relay synthetic baselines are merged through PR #279; PR #280 adds the physical 5/10/20/30-receiver Wi-Fi evidence harness. Hosted CI does not select the production Wi-Fi strategy. |
 | Phase 9 — monitoring grid | **9A–9E software complete; 9F physical qualification pending — Issue #281** | Low-cost 2–5 FPS monitoring profile/scheduler, GPU-native Worker thumbnail encode path, change-aware heartbeat, bounded Teacher fan-in and interactive promotion are merged through PR #286. PR #287 adds synthetic/classroom qualification tooling; physical 5/10/20/30-source evidence remains pending. |
 | Phase 10 — adaptive networking / quality controller | **10A–10F + 10G tooling complete; 10G physical evidence pending — Issue #288** | Per-receiver health sampling, hysteretic profile adaptation, independent cohort routing, physical-gated transport/topology decisions, and recovery/latest-frame-wins integration are merged through PR #293. PR #294 merged evidence-gated rendition/SFU eligibility without selecting a topology; PR #296 merged the adaptive-controller benchmark, physical evidence harness and qualification bundle. Physical 10G execution remains pending. |
+| Phase 11 — Teacher UI / classroom UX | **11A–11B merged; 11C active — Issue #298** | Framework-neutral classroom/device-list and monitoring-grid projections are merged through PR #301. PR #302 is the active focus/remote-control view slice and must continue to consume existing engine/promotion APIs without owning capture/network/authorization/adaptation policy. |
 | AI quality workflow | **Active** | Project skills + official plugins documented in `docs/AI_QUALITY_STACK.md` |
 
-Phase 5 tracking issue #32 is complete. Active physical/qualification tracking remains under Phase 6 Issue #108, Phase 7 Issue #153, Phase 8 Issue #276, Phase 9 Issue #281, and Phase 10 Issue #288.
+Phase 5 tracking issue #32 is complete. Active product/UI tracking is Phase 11 Issue #298. Active physical/qualification tracking remains under Phase 6 Issue #108, Phase 7 Issue #153, Phase 8 Issue #276, Phase 9 Issue #281, and Phase 10 Issue #288.
 
 ## Current priority
 
-1. Begin Phase 11 Teacher UI as a thin consumer of existing engine APIs; UI must not own capture, networking, authorization, adaptation, or transport-selection logic.
-2. Keep Phase 4, 6F, 7D/7H, 8D, 9F and 10G physical gates open until real hardware evidence exists.
-3. Do not let UI work or hosted CI silently select unresolved transport, topology, relay/SFU, rendition, or physical-qualification defaults.
-4. Preserve later Phase 12 administrative features, Phase 13 installer/update/recovery, and Phase 14 hardening in roadmap order.
+1. Continue Phase 11 from the live state: 11A and 11B are merged; finish 11C focus/remote-control view state, then proceed in order through 11D presentation state/health, 11E diagnostics/typed overrides, and 11F the production Windows UI shell.
+2. Keep Phase 11 framework/view-model code as a thin consumer of existing engine APIs; UI must not own capture, networking, authorization, adaptation, recovery, or transport-selection logic.
+3. Keep Phase 4, 6F, 7D/7H, 8D, 9F and 10G physical gates open until real hardware evidence exists.
+4. Do not let UI work or hosted CI silently select unresolved transport, topology, relay/SFU, rendition, or physical-qualification defaults.
+5. Preserve later Phase 12 administrative features, Phase 13 installer/update/recovery, and Phase 14 hardening in roadmap order.
 
 ## Rules while Phase 4 hardware is unavailable
 
