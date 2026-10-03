@@ -19,15 +19,17 @@ The bundle contains:
 The index records bounded file metadata and SHA-256 hashes. Validate it before launch:
 
 ```powershell
-.\phase11f4-teacher-ui-smoke.ps1 -Mode ValidateBundle -BundleDir .
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-smoke.ps1 -Mode ValidateBundle -BundleDir .
 ```
+
+`-ExecutionPolicy Bypass` is process-local here; it does not change the machine or user execution policy.
 
 ## Interactive launch smoke
 
 Run from a signed-in interactive Windows user session. Session 0 is intentionally rejected so an invisible service-session launch cannot be mistaken for UI validation.
 
 ```powershell
-.\phase11f4-teacher-ui-smoke.ps1 `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-smoke.ps1 `
   -Mode Smoke `
   -BundleDir . `
   -EvidenceDir .\evidence `
