@@ -1,5 +1,6 @@
 pub mod classroom_grid;
 pub mod classroom_view;
+pub mod focus_view;
 pub mod monitoring;
 pub mod monitoring_promotion;
 
