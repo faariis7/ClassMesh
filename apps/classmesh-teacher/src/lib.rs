@@ -8,6 +8,8 @@ pub mod presentation_view;
 #[cfg(windows)]
 pub mod ui_classroom;
 #[cfg(windows)]
+pub mod ui_diagnostics;
+#[cfg(windows)]
 pub mod ui_egui;
 #[cfg(windows)]
 pub mod ui_focus;
