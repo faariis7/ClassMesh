@@ -24,7 +24,9 @@ pub fn show_focus(
         quality_label(focused.quality_tier),
     ));
 
-    if focused.thumbnail_available {
+    if focused.interactive_active {
+        ui.small("Interactive session active");
+    } else if focused.thumbnail_available {
         ui.small("Monitoring thumbnail available");
     } else {
         ui.small("Monitoring thumbnail unavailable");
