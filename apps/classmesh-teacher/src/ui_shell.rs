@@ -31,8 +31,16 @@ impl TeacherUiShellState {
         self.active_section
     }
 
-    pub fn handle(&mut self, _message: TeacherUiMessage) -> Option<TeacherUiAction> {
-        todo!("Phase 11F1 RED: keep shell-local navigation separate from engine/view-model actions")
+    pub fn handle(&mut self, message: TeacherUiMessage) -> Option<TeacherUiAction> {
+        match message {
+            TeacherUiMessage::Navigate(section) => {
+                self.active_section = section;
+                None
+            }
+            TeacherUiMessage::SelectDevice(source_id) => {
+                Some(TeacherUiAction::SelectDevice(source_id))
+            }
+        }
     }
 }
 
