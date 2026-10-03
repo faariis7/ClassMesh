@@ -64,12 +64,9 @@ impl TeacherEguiShell {
 
     fn section_body(&mut self, ui: &mut egui::Ui) {
         match self.shell.active_section() {
-            TeacherUiSection::Classroom => show_classroom(
-                ui,
-                &mut self.shell,
-                &mut self.classroom,
-                &self.monitoring,
-            ),
+            TeacherUiSection::Classroom => {
+                show_classroom(ui, &mut self.shell, &mut self.classroom, &self.monitoring)
+            }
             TeacherUiSection::Focus => placeholder(
                 ui,
                 "Focus",
