@@ -1,9 +1,15 @@
+use std::collections::BTreeSet;
+
 use classmesh_core::MediaState;
 use classmesh_core::adaptation::QualityTier;
 use classmesh_core::presence::PresenceState;
+use classmesh_protocol::Capability;
+use classmesh_protocol::control_wire::StreamOffer;
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::classroom_view::{ClassroomViewError, TeacherClassroomViewModel};
+use crate::focus_view::{FocusViewError, TeacherFocusViewModel};
+use crate::monitoring_promotion::TeacherMonitoringCoordinator;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TeacherUiSection {
@@ -18,20 +24,90 @@ pub enum TeacherUiSection {
 pub enum TeacherUiMessage {
     Navigate(TeacherUiSection),
     SelectDevice(Option<MonitoringSourceId>),
+    RequestInteractive(MonitoringSourceId),
+    ResumeThumbnail(MonitoringSourceId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeacherFocusUiAction {
+    RequestInteractive { source_id: MonitoringSourceId },
+    ResumeThumbnail { source_id: MonitoringSourceId },
+}
+
+impl TeacherFocusUiAction {
+    #[must_use]
+    pub const fn source_id(self) -> MonitoringSourceId {
+        match self {
+            Self::RequestInteractive { source_id } | Self::ResumeThumbnail { source_id } => {
+                source_id
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeacherUiAction {
     SelectDevice(Option<MonitoringSourceId>),
+    Focus(TeacherFocusUiAction),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeacherUiClassroomActionError {
+    NotClassroomAction,
+    Classroom(ClassroomViewError),
 }
 
 impl TeacherUiAction {
     pub fn apply_to_classroom(
         self,
         classroom: &mut TeacherClassroomViewModel,
-    ) -> Result<(), ClassroomViewError> {
+    ) -> Result<(), TeacherUiClassroomActionError> {
         match self {
-            Self::SelectDevice(source_id) => classroom.select(source_id),
+            Self::SelectDevice(source_id) => classroom
+                .select(source_id)
+                .map_err(TeacherUiClassroomActionError::Classroom),
+            Self::Focus(_) => Err(TeacherUiClassroomActionError::NotClassroomAction),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeacherFocusUiActionError {
+    SelectionChanged {
+        expected: MonitoringSourceId,
+        selected: Option<MonitoringSourceId>,
+    },
+    MissingInteractiveContext,
+    Focus(FocusViewError),
+}
+
+pub fn apply_focus_ui_action(
+    action: TeacherFocusUiAction,
+    classroom: &TeacherClassroomViewModel,
+    monitoring: &mut TeacherMonitoringCoordinator,
+    interactive: Option<(&StreamOffer, &BTreeSet<Capability>)>,
+) -> Result<(), TeacherFocusUiActionError> {
+    let expected = action.source_id();
+    let selected = classroom.selected();
+    if selected != Some(expected) {
+        return Err(TeacherFocusUiActionError::SelectionChanged { expected, selected });
+    }
+
+    match action {
+        TeacherFocusUiAction::RequestInteractive { .. } => {
+            let (offer, negotiated_capabilities) =
+                interactive.ok_or(TeacherFocusUiActionError::MissingInteractiveContext)?;
+            TeacherFocusViewModel::request_interactive(
+                classroom,
+                monitoring,
+                offer,
+                negotiated_capabilities,
+            )
+            .map_err(TeacherFocusUiActionError::Focus)
+        }
+        TeacherFocusUiAction::ResumeThumbnail { .. } => {
+            TeacherFocusViewModel::resume_thumbnail(classroom, monitoring)
+                .map_err(TeacherFocusUiActionError::Focus)
         }
     }
 }
@@ -89,6 +165,12 @@ impl TeacherUiShellState {
             TeacherUiMessage::SelectDevice(source_id) => {
                 Some(TeacherUiAction::SelectDevice(source_id))
             }
+            TeacherUiMessage::RequestInteractive(source_id) => Some(TeacherUiAction::Focus(
+                TeacherFocusUiAction::RequestInteractive { source_id },
+            )),
+            TeacherUiMessage::ResumeThumbnail(source_id) => Some(TeacherUiAction::Focus(
+                TeacherFocusUiAction::ResumeThumbnail { source_id },
+            )),
         }
     }
 }
@@ -96,8 +178,13 @@ impl TeacherUiShellState {
 #[cfg(test)]
 mod tests {
     use classmesh_core::presence::DeviceHealth;
+    use classmesh_protocol::control_wire::{MediaTransport, StreamKind, VideoCodec, VideoProfile};
+    use classmesh_video::monitoring::MonitoringProfile;
+    use classmesh_video::monitoring_fanin::MonitoringFanInConfig;
+    use classmesh_video::monitoring_scheduler::{MonitoringPriority, MonitoringSchedulerConfig};
 
     use crate::classroom_view::{ClassroomDeviceSnapshot, ClassroomViewConfig};
+    use crate::monitoring_promotion::TeacherMonitoringAction;
 
     use super::*;
 
@@ -119,6 +206,48 @@ mod tests {
             })
             .unwrap();
         classroom
+    }
+
+    fn monitoring() -> TeacherMonitoringCoordinator {
+        let mut monitoring = TeacherMonitoringCoordinator::new(
+            MonitoringSchedulerConfig {
+                max_sources: 4,
+                max_actions_per_tick: 4,
+            },
+            MonitoringFanInConfig {
+                max_sources: 4,
+                max_updates_per_drain: 4,
+            },
+        )
+        .unwrap();
+        monitoring
+            .add_source(
+                MonitoringSourceId(7),
+                MonitoringProfile::for_thumbnail_at_fps(320, 180, 3).unwrap(),
+                MonitoringPriority::Visible,
+            )
+            .unwrap();
+        monitoring
+    }
+
+    fn interactive_offer() -> StreamOffer {
+        StreamOffer {
+            stream_id: 11,
+            kind: StreamKind::Interactive as i32,
+            transport: MediaTransport::UdpUnicast as i32,
+            profile: Some(VideoProfile {
+                width: 1280,
+                height: 720,
+                fps: 30,
+                bitrate_kbps: 2_500,
+                codec: VideoCodec::H264 as i32,
+            }),
+            transport_parameters: vec![1, 0x23, 0x28],
+        }
+    }
+
+    fn capabilities() -> BTreeSet<Capability> {
+        BTreeSet::from([Capability::UdpUnicast])
     }
 
     #[test]
@@ -153,7 +282,9 @@ mod tests {
             .expect("selection action");
         assert_eq!(
             unknown.apply_to_classroom(&mut classroom),
-            Err(ClassroomViewError::UnknownDevice)
+            Err(TeacherUiClassroomActionError::Classroom(
+                ClassroomViewError::UnknownDevice
+            ))
         );
         assert_eq!(classroom.selected(), Some(MonitoringSourceId(7)));
 
@@ -162,6 +293,97 @@ mod tests {
             .expect("selection action");
         assert_eq!(clear.apply_to_classroom(&mut classroom), Ok(()));
         assert_eq!(classroom.selected(), None);
+    }
+
+    #[test]
+    fn focus_request_captures_source_and_delegates_to_existing_focus_contract() {
+        let mut shell = TeacherUiShellState::default();
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let mut monitoring = monitoring();
+
+        let action = shell
+            .handle(TeacherUiMessage::RequestInteractive(MonitoringSourceId(7)))
+            .expect("focus action");
+        let TeacherUiAction::Focus(focus_action) = action else {
+            panic!("expected focus action");
+        };
+        assert_eq!(
+            focus_action,
+            TeacherFocusUiAction::RequestInteractive {
+                source_id: MonitoringSourceId(7)
+            }
+        );
+
+        let offer = interactive_offer();
+        let capabilities = capabilities();
+        apply_focus_ui_action(
+            focus_action,
+            &classroom,
+            &mut monitoring,
+            Some((&offer, &capabilities)),
+        )
+        .unwrap();
+
+        assert!(monitoring.poll(0).unwrap().iter().any(|action| {
+            matches!(
+                action,
+                TeacherMonitoringAction::StartInteractive { source_id, .. }
+                    if *source_id == MonitoringSourceId(7)
+            )
+        }));
+    }
+
+    #[test]
+    fn interactive_focus_request_without_engine_context_fails_closed() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let mut monitoring = monitoring();
+        let action = TeacherFocusUiAction::RequestInteractive {
+            source_id: MonitoringSourceId(7),
+        };
+
+        assert_eq!(
+            apply_focus_ui_action(action, &classroom, &mut monitoring, None),
+            Err(TeacherFocusUiActionError::MissingInteractiveContext)
+        );
+        assert!(
+            monitoring.poll(0).unwrap().iter().all(|action| {
+                !matches!(action, TeacherMonitoringAction::StartInteractive { .. })
+            })
+        );
+    }
+
+    #[test]
+    fn stale_focus_action_fails_closed_after_selection_changes() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let mut monitoring = monitoring();
+        let action = TeacherFocusUiAction::ResumeThumbnail {
+            source_id: MonitoringSourceId(7),
+        };
+
+        classroom.select(None).unwrap();
+        assert_eq!(
+            apply_focus_ui_action(action, &classroom, &mut monitoring, None),
+            Err(TeacherFocusUiActionError::SelectionChanged {
+                expected: MonitoringSourceId(7),
+                selected: None,
+            })
+        );
+    }
+
+    #[test]
+    fn focus_resume_message_emits_typed_action() {
+        let mut shell = TeacherUiShellState::default();
+        assert_eq!(
+            shell.handle(TeacherUiMessage::ResumeThumbnail(MonitoringSourceId(7))),
+            Some(TeacherUiAction::Focus(
+                TeacherFocusUiAction::ResumeThumbnail {
+                    source_id: MonitoringSourceId(7)
+                }
+            ))
+        );
     }
 
     #[test]

@@ -3,7 +3,8 @@ use eframe::egui;
 use crate::classroom_grid::{MonitoringGridViewConfig, TeacherMonitoringGridViewModel};
 use crate::classroom_view::{ClassroomViewConfig, TeacherClassroomViewModel};
 use crate::ui_classroom::show_classroom;
-use crate::ui_shell::{TeacherUiMessage, TeacherUiSection, TeacherUiShellState};
+use crate::ui_focus::show_focus;
+use crate::ui_shell::{TeacherUiAction, TeacherUiMessage, TeacherUiSection, TeacherUiShellState};
 
 const APP_TITLE: &str = "ClassMesh Teacher";
 
@@ -12,6 +13,7 @@ pub struct TeacherEguiShell {
     shell: TeacherUiShellState,
     classroom: TeacherClassroomViewModel,
     monitoring: TeacherMonitoringGridViewModel,
+    pending_action: Option<TeacherUiAction>,
 }
 
 impl Default for TeacherEguiShell {
@@ -22,6 +24,7 @@ impl Default for TeacherEguiShell {
                 .expect("default classroom view configuration is valid"),
             monitoring: TeacherMonitoringGridViewModel::new(MonitoringGridViewConfig::default())
                 .expect("default monitoring grid configuration is valid"),
+            pending_action: None,
         }
     }
 }
@@ -36,6 +39,18 @@ impl TeacherEguiShell {
             shell: TeacherUiShellState::default(),
             classroom,
             monitoring,
+            pending_action: None,
+        }
+    }
+
+    #[must_use]
+    pub fn take_pending_action(&mut self) -> Option<TeacherUiAction> {
+        self.pending_action.take()
+    }
+
+    fn queue_action(&mut self, action: TeacherUiAction) {
+        if self.pending_action.is_none() {
+            self.pending_action = Some(action);
         }
     }
 
@@ -67,11 +82,15 @@ impl TeacherEguiShell {
             TeacherUiSection::Classroom => {
                 show_classroom(ui, &mut self.shell, &mut self.classroom, &self.monitoring)
             }
-            TeacherUiSection::Focus => placeholder(
-                ui,
-                "Focus",
-                "Interactive focus actions remain owned by the existing Phase 11C contracts.",
-            ),
+            TeacherUiSection::Focus => {
+                if let Some(message) =
+                    show_focus(ui, &self.classroom, self.pending_action.is_some())
+                {
+                    if let Some(action) = self.shell.handle(message) {
+                        self.queue_action(action);
+                    }
+                }
+            }
             TeacherUiSection::Presentation => placeholder(
                 ui,
                 "Presentation",
@@ -109,4 +128,28 @@ pub fn run_teacher_ui() -> eframe::Result<()> {
         eframe::NativeOptions::default(),
         Box::new(|_creation_context| Ok(Box::<TeacherEguiShell>::default())),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use classmesh_video::monitoring_scheduler::MonitoringSourceId;
+
+    use crate::ui_shell::TeacherFocusUiAction;
+
+    use super::*;
+
+    #[test]
+    fn pending_action_slot_is_bounded_and_preserves_oldest_action() {
+        let mut app = TeacherEguiShell::default();
+        let first = TeacherUiAction::SelectDevice(Some(MonitoringSourceId(7)));
+        let second = TeacherUiAction::Focus(TeacherFocusUiAction::RequestInteractive {
+            source_id: MonitoringSourceId(7),
+        });
+
+        app.queue_action(first);
+        app.queue_action(second);
+
+        assert_eq!(app.take_pending_action(), Some(first));
+        assert_eq!(app.take_pending_action(), None);
+    }
 }
