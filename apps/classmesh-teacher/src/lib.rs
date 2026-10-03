@@ -3,6 +3,7 @@ pub mod classroom_view;
 pub mod focus_view;
 pub mod monitoring;
 pub mod monitoring_promotion;
+pub mod presentation_view;
 
 #[cfg(windows)]
 use classmesh_control::authorization::AuthenticatedControlGuard;
@@ -178,6 +179,47 @@ impl TeacherVideoEngineLifecycle {
     #[must_use]
     pub fn active_binding(&self) -> Option<PresentationMulticastSendBinding> {
         self.active.as_ref().map(|active| active.binding)
+    }
+
+    #[must_use]
+    pub fn presentation_snapshot(&self) -> crate::presentation_view::PresentationRuntimeSnapshot {
+        let Some(active) = self.active.as_ref() else {
+            return crate::presentation_view::PresentationRuntimeSnapshot::default();
+        };
+
+        let binding = active.binding;
+        let profile = active.runtime.profile();
+        let stats = active.runtime.presentation_stats().unwrap_or_default();
+        let sink = active.runtime.sink_stats();
+
+        crate::presentation_view::PresentationRuntimeSnapshot {
+            binding: Some(crate::presentation_view::PresentationBindingView {
+                presentation_id: binding.presentation_id(),
+                stream_id: binding.stream_id(),
+                epoch: binding.epoch(),
+            }),
+            profile: profile.map(
+                |profile| crate::presentation_view::PresentationProfileView {
+                    width: profile.target_width,
+                    height: profile.target_height,
+                    fps: profile.fps,
+                    bitrate_bps: profile.bitrate_bps,
+                },
+            ),
+            metrics: crate::presentation_view::PresentationMetricsView {
+                captured_frames: stats.captured_frames,
+                submitted_frames: stats.submitted_frames,
+                rate_dropped_frames: stats.rate_dropped_frames,
+                pool_dropped_frames: stats.pool_dropped_frames,
+                encoded_frames: stats.encoded_frames,
+                encoded_bytes: stats.encoded_bytes,
+                keyframes: stats.keyframes,
+                keyframe_requests: stats.keyframe_requests,
+                multicast_queued: sink.map_or(0, |sink| sink.queued),
+                multicast_dropped: sink.map_or(0, |sink| sink.dropped),
+                unicast_outliers: active.runtime.unicast_outlier_count(),
+            },
+        }
     }
 
     pub fn apply(
