@@ -122,6 +122,14 @@ fn placeholder(ui: &mut egui::Ui, heading: &str, description: &str) {
     ui.label(description);
 }
 
+pub fn run_teacher_ui() -> eframe::Result<()> {
+    eframe::run_native(
+        APP_TITLE,
+        eframe::NativeOptions::default(),
+        Box::new(|_creation_context| Ok(Box::<TeacherEguiShell>::default())),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use classmesh_video::monitoring_scheduler::MonitoringSourceId;
@@ -144,12 +152,4 @@ mod tests {
         assert_eq!(app.take_pending_action(), Some(first));
         assert_eq!(app.take_pending_action(), None);
     }
-}
-
-pub fn run_teacher_ui() -> eframe::Result<()> {
-    eframe::run_native(
-        APP_TITLE,
-        eframe::NativeOptions::default(),
-        Box::new(|_creation_context| Ok(Box::<TeacherEguiShell>::default())),
-    )
 }
