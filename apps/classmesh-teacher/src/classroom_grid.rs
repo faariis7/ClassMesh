@@ -47,19 +47,34 @@ pub struct TeacherMonitoringGridViewModel {
 }
 
 impl TeacherMonitoringGridViewModel {
-    pub fn new(_config: MonitoringGridViewConfig) -> Result<Self, MonitoringGridViewError> {
-        todo!("Phase 11B RED: validate bounded grid configuration")
+    pub fn new(config: MonitoringGridViewConfig) -> Result<Self, MonitoringGridViewError> {
+        if config.max_tiles == 0 {
+            return Err(MonitoringGridViewError::InvalidMaxTiles);
+        }
+        Ok(Self {
+            config,
+            latest: BTreeMap::new(),
+        })
     }
 
     pub fn accept(
         &mut self,
-        _update: MonitoringThumbnailUpdate,
+        update: MonitoringThumbnailUpdate,
     ) -> Result<MonitoringGridUpdate, MonitoringGridViewError> {
-        todo!("Phase 11B RED: keep only the latest thumbnail per source")
+        let source_id = update.source_id();
+        if let Some(existing) = self.latest.get_mut(&source_id) {
+            *existing = update.into_frame();
+            return Ok(MonitoringGridUpdate::Replaced);
+        }
+        if self.latest.len() >= self.config.max_tiles {
+            return Err(MonitoringGridViewError::TileLimitReached);
+        }
+        self.latest.insert(source_id, update.into_frame());
+        Ok(MonitoringGridUpdate::Inserted)
     }
 
-    pub fn remove(&mut self, _source_id: MonitoringSourceId) -> bool {
-        todo!("Phase 11B RED: remove one source thumbnail")
+    pub fn remove(&mut self, source_id: MonitoringSourceId) -> bool {
+        self.latest.remove(&source_id).is_some()
     }
 
     #[must_use]
@@ -73,8 +88,19 @@ impl TeacherMonitoringGridViewModel {
     }
 
     #[must_use]
-    pub fn tiles(&self, _classroom: &TeacherClassroomViewModel) -> Vec<MonitoringGridTile> {
-        todo!("Phase 11B RED: project deterministic tiles with authoritative selection")
+    pub fn tiles(&self, classroom: &TeacherClassroomViewModel) -> Vec<MonitoringGridTile> {
+        let selected = classroom.selected();
+        let mut tiles: Vec<_> = self
+            .latest
+            .iter()
+            .map(|(&source_id, frame)| MonitoringGridTile {
+                source_id,
+                frame: frame.clone(),
+                selected: selected == Some(source_id),
+            })
+            .collect();
+        tiles.sort_by_key(|tile| (!tile.selected, tile.source_id));
+        tiles
     }
 }
 
