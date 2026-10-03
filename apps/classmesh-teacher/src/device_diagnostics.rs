@@ -1,8 +1,9 @@
-use classmesh_core::adaptation::{QualityTier, StreamProfile};
+use classmesh_core::adaptation::{QualityTier, StreamProfile, profile_for};
 use classmesh_core::presence::DeviceHealth;
 use classmesh_core::quality_sample::{ReceiverQualitySample, ReceiverQualitySampleError};
 use classmesh_core::transport_topology::{
     MediaPath, PhysicalGateStatus, PhysicalPathGate, TransportTopologyEvidence,
+    media_path_blocking_gate,
 };
 use classmesh_core::StreamKind;
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
@@ -88,23 +89,82 @@ pub struct TeacherDeviceDiagnosticsViewModel {
 }
 
 impl TeacherDeviceDiagnosticsViewModel {
-    pub fn new(_config: DeviceDiagnosticsConfig) -> Result<Self, DeviceDiagnosticsError> {
-        todo!("Phase 11E RED: validate bounded diagnostics config")
+    pub fn new(config: DeviceDiagnosticsConfig) -> Result<Self, DeviceDiagnosticsError> {
+        if config.max_diagnostic_codes == 0 {
+            return Err(DeviceDiagnosticsError::InvalidMaxDiagnosticCodes);
+        }
+        Ok(Self { config })
     }
 
     pub fn project(
         &self,
-        _snapshot: DeviceDiagnosticsSnapshot<'_>,
+        snapshot: DeviceDiagnosticsSnapshot<'_>,
     ) -> Result<DeviceDiagnosticsView, DeviceDiagnosticsError> {
-        todo!("Phase 11E RED: project validated per-device diagnostics")
+        if snapshot.diagnostic_codes.len() > self.config.max_diagnostic_codes {
+            return Err(DeviceDiagnosticsError::TooManyDiagnosticCodes);
+        }
+        if snapshot
+            .diagnostic_codes
+            .iter()
+            .any(|code| code.trim().is_empty())
+        {
+            return Err(DeviceDiagnosticsError::InvalidDiagnosticCode);
+        }
+
+        let quality_sample = match snapshot.quality_sample {
+            Some(sample) => Some(
+                sample
+                    .validate()
+                    .map_err(DeviceDiagnosticsError::InvalidQualitySample)?,
+            ),
+            None => None,
+        };
+
+        let mut diagnostic_codes = Vec::with_capacity(snapshot.diagnostic_codes.len());
+        for code in snapshot.diagnostic_codes {
+            if !diagnostic_codes.contains(code) {
+                diagnostic_codes.push(*code);
+            }
+        }
+
+        Ok(DeviceDiagnosticsView {
+            source_id: snapshot.device.source_id,
+            display_name: snapshot.device.display_name.clone(),
+            health: snapshot.device.health,
+            quality_tier: snapshot.device.quality_tier,
+            quality_sample,
+            active_path: snapshot.active_path,
+            topology_evidence: snapshot.topology_evidence,
+            diagnostic_codes,
+        })
     }
 
     pub fn validate_override(
         &self,
-        _request: TroubleshootingOverrideRequest,
-        _evidence: TransportTopologyEvidence,
+        request: TroubleshootingOverrideRequest,
+        evidence: TransportTopologyEvidence,
     ) -> Result<ValidatedTroubleshootingOverride, TroubleshootingOverrideError> {
-        todo!("Phase 11E RED: validate typed troubleshooting override")
+        match request {
+            TroubleshootingOverrideRequest::Automatic => {
+                Ok(ValidatedTroubleshootingOverride::Automatic)
+            }
+            TroubleshootingOverrideRequest::Quality { stream_kind, tier } => {
+                Ok(ValidatedTroubleshootingOverride::Quality {
+                    stream_kind,
+                    tier,
+                    profile: profile_for(stream_kind, tier),
+                })
+            }
+            TroubleshootingOverrideRequest::MediaPath(path) => {
+                if let Some((gate, gate_evidence)) = media_path_blocking_gate(path, evidence) {
+                    return Err(TroubleshootingOverrideError::BlockedMediaPath {
+                        gate,
+                        evidence: gate_evidence,
+                    });
+                }
+                Ok(ValidatedTroubleshootingOverride::MediaPath(path))
+            }
+        }
     }
 }
 
