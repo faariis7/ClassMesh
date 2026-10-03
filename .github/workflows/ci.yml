@@ -91,6 +91,15 @@ jobs:
       - name: Build adaptive controller benchmark
         run: cargo build -p classmesh-lab --bin classmesh-adaptive-controller-benchmark --release
 
+      - name: Build Teacher UI shell
+        run: cargo build -p classmesh-teacher --bin classmesh-teacher-ui --release
+
+      - name: Validate Teacher UI workspace MSRV
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal --no-self-update
+          cargo +1.85.0 check -p classmesh-teacher --bin classmesh-teacher-ui
+
       - name: Build Phase 7 multicast probe
         run: cargo build -p classmesh-lab --bin classmesh-multicast-probe --release
 
