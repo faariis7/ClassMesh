@@ -178,7 +178,7 @@ switch ($Mode) {
     }
 
     "Smoke" {
-        if (-not $IsWindows) {
+        if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
             throw "Smoke mode requires Windows"
         }
 
