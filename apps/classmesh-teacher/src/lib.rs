@@ -11,6 +11,8 @@ pub mod ui_classroom;
 pub mod ui_egui;
 #[cfg(windows)]
 pub mod ui_focus;
+#[cfg(windows)]
+pub mod ui_presentation;
 pub mod ui_shell;
 
 #[cfg(windows)]
