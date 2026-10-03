@@ -1,4 +1,9 @@
+use classmesh_core::MediaState;
+use classmesh_core::adaptation::QualityTier;
+use classmesh_core::presence::PresenceState;
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
+
+use crate::classroom_view::{ClassroomViewError, TeacherClassroomViewModel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TeacherUiSection {
@@ -18,6 +23,50 @@ pub enum TeacherUiMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeacherUiAction {
     SelectDevice(Option<MonitoringSourceId>),
+}
+
+impl TeacherUiAction {
+    pub fn apply_to_classroom(
+        self,
+        classroom: &mut TeacherClassroomViewModel,
+    ) -> Result<(), ClassroomViewError> {
+        match self {
+            Self::SelectDevice(source_id) => classroom.select(source_id),
+        }
+    }
+}
+
+#[must_use]
+pub const fn presence_label(presence: PresenceState) -> &'static str {
+    match presence {
+        PresenceState::Offline => "Offline",
+        PresenceState::Connecting => "Connecting",
+        PresenceState::Online => "Online",
+        PresenceState::ControlRecovering => "Control recovering",
+    }
+}
+
+#[must_use]
+pub const fn media_label(media: MediaState) -> &'static str {
+    match media {
+        MediaState::Idle => "Idle",
+        MediaState::Starting => "Starting",
+        MediaState::Streaming => "Streaming",
+        MediaState::Degraded => "Degraded",
+        MediaState::Recovering => "Recovering",
+        MediaState::Stopped => "Stopped",
+    }
+}
+
+#[must_use]
+pub const fn quality_label(quality: Option<QualityTier>) -> &'static str {
+    match quality {
+        None => "Unknown",
+        Some(QualityTier::Emergency) => "Emergency",
+        Some(QualityTier::Low) => "Low",
+        Some(QualityTier::Medium) => "Medium",
+        Some(QualityTier::High) => "High",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -46,7 +95,31 @@ impl TeacherUiShellState {
 
 #[cfg(test)]
 mod tests {
+    use classmesh_core::presence::DeviceHealth;
+
+    use crate::classroom_view::{ClassroomDeviceSnapshot, ClassroomViewConfig};
+
     use super::*;
+
+    fn classroom() -> TeacherClassroomViewModel {
+        let mut classroom = TeacherClassroomViewModel::new(ClassroomViewConfig::default()).unwrap();
+        classroom
+            .upsert(ClassroomDeviceSnapshot {
+                source_id: MonitoringSourceId(7),
+                display_name: "Student 07".to_owned(),
+                health: DeviceHealth {
+                    presence: PresenceState::Online,
+                    media: MediaState::Recovering,
+                    worker_ready: true,
+                    service_ready: true,
+                },
+                quality_tier: Some(QualityTier::Medium),
+                thumbnail_available: true,
+                interactive_active: false,
+            })
+            .unwrap();
+        classroom
+    }
 
     #[test]
     fn shell_defaults_to_classroom_without_engine_action() {
@@ -65,19 +138,39 @@ mod tests {
     }
 
     #[test]
-    fn selection_is_emitted_as_typed_action_without_becoming_shell_state() {
+    fn selection_action_delegates_to_authoritative_classroom_model() {
         let mut shell = TeacherUiShellState::default();
-        let source_id = MonitoringSourceId(42);
+        let mut classroom = classroom();
 
-        assert_eq!(
-            shell.handle(TeacherUiMessage::SelectDevice(Some(source_id))),
-            Some(TeacherUiAction::SelectDevice(Some(source_id)))
-        );
-        assert_eq!(shell.active_section(), TeacherUiSection::Classroom);
+        let action = shell
+            .handle(TeacherUiMessage::SelectDevice(Some(MonitoringSourceId(7))))
+            .expect("selection action");
+        assert_eq!(action.apply_to_classroom(&mut classroom), Ok(()));
+        assert_eq!(classroom.selected(), Some(MonitoringSourceId(7)));
 
+        let unknown = shell
+            .handle(TeacherUiMessage::SelectDevice(Some(MonitoringSourceId(99))))
+            .expect("selection action");
         assert_eq!(
-            shell.handle(TeacherUiMessage::SelectDevice(None)),
-            Some(TeacherUiAction::SelectDevice(None))
+            unknown.apply_to_classroom(&mut classroom),
+            Err(ClassroomViewError::UnknownDevice)
         );
+        assert_eq!(classroom.selected(), Some(MonitoringSourceId(7)));
+
+        let clear = shell
+            .handle(TeacherUiMessage::SelectDevice(None))
+            .expect("selection action");
+        assert_eq!(clear.apply_to_classroom(&mut classroom), Ok(()));
+        assert_eq!(classroom.selected(), None);
+    }
+
+    #[test]
+    fn status_labels_keep_control_presence_independent_from_media_health() {
+        let classroom = classroom();
+        let row = classroom.rows().remove(0);
+
+        assert_eq!(presence_label(row.health.presence), "Online");
+        assert_eq!(media_label(row.health.media), "Recovering");
+        assert_eq!(quality_label(row.quality_tier), "Medium");
     }
 }
