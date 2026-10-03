@@ -16,8 +16,8 @@ use crate::ui_presentation::show_presentation;
 use crate::ui_shell::{TeacherUiAction, TeacherUiMessage, TeacherUiSection, TeacherUiShellState};
 
 const APP_TITLE: &str = "ClassMesh Teacher";
-const DEFAULT_WINDOW_SIZE: [f32; 2] = [960.0, 640.0];
-const MIN_WINDOW_SIZE: [f32; 2] = [640.0, 480.0];
+const DEFAULT_WINDOW_SIZE: [f32; 2] = [800.0, 600.0];
+const MIN_WINDOW_SIZE: [f32; 2] = [600.0, 420.0];
 
 #[derive(Debug)]
 pub struct TeacherEguiShell {
@@ -184,7 +184,8 @@ fn teacher_native_options() -> eframe::NativeOptions {
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(DEFAULT_WINDOW_SIZE)
-            .with_min_inner_size(MIN_WINDOW_SIZE),
+            .with_min_inner_size(MIN_WINDOW_SIZE)
+            .with_clamp_size_to_monitor_size(true),
         ..Default::default()
     }
 }
@@ -222,6 +223,7 @@ mod tests {
             options.viewport.min_inner_size,
             Some(egui::vec2(MIN_WINDOW_SIZE[0], MIN_WINDOW_SIZE[1]))
         );
+        assert_eq!(options.viewport.clamp_size_to_monitor_size, Some(true));
     }
 
     #[test]
