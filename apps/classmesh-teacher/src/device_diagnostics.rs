@@ -1,3 +1,4 @@
+use classmesh_core::StreamKind;
 use classmesh_core::adaptation::{QualityTier, StreamProfile, profile_for};
 use classmesh_core::presence::DeviceHealth;
 use classmesh_core::quality_sample::{ReceiverQualitySample, ReceiverQualitySampleError};
@@ -5,7 +6,6 @@ use classmesh_core::transport_topology::{
     MediaPath, PhysicalGateStatus, PhysicalPathGate, TransportTopologyEvidence,
     media_path_blocking_gate,
 };
-use classmesh_core::StreamKind;
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::classroom_view::ClassroomDeviceRow;
@@ -170,15 +170,15 @@ impl TeacherDeviceDiagnosticsViewModel {
 
 #[cfg(test)]
 mod tests {
-    use classmesh_core::NetworkMetrics;
     use classmesh_core::MediaState;
+    use classmesh_core::MediaTransport;
+    use classmesh_core::NetworkMetrics;
     use classmesh_core::adaptation::profile_for;
     use classmesh_core::presence::PresenceState;
     use classmesh_core::quality_sample::{
         RECEIVER_QUALITY_SAMPLE_VERSION, ReceiverCapabilityHealth,
     };
     use classmesh_core::transport_topology::{MediaTopology, PhysicalGateStatus};
-    use classmesh_core::MediaTransport;
 
     use super::*;
 
@@ -237,10 +237,13 @@ mod tests {
 
     #[test]
     fn diagnostics_projection_preserves_control_and_media_health_independently() {
-        let model = TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default())
-            .unwrap();
+        let model =
+            TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default()).unwrap();
         let row = row();
-        let codes = ["control.transport.timeout", "control.stream.invalid_profile"];
+        let codes = [
+            "control.transport.timeout",
+            "control.stream.invalid_profile",
+        ];
         let view = model
             .project(DeviceDiagnosticsSnapshot {
                 device: &row,
@@ -260,8 +263,8 @@ mod tests {
 
     #[test]
     fn malformed_quality_sample_fails_closed() {
-        let model = TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default())
-            .unwrap();
+        let model =
+            TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default()).unwrap();
         let row = row();
         let mut sample = healthy_sample();
         sample.schema_version += 1;
@@ -322,8 +325,8 @@ mod tests {
 
     #[test]
     fn quality_override_uses_existing_engine_profile() {
-        let model = TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default())
-            .unwrap();
+        let model =
+            TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default()).unwrap();
         let validated = model
             .validate_override(
                 TroubleshootingOverrideRequest::Quality {
@@ -346,8 +349,8 @@ mod tests {
 
     #[test]
     fn unresolved_transport_gate_blocks_typed_path_override() {
-        let model = TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default())
-            .unwrap();
+        let model =
+            TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default()).unwrap();
         assert_eq!(
             model.validate_override(
                 TroubleshootingOverrideRequest::MediaPath(direct_udp()),
@@ -362,8 +365,8 @@ mod tests {
 
     #[test]
     fn qualified_path_and_reliable_fallback_can_be_validated_without_selecting_defaults() {
-        let model = TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default())
-            .unwrap();
+        let model =
+            TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default()).unwrap();
         let mut evidence = TransportTopologyEvidence::default();
         evidence.udp_unicast = PhysicalGateStatus::Qualified;
 
@@ -394,8 +397,8 @@ mod tests {
 
     #[test]
     fn automatic_override_preserves_engine_ownership() {
-        let model = TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default())
-            .unwrap();
+        let model =
+            TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default()).unwrap();
         assert_eq!(
             model
                 .validate_override(
@@ -409,8 +412,8 @@ mod tests {
 
     #[test]
     fn relay_override_remains_blocked_by_relay_topology_gate() {
-        let model = TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default())
-            .unwrap();
+        let model =
+            TeacherDeviceDiagnosticsViewModel::new(DeviceDiagnosticsConfig::default()).unwrap();
         let relay = MediaPath {
             transport: MediaTransport::ReliableFallback,
             topology: MediaTopology::Relay,
