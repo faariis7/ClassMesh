@@ -178,14 +178,10 @@ impl TeacherUiShellState {
 #[cfg(test)]
 mod tests {
     use classmesh_core::presence::DeviceHealth;
-    use classmesh_protocol::control_wire::{
-        MediaTransport, StreamKind, VideoCodec, VideoProfile,
-    };
+    use classmesh_protocol::control_wire::{MediaTransport, StreamKind, VideoCodec, VideoProfile};
     use classmesh_video::monitoring::MonitoringProfile;
     use classmesh_video::monitoring_fanin::MonitoringFanInConfig;
-    use classmesh_video::monitoring_scheduler::{
-        MonitoringPriority, MonitoringSchedulerConfig,
-    };
+    use classmesh_video::monitoring_scheduler::{MonitoringPriority, MonitoringSchedulerConfig};
 
     use crate::classroom_view::{ClassroomDeviceSnapshot, ClassroomViewConfig};
     use crate::monitoring_promotion::TeacherMonitoringAction;
@@ -351,9 +347,11 @@ mod tests {
             apply_focus_ui_action(action, &classroom, &mut monitoring, None),
             Err(TeacherFocusUiActionError::MissingInteractiveContext)
         );
-        assert!(monitoring.poll(0).unwrap().iter().all(|action| {
-            !matches!(action, TeacherMonitoringAction::StartInteractive { .. })
-        }));
+        assert!(
+            monitoring.poll(0).unwrap().iter().all(|action| {
+                !matches!(action, TeacherMonitoringAction::StartInteractive { .. })
+            })
+        );
     }
 
     #[test]
