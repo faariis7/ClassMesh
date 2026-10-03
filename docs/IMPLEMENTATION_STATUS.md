@@ -20,7 +20,7 @@ Phase 9 monitoring-grid software is complete through 9E, with 9F qualification t
 
 Phase 10 adaptive networking is active under Issue #288. PR #289–#293 have merged the versioned receiver-health sample, stateful per-receiver quality controller, independent cohort planner, physical-gated transport/topology seam, and recovery/latest-frame-wins integration. PR #294 merged evidence-gated optional rendition/SFU eligibility, and PR #296 merged the adaptive-controller synthetic benchmark plus physical evidence harness/qualification bundle. Phase 10 software/tooling is complete; 10G physical execution remains pending and cannot be inferred from CI. Hosted CI must not turn pending Phase 4/7/8/9 physical gates into selected production defaults.
 
-Phase 11 Teacher UI is active under Issue #298. PR #300 merged the bounded framework-neutral classroom/device-list view model, PR #301 merged the bounded latest-thumbnail monitoring-grid projection, PR #302 merged the focus/remote-control projection that delegates interactive promotion/resume to existing engine coordinators, and PR #305 merged presentation start/stop plus stream-state/engine-counter projection on the existing exact-bound Teacher video lifecycle. 11E is now the active slice: detailed per-device diagnostics and typed troubleshooting override view state must reuse validated quality/topology/diagnostic contracts without bypassing unresolved physical gates.
+Phase 11 Teacher UI is active under Issue #298. PR #300 merged the bounded framework-neutral classroom/device-list view model, PR #301 merged the bounded latest-thumbnail monitoring-grid projection, PR #302 merged the focus/remote-control projection that delegates interactive promotion/resume to existing engine coordinators, PR #305 merged presentation start/stop plus stream-state/engine-counter projection on the existing exact-bound Teacher video lifecycle, and PR #308 merged detailed per-device diagnostics plus typed quality/media-path override validation using existing engine contracts and physical gates. 11F is now the active slice: integrate the production Windows UI shell as a thin consumer of the established view models/actions without giving framework code ownership of capture, networking, authorization, adaptation, recovery, or transport-selection policy.
 
 The hosted CI baseline covers Portable Rust / Ubuntu rustfmt, Clippy with warnings denied, full workspace tests and `classmesh-lab`, plus Windows workspace Clippy/tests and release builds for the media qualification executables. Hosted runners do not replace real interactive GPU/driver or two-PC validation.
 
@@ -153,7 +153,7 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 
 ## Next implementation sequence
 
-1. Implement Phase 11D next, then continue 11E → 11F in order, updating this plan after each merged slice.
+1. Implement Phase 11F next: production Windows UI shell/framework integration over the established 11A–11E view models/actions, updating this plan after the merged slice.
 2. Keep all Phase 11 UI/view-model code as a thin consumer of existing engine APIs; keep capture/network/adaptation/authorization/recovery ownership below the UI boundary.
 3. Keep Issue #3 open and run the Phase 4 two-PC qualification before selecting the default one-to-one UDP-vs-QUIC-Datagram transport.
 4. Run Phase 6F physical interactive-control validation.
