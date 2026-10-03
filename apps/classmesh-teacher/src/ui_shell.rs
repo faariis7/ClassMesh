@@ -10,6 +10,9 @@ use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 use crate::classroom_view::{ClassroomViewError, TeacherClassroomViewModel};
 use crate::focus_view::{FocusViewError, TeacherFocusViewModel};
 use crate::monitoring_promotion::TeacherMonitoringCoordinator;
+use crate::presentation_view::PresentationBindingView;
+#[cfg(windows)]
+use crate::presentation_view::TeacherPresentationViewModel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TeacherUiSection {
@@ -26,6 +29,8 @@ pub enum TeacherUiMessage {
     SelectDevice(Option<MonitoringSourceId>),
     RequestInteractive(MonitoringSourceId),
     ResumeThumbnail(MonitoringSourceId),
+    StartPresentation,
+    StopPresentation(PresentationBindingView),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,9 +51,16 @@ impl TeacherFocusUiAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeacherPresentationUiAction {
+    Start,
+    Stop { binding: PresentationBindingView },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeacherUiAction {
     SelectDevice(Option<MonitoringSourceId>),
     Focus(TeacherFocusUiAction),
+    Presentation(TeacherPresentationUiAction),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +78,9 @@ impl TeacherUiAction {
             Self::SelectDevice(source_id) => classroom
                 .select(source_id)
                 .map_err(TeacherUiClassroomActionError::Classroom),
-            Self::Focus(_) => Err(TeacherUiClassroomActionError::NotClassroomAction),
+            Self::Focus(_) | Self::Presentation(_) => {
+                Err(TeacherUiClassroomActionError::NotClassroomAction)
+            }
         }
     }
 }
@@ -108,6 +122,67 @@ pub fn apply_focus_ui_action(
         TeacherFocusUiAction::ResumeThumbnail { .. } => {
             TeacherFocusViewModel::resume_thumbnail(classroom, monitoring)
                 .map_err(TeacherFocusUiActionError::Focus)
+        }
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+pub enum TeacherPresentationUiActionError {
+    MissingStartContext,
+    BindingChanged {
+        expected: PresentationBindingView,
+        active: Option<PresentationBindingView>,
+    },
+    Presentation(crate::TeacherVideoEngineLifecycleError),
+}
+
+#[cfg(windows)]
+fn active_presentation_binding(
+    lifecycle: &crate::TeacherVideoEngineLifecycle,
+) -> Option<PresentationBindingView> {
+    lifecycle.active_binding().map(|binding| PresentationBindingView {
+        presentation_id: binding.presentation_id(),
+        stream_id: binding.stream_id(),
+        epoch: binding.epoch(),
+    })
+}
+
+#[cfg(windows)]
+pub fn apply_presentation_ui_action(
+    action: TeacherPresentationUiAction,
+    lifecycle: &mut crate::TeacherVideoEngineLifecycle,
+    start_context: Option<(
+        classmesh_worker::presentation_multicast_send::PresentationMulticastSendRuntime,
+        usize,
+    )>,
+) -> Result<(), TeacherPresentationUiActionError> {
+    match action {
+        TeacherPresentationUiAction::Start => {
+            let (runtime, unicast_queue_capacity) =
+                start_context.ok_or(TeacherPresentationUiActionError::MissingStartContext)?;
+            TeacherPresentationViewModel::start(lifecycle, runtime, unicast_queue_capacity)
+                .map_err(TeacherPresentationUiActionError::Presentation)
+        }
+        TeacherPresentationUiAction::Stop { binding } => {
+            let active = active_presentation_binding(lifecycle);
+            if active != Some(binding) {
+                return Err(TeacherPresentationUiActionError::BindingChanged {
+                    expected: binding,
+                    active,
+                });
+            }
+
+            let stopped = TeacherPresentationViewModel::stop(lifecycle)
+                .map_err(TeacherPresentationUiActionError::Presentation)?;
+            if stopped {
+                Ok(())
+            } else {
+                Err(TeacherPresentationUiActionError::BindingChanged {
+                    expected: binding,
+                    active: None,
+                })
+            }
         }
     }
 }
@@ -170,6 +245,12 @@ impl TeacherUiShellState {
             )),
             TeacherUiMessage::ResumeThumbnail(source_id) => Some(TeacherUiAction::Focus(
                 TeacherFocusUiAction::ResumeThumbnail { source_id },
+            )),
+            TeacherUiMessage::StartPresentation => Some(TeacherUiAction::Presentation(
+                TeacherPresentationUiAction::Start,
+            )),
+            TeacherUiMessage::StopPresentation(binding) => Some(TeacherUiAction::Presentation(
+                TeacherPresentationUiAction::Stop { binding },
             )),
         }
     }
@@ -384,6 +465,68 @@ mod tests {
                 }
             ))
         );
+    }
+
+    #[test]
+    fn presentation_messages_emit_typed_actions_and_capture_stop_binding() {
+        let mut shell = TeacherUiShellState::default();
+        assert_eq!(
+            shell.handle(TeacherUiMessage::StartPresentation),
+            Some(TeacherUiAction::Presentation(
+                TeacherPresentationUiAction::Start
+            ))
+        );
+
+        let binding = PresentationBindingView {
+            presentation_id: 700,
+            stream_id: 800,
+            epoch: 4,
+        };
+        assert_eq!(
+            shell.handle(TeacherUiMessage::StopPresentation(binding)),
+            Some(TeacherUiAction::Presentation(
+                TeacherPresentationUiAction::Stop { binding }
+            ))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn presentation_start_without_engine_context_fails_closed() {
+        let mut lifecycle = crate::TeacherVideoEngineLifecycle::default();
+
+        assert!(matches!(
+            apply_presentation_ui_action(
+                TeacherPresentationUiAction::Start,
+                &mut lifecycle,
+                None
+            ),
+            Err(TeacherPresentationUiActionError::MissingStartContext)
+        ));
+        assert_eq!(lifecycle.active_binding(), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stale_presentation_stop_fails_closed_without_stopping_another_binding() {
+        let mut lifecycle = crate::TeacherVideoEngineLifecycle::default();
+        let binding = PresentationBindingView {
+            presentation_id: 700,
+            stream_id: 800,
+            epoch: 4,
+        };
+
+        assert!(matches!(
+            apply_presentation_ui_action(
+                TeacherPresentationUiAction::Stop { binding },
+                &mut lifecycle,
+                None
+            ),
+            Err(TeacherPresentationUiActionError::BindingChanged {
+                expected,
+                active: None,
+            }) if expected == binding
+        ));
     }
 
     #[test]
