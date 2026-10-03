@@ -5,6 +5,8 @@ pub mod focus_view;
 pub mod monitoring;
 pub mod monitoring_promotion;
 pub mod presentation_view;
+#[cfg(windows)]
+pub mod ui_egui;
 pub mod ui_shell;
 
 #[cfg(windows)]
