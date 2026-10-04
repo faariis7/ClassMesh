@@ -23,6 +23,7 @@ pub mod presentation_sender_plan;
 pub mod presentation_state;
 pub mod quic;
 pub mod stream;
+pub mod system_action_execution;
 pub mod x509_issuance;
 
 use std::collections::BTreeSet;
