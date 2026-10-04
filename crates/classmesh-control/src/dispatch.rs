@@ -1,7 +1,7 @@
 use classmesh_protocol::clipboard::{ClipboardTextError, validate_text};
 use classmesh_protocol::control_wire::{
     ClipboardReadRequest, ClipboardWrite, ControlEnvelope, InputEvent, PresentationStart,
-    PresentationStop, SystemAction, SystemActionRequest, control_envelope,
+    PresentationStop, SystemAction, control_envelope,
 };
 use classmesh_protocol::presentation::{
     PresentationControlError, validate_start as validate_presentation_start,
@@ -14,6 +14,29 @@ use classmesh_security::{AuthorizationStore, Permission};
 
 use crate::authorization::{AuthenticatedControlGuard, CommandAuthorizationError};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorizedSystemAction {
+    action: SystemAction,
+}
+
+impl AuthorizedSystemAction {
+    #[must_use]
+    pub const fn action(self) -> SystemAction {
+        self.action
+    }
+
+    pub(crate) const fn from_validated(
+        action: SystemAction,
+    ) -> Result<Self, SystemActionControlError> {
+        match action {
+            SystemAction::Lock | SystemAction::Restart | SystemAction::Shutdown => {
+                Ok(Self { action })
+            }
+            SystemAction::Unspecified => Err(SystemActionControlError::InvalidAction),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrivilegedControlCommand {
     InputEvent(InputEvent),
@@ -21,7 +44,7 @@ pub enum PrivilegedControlCommand {
     ClipboardWrite(ClipboardWrite),
     PresentationStart(PresentationStart),
     PresentationStop(PresentationStop),
-    SystemActionRequest(SystemActionRequest),
+    SystemAction(AuthorizedSystemAction),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,7 +186,9 @@ pub fn dispatch_privileged_command(
             };
 
             guard.authorize(authorization, envelope, permission, now_unix_ms)?;
-            Ok(PrivilegedControlCommand::SystemActionRequest(*request))
+            let authorized = AuthorizedSystemAction::from_validated(action)
+                .map_err(PrivilegedDispatchError::InvalidSystemAction)?;
+            Ok(PrivilegedControlCommand::SystemAction(authorized))
         }
         _ => Err(PrivilegedDispatchError::UnsupportedPayload),
     }
@@ -364,14 +389,13 @@ mod tests {
             let allowed = store(BTreeSet::from([permission]));
             let mut allowed_guard =
                 AuthenticatedControlGuard::new(identity(), 77, SYSTEM_VERSION, 1);
-            assert_eq!(
-                dispatch_privileged_command(&mut allowed_guard, &allowed, &envelope, 150),
-                Ok(PrivilegedControlCommand::SystemActionRequest(
-                    SystemActionRequest {
-                        action: action as i32,
-                    }
-                ))
-            );
+            let dispatched =
+                dispatch_privileged_command(&mut allowed_guard, &allowed, &envelope, 150)
+                    .expect("authorized action dispatches");
+            let PrivilegedControlCommand::SystemAction(authorized) = dispatched else {
+                panic!("expected authorized system action");
+            };
+            assert_eq!(authorized.action(), action);
             assert_eq!(allowed_guard.last_sequence(), 2);
 
             let denied = store(BTreeSet::new());
