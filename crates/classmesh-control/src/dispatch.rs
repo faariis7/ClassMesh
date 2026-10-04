@@ -163,9 +163,7 @@ pub fn dispatch_privileged_command(
             };
 
             guard.authorize(authorization, envelope, permission, now_unix_ms)?;
-            Ok(PrivilegedControlCommand::SystemActionRequest(
-                request.clone(),
-            ))
+            Ok(PrivilegedControlCommand::SystemActionRequest(*request))
         }
         _ => Err(PrivilegedDispatchError::UnsupportedPayload),
     }
