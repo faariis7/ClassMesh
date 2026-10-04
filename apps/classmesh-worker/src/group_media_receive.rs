@@ -193,8 +193,8 @@ mod tests {
         ProtectedMulticastReceiverConfig,
     };
     use classmesh_network::{PacketizeMeta, packetize_frame};
-    use classmesh_protocol::PROTOCOL_VERSION;
     use classmesh_protocol::control_wire::PresentationKeyGrant;
+    use classmesh_protocol::media::MEDIA_PROTOCOL_VERSION;
     use classmesh_security::group_media::{GROUP_MEDIA_KEY_BYTES, GroupMediaSender};
 
     use super::*;
@@ -273,8 +273,8 @@ mod tests {
         let packets = packetize_frame(
             sealed.as_bytes(),
             PacketizeMeta {
-                protocol_major: u8::try_from(PROTOCOL_VERSION.major).expect("protocol major"),
-                protocol_minor: u8::try_from(PROTOCOL_VERSION.minor).expect("protocol minor"),
+                protocol_major: u8::try_from(MEDIA_PROTOCOL_VERSION.major).expect("media major"),
+                protocol_minor: u8::try_from(MEDIA_PROTOCOL_VERSION.minor).expect("media minor"),
                 stream_id: transport_stream_id,
                 frame_id: binding.frame_id(),
                 first_sequence: 1,
