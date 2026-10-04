@@ -196,15 +196,16 @@ mod tests {
             sequence: 10,
             protocol_version: Some(control_wire::ProtocolVersion { major: 0, minor: 5 }),
             request_id: 79,
-            payload: Some(control_wire::control_envelope::Payload::SystemActionRequest(
-                control_wire::SystemActionRequest {
-                    action: control_wire::SystemAction::Restart as i32,
-                },
-            )),
+            payload: Some(
+                control_wire::control_envelope::Payload::SystemActionRequest(
+                    control_wire::SystemActionRequest {
+                        action: control_wire::SystemAction::Restart as i32,
+                    },
+                ),
+            ),
         };
-        let decoded =
-            control_wire::ControlEnvelope::decode(request.encode_to_vec().as_slice())
-                .expect("system action request should decode");
+        let decoded = control_wire::ControlEnvelope::decode(request.encode_to_vec().as_slice())
+            .expect("system action request should decode");
         let Some(control_wire::control_envelope::Payload::SystemActionRequest(request)) =
             decoded.payload
         else {
@@ -228,9 +229,8 @@ mod tests {
                 },
             )),
         };
-        let decoded =
-            control_wire::ControlEnvelope::decode(result.encode_to_vec().as_slice())
-                .expect("system action result should decode");
+        let decoded = control_wire::ControlEnvelope::decode(result.encode_to_vec().as_slice())
+            .expect("system action result should decode");
         let Some(control_wire::control_envelope::Payload::SystemActionResult(result)) =
             decoded.payload
         else {
