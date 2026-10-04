@@ -1,9 +1,7 @@
-use classmesh_protocol::control_wire::{
-    SystemAction, SystemActionRequest, SystemActionResult, SystemActionState,
-};
-use classmesh_protocol::system_action::{
-    SystemActionControlError, system_action, validate_result,
-};
+use classmesh_protocol::control_wire::{SystemAction, SystemActionResult, SystemActionState};
+use classmesh_protocol::system_action::validate_result;
+
+use crate::dispatch::AuthorizedSystemAction;
 
 pub const EXECUTOR_UNAVAILABLE_DIAGNOSTIC: &str = "system_action.executor_unavailable";
 pub const EXECUTION_FAILED_DIAGNOSTIC: &str = "system_action.execution_failed";
@@ -20,27 +18,22 @@ pub enum SystemActionExecutionError {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SystemActionExecutionContractError {
-    InvalidRequest(SystemActionControlError),
-}
-
 pub trait SystemActionExecutor {
     fn execute(
         &mut self,
-        action: SystemAction,
+        action: AuthorizedSystemAction,
     ) -> Result<SystemActionExecutionOutcome, SystemActionExecutionError>;
 }
 
+#[must_use]
 pub fn execute_system_action<E>(
     executor: &mut E,
-    request: &SystemActionRequest,
-) -> Result<SystemActionResult, SystemActionExecutionContractError>
+    action: AuthorizedSystemAction,
+) -> SystemActionResult
 where
     E: SystemActionExecutor + ?Sized,
 {
-    let action =
-        system_action(request.action).map_err(SystemActionExecutionContractError::InvalidRequest)?;
+    let wire_action = action.action();
 
     let (state, diagnostic) = match executor.execute(action) {
         Ok(SystemActionExecutionOutcome::Accepted) => (SystemActionState::Accepted, String::new()),
@@ -58,19 +51,19 @@ where
     };
 
     let result = SystemActionResult {
-        action: action as i32,
+        action: wire_action as i32,
         state: state as i32,
         diagnostic,
     };
     debug_assert_eq!(validate_result(&result), Ok(()));
 
-    Ok(result)
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use classmesh_protocol::system_action::{
-        MAX_SYSTEM_ACTION_DIAGNOSTIC_BYTES, validate_result,
+        MAX_SYSTEM_ACTION_DIAGNOSTIC_BYTES, SystemActionControlError, validate_result,
     };
 
     use super::*;
@@ -95,21 +88,19 @@ mod tests {
     impl SystemActionExecutor for RecordingExecutor {
         fn execute(
             &mut self,
-            action: SystemAction,
+            action: AuthorizedSystemAction,
         ) -> Result<SystemActionExecutionOutcome, SystemActionExecutionError> {
-            self.calls.push(action);
+            self.calls.push(action.action());
             self.response
         }
     }
 
-    fn request(action: SystemAction) -> SystemActionRequest {
-        SystemActionRequest {
-            action: action as i32,
-        }
+    fn authorized(action: SystemAction) -> AuthorizedSystemAction {
+        AuthorizedSystemAction::from_validated(action).expect("valid closed action")
     }
 
     #[test]
-    fn forwards_each_closed_action_exactly_once_to_the_executor() {
+    fn forwards_each_authorized_action_exactly_once_to_the_executor() {
         for action in [
             SystemAction::Lock,
             SystemAction::Restart,
@@ -117,8 +108,7 @@ mod tests {
         ] {
             let mut executor =
                 RecordingExecutor::returning(Ok(SystemActionExecutionOutcome::Completed));
-            let result =
-                execute_system_action(&mut executor, &request(action)).expect("execution maps");
+            let result = execute_system_action(&mut executor, authorized(action));
 
             assert_eq!(executor.calls, vec![action]);
             assert_eq!(result.action, action as i32);
@@ -133,8 +123,7 @@ mod tests {
         let mut executor =
             RecordingExecutor::returning(Ok(SystemActionExecutionOutcome::Accepted));
 
-        let result =
-            execute_system_action(&mut executor, &request(SystemAction::Restart)).expect("maps");
+        let result = execute_system_action(&mut executor, authorized(SystemAction::Restart));
 
         assert_eq!(result.state, SystemActionState::Accepted as i32);
         assert!(result.diagnostic.is_empty());
@@ -156,7 +145,7 @@ mod tests {
         ] {
             let mut executor = RecordingExecutor::returning(Err(error));
             let result =
-                execute_system_action(&mut executor, &request(SystemAction::Shutdown)).expect("maps");
+                execute_system_action(&mut executor, authorized(SystemAction::Shutdown));
 
             assert_eq!(executor.calls, vec![SystemAction::Shutdown]);
             assert_eq!(result.state, expected_state as i32);
@@ -167,24 +156,10 @@ mod tests {
     }
 
     #[test]
-    fn invalid_or_unspecified_action_never_reaches_the_executor() {
-        for invalid_action in [SystemAction::Unspecified as i32, i32::MAX] {
-            let mut executor =
-                RecordingExecutor::returning(Ok(SystemActionExecutionOutcome::Completed));
-            let result = execute_system_action(
-                &mut executor,
-                &SystemActionRequest {
-                    action: invalid_action,
-                },
-            );
-
-            assert_eq!(
-                result,
-                Err(SystemActionExecutionContractError::InvalidRequest(
-                    SystemActionControlError::InvalidAction
-                ))
-            );
-            assert!(executor.calls.is_empty());
-        }
+    fn authorized_token_rejects_unspecified_action() {
+        assert_eq!(
+            AuthorizedSystemAction::from_validated(SystemAction::Unspecified),
+            Err(SystemActionControlError::InvalidAction)
+        );
     }
 }
