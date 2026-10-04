@@ -45,7 +45,9 @@ impl WorkstationLockError {
 impl Display for WorkstationLockError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Rejected(source) => write!(formatter, "LockWorkStation rejected the request: {source}"),
+            Self::Rejected(source) => {
+                write!(formatter, "LockWorkStation rejected the request: {source}")
+            }
         }
     }
 }
@@ -65,9 +67,6 @@ mod tests {
     #[test]
     fn workstation_lock_diagnostic_code_is_stable_and_value_free() {
         let error = WorkstationLockError::Rejected(io::Error::from_raw_os_error(5));
-        assert_eq!(
-            error.diagnostic_code(),
-            "worker.workstation.lock_rejected"
-        );
+        assert_eq!(error.diagnostic_code(), "worker.workstation.lock_rejected");
     }
 }
