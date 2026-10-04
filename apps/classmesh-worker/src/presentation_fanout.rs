@@ -248,7 +248,6 @@ mod tests {
             .expect("multicast sink");
 
         let shared = frame(1);
-        let pointer = Arc::as_ptr(&shared.data);
         runtime.distributor.publish(shared);
         assert_eq!(runtime.sink_stats(SinkId(1)).expect("stats").queued, 1);
 
@@ -264,7 +263,8 @@ mod tests {
         runtime.distributor.publish(next);
         let delivered = runtime.pop_latest(SinkId(1)).expect("sink still receives");
         assert_eq!(Arc::as_ptr(&delivered.data), next_pointer);
-        assert_ne!(Arc::as_ptr(&delivered.data), pointer);
+        assert_eq!(delivered.meta.frame_id, 2);
+        assert_eq!(delivered.data.as_ref(), &[2_u8; 32]);
     }
 
     #[test]
