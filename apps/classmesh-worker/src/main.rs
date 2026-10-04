@@ -1579,9 +1579,7 @@ mod focused_profile_tests {
         }
 
         impl classmesh_win32::WorkstationLocker for RecordingLocker {
-            fn lock_workstation(
-                &mut self,
-            ) -> Result<(), classmesh_win32::WorkstationLockError> {
+            fn lock_workstation(&mut self) -> Result<(), classmesh_win32::WorkstationLockError> {
                 self.events.borrow_mut().push("lock");
                 Ok(())
             }
@@ -1615,9 +1613,7 @@ mod focused_profile_tests {
         }
 
         impl classmesh_win32::WorkstationLocker for RecordingLocker {
-            fn lock_workstation(
-                &mut self,
-            ) -> Result<(), classmesh_win32::WorkstationLockError> {
+            fn lock_workstation(&mut self) -> Result<(), classmesh_win32::WorkstationLockError> {
                 self.called.set(true);
                 Ok(())
             }
