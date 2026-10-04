@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::time::{Duration, Instant};
 
     use classmesh_capture_win::CaptureStep;
-    use classmesh_win32::{InputInjector, NamedPipeClient};
+    use classmesh_win32::{InputInjector, NamedPipeClient, Win32WorkstationLocker};
     use classmesh_windows_runtime::ipc::{IpcFrame, IpcMessage};
 
     let args: Vec<String> = std::env::args().collect();
@@ -86,6 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut active_focused_profile: Option<FocusedWorkerProfile> = None;
     let mut captured_frames = 0_u64;
     let mut input_injector = InputInjector::default();
+    let mut workstation_locker = Win32WorkstationLocker;
     let mut group_media_keys =
         classmesh_worker::group_media_receive::WorkerGroupMediaKeyState::default();
     let mut presentation_multicast: Option<
@@ -182,9 +183,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 classmesh_windows_runtime::ipc::IpcControlCommand::LockWorkstation => {
-                    eprintln!(
-                        "ClassMesh Worker received typed workstation-lock IPC command; execution is deferred to Phase 12B2b"
-                    );
+                    match lock_workstation_after_input_release(
+                        || input_injector.release_all(),
+                        &mut workstation_locker,
+                    ) {
+                        Ok(()) => {
+                            eprintln!("ClassMesh Worker locked the interactive workstation");
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "ClassMesh Worker workstation lock failed closed: {}",
+                                error.diagnostic_code()
+                            );
+                        }
+                    }
                     continue;
                 }
             },
@@ -1003,6 +1015,39 @@ fn next_capture_due(profile: Option<FocusedWorkerProfile>) -> std::time::Instant
 }
 
 #[cfg(windows)]
+#[derive(Debug)]
+enum WorkstationLockFlowError {
+    Input(classmesh_win32::InputError),
+    Lock(classmesh_win32::WorkstationLockError),
+}
+
+#[cfg(windows)]
+impl WorkstationLockFlowError {
+    #[must_use]
+    fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::Input(error) => error.diagnostic_code(),
+            Self::Lock(error) => error.diagnostic_code(),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn lock_workstation_after_input_release<L, F>(
+    release_input: F,
+    locker: &mut L,
+) -> Result<(), WorkstationLockFlowError>
+where
+    L: classmesh_win32::WorkstationLocker,
+    F: FnOnce() -> Result<(), classmesh_win32::InputError>,
+{
+    release_input().map_err(WorkstationLockFlowError::Input)?;
+    locker
+        .lock_workstation()
+        .map_err(WorkstationLockFlowError::Lock)
+}
+
+#[cfg(windows)]
 fn release_tracked_input(injector: &mut classmesh_win32::InputInjector) {
     if let Err(error) = injector.release_all() {
         eprintln!(
@@ -1522,6 +1567,69 @@ mod focused_profile_tests {
         assert_eq!(install.binding().stream_id, 7);
         assert_eq!(install.binding().epoch, 3);
         assert!(grant.key_material.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn workstation_lock_releases_input_before_locking() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        struct RecordingLocker {
+            events: Rc<RefCell<Vec<&'static str>>>,
+        }
+
+        impl classmesh_win32::WorkstationLocker for RecordingLocker {
+            fn lock_workstation(&mut self) -> Result<(), classmesh_win32::WorkstationLockError> {
+                self.events.borrow_mut().push("lock");
+                Ok(())
+            }
+        }
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut locker = RecordingLocker {
+            events: Rc::clone(&events),
+        };
+        let release_events = Rc::clone(&events);
+
+        lock_workstation_after_input_release(
+            || {
+                release_events.borrow_mut().push("release");
+                Ok(())
+            },
+            &mut locker,
+        )
+        .expect("release then lock succeeds");
+
+        assert_eq!(&*events.borrow(), &["release", "lock"]);
+    }
+
+    #[test]
+    fn workstation_lock_fails_closed_when_input_release_fails() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct RecordingLocker {
+            called: Rc<Cell<bool>>,
+        }
+
+        impl classmesh_win32::WorkstationLocker for RecordingLocker {
+            fn lock_workstation(&mut self) -> Result<(), classmesh_win32::WorkstationLockError> {
+                self.called.set(true);
+                Ok(())
+            }
+        }
+
+        let called = Rc::new(Cell::new(false));
+        let mut locker = RecordingLocker {
+            called: Rc::clone(&called),
+        };
+        let result = lock_workstation_after_input_release(
+            || Err(classmesh_win32::InputError::MissingKeyCode),
+            &mut locker,
+        );
+
+        assert!(matches!(result, Err(WorkstationLockFlowError::Input(_))));
+        assert!(!called.get());
     }
 
     #[test]

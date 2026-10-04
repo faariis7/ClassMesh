@@ -8,6 +8,8 @@ mod named_pipe;
 mod session;
 #[cfg(windows)]
 mod session_process;
+#[cfg(windows)]
+mod workstation;
 
 #[cfg(windows)]
 pub use input::{
@@ -22,3 +24,6 @@ pub use session::current_session_id;
 pub use session_process::{
     LaunchError, SessionProcess, launch_worker_in_session, session_user_sid,
 };
+
+#[cfg(windows)]
+pub use workstation::{Win32WorkstationLocker, WorkstationLockError, WorkstationLocker};
