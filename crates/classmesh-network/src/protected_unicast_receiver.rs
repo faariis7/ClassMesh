@@ -244,8 +244,10 @@ mod tests {
         packetize_frame(
             &vec![0x5a; classmesh_protocol::media::MAX_PACKET_PAYLOAD * 2 + 17],
             PacketizeMeta {
-                protocol_major: u8::try_from(MEDIA_PROTOCOL_VERSION.major).expect("media major fits"),
-                protocol_minor: u8::try_from(MEDIA_PROTOCOL_VERSION.minor).expect("media minor fits"),
+                protocol_major: u8::try_from(MEDIA_PROTOCOL_VERSION.major)
+                    .expect("media major fits"),
+                protocol_minor: u8::try_from(MEDIA_PROTOCOL_VERSION.minor)
+                    .expect("media minor fits"),
                 stream_id: STREAM_ID,
                 frame_id,
                 first_sequence: 10,
