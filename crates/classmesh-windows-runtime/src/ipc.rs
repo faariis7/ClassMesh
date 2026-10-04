@@ -12,7 +12,9 @@ pub const IPC_MAGIC: u32 = 0x434D_4950; // "CMIP"
 pub const IPC_HEADER_LEN: usize = 12;
 pub const MAX_IPC_MESSAGE: usize = 1_048_576;
 pub const IPC_VERSION_MAJOR: u8 = 0;
-pub const IPC_VERSION_MINOR: u8 = 8;
+/// IPC minor 9 adds the typed Service -> Worker workstation-lock control command.
+/// Older minors must reject that command instead of treating it as a legacy control action.
+pub const IPC_VERSION_MINOR: u8 = 9;
 
 const MESSAGE_WORKER_HELLO: u16 = 1;
 const MESSAGE_SERVICE_READY: u16 = 2;
@@ -49,6 +51,7 @@ const PRESENTATION_KEY_INSTALL_RESULT_MIN_MINOR: u8 = 6;
 const WORKER_PRESENTATION_FEEDBACK_MIN_MINOR: u8 = 6;
 const PRESENTATION_KEYFRAME_REQUEST_MIN_MINOR: u8 = 7;
 const PRESENTATION_SENDER_UNICAST_ACTION_MIN_MINOR: u8 = 8;
+const WORKSTATION_LOCK_MIN_MINOR: u8 = 9;
 
 const MAX_EVIDENCE_ADAPTER_IDENTITY: usize = 128;
 const MAX_EVIDENCE_DRIVER_VERSION: usize = 128;
@@ -142,6 +145,7 @@ pub enum IpcControlCommand {
     Shutdown,
     ReleaseInput,
     ClearFocusedProfile,
+    LockWorkstation,
 }
 
 impl IpcControlCommand {
@@ -152,6 +156,7 @@ impl IpcControlCommand {
             Self::Shutdown => 3,
             Self::ReleaseInput => 4,
             Self::ClearFocusedProfile => 5,
+            Self::LockWorkstation => 6,
         }
     }
 
@@ -162,6 +167,7 @@ impl IpcControlCommand {
             3 => Some(Self::Shutdown),
             4 => Some(Self::ReleaseInput),
             5 => Some(Self::ClearFocusedProfile),
+            6 => Some(Self::LockWorkstation),
             _ => None,
         }
     }
@@ -1160,6 +1166,11 @@ impl IpcFrame {
                 };
                 let command =
                     IpcControlCommand::from_byte(*raw).ok_or(IpcMessageError::InvalidPayload)?;
+                if command == IpcControlCommand::LockWorkstation
+                    && self.header.version_minor < WORKSTATION_LOCK_MIN_MINOR
+                {
+                    return Err(IpcMessageError::UnsupportedVersion);
+                }
                 Ok(IpcMessage::Control(command))
             }
             MESSAGE_INPUT_EVENT => {
@@ -1860,6 +1871,7 @@ mod tests {
             IpcControlCommand::Shutdown,
             IpcControlCommand::ReleaseInput,
             IpcControlCommand::ClearFocusedProfile,
+            IpcControlCommand::LockWorkstation,
         ] {
             let frame = IpcFrame::control(command);
             let encoded = frame.encode().expect("control frame should encode");
@@ -1872,6 +1884,28 @@ mod tests {
                 IpcMessage::Control(command)
             );
         }
+    }
+
+    #[test]
+    fn workstation_lock_requires_ipc_minor_nine() {
+        let frame = IpcFrame::control(IpcControlCommand::LockWorkstation);
+        assert_eq!(frame.header.version_minor, IPC_VERSION_MINOR);
+        assert_eq!(IPC_VERSION_MINOR, WORKSTATION_LOCK_MIN_MINOR);
+        assert_eq!(
+            frame.message().expect("minor 9 lock command decodes"),
+            IpcMessage::Control(IpcControlCommand::LockWorkstation)
+        );
+
+        let mut legacy = frame;
+        legacy.header.version_minor = WORKSTATION_LOCK_MIN_MINOR - 1;
+        assert_eq!(legacy.message(), Err(IpcMessageError::UnsupportedVersion));
+    }
+
+    #[test]
+    fn unknown_control_command_fails_closed() {
+        let mut frame = IpcFrame::control(IpcControlCommand::LockWorkstation);
+        frame.payload[0] = u8::MAX;
+        assert_eq!(frame.message(), Err(IpcMessageError::InvalidPayload));
     }
 
     #[test]
