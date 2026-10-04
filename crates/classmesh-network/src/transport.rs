@@ -2,7 +2,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use classmesh_protocol::PROTOCOL_VERSION;
+use classmesh_protocol::media::MEDIA_PROTOCOL_VERSION;
 use classmesh_video::Codec;
 use classmesh_video::distributor::SharedEncodedFrame;
 
@@ -109,9 +109,9 @@ impl UdpFrameSender {
         if frame.codec != Codec::H264 {
             return Err(UdpSendError::UnsupportedCodec);
         }
-        let major = u8::try_from(PROTOCOL_VERSION.major)
+        let major = u8::try_from(MEDIA_PROTOCOL_VERSION.major)
             .map_err(|_| UdpSendError::ProtocolVersionOutOfRange)?;
-        let minor = u8::try_from(PROTOCOL_VERSION.minor)
+        let minor = u8::try_from(MEDIA_PROTOCOL_VERSION.minor)
             .map_err(|_| UdpSendError::ProtocolVersionOutOfRange)?;
         let first_sequence = self.next_sequence;
         let packets = packetize_frame(
@@ -313,6 +313,33 @@ mod tests {
             Codec::H264,
             (0_u8..=250).cycle().take(bytes).collect(),
         )
+    }
+
+    #[test]
+    fn udp_sender_uses_explicit_media_wire_version() {
+        let receiver = UdpMediaSocket::bind(loopback_any()).expect("raw receiver binds");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("timeout config");
+        let destination = receiver.local_addr().expect("receiver address");
+        let mut sender = UdpFrameSender::bind(
+            loopback_any(),
+            UdpSenderConfig::presentation(55, destination),
+        )
+        .expect("sender binds");
+
+        let report = sender.send_frame(10_000, &frame(1, 64)).expect("frame sends");
+        assert_eq!(report.packets, 1);
+
+        let (packet, _) = receiver.receive_packet().expect("media packet receives");
+        assert_eq!(
+            packet.header.protocol_major,
+            u8::try_from(MEDIA_PROTOCOL_VERSION.major).expect("media major fits")
+        );
+        assert_eq!(
+            packet.header.protocol_minor,
+            u8::try_from(MEDIA_PROTOCOL_VERSION.minor).expect("media minor fits")
+        );
     }
 
     #[test]
