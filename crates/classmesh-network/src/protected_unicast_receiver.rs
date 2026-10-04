@@ -227,8 +227,7 @@ impl ProtectedUnicastFrameReceiver {
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6, UdpSocket};
 
-    use classmesh_protocol::PROTOCOL_VERSION;
-    use classmesh_protocol::media::MediaFlags;
+    use classmesh_protocol::media::{MEDIA_PROTOCOL_VERSION, MediaFlags};
 
     use crate::{PacketizeMeta, packetize_frame};
 
@@ -245,8 +244,10 @@ mod tests {
         packetize_frame(
             &vec![0x5a; classmesh_protocol::media::MAX_PACKET_PAYLOAD * 2 + 17],
             PacketizeMeta {
-                protocol_major: u8::try_from(PROTOCOL_VERSION.major).expect("protocol major fits"),
-                protocol_minor: u8::try_from(PROTOCOL_VERSION.minor).expect("protocol minor fits"),
+                protocol_major: u8::try_from(MEDIA_PROTOCOL_VERSION.major)
+                    .expect("media major fits"),
+                protocol_minor: u8::try_from(MEDIA_PROTOCOL_VERSION.minor)
+                    .expect("media minor fits"),
                 stream_id: STREAM_ID,
                 frame_id,
                 first_sequence: 10,

@@ -1,6 +1,6 @@
 use core::fmt;
 
-use crate::PROTOCOL_VERSION;
+use crate::media::MEDIA_PROTOCOL_VERSION;
 
 pub const FEEDBACK_MAGIC: u32 = 0x434D_4631; // "CMF1"
 pub const FEEDBACK_HEADER_LEN: usize = 24;
@@ -31,9 +31,9 @@ impl FeedbackMessage {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, FeedbackCodecError> {
-        let major = u8::try_from(PROTOCOL_VERSION.major)
+        let major = u8::try_from(MEDIA_PROTOCOL_VERSION.major)
             .map_err(|_| FeedbackCodecError::VersionOutOfRange)?;
-        let minor = u8::try_from(PROTOCOL_VERSION.minor)
+        let minor = u8::try_from(MEDIA_PROTOCOL_VERSION.minor)
             .map_err(|_| FeedbackCodecError::VersionOutOfRange)?;
 
         let (kind, stream_id, frame_id, missing): (u8, u32, u64, &[u16]) = match self {
@@ -86,7 +86,7 @@ impl FeedbackMessage {
             return Err(FeedbackCodecError::BadMagic);
         }
 
-        let expected_major = u8::try_from(PROTOCOL_VERSION.major)
+        let expected_major = u8::try_from(MEDIA_PROTOCOL_VERSION.major)
             .map_err(|_| FeedbackCodecError::VersionOutOfRange)?;
         if data[4] != expected_major {
             return Err(FeedbackCodecError::IncompatibleMajorVersion {
@@ -211,6 +211,14 @@ mod tests {
             missing_packet_indices: vec![0, 3, 17],
         };
         let encoded = message.encode().expect("NACK encodes");
+        assert_eq!(
+            encoded[4],
+            u8::try_from(MEDIA_PROTOCOL_VERSION.major).expect("media major fits")
+        );
+        assert_eq!(
+            encoded[5],
+            u8::try_from(MEDIA_PROTOCOL_VERSION.minor).expect("media minor fits")
+        );
         assert_eq!(FeedbackMessage::decode(&encoded), Ok(message));
     }
 
