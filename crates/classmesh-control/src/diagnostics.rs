@@ -128,9 +128,7 @@ pub const fn privileged_dispatch_diagnostic_code(error: &PrivilegedDispatchError
         PrivilegedDispatchError::SystemActionRequiresProtocolV5 => {
             "control.command.system_action_requires_v0_5"
         }
-        PrivilegedDispatchError::InvalidSystemAction(_) => {
-            "control.command.system_action_invalid"
-        }
+        PrivilegedDispatchError::InvalidSystemAction(_) => "control.command.system_action_invalid",
         PrivilegedDispatchError::Authorization(error) => {
             command_authorization_diagnostic_code(error)
         }
@@ -263,11 +261,9 @@ mod tests {
             "control.command.system_action_requires_v0_5"
         );
         assert_eq!(
-            privileged_dispatch_diagnostic_code(
-                &PrivilegedDispatchError::InvalidSystemAction(
-                    classmesh_protocol::system_action::SystemActionControlError::InvalidAction
-                )
-            ),
+            privileged_dispatch_diagnostic_code(&PrivilegedDispatchError::InvalidSystemAction(
+                classmesh_protocol::system_action::SystemActionControlError::InvalidAction
+            )),
             "control.command.system_action_invalid"
         );
     }
