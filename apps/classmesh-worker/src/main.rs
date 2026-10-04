@@ -181,6 +181,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("ClassMesh Worker cleared focused media profile");
                     continue;
                 }
+                classmesh_windows_runtime::ipc::IpcControlCommand::LockWorkstation => {
+                    eprintln!(
+                        "ClassMesh Worker received typed workstation-lock IPC command; execution is deferred to Phase 12B2b"
+                    );
+                    continue;
+                }
             },
             Ok(WorkerEvent::UdpStreamStart(start)) => {
                 let profile = FocusedWorkerProfile::from_udp_start(start);
@@ -1516,6 +1522,21 @@ mod focused_profile_tests {
         assert_eq!(install.binding().stream_id, 7);
         assert_eq!(install.binding().epoch, 3);
         assert!(grant.key_material.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn workstation_lock_routes_through_existing_control_event() {
+        use classmesh_windows_runtime::ipc::{IpcControlCommand, IpcFrame};
+        use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+
+        let frame = IpcFrame::control(IpcControlCommand::LockWorkstation);
+        let event = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
+            .expect("workstation-lock control routes");
+
+        let WorkerEvent::Control(command) = event else {
+            panic!("expected existing control event path");
+        };
+        assert_eq!(command, IpcControlCommand::LockWorkstation);
     }
 
     #[test]
