@@ -120,8 +120,7 @@ mod tests {
 
     #[test]
     fn accepted_outcome_maps_without_fabricating_completion() {
-        let mut executor =
-            RecordingExecutor::returning(Ok(SystemActionExecutionOutcome::Accepted));
+        let mut executor = RecordingExecutor::returning(Ok(SystemActionExecutionOutcome::Accepted));
 
         let result = execute_system_action(&mut executor, authorized(SystemAction::Restart));
 
@@ -144,8 +143,7 @@ mod tests {
             ),
         ] {
             let mut executor = RecordingExecutor::returning(Err(error));
-            let result =
-                execute_system_action(&mut executor, authorized(SystemAction::Shutdown));
+            let result = execute_system_action(&mut executor, authorized(SystemAction::Shutdown));
 
             assert_eq!(executor.calls, vec![SystemAction::Shutdown]);
             assert_eq!(result.state, expected_state as i32);
