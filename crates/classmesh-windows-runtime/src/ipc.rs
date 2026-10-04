@@ -1898,10 +1898,7 @@ mod tests {
 
         let mut legacy = frame;
         legacy.header.version_minor = WORKSTATION_LOCK_MIN_MINOR - 1;
-        assert_eq!(
-            legacy.message(),
-            Err(IpcMessageError::UnsupportedVersion)
-        );
+        assert_eq!(legacy.message(), Err(IpcMessageError::UnsupportedVersion));
     }
 
     #[test]
