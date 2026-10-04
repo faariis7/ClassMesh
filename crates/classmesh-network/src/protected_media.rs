@@ -1,7 +1,6 @@
 use std::io::ErrorKind;
 
-use classmesh_protocol::PROTOCOL_VERSION;
-use classmesh_protocol::media::MEDIA_HEADER_LEN;
+use classmesh_protocol::media::{MEDIA_HEADER_LEN, MEDIA_PROTOCOL_VERSION};
 use classmesh_security::AuthorizationStore;
 use classmesh_security::group_media::{
     GroupMediaEpoch, GroupMediaError, GroupMediaFrameBinding, SealedGroupMediaFrame,
@@ -140,9 +139,9 @@ impl ProtectedMediaPacketizer {
             return Err(ProtectedMediaCoreError::FrameBindingMismatch);
         }
 
-        let protocol_major = u8::try_from(PROTOCOL_VERSION.major)
+        let protocol_major = u8::try_from(MEDIA_PROTOCOL_VERSION.major)
             .map_err(|_| ProtectedMediaCoreError::ProtocolVersionOutOfRange)?;
-        let protocol_minor = u8::try_from(PROTOCOL_VERSION.minor)
+        let protocol_minor = u8::try_from(MEDIA_PROTOCOL_VERSION.minor)
             .map_err(|_| ProtectedMediaCoreError::ProtocolVersionOutOfRange)?;
         let first_sequence = self.next_sequence;
         let packets = packetize_frame(
