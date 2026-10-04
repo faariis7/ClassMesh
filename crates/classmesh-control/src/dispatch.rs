@@ -1,11 +1,14 @@
 use classmesh_protocol::clipboard::{ClipboardTextError, validate_text};
 use classmesh_protocol::control_wire::{
     ClipboardReadRequest, ClipboardWrite, ControlEnvelope, InputEvent, PresentationStart,
-    PresentationStop, control_envelope,
+    PresentationStop, SystemAction, SystemActionRequest, control_envelope,
 };
 use classmesh_protocol::presentation::{
     PresentationControlError, validate_start as validate_presentation_start,
     validate_stop as validate_presentation_stop,
+};
+use classmesh_protocol::system_action::{
+    SYSTEM_ACTION_MIN_VERSION, SystemActionControlError, system_action,
 };
 use classmesh_security::{AuthorizationStore, Permission};
 
@@ -18,6 +21,7 @@ pub enum PrivilegedControlCommand {
     ClipboardWrite(ClipboardWrite),
     PresentationStart(PresentationStart),
     PresentationStop(PresentationStop),
+    SystemActionRequest(SystemActionRequest),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +34,9 @@ pub enum PrivilegedDispatchError {
     PresentationRequestMissingId,
     PresentationRequiresProtocolV3,
     InvalidPresentation(PresentationControlError),
+    SystemActionRequestMissingId,
+    SystemActionRequiresProtocolV5,
+    InvalidSystemAction(SystemActionControlError),
     Authorization(CommandAuthorizationError),
 }
 
@@ -131,6 +138,33 @@ pub fn dispatch_privileged_command(
             )?;
             Ok(PrivilegedControlCommand::PresentationStop(*stop))
         }
+        control_envelope::Payload::SystemActionRequest(request) => {
+            let version = guard.protocol_version();
+            if version.major != SYSTEM_ACTION_MIN_VERSION.major
+                || version.minor < SYSTEM_ACTION_MIN_VERSION.minor
+            {
+                return Err(PrivilegedDispatchError::SystemActionRequiresProtocolV5);
+            }
+            if envelope.request_id == 0 {
+                return Err(PrivilegedDispatchError::SystemActionRequestMissingId);
+            }
+
+            let action = system_action(request.action)
+                .map_err(PrivilegedDispatchError::InvalidSystemAction)?;
+            let permission = match action {
+                SystemAction::Lock => Permission::LockDevice,
+                SystemAction::Restart => Permission::RestartDevice,
+                SystemAction::Shutdown => Permission::ShutdownDevice,
+                SystemAction::Unspecified => {
+                    return Err(PrivilegedDispatchError::InvalidSystemAction(
+                        SystemActionControlError::InvalidAction,
+                    ));
+                }
+            };
+
+            guard.authorize(authorization, envelope, permission, now_unix_ms)?;
+            Ok(PrivilegedControlCommand::SystemActionRequest(*request))
+        }
         _ => Err(PrivilegedDispatchError::UnsupportedPayload),
     }
 }
@@ -143,7 +177,8 @@ mod tests {
     use classmesh_protocol::clipboard::MAX_CLIPBOARD_TEXT_BYTES;
     use classmesh_protocol::control_wire::{
         ClipboardReadRequest, ClipboardWrite, Heartbeat, PresentationKeyGrant, PresentationStart,
-        PresentationStop, ProtocolVersion as WireProtocolVersion, ReleaseAllInput, input_event,
+        PresentationStop, ProtocolVersion as WireProtocolVersion, ReleaseAllInput,
+        SystemActionRequest, input_event,
     };
     use classmesh_security::{
         CredentialFingerprint, CredentialRecord, Principal, PrincipalId, PrincipalKind,
@@ -153,6 +188,7 @@ mod tests {
     use crate::peer_identity::AuthenticatedPeerIdentity;
 
     const VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 3 };
+    const SYSTEM_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 5 };
 
     fn identity() -> AuthenticatedPeerIdentity {
         AuthenticatedPeerIdentity {
@@ -260,6 +296,98 @@ mod tests {
             payload: Some(control_envelope::Payload::ClipboardWrite(ClipboardWrite {
                 text_utf8,
             })),
+        }
+    }
+
+    fn system_action_envelope(
+        sequence: u64,
+        request_id: u64,
+        action: i32,
+        version: ProtocolVersion,
+    ) -> ControlEnvelope {
+        ControlEnvelope {
+            control_session_id: 77,
+            sequence,
+            protocol_version: Some(WireProtocolVersion {
+                major: u32::from(version.major),
+                minor: u32::from(version.minor),
+            }),
+            request_id,
+            payload: Some(control_envelope::Payload::SystemActionRequest(
+                SystemActionRequest { action },
+            )),
+        }
+    }
+
+    #[test]
+    fn system_actions_require_v05_request_id_and_valid_action_before_sequence_consumption() {
+        let authorization = store(BTreeSet::from([Permission::LockDevice]));
+
+        let old_version = ProtocolVersion { major: 0, minor: 4 };
+        let mut old_guard = AuthenticatedControlGuard::new(identity(), 77, old_version, 1);
+        let old_envelope = system_action_envelope(2, 500, SystemAction::Lock as i32, old_version);
+        assert_eq!(
+            dispatch_privileged_command(&mut old_guard, &authorization, &old_envelope, 150),
+            Err(PrivilegedDispatchError::SystemActionRequiresProtocolV5)
+        );
+        assert_eq!(old_guard.last_sequence(), 1);
+
+        let mut missing_id_guard =
+            AuthenticatedControlGuard::new(identity(), 77, SYSTEM_VERSION, 1);
+        let missing_id = system_action_envelope(2, 0, SystemAction::Lock as i32, SYSTEM_VERSION);
+        assert_eq!(
+            dispatch_privileged_command(&mut missing_id_guard, &authorization, &missing_id, 150,),
+            Err(PrivilegedDispatchError::SystemActionRequestMissingId)
+        );
+        assert_eq!(missing_id_guard.last_sequence(), 1);
+
+        let mut malformed_guard = AuthenticatedControlGuard::new(identity(), 77, SYSTEM_VERSION, 1);
+        let malformed = system_action_envelope(2, 501, i32::MAX, SYSTEM_VERSION);
+        assert_eq!(
+            dispatch_privileged_command(&mut malformed_guard, &authorization, &malformed, 150,),
+            Err(PrivilegedDispatchError::InvalidSystemAction(
+                SystemActionControlError::InvalidAction
+            ))
+        );
+        assert_eq!(malformed_guard.last_sequence(), 1);
+    }
+
+    #[test]
+    fn system_action_permissions_are_exact_and_denials_consume_sequence() {
+        for (action, permission) in [
+            (SystemAction::Lock, Permission::LockDevice),
+            (SystemAction::Restart, Permission::RestartDevice),
+            (SystemAction::Shutdown, Permission::ShutdownDevice),
+        ] {
+            let envelope = system_action_envelope(2, 600, action as i32, SYSTEM_VERSION);
+
+            let allowed = store(BTreeSet::from([permission]));
+            let mut allowed_guard =
+                AuthenticatedControlGuard::new(identity(), 77, SYSTEM_VERSION, 1);
+            assert_eq!(
+                dispatch_privileged_command(&mut allowed_guard, &allowed, &envelope, 150),
+                Ok(PrivilegedControlCommand::SystemActionRequest(
+                    SystemActionRequest {
+                        action: action as i32,
+                    }
+                ))
+            );
+            assert_eq!(allowed_guard.last_sequence(), 2);
+
+            let denied = store(BTreeSet::new());
+            let mut denied_guard =
+                AuthenticatedControlGuard::new(identity(), 77, SYSTEM_VERSION, 1);
+            assert_eq!(
+                dispatch_privileged_command(&mut denied_guard, &denied, &envelope, 150),
+                Err(PrivilegedDispatchError::Authorization(
+                    CommandAuthorizationError::Unauthorized { permission }
+                ))
+            );
+            assert_eq!(
+                denied_guard.last_sequence(),
+                2,
+                "an otherwise valid denied system action must consume its sequence"
+            );
         }
     }
 
