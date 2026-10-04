@@ -1,5 +1,13 @@
 use core::fmt;
 
+use crate::ProtocolVersion;
+
+/// Version of the media datagram wire contract.
+///
+/// This is intentionally independent from the reliable control-plane protocol
+/// minor so additive control-only changes do not silently change media packet
+/// compatibility.
+pub const MEDIA_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 4 };
 pub const MEDIA_MAGIC: u32 = 0x434D_5631; // "CMV1"
 pub const MEDIA_HEADER_LEN: usize = 40;
 pub const MAX_PACKET_PAYLOAD: usize = 1_200;
@@ -175,6 +183,14 @@ mod tests {
             timestamp_us: 1_234_567,
             payload_len: 1_000,
         }
+    }
+
+    #[test]
+    fn media_wire_version_remains_explicit_minor_four() {
+        assert_eq!(
+            MEDIA_PROTOCOL_VERSION,
+            ProtocolVersion { major: 0, minor: 4 }
+        );
     }
 
     #[test]
