@@ -22,6 +22,7 @@ enum Capability {
   CAPABILITY_CLIPBOARD_TEXT = 11;
   CAPABILITY_TEACHER_PRESENTATION = 12;
   CAPABILITY_SFRAME_GROUP_MEDIA = 13;
+  CAPABILITY_SYSTEM_ACTIONS = 14;
 }
 
 enum PrincipalRole {
@@ -283,6 +284,36 @@ message ClipboardWrite {
   string text_utf8 = 1;
 }
 
+// Protocol v0.5 administrative system actions are deliberately closed and
+// typed. They never carry command lines, executable paths, shell fragments,
+// credentials, or arbitrary arguments.
+enum SystemAction {
+  SYSTEM_ACTION_UNSPECIFIED = 0;
+  SYSTEM_ACTION_LOCK = 1;
+  SYSTEM_ACTION_RESTART = 2;
+  SYSTEM_ACTION_SHUTDOWN = 3;
+}
+
+message SystemActionRequest {
+  SystemAction action = 1;
+}
+
+enum SystemActionState {
+  SYSTEM_ACTION_STATE_UNSPECIFIED = 0;
+  SYSTEM_ACTION_STATE_ACCEPTED = 1;
+  SYSTEM_ACTION_STATE_COMPLETED = 2;
+  SYSTEM_ACTION_STATE_REJECTED = 3;
+  SYSTEM_ACTION_STATE_FAILED = 4;
+}
+
+// Correlated to SystemActionRequest by ControlEnvelope.request_id.
+// This transport-neutral result does not define Windows execution semantics.
+message SystemActionResult {
+  SystemAction action = 1;
+  SystemActionState state = 2;
+  string diagnostic = 3;
+}
+
 // Phase 7 presentation lifecycle is transport-neutral. Media transport/profile
 // negotiation remains in StreamOffer so lifecycle control does not select a
 // multicast/unicast transport before the relevant physical evidence exists.
@@ -384,5 +415,8 @@ message ControlEnvelope {
     EnrollmentReceipt enrollment_receipt = 41;
     EnrollmentStatusRequest enrollment_status_request = 42;
     EnrollmentResult enrollment_result = 43;
+
+    SystemActionRequest system_action_request = 44;
+    SystemActionResult system_action_result = 45;
   }
 }
