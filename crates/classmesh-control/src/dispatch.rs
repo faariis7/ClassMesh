@@ -149,8 +149,8 @@ pub fn dispatch_privileged_command(
                 return Err(PrivilegedDispatchError::SystemActionRequestMissingId);
             }
 
-            let action =
-                system_action(request.action).map_err(PrivilegedDispatchError::InvalidSystemAction)?;
+            let action = system_action(request.action)
+                .map_err(PrivilegedDispatchError::InvalidSystemAction)?;
             let permission = match action {
                 SystemAction::Lock => Permission::LockDevice,
                 SystemAction::Restart => Permission::RestartDevice,
@@ -327,8 +327,7 @@ mod tests {
 
         let old_version = ProtocolVersion { major: 0, minor: 4 };
         let mut old_guard = AuthenticatedControlGuard::new(identity(), 77, old_version, 1);
-        let old_envelope =
-            system_action_envelope(2, 500, SystemAction::Lock as i32, old_version);
+        let old_envelope = system_action_envelope(2, 500, SystemAction::Lock as i32, old_version);
         assert_eq!(
             dispatch_privileged_command(&mut old_guard, &authorization, &old_envelope, 150),
             Err(PrivilegedDispatchError::SystemActionRequiresProtocolV5)
@@ -337,29 +336,17 @@ mod tests {
 
         let mut missing_id_guard =
             AuthenticatedControlGuard::new(identity(), 77, SYSTEM_VERSION, 1);
-        let missing_id =
-            system_action_envelope(2, 0, SystemAction::Lock as i32, SYSTEM_VERSION);
+        let missing_id = system_action_envelope(2, 0, SystemAction::Lock as i32, SYSTEM_VERSION);
         assert_eq!(
-            dispatch_privileged_command(
-                &mut missing_id_guard,
-                &authorization,
-                &missing_id,
-                150,
-            ),
+            dispatch_privileged_command(&mut missing_id_guard, &authorization, &missing_id, 150,),
             Err(PrivilegedDispatchError::SystemActionRequestMissingId)
         );
         assert_eq!(missing_id_guard.last_sequence(), 1);
 
-        let mut malformed_guard =
-            AuthenticatedControlGuard::new(identity(), 77, SYSTEM_VERSION, 1);
+        let mut malformed_guard = AuthenticatedControlGuard::new(identity(), 77, SYSTEM_VERSION, 1);
         let malformed = system_action_envelope(2, 501, i32::MAX, SYSTEM_VERSION);
         assert_eq!(
-            dispatch_privileged_command(
-                &mut malformed_guard,
-                &authorization,
-                &malformed,
-                150,
-            ),
+            dispatch_privileged_command(&mut malformed_guard, &authorization, &malformed, 150,),
             Err(PrivilegedDispatchError::InvalidSystemAction(
                 SystemActionControlError::InvalidAction
             ))
