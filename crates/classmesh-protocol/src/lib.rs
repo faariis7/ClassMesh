@@ -5,13 +5,14 @@ pub mod feedback;
 pub mod group_media_control;
 pub mod media;
 pub mod presentation;
+pub mod system_action;
 
 /// Generated Protocol Buffers types for the reliable control plane.
 pub mod control_wire {
     include!(concat!(env!("OUT_DIR"), "/classmesh.control.v1.rs"));
 }
 
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 4 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 5 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProtocolVersion {
@@ -61,6 +62,7 @@ pub enum Capability {
     ClipboardText,
     TeacherPresentation,
     SframeGroupMedia,
+    SystemActions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,8 +151,12 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_marks_group_media_contract_as_minor_four() {
-        assert_eq!(PROTOCOL_VERSION, ProtocolVersion { major: 0, minor: 4 });
+    fn protocol_version_is_minor_five_and_preserves_additive_negotiation() {
+        assert_eq!(PROTOCOL_VERSION, ProtocolVersion { major: 0, minor: 5 });
+        assert_eq!(
+            PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 4 }),
+            Some(ProtocolVersion { major: 0, minor: 4 })
+        );
         assert_eq!(
             PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 3 }),
             Some(ProtocolVersion { major: 0, minor: 3 })
@@ -181,6 +187,59 @@ mod tests {
         };
         assert_eq!(start.presentation_id, 900);
         assert_eq!(start.stream_id, 12);
+    }
+
+    #[test]
+    fn system_action_request_and_result_round_trip_on_v05() {
+        let request = control_wire::ControlEnvelope {
+            control_session_id: 44,
+            sequence: 10,
+            protocol_version: Some(control_wire::ProtocolVersion { major: 0, minor: 5 }),
+            request_id: 79,
+            payload: Some(control_wire::control_envelope::Payload::SystemActionRequest(
+                control_wire::SystemActionRequest {
+                    action: control_wire::SystemAction::Restart as i32,
+                },
+            )),
+        };
+        let decoded =
+            control_wire::ControlEnvelope::decode(request.encode_to_vec().as_slice())
+                .expect("system action request should decode");
+        let Some(control_wire::control_envelope::Payload::SystemActionRequest(request)) =
+            decoded.payload
+        else {
+            panic!("expected system action request payload");
+        };
+        assert_eq!(
+            control_wire::SystemAction::try_from(request.action),
+            Ok(control_wire::SystemAction::Restart)
+        );
+
+        let result = control_wire::ControlEnvelope {
+            control_session_id: 44,
+            sequence: 11,
+            protocol_version: Some(control_wire::ProtocolVersion { major: 0, minor: 5 }),
+            request_id: 79,
+            payload: Some(control_wire::control_envelope::Payload::SystemActionResult(
+                control_wire::SystemActionResult {
+                    action: control_wire::SystemAction::Restart as i32,
+                    state: control_wire::SystemActionState::Accepted as i32,
+                    diagnostic: String::new(),
+                },
+            )),
+        };
+        let decoded =
+            control_wire::ControlEnvelope::decode(result.encode_to_vec().as_slice())
+                .expect("system action result should decode");
+        let Some(control_wire::control_envelope::Payload::SystemActionResult(result)) =
+            decoded.payload
+        else {
+            panic!("expected system action result payload");
+        };
+        assert_eq!(
+            control_wire::SystemActionState::try_from(result.state),
+            Ok(control_wire::SystemActionState::Accepted)
+        );
     }
 
     #[test]
