@@ -25,17 +25,15 @@ pub fn system_actions_available(
         && capabilities.contains(&Capability::SystemActions)
 }
 
-pub fn validate_request(
-    request: &SystemActionRequest,
-) -> Result<(), SystemActionControlError> {
+pub fn validate_request(request: &SystemActionRequest) -> Result<(), SystemActionControlError> {
     system_action(request.action).map(|_| ())
 }
 
 pub fn validate_result(result: &SystemActionResult) -> Result<(), SystemActionControlError> {
     system_action(result.action)?;
 
-    let state =
-        SystemActionState::try_from(result.state).map_err(|_| SystemActionControlError::InvalidState)?;
+    let state = SystemActionState::try_from(result.state)
+        .map_err(|_| SystemActionControlError::InvalidState)?;
     if state == SystemActionState::Unspecified {
         return Err(SystemActionControlError::InvalidState);
     }
@@ -128,10 +126,7 @@ mod tests {
             SystemActionState::Rejected,
             SystemActionState::Failed,
         ] {
-            assert_eq!(
-                validate_result(&result(SystemAction::Lock, state)),
-                Ok(())
-            );
+            assert_eq!(validate_result(&result(SystemAction::Lock, state)), Ok(()));
         }
 
         assert_eq!(
