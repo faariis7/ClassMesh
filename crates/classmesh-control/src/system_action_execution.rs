@@ -1,4 +1,4 @@
-use classmesh_protocol::control_wire::{SystemAction, SystemActionResult, SystemActionState};
+use classmesh_protocol::control_wire::{SystemActionResult, SystemActionState};
 use classmesh_protocol::system_action::validate_result;
 
 use crate::dispatch::AuthorizedSystemAction;
@@ -62,6 +62,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use classmesh_protocol::control_wire::SystemAction;
     use classmesh_protocol::system_action::{
         MAX_SYSTEM_ACTION_DIAGNOSTIC_BYTES, SystemActionControlError, validate_result,
     };
