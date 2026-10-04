@@ -122,6 +122,15 @@ pub const fn privileged_dispatch_diagnostic_code(error: &PrivilegedDispatchError
             "control.command.presentation_requires_v0_3"
         }
         PrivilegedDispatchError::InvalidPresentation(_) => "control.command.presentation_invalid",
+        PrivilegedDispatchError::SystemActionRequestMissingId => {
+            "control.command.system_action_missing_request_id"
+        }
+        PrivilegedDispatchError::SystemActionRequiresProtocolV5 => {
+            "control.command.system_action_requires_v0_5"
+        }
+        PrivilegedDispatchError::InvalidSystemAction(_) => {
+            "control.command.system_action_invalid"
+        }
         PrivilegedDispatchError::Authorization(error) => {
             command_authorization_diagnostic_code(error)
         }
@@ -236,6 +245,30 @@ mod tests {
                 classmesh_protocol::presentation::PresentationControlError::InvalidStreamId
             )),
             "control.command.presentation_invalid"
+        );
+    }
+
+    #[test]
+    fn system_action_codes_are_stable_and_non_sensitive() {
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(
+                &PrivilegedDispatchError::SystemActionRequestMissingId
+            ),
+            "control.command.system_action_missing_request_id"
+        );
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(
+                &PrivilegedDispatchError::SystemActionRequiresProtocolV5
+            ),
+            "control.command.system_action_requires_v0_5"
+        );
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(
+                &PrivilegedDispatchError::InvalidSystemAction(
+                    classmesh_protocol::system_action::SystemActionControlError::InvalidAction
+                )
+            ),
+            "control.command.system_action_invalid"
         );
     }
 
