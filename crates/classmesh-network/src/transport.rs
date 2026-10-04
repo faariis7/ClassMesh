@@ -328,7 +328,9 @@ mod tests {
         )
         .expect("sender binds");
 
-        let report = sender.send_frame(10_000, &frame(1, 64)).expect("frame sends");
+        let report = sender
+            .send_frame(10_000, &frame(1, 64))
+            .expect("frame sends");
         assert_eq!(report.packets, 1);
 
         let (packet, _) = receiver.receive_packet().expect("media packet receives");
