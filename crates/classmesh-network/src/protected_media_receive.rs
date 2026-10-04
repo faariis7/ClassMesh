@@ -2,9 +2,8 @@ use std::fmt;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 
-use classmesh_protocol::PROTOCOL_VERSION;
 use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
-use classmesh_protocol::media::{MAX_PACKET_PAYLOAD, MediaFlags};
+use classmesh_protocol::media::{MAX_PACKET_PAYLOAD, MEDIA_PROTOCOL_VERSION, MediaFlags};
 use classmesh_security::group_media::MAX_GROUP_MEDIA_SEALED_BYTES;
 
 use crate::receiver::{ReceiverEvent, ReceiverPolicy, ReceiverWindow};
@@ -208,9 +207,9 @@ impl ProtectedMediaReceiveState {
         if stream_id == 0 {
             return Err(ProtectedMediaReceiveCoreError::InvalidStreamId);
         }
-        let protocol_major = u8::try_from(PROTOCOL_VERSION.major)
+        let protocol_major = u8::try_from(MEDIA_PROTOCOL_VERSION.major)
             .map_err(|_| ProtectedMediaReceiveCoreError::ProtocolVersionOutOfRange)?;
-        let protocol_minor = u8::try_from(PROTOCOL_VERSION.minor)
+        let protocol_minor = u8::try_from(MEDIA_PROTOCOL_VERSION.minor)
             .map_err(|_| ProtectedMediaReceiveCoreError::ProtocolVersionOutOfRange)?;
 
         Ok(Self {
