@@ -3,8 +3,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::{Duration, Instant};
 
-use classmesh_protocol::PROTOCOL_VERSION;
-use classmesh_protocol::media::{MediaFlags, MediaPacketHeader};
+use classmesh_protocol::media::{MEDIA_PROTOCOL_VERSION, MediaFlags, MediaPacketHeader};
 
 use crate::MediaPacket;
 use crate::multicast::{
@@ -181,9 +180,9 @@ fn send_and_observe(
 fn runtime_probe_packet(
     token: [u8; RUNTIME_PROBE_TOKEN_BYTES],
 ) -> Result<MediaPacket, RuntimeMulticastProbeError> {
-    let protocol_major = u8::try_from(PROTOCOL_VERSION.major)
+    let protocol_major = u8::try_from(MEDIA_PROTOCOL_VERSION.major)
         .map_err(|_| RuntimeMulticastProbeError::ProtocolVersionOutOfRange)?;
-    let protocol_minor = u8::try_from(PROTOCOL_VERSION.minor)
+    let protocol_minor = u8::try_from(MEDIA_PROTOCOL_VERSION.minor)
         .map_err(|_| RuntimeMulticastProbeError::ProtocolVersionOutOfRange)?;
     let mut payload = Vec::with_capacity(RUNTIME_PROBE_TAG.len() + RUNTIME_PROBE_TOKEN_BYTES);
     payload.extend_from_slice(RUNTIME_PROBE_TAG);
@@ -210,10 +209,10 @@ fn runtime_probe_packet_matches(
     packet: &MediaPacket,
     token: [u8; RUNTIME_PROBE_TOKEN_BYTES],
 ) -> bool {
-    let Ok(protocol_major) = u8::try_from(PROTOCOL_VERSION.major) else {
+    let Ok(protocol_major) = u8::try_from(MEDIA_PROTOCOL_VERSION.major) else {
         return false;
     };
-    let Ok(protocol_minor) = u8::try_from(PROTOCOL_VERSION.minor) else {
+    let Ok(protocol_minor) = u8::try_from(MEDIA_PROTOCOL_VERSION.minor) else {
         return false;
     };
     packet.header.protocol_major == protocol_major
@@ -234,6 +233,14 @@ mod tests {
     fn runtime_probe_packet_requires_exact_version_stream_tag_and_token() {
         let token = [0x5a; RUNTIME_PROBE_TOKEN_BYTES];
         let packet = runtime_probe_packet(token).expect("probe packet");
+        assert_eq!(
+            packet.header.protocol_major,
+            u8::try_from(MEDIA_PROTOCOL_VERSION.major).expect("media major fits")
+        );
+        assert_eq!(
+            packet.header.protocol_minor,
+            u8::try_from(MEDIA_PROTOCOL_VERSION.minor).expect("media minor fits")
+        );
         assert!(runtime_probe_packet_matches(&packet, token));
 
         let mut wrong_stream = packet.clone();
