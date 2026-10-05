@@ -114,7 +114,6 @@ pub(crate) struct InputDispatchChannels {
     pub(crate) availability: Arc<AtomicU8>,
 }
 
-
 const SYSTEM_ACTION_PENDING: u8 = 0;
 const SYSTEM_ACTION_COMMITTED: u8 = 1;
 const SYSTEM_ACTION_CANCELLED: u8 = 2;
@@ -210,14 +209,12 @@ fn system_action_result(
             SystemActionState::Failed,
             "system_action.service_reply_dropped",
         ),
-        SystemActionDispatchOutcome::TimedOut => (
-            SystemActionState::Failed,
-            "system_action.service_timeout",
-        ),
-        SystemActionDispatchOutcome::Cancelled => (
-            SystemActionState::Rejected,
-            "system_action.cancelled",
-        ),
+        SystemActionDispatchOutcome::TimedOut => {
+            (SystemActionState::Failed, "system_action.service_timeout")
+        }
+        SystemActionDispatchOutcome::Cancelled => {
+            (SystemActionState::Rejected, "system_action.cancelled")
+        }
     };
 
     SystemActionResult {
@@ -2788,7 +2785,8 @@ mod tests {
             assert_eq!(envelope.control_session_id, 77);
             assert_eq!(envelope.sequence, 12);
             assert_eq!(envelope.request_id, 991);
-            let Some(control_envelope::Payload::SystemActionResult(result)) = envelope.payload else {
+            let Some(control_envelope::Payload::SystemActionResult(result)) = envelope.payload
+            else {
                 panic!("expected system action result");
             };
             assert_eq!(result.action, SystemAction::Lock as i32);
