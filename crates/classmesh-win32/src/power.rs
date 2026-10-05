@@ -319,15 +319,24 @@ mod tests {
     }
 
     #[test]
-    fn rejected_request_does_not_mask_privilege_restore_failure() {
+    fn request_outcome_preserves_acceptance_and_cleanup_truth() {
         let restore_error = SystemPowerError::at(SystemPowerStage::RestoreShutdownPrivilege);
+
         assert_eq!(
-            finish_power_request(false, Err(restore_error)),
-            Err(restore_error)
+            finish_power_request(true, Ok(())),
+            Ok(SystemPowerRequestOutcome::Accepted)
+        );
+        assert_eq!(
+            finish_power_request(true, Err(restore_error)),
+            Ok(SystemPowerRequestOutcome::AcceptedPrivilegeRestoreFailed)
         );
         assert_eq!(
             finish_power_request(false, Ok(())),
             Err(SystemPowerError::at(SystemPowerStage::RequestRejected))
+        );
+        assert_eq!(
+            finish_power_request(false, Err(restore_error)),
+            Err(restore_error)
         );
     }
 
