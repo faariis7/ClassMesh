@@ -68,10 +68,13 @@ enum SystemPowerStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SystemPowerError {
     stage: SystemPowerStage,
-    win32_error: u32,
 }
 
 impl SystemPowerError {
+    const fn at(stage: SystemPowerStage) -> Self {
+        Self { stage }
+    }
+
     #[must_use]
     pub const fn diagnostic_code(self) -> &'static str {
         match self.stage {
@@ -92,12 +95,7 @@ impl SystemPowerError {
 
 impl Display for SystemPowerError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "{} (Win32 error {})",
-            self.diagnostic_code(),
-            self.win32_error
-        )
+        formatter.write_str(self.diagnostic_code())
     }
 }
 
@@ -123,21 +121,21 @@ fn request_system_power(
             CLASSMESH_POWER_REASON,
         )
     };
-    let request_error = if accepted == 0 {
-        Some(last_error(SystemPowerStage::RequestRejected))
-    } else {
-        None
-    };
-
     let restored = privilege.restore();
+    finish_power_request(accepted != 0, restored)
+}
 
-    if let Some(error) = request_error {
-        return Err(error);
-    }
-
-    match restored {
-        Ok(()) => Ok(SystemPowerRequestOutcome::Accepted),
-        Err(_) => Ok(SystemPowerRequestOutcome::AcceptedPrivilegeRestoreFailed),
+fn finish_power_request(
+    accepted: bool,
+    restored: Result<(), SystemPowerError>,
+) -> Result<SystemPowerRequestOutcome, SystemPowerError> {
+    match (accepted, restored) {
+        (true, Ok(())) => Ok(SystemPowerRequestOutcome::Accepted),
+        (true, Err(_)) => Ok(SystemPowerRequestOutcome::AcceptedPrivilegeRestoreFailed),
+        (false, Ok(())) => Err(SystemPowerError::at(SystemPowerStage::RequestRejected)),
+        // Cleanup failure takes precedence when Windows rejected the request:
+        // leaving SE_SHUTDOWN_NAME enabled is the more security-relevant state.
+        (false, Err(error)) => Err(error),
     }
 }
 
@@ -168,7 +166,7 @@ impl ShutdownPrivilegeGuard {
             )
         } == 0
         {
-            return Err(last_error(SystemPowerStage::OpenProcessToken));
+            return Err(SystemPowerError::at(SystemPowerStage::OpenProcessToken));
         }
         let token = TokenHandle(raw_token);
 
@@ -178,7 +176,9 @@ impl ShutdownPrivilegeGuard {
         // SAFETY: null selects the local system, SE_SHUTDOWN_NAME is a valid
         // NUL-terminated Windows constant, and luid is writable.
         if unsafe { LookupPrivilegeValueW(null(), SE_SHUTDOWN_NAME, &mut luid) } == 0 {
-            return Err(last_error(SystemPowerStage::LookupShutdownPrivilege));
+            return Err(SystemPowerError::at(
+                SystemPowerStage::LookupShutdownPrivilege,
+            ));
         }
 
         let desired = TOKEN_PRIVILEGES {
@@ -206,21 +206,16 @@ impl ShutdownPrivilegeGuard {
                 &mut previous_len,
             )
         };
-        if adjusted == 0 {
-            return Err(last_error(SystemPowerStage::EnableShutdownPrivilege));
-        }
-
         // AdjustTokenPrivileges may return non-zero even when the requested
         // privilege was not present. Microsoft documents GetLastError as the
-        // authoritative signal for that case.
+        // authoritative signal for that case, so both signals are required.
         // SAFETY: GetLastError has no preconditions and is read immediately after
         // AdjustTokenPrivileges.
         let privilege_status = unsafe { GetLastError() };
-        if privilege_status != ERROR_SUCCESS {
-            return Err(SystemPowerError {
-                stage: SystemPowerStage::EnableShutdownPrivilege,
-                win32_error: privilege_status,
-            });
+        if !privilege_adjustment_succeeded(adjusted, privilege_status) {
+            return Err(SystemPowerError::at(
+                SystemPowerStage::EnableShutdownPrivilege,
+            ));
         }
 
         Ok(Self {
@@ -240,8 +235,14 @@ impl ShutdownPrivilegeGuard {
         let restored = unsafe {
             AdjustTokenPrivileges(self.token.0, 0, &self.previous, 0, null_mut(), null_mut())
         };
-        if restored == 0 {
-            return Err(last_error(SystemPowerStage::RestoreShutdownPrivilege));
+        // SAFETY: GetLastError is read immediately after AdjustTokenPrivileges;
+        // a non-zero BOOL alone does not guarantee every requested privilege was
+        // adjusted.
+        let privilege_status = unsafe { GetLastError() };
+        if !privilege_adjustment_succeeded(restored, privilege_status) {
+            return Err(SystemPowerError::at(
+                SystemPowerStage::RestoreShutdownPrivilege,
+            ));
         }
 
         self.restore_pending = false;
@@ -279,11 +280,8 @@ impl Drop for TokenHandle {
     }
 }
 
-fn last_error(stage: SystemPowerStage) -> SystemPowerError {
-    // SAFETY: GetLastError has no preconditions and is read immediately after
-    // the failing Win32 API.
-    let win32_error = unsafe { GetLastError() };
-    SystemPowerError { stage, win32_error }
+const fn privilege_adjustment_succeeded(adjusted: i32, status: u32) -> bool {
+    adjusted != 0 && status == ERROR_SUCCESS
 }
 
 #[cfg(test)]
@@ -314,6 +312,29 @@ mod tests {
     }
 
     #[test]
+    fn privilege_adjustment_requires_bool_success_and_error_success() {
+        assert!(privilege_adjustment_succeeded(1, ERROR_SUCCESS));
+        assert!(!privilege_adjustment_succeeded(0, ERROR_SUCCESS));
+        assert!(!privilege_adjustment_succeeded(1, 1));
+    }
+
+    #[test]
+    fn rejected_request_does_not_mask_privilege_restore_failure() {
+        let restore_error = SystemPowerError::at(SystemPowerStage::RestoreShutdownPrivilege);
+        assert_eq!(
+            finish_power_request(false, Err(restore_error)),
+            Err(restore_error)
+        );
+        assert_eq!(
+            finish_power_request(
+                false,
+                Ok(())
+            ),
+            Err(SystemPowerError::at(SystemPowerStage::RequestRejected))
+        );
+    }
+
+    #[test]
     fn power_diagnostic_codes_are_stable_and_value_free() {
         for (stage, expected) in [
             (
@@ -337,12 +358,9 @@ mod tests {
                 "system_power.restore_shutdown_privilege_failed",
             ),
         ] {
-            let error = SystemPowerError {
-                stage,
-                win32_error: 12345,
-            };
+            let error = SystemPowerError::at(stage);
             assert_eq!(error.diagnostic_code(), expected);
-            assert!(!error.diagnostic_code().contains("12345"));
+            assert_eq!(error.to_string(), expected);
         }
     }
 }
