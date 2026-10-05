@@ -99,7 +99,6 @@ mod windows_service_app {
         None,
     }
 
-
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum WorkerControlSendError {
         Unavailable,
@@ -2590,7 +2589,10 @@ mod windows_service_app {
             );
             assert_eq!(system_action_worker_command(SystemAction::Restart), None);
             assert_eq!(system_action_worker_command(SystemAction::Shutdown), None);
-            assert_eq!(system_action_worker_command(SystemAction::Unspecified), None);
+            assert_eq!(
+                system_action_worker_command(SystemAction::Unspecified),
+                None
+            );
         }
 
         #[test]
