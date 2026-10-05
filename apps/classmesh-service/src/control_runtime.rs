@@ -13,7 +13,9 @@ use classmesh_control::diagnostics::{
     command_authorization_diagnostic_code, handshake_diagnostic_code, heartbeat_diagnostic_code,
     privileged_dispatch_diagnostic_code, stream_offer_diagnostic_code, transport_diagnostic_code,
 };
-use classmesh_control::dispatch::{PrivilegedControlCommand, dispatch_privileged_command};
+use classmesh_control::dispatch::{
+    AuthorizedSystemAction, PrivilegedControlCommand, dispatch_privileged_command,
+};
 use classmesh_control::group_media_feedback::build_presentation_feedback_envelope;
 use classmesh_control::group_media_key::{
     InstalledPresentationKeyBinding, build_presentation_key_ack_from_binding,
@@ -43,10 +45,11 @@ use classmesh_protocol::control_wire::{
     ControlEnvelope, HeartbeatAck, InputEvent, KeyframeRequest,
     MediaTransport as WireMediaTransport, Nack, PresentationState as WirePresentationState,
     PresentationStatus, ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamAnswer,
-    StreamKind as WireStreamKind, StreamReconfigure, control_envelope,
+    StreamKind as WireStreamKind, StreamReconfigure, SystemAction, SystemActionResult,
+    SystemActionState, control_envelope,
 };
 use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
-use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION};
+use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION, ProtocolVersion};
 use classmesh_security::{AuthorizationStore, Permission, PrincipalId};
 use classmesh_windows_runtime::ipc::{
     ServicePresentationMulticastStart, ServicePresentationUnicastStart, ServiceUdpStreamStart,
@@ -67,6 +70,7 @@ const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const PRESENTATION_KEY_INSTALL_TIMEOUT: Duration = Duration::from_secs(1);
 const PRESENTATION_START_TIMEOUT: Duration = Duration::from_secs(1);
+const SYSTEM_ACTION_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const PRESENTATION_FEEDBACK_BUS_CAPACITY: usize = 64;
 const CONTROL_INBOUND_QUEUE_CAPACITY: usize = 32;
 
@@ -108,6 +112,153 @@ pub(crate) struct InputDispatchChannels {
     pub(crate) event_tx: mpsc::SyncSender<InputEvent>,
     pub(crate) cleanup_tx: mpsc::SyncSender<()>,
     pub(crate) availability: Arc<AtomicU8>,
+}
+
+const SYSTEM_ACTION_PENDING: u8 = 0;
+const SYSTEM_ACTION_COMMITTED: u8 = 1;
+const SYSTEM_ACTION_CANCELLED: u8 = 2;
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemActionCommit(Arc<AtomicU8>);
+
+impl SystemActionCommit {
+    fn pending() -> Self {
+        Self(Arc::new(AtomicU8::new(SYSTEM_ACTION_PENDING)))
+    }
+
+    pub(crate) fn try_commit(&self) -> bool {
+        self.0
+            .compare_exchange(
+                SYSTEM_ACTION_PENDING,
+                SYSTEM_ACTION_COMMITTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn cancel(&self) -> bool {
+        self.0
+            .compare_exchange(
+                SYSTEM_ACTION_PENDING,
+                SYSTEM_ACTION_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn is_committed(&self) -> bool {
+        self.0.load(Ordering::Acquire) == SYSTEM_ACTION_COMMITTED
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SystemActionDispatchOutcome {
+    Accepted,
+    WorkerUnavailable,
+    Backpressure,
+    ServiceUnavailable,
+    WriteFailed,
+    Unsupported,
+    ReplyDropped,
+    TimedOut,
+    Cancelled,
+}
+
+#[derive(Debug)]
+pub(crate) struct SystemActionDispatch {
+    pub(crate) request_id: u64,
+    pub(crate) action: AuthorizedSystemAction,
+    pub(crate) commit: SystemActionCommit,
+    pub(crate) reply_tx: oneshot::Sender<SystemActionDispatchOutcome>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemActionDispatchChannels {
+    pub(crate) tx: mpsc::SyncSender<SystemActionDispatch>,
+}
+
+fn system_action_result(
+    action: SystemAction,
+    outcome: SystemActionDispatchOutcome,
+) -> SystemActionResult {
+    let (state, diagnostic) = match outcome {
+        SystemActionDispatchOutcome::Accepted => (SystemActionState::Accepted, ""),
+        SystemActionDispatchOutcome::WorkerUnavailable => (
+            SystemActionState::Rejected,
+            "system_action.worker_unavailable",
+        ),
+        SystemActionDispatchOutcome::Backpressure => (
+            SystemActionState::Rejected,
+            "system_action.service_backpressure",
+        ),
+        SystemActionDispatchOutcome::ServiceUnavailable => (
+            SystemActionState::Rejected,
+            "system_action.service_unavailable",
+        ),
+        SystemActionDispatchOutcome::WriteFailed => (
+            SystemActionState::Failed,
+            "system_action.worker_write_failed",
+        ),
+        SystemActionDispatchOutcome::Unsupported => (
+            SystemActionState::Rejected,
+            "system_action.executor_unavailable",
+        ),
+        SystemActionDispatchOutcome::ReplyDropped => (
+            SystemActionState::Failed,
+            "system_action.service_reply_dropped",
+        ),
+        SystemActionDispatchOutcome::TimedOut => {
+            (SystemActionState::Failed, "system_action.service_timeout")
+        }
+        SystemActionDispatchOutcome::Cancelled => {
+            (SystemActionState::Rejected, "system_action.cancelled")
+        }
+    };
+
+    SystemActionResult {
+        action: action as i32,
+        state: state as i32,
+        diagnostic: diagnostic.to_owned(),
+    }
+}
+
+fn build_system_action_response(
+    control_session_id: u64,
+    sequence: u64,
+    request_id: u64,
+    version: ProtocolVersion,
+    action: SystemAction,
+    outcome: SystemActionDispatchOutcome,
+) -> ControlEnvelope {
+    ControlEnvelope {
+        control_session_id,
+        sequence,
+        protocol_version: Some(WireProtocolVersion {
+            major: u32::from(version.major),
+            minor: u32::from(version.minor),
+        }),
+        request_id,
+        payload: Some(control_envelope::Payload::SystemActionResult(
+            system_action_result(action, outcome),
+        )),
+    }
+}
+
+async fn await_system_action_dispatch(
+    commit: SystemActionCommit,
+    reply_rx: &mut oneshot::Receiver<SystemActionDispatchOutcome>,
+) -> SystemActionDispatchOutcome {
+    match tokio::time::timeout(SYSTEM_ACTION_REPLY_TIMEOUT, &mut *reply_rx).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(_)) => SystemActionDispatchOutcome::ReplyDropped,
+        Err(_) if commit.cancel() => SystemActionDispatchOutcome::TimedOut,
+        Err(_) if commit.is_committed() => reply_rx
+            .await
+            .unwrap_or(SystemActionDispatchOutcome::ReplyDropped),
+        Err(_) => SystemActionDispatchOutcome::Cancelled,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -801,12 +952,33 @@ impl ControlRuntimeConfig {
     }
 }
 
-struct ControlRuntimeDispatch {
+pub(crate) struct ControlRuntimeDispatch {
     input: InputDispatchChannels,
+    system_actions: SystemActionDispatchChannels,
     media: FocusedMediaDispatchChannels,
     presentation_dispatch: PresentationDispatchChannels,
     presentation_feedback: PresentationFeedbackBus,
     worker_capabilities: Arc<WorkerCapabilityState>,
+}
+
+impl ControlRuntimeDispatch {
+    pub(crate) fn new(
+        input: InputDispatchChannels,
+        system_actions: SystemActionDispatchChannels,
+        media: FocusedMediaDispatchChannels,
+        presentation_dispatch: PresentationDispatchChannels,
+        presentation_feedback: PresentationFeedbackBus,
+        worker_capabilities: Arc<WorkerCapabilityState>,
+    ) -> Self {
+        Self {
+            input,
+            system_actions,
+            media,
+            presentation_dispatch,
+            presentation_feedback,
+            worker_capabilities,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -820,11 +992,7 @@ impl ControlRuntime {
     pub(crate) fn start(
         state: ControlRuntimeState,
         config: ControlRuntimeConfig,
-        input: InputDispatchChannels,
-        media: FocusedMediaDispatchChannels,
-        presentation_dispatch: PresentationDispatchChannels,
-        presentation_feedback: PresentationFeedbackBus,
-        worker_capabilities: Arc<WorkerCapabilityState>,
+        dispatch: ControlRuntimeDispatch,
     ) -> Result<Self, String> {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<SocketAddr, String>>(1);
         let (stop_tx, stop_rx) = oneshot::channel();
@@ -846,19 +1014,7 @@ impl ControlRuntime {
                     }
                 };
 
-                runtime.block_on(run_listener(
-                    state,
-                    config,
-                    ready_tx,
-                    stop_rx,
-                    ControlRuntimeDispatch {
-                        input,
-                        media,
-                        presentation_dispatch,
-                        presentation_feedback,
-                        worker_capabilities,
-                    },
-                ));
+                runtime.block_on(run_listener(state, config, ready_tx, stop_rx, dispatch));
             })
             .map_err(|error| format!("control runtime thread creation failed: {error}"))?;
 
@@ -921,6 +1077,7 @@ async fn run_listener(
 ) {
     let ControlRuntimeDispatch {
         input,
+        system_actions,
         media,
         presentation_dispatch,
         presentation_feedback,
@@ -975,6 +1132,7 @@ async fn run_listener(
                 let authorization = Arc::clone(&authorization);
                 let session_ids = Arc::clone(&session_ids);
                 let input = input.clone();
+                let system_actions = system_actions.clone();
                 let media = media.clone();
                 let presentation_dispatch = presentation_dispatch.clone();
                 let presentation_feedback = presentation_feedback.clone();
@@ -1032,6 +1190,7 @@ async fn run_listener(
                                 EstablishedSessionRuntime {
                                     authorization: authorization.as_ref(),
                                     input: &input,
+                                    system_actions: &system_actions,
                                     media: &media,
                                     presentation_dispatch: &presentation_dispatch,
                                     presentation_feedback: &presentation_feedback,
@@ -1069,6 +1228,7 @@ async fn run_listener(
 struct EstablishedSessionRuntime<'a> {
     authorization: &'a AuthorizationStore,
     input: &'a InputDispatchState,
+    system_actions: &'a SystemActionDispatchChannels,
     media: &'a FocusedMediaDispatchChannels,
     presentation_dispatch: &'a PresentationDispatchChannels,
     presentation_feedback: &'a PresentationFeedbackBus,
@@ -1118,6 +1278,7 @@ async fn run_established_session(
     let EstablishedSessionRuntime {
         authorization,
         input,
+        system_actions,
         media,
         presentation_dispatch,
         presentation_feedback,
@@ -2101,6 +2262,87 @@ async fn run_established_session(
                     return;
                 }
             }
+            Some(control_envelope::Payload::SystemActionRequest(_)) => {
+                if !system_action_capability_negotiated(&session.negotiated.capabilities) {
+                    eprintln!(
+                        "ClassMesh system action rejected: control.system_action.capability_not_negotiated"
+                    );
+                    connection.close(0_u32.into(), b"system action capability not negotiated");
+                    return;
+                }
+
+                let now_unix_ms = match unix_time_ms() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"invalid service clock");
+                        return;
+                    }
+                };
+                let action = match dispatch_privileged_command(
+                    &mut guard,
+                    authorization,
+                    &envelope,
+                    now_unix_ms,
+                ) {
+                    Ok(PrivilegedControlCommand::SystemAction(action)) => action,
+                    Ok(_) => {
+                        eprintln!(
+                            "ClassMesh system action rejected: control.command.payload_mismatch"
+                        );
+                        connection.close(0_u32.into(), b"privileged payload mismatch");
+                        return;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "ClassMesh system action rejected: {}",
+                            privileged_dispatch_diagnostic_code(&error)
+                        );
+                        connection.close(0_u32.into(), b"privileged command rejected");
+                        return;
+                    }
+                };
+
+                let wire_action = action.action();
+                let request_id = envelope.request_id;
+                let commit = SystemActionCommit::pending();
+                let (reply_tx, mut reply_rx) = oneshot::channel();
+                let dispatch = SystemActionDispatch {
+                    request_id,
+                    action,
+                    commit: commit.clone(),
+                    reply_tx,
+                };
+                let outcome = match system_actions.tx.try_send(dispatch) {
+                    Ok(()) => await_system_action_dispatch(commit, &mut reply_rx).await,
+                    Err(mpsc::TrySendError::Full(_)) => SystemActionDispatchOutcome::Backpressure,
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        SystemActionDispatchOutcome::ServiceUnavailable
+                    }
+                };
+
+                let Some(next_sequence) = outbound_sequence.checked_add(1) else {
+                    eprintln!("ClassMesh control session closed: control.sequence.exhausted");
+                    connection.close(0_u32.into(), b"control sequence exhausted");
+                    return;
+                };
+                outbound_sequence = next_sequence;
+                let response = build_system_action_response(
+                    session.control_session_id,
+                    outbound_sequence,
+                    request_id,
+                    session.negotiated.version,
+                    wire_action,
+                    outcome,
+                );
+                if let Err(error) = send.send(&response).await {
+                    eprintln!(
+                        "ClassMesh system action result failed: {}",
+                        transport_diagnostic_code(&error)
+                    );
+                    connection.close(0_u32.into(), b"system action result failed");
+                    return;
+                }
+            }
             Some(control_envelope::Payload::InputEvent(_)) => {
                 let now_unix_ms = match unix_time_ms() {
                     Ok(value) => value,
@@ -2230,6 +2472,7 @@ fn service_hello_capabilities(
     let mut capabilities = worker_capabilities.hello_capabilities();
     capabilities.insert(Capability::TeacherPresentation);
     capabilities.insert(Capability::SframeGroupMedia);
+    capabilities.insert(Capability::SystemActions);
     if udp_multicast_available {
         capabilities.insert(Capability::UdpMulticast);
     }
@@ -2264,6 +2507,10 @@ fn local_udp_multicast_capability(interface: Option<Ipv4Addr>) -> bool {
 
 fn presentation_capability_negotiated(capabilities: &BTreeSet<Capability>) -> bool {
     capabilities.contains(&Capability::TeacherPresentation)
+}
+
+fn system_action_capability_negotiated(capabilities: &BTreeSet<Capability>) -> bool {
+    capabilities.contains(&Capability::SystemActions)
 }
 
 fn group_media_capability_negotiated(capabilities: &BTreeSet<Capability>) -> bool {
@@ -2479,12 +2726,99 @@ mod tests {
     }
 
     #[test]
+    fn system_action_result_mapping_is_bounded_non_sensitive_and_correlated() {
+        use classmesh_protocol::system_action::validate_result;
+
+        for (outcome, state, diagnostic) in [
+            (
+                SystemActionDispatchOutcome::Accepted,
+                SystemActionState::Accepted,
+                "",
+            ),
+            (
+                SystemActionDispatchOutcome::WorkerUnavailable,
+                SystemActionState::Rejected,
+                "system_action.worker_unavailable",
+            ),
+            (
+                SystemActionDispatchOutcome::Backpressure,
+                SystemActionState::Rejected,
+                "system_action.service_backpressure",
+            ),
+            (
+                SystemActionDispatchOutcome::ServiceUnavailable,
+                SystemActionState::Rejected,
+                "system_action.service_unavailable",
+            ),
+            (
+                SystemActionDispatchOutcome::WriteFailed,
+                SystemActionState::Failed,
+                "system_action.worker_write_failed",
+            ),
+            (
+                SystemActionDispatchOutcome::Unsupported,
+                SystemActionState::Rejected,
+                "system_action.executor_unavailable",
+            ),
+            (
+                SystemActionDispatchOutcome::ReplyDropped,
+                SystemActionState::Failed,
+                "system_action.service_reply_dropped",
+            ),
+            (
+                SystemActionDispatchOutcome::TimedOut,
+                SystemActionState::Failed,
+                "system_action.service_timeout",
+            ),
+            (
+                SystemActionDispatchOutcome::Cancelled,
+                SystemActionState::Rejected,
+                "system_action.cancelled",
+            ),
+        ] {
+            let envelope = build_system_action_response(
+                77,
+                12,
+                991,
+                ProtocolVersion { major: 0, minor: 5 },
+                SystemAction::Lock,
+                outcome,
+            );
+            assert_eq!(envelope.control_session_id, 77);
+            assert_eq!(envelope.sequence, 12);
+            assert_eq!(envelope.request_id, 991);
+            let Some(control_envelope::Payload::SystemActionResult(result)) = envelope.payload
+            else {
+                panic!("expected system action result");
+            };
+            assert_eq!(result.action, SystemAction::Lock as i32);
+            assert_eq!(result.state, state as i32);
+            assert_eq!(result.diagnostic, diagnostic);
+            assert!(result.diagnostic.len() <= 1024);
+            assert_eq!(validate_result(&result), Ok(()));
+        }
+    }
+
+    #[test]
+    fn system_action_commit_prevents_late_execution_after_cancellation() {
+        let commit = SystemActionCommit::pending();
+        assert!(commit.cancel());
+        assert!(!commit.try_commit());
+
+        let committed = SystemActionCommit::pending();
+        assert!(committed.try_commit());
+        assert!(committed.is_committed());
+        assert!(!committed.cancel());
+    }
+
+    #[test]
     fn presentation_runtime_capability_is_explicit_and_probe_gated() {
         let worker = WorkerCapabilityState::default();
         let capabilities = service_hello_capabilities(&worker, false);
         assert!(capabilities.contains(&Capability::TeacherPresentation));
         assert!(capabilities.contains(&Capability::SframeGroupMedia));
         assert!(capabilities.contains(&Capability::ServiceSessionWorker));
+        assert!(capabilities.contains(&Capability::SystemActions));
         assert!(!capabilities.contains(&Capability::UdpUnicast));
         assert!(!capabilities.contains(&Capability::QuicDatagram));
         assert!(!capabilities.contains(&Capability::UdpMulticast));
@@ -2496,6 +2830,7 @@ mod tests {
 
         assert!(presentation_capability_negotiated(&capabilities));
         assert!(group_media_capability_negotiated(&capabilities));
+        assert!(system_action_capability_negotiated(&capabilities));
         assert!(!presentation_capability_negotiated(&BTreeSet::new()));
         assert!(!group_media_capability_negotiated(&BTreeSet::from([
             Capability::TeacherPresentation,
