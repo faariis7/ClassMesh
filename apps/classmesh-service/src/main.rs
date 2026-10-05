@@ -75,7 +75,8 @@ mod windows_service_app {
     const MAX_MEDIA_RECONFIGURE_ATTEMPTS: u8 = 4;
 
     use crate::control_runtime::{
-        ControlRuntime, ControlRuntimeConfig, ControlRuntimeState, FocusedMediaDispatchChannels,
+        ControlRuntime, ControlRuntimeConfig, ControlRuntimeDispatch, ControlRuntimeState,
+        FocusedMediaDispatchChannels,
         FocusedMediaFeedback, FocusedMediaReconfigure, FocusedMediaStart, InputAvailability,
         InputDispatchChannels, PresentationDispatchChannels, PresentationFeedbackBus,
         PresentationKeyInstallDispatch, PresentationMulticastStartDispatch,
@@ -1593,23 +1594,23 @@ mod windows_service_app {
 
         let worker_capabilities = Arc::new(WorkerCapabilityState::default());
         let presentation_feedback = PresentationFeedbackBus::default();
-        let mut control_runtime = match ControlRuntime::start(
-            control_state,
-            control_config,
+        let control_dispatch = ControlRuntimeDispatch::new(
             input_channels,
             system_action_channels,
             media_channels,
             presentation_channels,
             presentation_feedback.clone(),
             Arc::clone(&worker_capabilities),
-        ) {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                eprintln!("ClassMesh control runtime failed to start: {error}");
-                set_stopped_with_exit(&status_handle, 3)?;
-                return Ok(());
-            }
-        };
+        );
+        let mut control_runtime =
+            match ControlRuntime::start(control_state, control_config, control_dispatch) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("ClassMesh control runtime failed to start: {error}");
+                    set_stopped_with_exit(&status_handle, 3)?;
+                    return Ok(());
+                }
+            };
         eprintln!(
             "ClassMesh enrolled control listener ready on {}",
             control_runtime.local_address()
