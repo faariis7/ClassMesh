@@ -15,7 +15,7 @@ mod windows_service_app {
     use classmesh_codec_win::capability_cache::DurableEncoderCapabilityCache;
     use classmesh_codec_win::{EncoderBenchmarkResult, EncoderCapabilityCacheKey};
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity};
-    use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure};
+    use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure, SystemAction};
     use classmesh_protocol::feedback::FeedbackMessage;
     use classmesh_security::persistence::DurableAuthorizationState;
     use classmesh_security::{CredentialFingerprint, PrincipalId};
@@ -59,6 +59,8 @@ mod windows_service_app {
     const CONTROL_RUNTIME_CONFIG_FILE: &str = "control-runtime.json";
     const INPUT_QUEUE_CAPACITY: usize = 256;
     const INPUT_CLEANUP_QUEUE_CAPACITY: usize = 1;
+    const SYSTEM_ACTION_DISPATCH_QUEUE_CAPACITY: usize = 1;
+    const MAX_SYSTEM_ACTIONS_PER_TICK: usize = 1;
     const FOCUSED_MEDIA_QUEUE_CAPACITY: usize = 4;
     const FOCUSED_MEDIA_FEEDBACK_QUEUE_CAPACITY: usize = 32;
     const PRESENTATION_KEY_INSTALL_QUEUE_CAPACITY: usize = 1;
@@ -77,7 +79,8 @@ mod windows_service_app {
         FocusedMediaFeedback, FocusedMediaReconfigure, FocusedMediaStart, InputAvailability,
         InputDispatchChannels, PresentationDispatchChannels, PresentationFeedbackBus,
         PresentationKeyInstallDispatch, PresentationMulticastStartDispatch,
-        PresentationUnicastStartDispatch, WorkerCapabilityState,
+        PresentationUnicastStartDispatch, SystemActionDispatch, SystemActionDispatchChannels,
+        SystemActionDispatchOutcome, WorkerCapabilityState,
     };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -94,6 +97,13 @@ mod windows_service_app {
         RestartScheduled(SessionId),
         GiveUp(SessionId),
         None,
+    }
+
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum WorkerControlSendError {
+        Unavailable,
+        WriteFailed,
     }
 
     #[derive(Debug)]
@@ -395,7 +405,11 @@ mod windows_service_app {
             }
         }
 
-        fn send_control(&self, session: SessionId, command: IpcControlCommand) -> bool {
+        fn send_control(
+            &self,
+            session: SessionId,
+            command: IpcControlCommand,
+        ) -> Result<(), WorkerControlSendError> {
             if !self
                 .process
                 .as_ref()
@@ -405,18 +419,18 @@ mod windows_service_app {
                     "ignoring IPC command for session {}; no matching Worker is running",
                     session.0
                 );
-                return false;
+                return Err(WorkerControlSendError::Unavailable);
             }
 
             let Some(pipe) = self.pipe.as_ref() else {
                 eprintln!("Worker IPC pipe is unavailable for session {}", session.0);
-                return false;
+                return Err(WorkerControlSendError::Unavailable);
             };
             if let Err(error) = send_control(pipe, command) {
                 eprintln!("failed to send Worker IPC command: {error}");
-                return false;
+                return Err(WorkerControlSendError::WriteFailed);
             }
-            true
+            Ok(())
         }
 
         fn send_input(&self, event: &InputEvent) -> Result<(), String> {
@@ -1511,6 +1525,11 @@ mod windows_service_app {
             cleanup_tx: input_cleanup_tx,
             availability: Arc::clone(&input_availability),
         };
+        let (system_action_tx, system_action_rx) =
+            mpsc::sync_channel::<SystemActionDispatch>(SYSTEM_ACTION_DISPATCH_QUEUE_CAPACITY);
+        let system_action_channels = SystemActionDispatchChannels {
+            tx: system_action_tx,
+        };
         let (media_start_tx, media_start_rx) =
             mpsc::sync_channel::<FocusedMediaStart>(FOCUSED_MEDIA_QUEUE_CAPACITY);
         let (media_reconfigure_tx, media_reconfigure_rx) =
@@ -1579,6 +1598,7 @@ mod windows_service_app {
             control_state,
             control_config,
             input_channels,
+            system_action_channels,
             media_channels,
             presentation_channels,
             presentation_feedback.clone(),
@@ -1624,6 +1644,31 @@ mod windows_service_app {
             None;
         let mut pending_presentation_unicast_start: Option<PendingPresentationUnicastStart> = None;
         loop {
+            for _ in 0..MAX_SYSTEM_ACTIONS_PER_TICK {
+                let dispatch = match system_action_rx.try_recv() {
+                    Ok(dispatch) => dispatch,
+                    Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+                };
+
+                if dispatch.request_id == 0 || !dispatch.commit.try_commit() {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(SystemActionDispatchOutcome::Cancelled);
+                    continue;
+                }
+
+                let outcome = match system_action_worker_command(dispatch.action.action()) {
+                    Some(command) => match supervisor.active_session() {
+                        Some(session) => {
+                            worker_system_action_outcome(workers.send_control(session, command))
+                        }
+                        None => SystemActionDispatchOutcome::WorkerUnavailable,
+                    },
+                    None => SystemActionDispatchOutcome::Unsupported,
+                };
+                let _ = dispatch.reply_tx.send(outcome);
+            }
+
             while let Ok(binding) = presentation_key_clear_rx.try_recv() {
                 if pending_presentation_multicast_start
                     .as_ref()
@@ -2289,6 +2334,25 @@ mod windows_service_app {
         }
     }
 
+    fn system_action_worker_command(action: SystemAction) -> Option<IpcControlCommand> {
+        match action {
+            SystemAction::Lock => Some(IpcControlCommand::LockWorkstation),
+            SystemAction::Restart | SystemAction::Shutdown | SystemAction::Unspecified => None,
+        }
+    }
+
+    fn worker_system_action_outcome(
+        result: Result<(), WorkerControlSendError>,
+    ) -> SystemActionDispatchOutcome {
+        match result {
+            Ok(()) => SystemActionDispatchOutcome::Accepted,
+            Err(WorkerControlSendError::Unavailable) => {
+                SystemActionDispatchOutcome::WorkerUnavailable
+            }
+            Err(WorkerControlSendError::WriteFailed) => SystemActionDispatchOutcome::WriteFailed,
+        }
+    }
+
     fn handle_supervisor_action(
         action: SupervisorAction,
         supervisor: &mut SessionSupervisor,
@@ -2312,7 +2376,9 @@ mod windows_service_app {
                 let _ = workers.send_control(session, IpcControlCommand::SuspendMedia);
             }
             SupervisorAction::ResumeMedia(session) => {
-                let resumed = workers.send_control(session, IpcControlCommand::ResumeMedia);
+                let resumed = workers
+                    .send_control(session, IpcControlCommand::ResumeMedia)
+                    .is_ok();
                 let availability = if resumed {
                     InputAvailability::Ready
                 } else {
@@ -2514,6 +2580,33 @@ mod windows_service_app {
             ] {
                 assert!(!pending.matches_key_binding(wrong));
             }
+        }
+
+        #[test]
+        fn system_action_routing_exposes_only_lock_to_the_worker() {
+            assert_eq!(
+                system_action_worker_command(SystemAction::Lock),
+                Some(IpcControlCommand::LockWorkstation)
+            );
+            assert_eq!(system_action_worker_command(SystemAction::Restart), None);
+            assert_eq!(system_action_worker_command(SystemAction::Shutdown), None);
+            assert_eq!(system_action_worker_command(SystemAction::Unspecified), None);
+        }
+
+        #[test]
+        fn worker_control_failures_map_to_bounded_system_action_outcomes() {
+            assert_eq!(
+                worker_system_action_outcome(Ok(())),
+                SystemActionDispatchOutcome::Accepted
+            );
+            assert_eq!(
+                worker_system_action_outcome(Err(WorkerControlSendError::Unavailable)),
+                SystemActionDispatchOutcome::WorkerUnavailable
+            );
+            assert_eq!(
+                worker_system_action_outcome(Err(WorkerControlSendError::WriteFailed)),
+                SystemActionDispatchOutcome::WriteFailed
+            );
         }
 
         #[test]
