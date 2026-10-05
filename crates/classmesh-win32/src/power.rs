@@ -4,9 +4,8 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, GetLastError, HANDLE};
 use windows_sys::Win32::Security::{
-    AdjustTokenPrivileges, LUID, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW,
-    SE_PRIVILEGE_ENABLED, SE_SHUTDOWN_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
-    TOKEN_QUERY,
+    AdjustTokenPrivileges, LUID, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+    SE_SHUTDOWN_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows_sys::Win32::System::Shutdown::{
     InitiateSystemShutdownExW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_APPLICATION,
@@ -108,7 +107,7 @@ fn request_system_power(
     action: SystemPowerAction,
 ) -> Result<SystemPowerRequestOutcome, SystemPowerError> {
     let mut privilege = ShutdownPrivilegeGuard::enable()?;
-    let reboot_after_shutdown = matches!(action, SystemPowerAction::Restart);
+    let reboot_after_shutdown = reboot_after_shutdown(action);
 
     // SAFETY: both optional string pointers are null for a local-machine request,
     // all scalar arguments are valid, and the scoped guard above enabled the
@@ -120,7 +119,7 @@ fn request_system_power(
             null(),
             0,
             0,
-            i32::from(reboot_after_shutdown),
+            reboot_after_shutdown,
             CLASSMESH_POWER_REASON,
         )
     };
@@ -139,6 +138,13 @@ fn request_system_power(
     match restored {
         Ok(()) => Ok(SystemPowerRequestOutcome::Accepted),
         Err(_) => Ok(SystemPowerRequestOutcome::AcceptedPrivilegeRestoreFailed),
+    }
+}
+
+const fn reboot_after_shutdown(action: SystemPowerAction) -> i32 {
+    match action {
+        SystemPowerAction::Restart => 1,
+        SystemPowerAction::Shutdown => 0,
     }
 }
 
@@ -232,14 +238,7 @@ impl ShutdownPrivilegeGuard {
         // SAFETY: token remains owned by this guard and previous is the exact
         // state returned by the successful privilege-adjustment call above.
         let restored = unsafe {
-            AdjustTokenPrivileges(
-                self.token.0,
-                0,
-                &self.previous,
-                0,
-                null_mut(),
-                null_mut(),
-            )
+            AdjustTokenPrivileges(self.token.0, 0, &self.previous, 0, null_mut(), null_mut())
         };
         if restored == 0 {
             return Err(last_error(SystemPowerStage::RestoreShutdownPrivilege));
@@ -258,14 +257,7 @@ impl Drop for ShutdownPrivilegeGuard {
             // failed; Drop retries restoration without masking that truth.
             // SAFETY: the token and previous state remain valid until fields drop.
             unsafe {
-                AdjustTokenPrivileges(
-                    self.token.0,
-                    0,
-                    &self.previous,
-                    0,
-                    null_mut(),
-                    null_mut(),
-                );
+                AdjustTokenPrivileges(self.token.0, 0, &self.previous, 0, null_mut(), null_mut());
             }
             self.restore_pending = false;
         }
@@ -306,10 +298,9 @@ mod tests {
     }
 
     #[test]
-    fn power_actions_keep_restart_and_shutdown_closed() {
-        assert!(matches!(SystemPowerAction::Restart, SystemPowerAction::Restart));
-        assert!(matches!(SystemPowerAction::Shutdown, SystemPowerAction::Shutdown));
-        assert_ne!(SystemPowerAction::Restart, SystemPowerAction::Shutdown);
+    fn power_actions_map_to_closed_win32_reboot_flags() {
+        assert_eq!(reboot_after_shutdown(SystemPowerAction::Restart), 1);
+        assert_eq!(reboot_after_shutdown(SystemPowerAction::Shutdown), 0);
     }
 
     #[test]
