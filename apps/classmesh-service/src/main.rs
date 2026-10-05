@@ -76,12 +76,11 @@ mod windows_service_app {
 
     use crate::control_runtime::{
         ControlRuntime, ControlRuntimeConfig, ControlRuntimeDispatch, ControlRuntimeState,
-        FocusedMediaDispatchChannels,
-        FocusedMediaFeedback, FocusedMediaReconfigure, FocusedMediaStart, InputAvailability,
-        InputDispatchChannels, PresentationDispatchChannels, PresentationFeedbackBus,
-        PresentationKeyInstallDispatch, PresentationMulticastStartDispatch,
-        PresentationUnicastStartDispatch, SystemActionDispatch, SystemActionDispatchChannels,
-        SystemActionDispatchOutcome, WorkerCapabilityState,
+        FocusedMediaDispatchChannels, FocusedMediaFeedback, FocusedMediaReconfigure,
+        FocusedMediaStart, InputAvailability, InputDispatchChannels, PresentationDispatchChannels,
+        PresentationFeedbackBus, PresentationKeyInstallDispatch,
+        PresentationMulticastStartDispatch, PresentationUnicastStartDispatch, SystemActionDispatch,
+        SystemActionDispatchChannels, SystemActionDispatchOutcome, WorkerCapabilityState,
     };
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
