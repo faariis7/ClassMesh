@@ -326,10 +326,7 @@ mod tests {
             Err(restore_error)
         );
         assert_eq!(
-            finish_power_request(
-                false,
-                Ok(())
-            ),
+            finish_power_request(false, Ok(())),
             Err(SystemPowerError::at(SystemPowerStage::RequestRejected))
         );
     }
