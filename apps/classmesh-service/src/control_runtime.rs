@@ -952,13 +952,33 @@ impl ControlRuntimeConfig {
     }
 }
 
-struct ControlRuntimeDispatch {
+pub(crate) struct ControlRuntimeDispatch {
     input: InputDispatchChannels,
     system_actions: SystemActionDispatchChannels,
     media: FocusedMediaDispatchChannels,
     presentation_dispatch: PresentationDispatchChannels,
     presentation_feedback: PresentationFeedbackBus,
     worker_capabilities: Arc<WorkerCapabilityState>,
+}
+
+impl ControlRuntimeDispatch {
+    pub(crate) fn new(
+        input: InputDispatchChannels,
+        system_actions: SystemActionDispatchChannels,
+        media: FocusedMediaDispatchChannels,
+        presentation_dispatch: PresentationDispatchChannels,
+        presentation_feedback: PresentationFeedbackBus,
+        worker_capabilities: Arc<WorkerCapabilityState>,
+    ) -> Self {
+        Self {
+            input,
+            system_actions,
+            media,
+            presentation_dispatch,
+            presentation_feedback,
+            worker_capabilities,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -972,12 +992,7 @@ impl ControlRuntime {
     pub(crate) fn start(
         state: ControlRuntimeState,
         config: ControlRuntimeConfig,
-        input: InputDispatchChannels,
-        system_actions: SystemActionDispatchChannels,
-        media: FocusedMediaDispatchChannels,
-        presentation_dispatch: PresentationDispatchChannels,
-        presentation_feedback: PresentationFeedbackBus,
-        worker_capabilities: Arc<WorkerCapabilityState>,
+        dispatch: ControlRuntimeDispatch,
     ) -> Result<Self, String> {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<SocketAddr, String>>(1);
         let (stop_tx, stop_rx) = oneshot::channel();
@@ -999,20 +1014,7 @@ impl ControlRuntime {
                     }
                 };
 
-                runtime.block_on(run_listener(
-                    state,
-                    config,
-                    ready_tx,
-                    stop_rx,
-                    ControlRuntimeDispatch {
-                        input,
-                        system_actions,
-                        media,
-                        presentation_dispatch,
-                        presentation_feedback,
-                        worker_capabilities,
-                    },
-                ));
+                runtime.block_on(run_listener(state, config, ready_tx, stop_rx, dispatch));
             })
             .map_err(|error| format!("control runtime thread creation failed: {error}"))?;
 
