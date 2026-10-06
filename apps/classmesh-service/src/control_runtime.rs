@@ -160,6 +160,7 @@ pub(crate) enum SystemActionDispatchOutcome {
     Backpressure,
     ServiceUnavailable,
     WriteFailed,
+    ExecutionFailed,
     Unsupported,
     ReplyDropped,
     TimedOut,
@@ -201,6 +202,9 @@ fn system_action_result(
             SystemActionState::Failed,
             "system_action.worker_write_failed",
         ),
+        SystemActionDispatchOutcome::ExecutionFailed => {
+            (SystemActionState::Failed, "system_action.execution_failed")
+        }
         SystemActionDispatchOutcome::Unsupported => (
             SystemActionState::Rejected,
             "system_action.executor_unavailable",
@@ -2754,6 +2758,11 @@ mod tests {
                 SystemActionDispatchOutcome::WriteFailed,
                 SystemActionState::Failed,
                 "system_action.worker_write_failed",
+            ),
+            (
+                SystemActionDispatchOutcome::ExecutionFailed,
+                SystemActionState::Failed,
+                "system_action.execution_failed",
             ),
             (
                 SystemActionDispatchOutcome::Unsupported,
