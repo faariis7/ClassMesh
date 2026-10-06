@@ -202,10 +202,9 @@ fn system_action_result(
             SystemActionState::Failed,
             "system_action.worker_write_failed",
         ),
-        SystemActionDispatchOutcome::ExecutionFailed => (
-            SystemActionState::Failed,
-            "system_action.execution_failed",
-        ),
+        SystemActionDispatchOutcome::ExecutionFailed => {
+            (SystemActionState::Failed, "system_action.execution_failed")
+        }
         SystemActionDispatchOutcome::Unsupported => (
             SystemActionState::Rejected,
             "system_action.executor_unavailable",
