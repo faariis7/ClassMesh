@@ -3,9 +3,7 @@ use classmesh_control::system_action_execution::{
     SystemActionExecutionError, SystemActionExecutionOutcome, SystemActionExecutor,
 };
 use classmesh_protocol::control_wire::SystemAction;
-use classmesh_win32::{
-    SystemPowerAction, SystemPowerController, SystemPowerRequestOutcome,
-};
+use classmesh_win32::{SystemPowerAction, SystemPowerController, SystemPowerRequestOutcome};
 
 const PRIVILEGE_RESTORE_WARNING: &str = "system_power.restore_shutdown_privilege_failed";
 
@@ -142,9 +140,6 @@ mod tests {
             executor.execute_action(SystemAction::Restart),
             Ok(SystemActionExecutionOutcome::Accepted)
         );
-        assert_eq!(
-            executor.controller.calls,
-            vec![SystemPowerAction::Restart]
-        );
+        assert_eq!(executor.controller.calls, vec![SystemPowerAction::Restart]);
     }
 }
