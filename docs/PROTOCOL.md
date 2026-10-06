@@ -103,6 +103,30 @@ Protocol minor 0.4 adds the sensitive control-wire contract used by the Phase 7E
 - The Student Service forwards at most one pending presentation-key install through a bounded local dispatch path. The network `PresentationKeyAck` is constructed from the Worker-confirmed non-secret binding only after exact PID/session and all correlation fields match; the Service does not derive a duplicate SFrame receiver for ACK construction. Stale or miscorrelated Worker results are ignored, and the exact-bound local clear path handles stop/session teardown without broadening network protocol v0.4.
 - Phase 7F runtime feedback preserves one reliable QUIC control stream while splitting its in-process send/receive ownership. A dedicated receive pump owns each framed read to completion. Exact-bound Worker feedback is emitted only for the matching installed key lease and active presentation after live Teacher credential/`StartPresentation` reauthorization; network feedback remains an uncorrelated (`request_id = 0`) event with the session-global outbound sequence. A bounded per-session lag may drop feedback, but it does not alter control framing or authorize multicast retransmission.
 
+### System-action contract (v0.5)
+
+Protocol minor 0.5 adds the typed administrative system-action contract without changing the media datagram wire contract.
+
+- `CAPABILITY_SYSTEM_ACTIONS` is negotiated explicitly; an older v0.4 peer can continue negotiating v0.4 and never gains system-action availability.
+- `SystemActionRequest` is a closed enum with only Lock, Restart and Shutdown. Unspecified/unknown values fail closed; the payload cannot carry an executable path, command line, shell fragment or arbitrary arguments.
+- Requests are correlated privileged commands with a non-zero `ControlEnvelope.request_id`, exact established protocol/session/sequence validation and explicit action permissions: Lock→`LockDevice`, Restart→`RestartDevice`, Shutdown→`ShutdownDevice`.
+- Structurally invalid or unsupported requests fail before sequence consumption where possible. An otherwise-valid authorization denial consumes its application sequence so it cannot be replayed after a later permission grant.
+- `SystemActionResult` uses closed result states and a diagnostic bounded to 1 KiB. Runtime failure diagnostics are stable/non-sensitive rather than raw Win32 values.
+- Production routing remains bounded: the Service processes one capacity-1 dispatch seam with commit/cancel semantics; interactive Lock is routed through typed Worker IPC while Restart/Shutdown execute behind the narrow Service-side Windows power boundary. Hosted tests inject non-destructive backends.
+- Raising the control protocol to v0.5 did not raise media packet versions. `MEDIA_PROTOCOL_VERSION` remains explicitly pinned to media v0.4 for protected multicast/unicast, probes, generic UDP and feedback datagrams.
+
+### Teacher-interaction contract (v0.6)
+
+Protocol minor 0.6 adds portable Teacher-message and typed open-target contracts. PR #354 establishes the wire/validation boundary only; authorization, Service/Worker routing and Windows execution remain later slices.
+
+- `CAPABILITY_TEACHER_MESSAGE` and `CAPABILITY_OPEN_TARGET` are separate negotiated capabilities so a peer can advertise only the interaction types it can actually service.
+- `TeacherMessage.text_utf8` is display-only, non-empty after trimming, bounded to 4 KiB of UTF-8 bytes, and rejects control characters except newline, carriage return and tab.
+- `OpenTarget` is a one-of: an HTTPS URL bounded to 2 KiB or a closed `AppIdentity` (`DefaultBrowser`, `Calculator`, `TextEditor`). There is no executable path, raw command line, shell fragment, environment expansion or arbitrary-argument field.
+- HTTPS validation accepts only the exact `https://` scheme, rejects credentials, whitespace/control characters and backslashes, validates bracketed IPv6 or strict ASCII host labels, and rejects invalid/zero ports. Unknown/unspecified app identities fail closed.
+- `TeacherInteractionResult` has closed kind/state enums and a diagnostic bounded to 1 KiB; request/result correlation is carried by the non-zero control-envelope `request_id` once privileged dispatch is enabled.
+- Availability helpers require control protocol v0.6 plus the exact corresponding capability. The current Service intentionally does not advertise either new capability until the later bounded routing/execution boundary can truthfully service it.
+- The control minor bump to v0.6 does not alter media datagrams; media continues to use its independent v0.4 wire version.
+
 ### Phase 6E clipboard skeleton
 
 Clipboard support is deliberately narrow and opt-in:
