@@ -5,6 +5,8 @@ mod input;
 #[cfg(windows)]
 mod named_pipe;
 #[cfg(windows)]
+mod power;
+#[cfg(windows)]
 mod session;
 #[cfg(windows)]
 mod session_process;
@@ -18,6 +20,11 @@ pub use input::{
 };
 #[cfg(windows)]
 pub use named_pipe::{NamedPipeClient, NamedPipeServer, PipeError, PipePeer, worker_pipe_name};
+#[cfg(windows)]
+pub use power::{
+    SystemPowerAction, SystemPowerController, SystemPowerError, SystemPowerRequestOutcome,
+    Win32SystemPowerController,
+};
 #[cfg(windows)]
 pub use session::current_session_id;
 #[cfg(windows)]
