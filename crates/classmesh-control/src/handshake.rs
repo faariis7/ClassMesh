@@ -553,6 +553,8 @@ fn capability_to_wire(capability: Capability) -> i32 {
         Capability::TeacherPresentation => 12,
         Capability::SframeGroupMedia => 13,
         Capability::SystemActions => 14,
+        Capability::TeacherMessage => 15,
+        Capability::OpenTarget => 16,
     }
 }
 
@@ -572,6 +574,8 @@ fn capability_from_wire(value: i32) -> Option<Capability> {
         12 => Some(Capability::TeacherPresentation),
         13 => Some(Capability::SframeGroupMedia),
         14 => Some(Capability::SystemActions),
+        15 => Some(Capability::TeacherMessage),
+        16 => Some(Capability::OpenTarget),
         _ => None,
     }
 }
@@ -601,6 +605,8 @@ mod tests {
                 Capability::TeacherPresentation,
                 Capability::SframeGroupMedia,
                 Capability::SystemActions,
+                Capability::TeacherMessage,
+                Capability::OpenTarget,
             ]),
             hostname: "student-05".to_owned(),
             app_version: "0.0.1".to_owned(),
