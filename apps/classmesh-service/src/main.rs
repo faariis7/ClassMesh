@@ -1,6 +1,8 @@
 #[cfg(windows)]
 mod control_runtime;
 #[cfg(windows)]
+mod system_action_power;
+#[cfg(windows)]
 pub mod monitoring;
 
 #[cfg(windows)]
@@ -14,6 +16,9 @@ mod windows_service_app {
 
     use classmesh_codec_win::capability_cache::DurableEncoderCapabilityCache;
     use classmesh_codec_win::{EncoderBenchmarkResult, EncoderCapabilityCacheKey};
+    use classmesh_control::system_action_execution::{
+        SystemActionExecutionError, SystemActionExecutionOutcome, SystemActionExecutor,
+    };
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity};
     use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure, SystemAction};
     use classmesh_protocol::feedback::FeedbackMessage;
@@ -23,8 +28,8 @@ mod windows_service_app {
     use sha2::{Digest, Sha256};
 
     use classmesh_win32::{
-        NamedPipeServer, SessionProcess, launch_worker_in_session, session_user_sid,
-        worker_pipe_name,
+        NamedPipeServer, SessionProcess, Win32SystemPowerController, launch_worker_in_session,
+        session_user_sid, worker_pipe_name,
     };
     use classmesh_windows_runtime::ipc::{
         IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage,
@@ -82,6 +87,7 @@ mod windows_service_app {
         PresentationMulticastStartDispatch, PresentationUnicastStartDispatch, SystemActionDispatch,
         SystemActionDispatchChannels, SystemActionDispatchOutcome, WorkerCapabilityState,
     };
+    use crate::system_action_power::ServicePowerSystemActionExecutor;
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
 
@@ -1625,6 +1631,8 @@ mod windows_service_app {
             worker_presentation_unicast_result_tx,
             presentation_feedback,
         );
+        let mut power_executor =
+            ServicePowerSystemActionExecutor::new(Win32SystemPowerController);
         let mut desired_focused_start: Option<ServiceUdpStreamStart> = None;
         let mut desired_focused_reconfigure: Option<StreamReconfigure> = None;
         let mut desired_focused_control_session_id: Option<u64> = None;
@@ -1663,7 +1671,7 @@ mod windows_service_app {
                         }
                         None => SystemActionDispatchOutcome::WorkerUnavailable,
                     },
-                    None => SystemActionDispatchOutcome::Unsupported,
+                    None => power_system_action_outcome(power_executor.execute(dispatch.action)),
                 };
                 let _ = dispatch.reply_tx.send(outcome);
             }
@@ -2352,6 +2360,23 @@ mod windows_service_app {
         }
     }
 
+    fn power_system_action_outcome(
+        result: Result<SystemActionExecutionOutcome, SystemActionExecutionError>,
+    ) -> SystemActionDispatchOutcome {
+        match result {
+            Ok(SystemActionExecutionOutcome::Accepted) => SystemActionDispatchOutcome::Accepted,
+            Ok(SystemActionExecutionOutcome::Completed) => {
+                SystemActionDispatchOutcome::ExecutionFailed
+            }
+            Err(SystemActionExecutionError::Unavailable) => {
+                SystemActionDispatchOutcome::Unsupported
+            }
+            Err(SystemActionExecutionError::Failed) => {
+                SystemActionDispatchOutcome::ExecutionFailed
+            }
+        }
+    }
+
     fn handle_supervisor_action(
         action: SupervisorAction,
         supervisor: &mut SessionSupervisor,
@@ -2592,6 +2617,27 @@ mod windows_service_app {
             assert_eq!(
                 system_action_worker_command(SystemAction::Unspecified),
                 None
+            );
+        }
+
+        #[test]
+        fn power_executor_results_preserve_asynchronous_acceptance_semantics() {
+            assert_eq!(
+                power_system_action_outcome(Ok(SystemActionExecutionOutcome::Accepted)),
+                SystemActionDispatchOutcome::Accepted
+            );
+            assert_eq!(
+                power_system_action_outcome(Ok(SystemActionExecutionOutcome::Completed)),
+                SystemActionDispatchOutcome::ExecutionFailed,
+                "Service power actions must never fabricate synchronous completion"
+            );
+            assert_eq!(
+                power_system_action_outcome(Err(SystemActionExecutionError::Unavailable)),
+                SystemActionDispatchOutcome::Unsupported
+            );
+            assert_eq!(
+                power_system_action_outcome(Err(SystemActionExecutionError::Failed)),
+                SystemActionDispatchOutcome::ExecutionFailed
             );
         }
 
