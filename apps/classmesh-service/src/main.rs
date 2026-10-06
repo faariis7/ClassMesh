@@ -1,9 +1,9 @@
 #[cfg(windows)]
 mod control_runtime;
 #[cfg(windows)]
-mod system_action_power;
-#[cfg(windows)]
 pub mod monitoring;
+#[cfg(windows)]
+mod system_action_power;
 
 #[cfg(windows)]
 mod windows_service_app {
@@ -1631,8 +1631,7 @@ mod windows_service_app {
             worker_presentation_unicast_result_tx,
             presentation_feedback,
         );
-        let mut power_executor =
-            ServicePowerSystemActionExecutor::new(Win32SystemPowerController);
+        let mut power_executor = ServicePowerSystemActionExecutor::new(Win32SystemPowerController);
         let mut desired_focused_start: Option<ServiceUdpStreamStart> = None;
         let mut desired_focused_reconfigure: Option<StreamReconfigure> = None;
         let mut desired_focused_control_session_id: Option<u64> = None;
@@ -2371,9 +2370,7 @@ mod windows_service_app {
             Err(SystemActionExecutionError::Unavailable) => {
                 SystemActionDispatchOutcome::Unsupported
             }
-            Err(SystemActionExecutionError::Failed) => {
-                SystemActionDispatchOutcome::ExecutionFailed
-            }
+            Err(SystemActionExecutionError::Failed) => SystemActionDispatchOutcome::ExecutionFailed,
         }
     }
 
