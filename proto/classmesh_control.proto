@@ -23,6 +23,8 @@ enum Capability {
   CAPABILITY_TEACHER_PRESENTATION = 12;
   CAPABILITY_SFRAME_GROUP_MEDIA = 13;
   CAPABILITY_SYSTEM_ACTIONS = 14;
+  CAPABILITY_TEACHER_MESSAGE = 15;
+  CAPABILITY_OPEN_TARGET = 16;
 }
 
 enum PrincipalRole {
@@ -314,6 +316,55 @@ message SystemActionResult {
   string diagnostic = 3;
 }
 
+// Protocol v0.6 Teacher interactions are deliberately typed and bounded.
+// Message text is display-only; open targets never carry an executable path,
+// raw command line, shell fragment, environment expansion, or arbitrary args.
+message TeacherMessage {
+  string text_utf8 = 1;
+}
+
+enum AppIdentity {
+  APP_IDENTITY_UNSPECIFIED = 0;
+  APP_IDENTITY_DEFAULT_BROWSER = 1;
+  APP_IDENTITY_CALCULATOR = 2;
+  APP_IDENTITY_TEXT_EDITOR = 3;
+}
+
+message OpenTarget {
+  oneof target {
+    string https_url = 1;
+    AppIdentity app = 2;
+  }
+}
+
+message TeacherInteractionRequest {
+  oneof action {
+    TeacherMessage message = 1;
+    OpenTarget open_target = 2;
+  }
+}
+
+enum TeacherInteractionKind {
+  TEACHER_INTERACTION_KIND_UNSPECIFIED = 0;
+  TEACHER_INTERACTION_KIND_MESSAGE = 1;
+  TEACHER_INTERACTION_KIND_OPEN_TARGET = 2;
+}
+
+enum TeacherInteractionState {
+  TEACHER_INTERACTION_STATE_UNSPECIFIED = 0;
+  TEACHER_INTERACTION_STATE_ACCEPTED = 1;
+  TEACHER_INTERACTION_STATE_COMPLETED = 2;
+  TEACHER_INTERACTION_STATE_REJECTED = 3;
+  TEACHER_INTERACTION_STATE_FAILED = 4;
+}
+
+// Correlated to TeacherInteractionRequest by ControlEnvelope.request_id.
+message TeacherInteractionResult {
+  TeacherInteractionKind kind = 1;
+  TeacherInteractionState state = 2;
+  string diagnostic = 3;
+}
+
 // Phase 7 presentation lifecycle is transport-neutral. Media transport/profile
 // negotiation remains in StreamOffer so lifecycle control does not select a
 // multicast/unicast transport before the relevant physical evidence exists.
@@ -418,5 +469,7 @@ message ControlEnvelope {
 
     SystemActionRequest system_action_request = 44;
     SystemActionResult system_action_result = 45;
+    TeacherInteractionRequest teacher_interaction_request = 46;
+    TeacherInteractionResult teacher_interaction_result = 47;
   }
 }

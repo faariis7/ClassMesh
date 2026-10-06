@@ -6,13 +6,14 @@ pub mod group_media_control;
 pub mod media;
 pub mod presentation;
 pub mod system_action;
+pub mod teacher_interaction;
 
 /// Generated Protocol Buffers types for the reliable control plane.
 pub mod control_wire {
     include!(concat!(env!("OUT_DIR"), "/classmesh.control.v1.rs"));
 }
 
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 5 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 6 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProtocolVersion {
@@ -63,6 +64,8 @@ pub enum Capability {
     TeacherPresentation,
     SframeGroupMedia,
     SystemActions,
+    TeacherMessage,
+    OpenTarget,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,8 +154,12 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_minor_five_and_preserves_additive_negotiation() {
-        assert_eq!(PROTOCOL_VERSION, ProtocolVersion { major: 0, minor: 5 });
+    fn protocol_version_is_minor_six_and_preserves_additive_negotiation() {
+        assert_eq!(PROTOCOL_VERSION, ProtocolVersion { major: 0, minor: 6 });
+        assert_eq!(
+            PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 5 }),
+            Some(ProtocolVersion { major: 0, minor: 5 })
+        );
         assert_eq!(
             PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 4 }),
             Some(ProtocolVersion { major: 0, minor: 4 })
@@ -239,6 +246,69 @@ mod tests {
         assert_eq!(
             control_wire::SystemActionState::try_from(result.state),
             Ok(control_wire::SystemActionState::Accepted)
+        );
+    }
+
+    #[test]
+    fn teacher_interaction_request_and_result_round_trip_on_v06() {
+        let request = control_wire::ControlEnvelope {
+            control_session_id: 44,
+            sequence: 12,
+            protocol_version: Some(control_wire::ProtocolVersion { major: 0, minor: 6 }),
+            request_id: 80,
+            payload: Some(
+                control_wire::control_envelope::Payload::TeacherInteractionRequest(
+                    control_wire::TeacherInteractionRequest {
+                        action: Some(
+                            control_wire::teacher_interaction_request::Action::OpenTarget(
+                                control_wire::OpenTarget {
+                                    target: Some(control_wire::open_target::Target::HttpsUrl(
+                                        "https://example.com/lesson".to_owned(),
+                                    )),
+                                },
+                            ),
+                        ),
+                    },
+                ),
+            ),
+        };
+        let decoded = control_wire::ControlEnvelope::decode(request.encode_to_vec().as_slice())
+            .expect("Teacher interaction request should decode");
+        let Some(control_wire::control_envelope::Payload::TeacherInteractionRequest(request)) =
+            decoded.payload
+        else {
+            panic!("expected Teacher interaction request payload");
+        };
+        assert!(matches!(
+            request.action,
+            Some(control_wire::teacher_interaction_request::Action::OpenTarget(_))
+        ));
+
+        let result = control_wire::ControlEnvelope {
+            control_session_id: 44,
+            sequence: 13,
+            protocol_version: Some(control_wire::ProtocolVersion { major: 0, minor: 6 }),
+            request_id: 80,
+            payload: Some(
+                control_wire::control_envelope::Payload::TeacherInteractionResult(
+                    control_wire::TeacherInteractionResult {
+                        kind: control_wire::TeacherInteractionKind::OpenTarget as i32,
+                        state: control_wire::TeacherInteractionState::Accepted as i32,
+                        diagnostic: String::new(),
+                    },
+                ),
+            ),
+        };
+        let decoded = control_wire::ControlEnvelope::decode(result.encode_to_vec().as_slice())
+            .expect("Teacher interaction result should decode");
+        let Some(control_wire::control_envelope::Payload::TeacherInteractionResult(result)) =
+            decoded.payload
+        else {
+            panic!("expected Teacher interaction result payload");
+        };
+        assert_eq!(
+            control_wire::TeacherInteractionState::try_from(result.state),
+            Ok(control_wire::TeacherInteractionState::Accepted)
         );
     }
 
