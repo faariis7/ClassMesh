@@ -145,6 +145,7 @@ PR #184 wires that feedback into the established Student control session. The ex
 
 - Phase 6F physical interactive-control validation under Issue #108, including degraded/lost media while authenticated control remains responsive; hosted CI cannot close this gate;
 - Phase 7D physical wired multicast viability and Phase 7H classroom-scale qualification remain evidence gates; hosted CI cannot close them;
+- Phase 8D Wi-Fi strategy, Phase 9F monitoring-grid, Phase 10G adaptive-networking and Phase 12B4b system-action physical execution evidence remain independent physical gates; hosted CI cannot close them;
 - final privilege-boundary, dependency and update-chain review before the 1.0 gate.
 
 ## Other production work still required
@@ -153,9 +154,8 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 
 ## Next implementation sequence
 
-1. Implement **Phase 11F1 next/current**: pin `eframe/egui` 0.32.3 against the workspace Rust 1.85 MSRV and add the production Windows shell boundary as a typed consumer of the established 11A–11E view-model/action layer. Update the living plan/status again after 11F1 merges before advancing to 11F2.
-2. Keep all Phase 11 UI/view-model code as a thin consumer of existing engine APIs; keep capture/network/adaptation/authorization/recovery ownership below the UI boundary.
-3. Keep Issue #3 open and run the Phase 4 two-PC qualification before selecting the default one-to-one UDP-vs-QUIC-Datagram transport.
-4. Run Phase 6F physical interactive-control validation.
-5. Execute the remaining Phase 7D/7H, Phase 8D, Phase 9F and Phase 10G physical evidence gates when hardware is available; hosted CI cannot close them.
-6. Continue later Phase 12 administrative features, Phase 13 installer/update/recovery and Phase 14 hardening in roadmap order.
+1. Implement **Phase 12C1 current** under Issue #328: portable bounded Teacher-message and typed open-target wire/contracts + validation only. Keep it control-contract-only: no permission mapping, Service/Worker routing, Windows side effects or Teacher UI ownership.
+2. For open targets, allow only an explicitly validated HTTPS URL contract or a closed typed app identity. Do not add executable paths, arbitrary arguments, raw command lines or shell fragments. Keep malformed/unsupported values fail closed and bounded before side effects.
+3. After 12C1 merges and the living docs/Issue are updated, advance to the next Phase 12 slice exactly as Issue #328 and the roadmap define it; authorization and routing remain separate from the portable contract.
+4. Keep Issue #3, Phase 6F, Phase 7D/7H, Phase 8D, Phase 9F, Phase 10G and Phase 12B4b open until their own physical evidence exists.
+5. Preserve Phase 13 installer/update/recovery and Phase 14 hardening in roadmap order.
