@@ -91,6 +91,9 @@ jobs:
       - name: Build adaptive controller benchmark
         run: cargo build -p classmesh-lab --bin classmesh-adaptive-controller-benchmark --release
 
+      - name: Build Phase 12B4 Service qualification binary
+        run: cargo build -p classmesh-service --release
+
       - name: Build Teacher UI shell
         run: cargo build -p classmesh-teacher --bin classmesh-teacher-ui --release
 
@@ -103,6 +106,10 @@ jobs:
       - name: Validate Phase 11F4 Teacher UI smoke helper
         shell: pwsh
         run: .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode Help
+
+      - name: Validate Phase 12B4 system-action qualification helper
+        shell: pwsh
+        run: .\scripts\phase12b4-system-actions.ps1 -Mode Help
 
       - name: Build Phase 7 multicast probe
         run: cargo build -p classmesh-lab --bin classmesh-multicast-probe --release
@@ -429,6 +436,35 @@ jobs:
         with:
           name: classmesh-phase11f4-teacher-ui-windows-x64
           path: phase11f4-teacher-ui-bundle/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
+
+      - name: Stage Phase 12B4 system-action qualification bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path phase12b4-system-action-bundle -Force | Out-Null
+          Copy-Item target/release/classmesh-service.exe phase12b4-system-action-bundle/
+          Copy-Item scripts/phase12b4-system-actions.ps1 phase12b4-system-action-bundle/
+          Copy-Item docs/PHASE12_SYSTEM_ACTION_QUALIFICATION.md phase12b4-system-action-bundle/
+          Copy-Item docs/PHASE12_SYSTEM_ACTION_RESULTS.md phase12b4-system-action-bundle/
+          .\scripts\phase12b4-system-actions.ps1 -Mode IndexBundle -BundleDir phase12b4-system-action-bundle -SourceRevision "${{ github.sha }}"
+          .\scripts\phase12b4-system-actions.ps1 -Mode ValidateBundle -BundleDir phase12b4-system-action-bundle
+          .\scripts\phase12b4-system-actions.ps1 -Mode CollectPreflight -BundleDir phase12b4-system-action-bundle -EvidenceDir phase12b4-system-action-bundle/ci-evidence -HostedCi
+          $evidence = Get-Content -LiteralPath phase12b4-system-action-bundle/ci-evidence/system-action-preflight-evidence.json -Raw | ConvertFrom-Json
+          if ($evidence.actions_invoked -ne $false) {
+            throw "Phase 12B4a CI must never invoke a system action"
+          }
+          foreach ($field in @("physical_qualification_passed","lock_execution","restart_execution","shutdown_execution","destructive_target_disposable")) {
+            if ($null -ne $evidence.$field) {
+              throw "Phase 12B4a CI evidence must leave $field undetermined"
+            }
+          }
+
+      - name: Upload Phase 12B4 system-action qualification bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-phase12b4-system-action-qualification-windows-x64
+          path: phase12b4-system-action-bundle/
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
