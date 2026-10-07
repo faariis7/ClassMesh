@@ -214,15 +214,15 @@ fn teacher_interaction_failure(
 ) -> TeacherInteractionResult {
     let (state, diagnostic) = match outcome {
         TeacherInteractionDispatchOutcome::Result(result) => return result,
-        TeacherInteractionDispatchOutcome::WorkerUnavailable => (TeacherInteractionState::Rejected, "teacher_interaction.worker_unavailable"),
-        TeacherInteractionDispatchOutcome::Backpressure => (TeacherInteractionState::Rejected, "teacher_interaction.service_backpressure"),
-        TeacherInteractionDispatchOutcome::ServiceUnavailable => (TeacherInteractionState::Rejected, "teacher_interaction.service_unavailable"),
-        TeacherInteractionDispatchOutcome::WriteFailed => (TeacherInteractionState::Failed, "teacher_interaction.worker_write_failed"),
-        TeacherInteractionDispatchOutcome::ReplyDropped => (TeacherInteractionState::Failed, "teacher_interaction.service_reply_dropped"),
-        TeacherInteractionDispatchOutcome::TimedOut => (TeacherInteractionState::Failed, "teacher_interaction.service_timeout"),
-        TeacherInteractionDispatchOutcome::Cancelled => (TeacherInteractionState::Rejected, "teacher_interaction.cancelled"),
+        TeacherInteractionDispatchOutcome::WorkerUnavailable => (\n            TeacherInteractionState::Rejected,\n            "teacher_interaction.worker_unavailable",\n        ),
+        TeacherInteractionDispatchOutcome::Backpressure => (\n            TeacherInteractionState::Rejected,\n            "teacher_interaction.service_backpressure",\n        ),
+        TeacherInteractionDispatchOutcome::ServiceUnavailable => (\n            TeacherInteractionState::Rejected,\n            "teacher_interaction.service_unavailable",\n        ),
+        TeacherInteractionDispatchOutcome::WriteFailed => (\n            TeacherInteractionState::Failed,\n            "teacher_interaction.worker_write_failed",\n        ),
+        TeacherInteractionDispatchOutcome::ReplyDropped => (\n            TeacherInteractionState::Failed,\n            "teacher_interaction.service_reply_dropped",\n        ),
+        TeacherInteractionDispatchOutcome::TimedOut => (\n            TeacherInteractionState::Failed,\n            "teacher_interaction.service_timeout",\n        ),
+        TeacherInteractionDispatchOutcome::Cancelled => (\n            TeacherInteractionState::Rejected,\n            "teacher_interaction.cancelled",\n        ),
     };
-    TeacherInteractionResult { kind: kind as i32, state: state as i32, diagnostic: diagnostic.to_owned() }
+    TeacherInteractionResult {\n        kind: kind as i32,\n        state: state as i32,\n        diagnostic: diagnostic.to_owned(),\n    }
 }
 
 async fn await_teacher_interaction_dispatch(
@@ -233,7 +233,7 @@ async fn await_teacher_interaction_dispatch(
         Ok(Ok(outcome)) => outcome,
         Ok(Err(_)) => TeacherInteractionDispatchOutcome::ReplyDropped,
         Err(_) if commit.cancel() => TeacherInteractionDispatchOutcome::TimedOut,
-        Err(_) if commit.is_committed() => reply_rx.await.unwrap_or(TeacherInteractionDispatchOutcome::ReplyDropped),
+        Err(_) if commit.is_committed() => reply_rx\n            .await\n            .unwrap_or(TeacherInteractionDispatchOutcome::ReplyDropped),
         Err(_) => TeacherInteractionDispatchOutcome::Cancelled,
     }
 }
@@ -2416,20 +2416,20 @@ async fn run_established_session(
             Some(control_envelope::Payload::TeacherInteractionRequest(_)) => {
                 let now_unix_ms = match unix_time_ms() {
                     Ok(value) => value,
-                    Err(_) => { connection.close(0_u32.into(), b"invalid service clock"); return; }
+                    Err(_) => {\n                        connection.close(0_u32.into(), b"invalid service clock");\n                        return;\n                    }
                 };
-                let request = match dispatch_privileged_command(&mut guard, authorization, &envelope, now_unix_ms) {
+                let request = match dispatch_privileged_command(\n                    &mut guard,\n                    authorization,\n                    &envelope,\n                    now_unix_ms,\n                ) {
                     Ok(PrivilegedControlCommand::TeacherInteraction(request)) => request,
-                    Ok(_) => { connection.close(0_u32.into(), b"privileged payload mismatch"); return; }
+                    Ok(_) => {\n                        connection.close(0_u32.into(), b"privileged payload mismatch");\n                        return;\n                    }
                     Err(error) => {
-                        eprintln!("ClassMesh Teacher interaction rejected: {}", privileged_dispatch_diagnostic_code(&error));
+                        eprintln!(\n                            "ClassMesh Teacher interaction rejected: {}",\n                            privileged_dispatch_diagnostic_code(&error)\n                        );
                         connection.close(0_u32.into(), b"privileged command rejected");
                         return;
                     }
                 };
-                let kind = match classmesh_protocol::teacher_interaction::validate_request(&request) {
+                let kind = match classmesh_protocol::teacher_interaction::validate_request(&request)\n                {
                     Ok(kind) => kind,
-                    Err(_) => { connection.close(0_u32.into(), b"teacher interaction invalid"); return; }
+                    Err(_) => {\n                        connection.close(0_u32.into(), b"teacher interaction invalid");\n                        return;\n                    }
                 };
                 let request_id = envelope.request_id;
                 let commit = SystemActionCommit::pending();
@@ -2443,8 +2443,8 @@ async fn run_established_session(
                 };
                 let outcome = match teacher_interactions.tx.try_send(dispatch) {
                     Ok(()) => await_teacher_interaction_dispatch(commit, &mut reply_rx).await,
-                    Err(mpsc::TrySendError::Full(_)) => TeacherInteractionDispatchOutcome::Backpressure,
-                    Err(mpsc::TrySendError::Disconnected(_)) => TeacherInteractionDispatchOutcome::ServiceUnavailable,
+                    Err(mpsc::TrySendError::Full(_)) => {\n                        TeacherInteractionDispatchOutcome::Backpressure\n                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {\n                        TeacherInteractionDispatchOutcome::ServiceUnavailable\n                    }
                 };
                 let result = teacher_interaction_failure(kind, outcome);
                 let Some(next_sequence) = outbound_sequence.checked_add(1) else {
@@ -2455,12 +2455,12 @@ async fn run_established_session(
                 let response = ControlEnvelope {
                     control_session_id: session.control_session_id,
                     sequence: outbound_sequence,
-                    protocol_version: Some(WireProtocolVersion { major: u32::from(session.negotiated.version.major), minor: u32::from(session.negotiated.version.minor) }),
+                    protocol_version: Some(WireProtocolVersion {\n                        major: u32::from(session.negotiated.version.major),\n                        minor: u32::from(session.negotiated.version.minor),\n                    }),
                     request_id,
                     payload: Some(control_envelope::Payload::TeacherInteractionResult(result)),
                 };
                 if let Err(error) = send.send(&response).await {
-                    eprintln!("ClassMesh Teacher interaction result failed: {}", transport_diagnostic_code(&error));
+                    eprintln!(\n                        "ClassMesh Teacher interaction result failed: {}",\n                        transport_diagnostic_code(&error)\n                    );
                     connection.close(0_u32.into(), b"teacher interaction result failed");
                     return;
                 }
