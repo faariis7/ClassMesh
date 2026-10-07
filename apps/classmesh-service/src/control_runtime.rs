@@ -182,7 +182,7 @@ pub(crate) struct SystemActionDispatchChannels {
     pub(crate) tx: mpsc::SyncSender<SystemActionDispatch>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct TeacherInteractionDispatch {
     pub(crate) control_session_id: u64,
     pub(crate) request_id: u64,
@@ -214,15 +214,40 @@ fn teacher_interaction_failure(
 ) -> TeacherInteractionResult {
     let (state, diagnostic) = match outcome {
         TeacherInteractionDispatchOutcome::Result(result) => return result,
-        TeacherInteractionDispatchOutcome::WorkerUnavailable => (\n            TeacherInteractionState::Rejected,\n            "teacher_interaction.worker_unavailable",\n        ),
-        TeacherInteractionDispatchOutcome::Backpressure => (\n            TeacherInteractionState::Rejected,\n            "teacher_interaction.service_backpressure",\n        ),
-        TeacherInteractionDispatchOutcome::ServiceUnavailable => (\n            TeacherInteractionState::Rejected,\n            "teacher_interaction.service_unavailable",\n        ),
-        TeacherInteractionDispatchOutcome::WriteFailed => (\n            TeacherInteractionState::Failed,\n            "teacher_interaction.worker_write_failed",\n        ),
-        TeacherInteractionDispatchOutcome::ReplyDropped => (\n            TeacherInteractionState::Failed,\n            "teacher_interaction.service_reply_dropped",\n        ),
-        TeacherInteractionDispatchOutcome::TimedOut => (\n            TeacherInteractionState::Failed,\n            "teacher_interaction.service_timeout",\n        ),
-        TeacherInteractionDispatchOutcome::Cancelled => (\n            TeacherInteractionState::Rejected,\n            "teacher_interaction.cancelled",\n        ),
+        TeacherInteractionDispatchOutcome::WorkerUnavailable => (
+            TeacherInteractionState::Rejected,
+            "teacher_interaction.worker_unavailable",
+        ),
+        TeacherInteractionDispatchOutcome::Backpressure => (
+            TeacherInteractionState::Rejected,
+            "teacher_interaction.service_backpressure",
+        ),
+        TeacherInteractionDispatchOutcome::ServiceUnavailable => (
+            TeacherInteractionState::Rejected,
+            "teacher_interaction.service_unavailable",
+        ),
+        TeacherInteractionDispatchOutcome::WriteFailed => (
+            TeacherInteractionState::Failed,
+            "teacher_interaction.worker_write_failed",
+        ),
+        TeacherInteractionDispatchOutcome::ReplyDropped => (
+            TeacherInteractionState::Failed,
+            "teacher_interaction.service_reply_dropped",
+        ),
+        TeacherInteractionDispatchOutcome::TimedOut => (
+            TeacherInteractionState::Failed,
+            "teacher_interaction.service_timeout",
+        ),
+        TeacherInteractionDispatchOutcome::Cancelled => (
+            TeacherInteractionState::Rejected,
+            "teacher_interaction.cancelled",
+        ),
     };
-    TeacherInteractionResult {\n        kind: kind as i32,\n        state: state as i32,\n        diagnostic: diagnostic.to_owned(),\n    }
+    TeacherInteractionResult {
+        kind: kind as i32,
+        state: state as i32,
+        diagnostic: diagnostic.to_owned(),
+    }
 }
 
 async fn await_teacher_interaction_dispatch(
@@ -233,7 +258,9 @@ async fn await_teacher_interaction_dispatch(
         Ok(Ok(outcome)) => outcome,
         Ok(Err(_)) => TeacherInteractionDispatchOutcome::ReplyDropped,
         Err(_) if commit.cancel() => TeacherInteractionDispatchOutcome::TimedOut,
-        Err(_) if commit.is_committed() => reply_rx\n            .await\n            .unwrap_or(TeacherInteractionDispatchOutcome::ReplyDropped),
+        Err(_) if commit.is_committed() => reply_rx
+            .await
+            .unwrap_or(TeacherInteractionDispatchOutcome::ReplyDropped),
         Err(_) => TeacherInteractionDispatchOutcome::Cancelled,
     }
 }
@@ -2416,20 +2443,38 @@ async fn run_established_session(
             Some(control_envelope::Payload::TeacherInteractionRequest(_)) => {
                 let now_unix_ms = match unix_time_ms() {
                     Ok(value) => value,
-                    Err(_) => {\n                        connection.close(0_u32.into(), b"invalid service clock");\n                        return;\n                    }
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"invalid service clock");
+                        return;
+                    }
                 };
-                let request = match dispatch_privileged_command(\n                    &mut guard,\n                    authorization,\n                    &envelope,\n                    now_unix_ms,\n                ) {
+                let request = match dispatch_privileged_command(
+                    &mut guard,
+                    authorization,
+                    &envelope,
+                    now_unix_ms,
+                ) {
                     Ok(PrivilegedControlCommand::TeacherInteraction(request)) => request,
-                    Ok(_) => {\n                        connection.close(0_u32.into(), b"privileged payload mismatch");\n                        return;\n                    }
+                    Ok(_) => {
+                        connection.close(0_u32.into(), b"privileged payload mismatch");
+                        return;
+                    }
                     Err(error) => {
-                        eprintln!(\n                            "ClassMesh Teacher interaction rejected: {}",\n                            privileged_dispatch_diagnostic_code(&error)\n                        );
+                        eprintln!(
+                            "ClassMesh Teacher interaction rejected: {}",
+                            privileged_dispatch_diagnostic_code(&error)
+                        );
                         connection.close(0_u32.into(), b"privileged command rejected");
                         return;
                     }
                 };
-                let kind = match classmesh_protocol::teacher_interaction::validate_request(&request)\n                {
+                let kind = match classmesh_protocol::teacher_interaction::validate_request(&request)
+                {
                     Ok(kind) => kind,
-                    Err(_) => {\n                        connection.close(0_u32.into(), b"teacher interaction invalid");\n                        return;\n                    }
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"teacher interaction invalid");
+                        return;
+                    }
                 };
                 let request_id = envelope.request_id;
                 let commit = SystemActionCommit::pending();
@@ -2443,8 +2488,12 @@ async fn run_established_session(
                 };
                 let outcome = match teacher_interactions.tx.try_send(dispatch) {
                     Ok(()) => await_teacher_interaction_dispatch(commit, &mut reply_rx).await,
-                    Err(mpsc::TrySendError::Full(_)) => {\n                        TeacherInteractionDispatchOutcome::Backpressure\n                    }
-                    Err(mpsc::TrySendError::Disconnected(_)) => {\n                        TeacherInteractionDispatchOutcome::ServiceUnavailable\n                    }
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        TeacherInteractionDispatchOutcome::Backpressure
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        TeacherInteractionDispatchOutcome::ServiceUnavailable
+                    }
                 };
                 let result = teacher_interaction_failure(kind, outcome);
                 let Some(next_sequence) = outbound_sequence.checked_add(1) else {
@@ -2455,12 +2504,18 @@ async fn run_established_session(
                 let response = ControlEnvelope {
                     control_session_id: session.control_session_id,
                     sequence: outbound_sequence,
-                    protocol_version: Some(WireProtocolVersion {\n                        major: u32::from(session.negotiated.version.major),\n                        minor: u32::from(session.negotiated.version.minor),\n                    }),
+                    protocol_version: Some(WireProtocolVersion {
+                        major: u32::from(session.negotiated.version.major),
+                        minor: u32::from(session.negotiated.version.minor),
+                    }),
                     request_id,
                     payload: Some(control_envelope::Payload::TeacherInteractionResult(result)),
                 };
                 if let Err(error) = send.send(&response).await {
-                    eprintln!(\n                        "ClassMesh Teacher interaction result failed: {}",\n                        transport_diagnostic_code(&error)\n                    );
+                    eprintln!(
+                        "ClassMesh Teacher interaction result failed: {}",
+                        transport_diagnostic_code(&error)
+                    );
                     connection.close(0_u32.into(), b"teacher interaction result failed");
                     return;
                 }
