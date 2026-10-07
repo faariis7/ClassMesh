@@ -2446,7 +2446,8 @@ async fn run_established_session(
                 }
             }
             Some(control_envelope::Payload::TeacherInteractionRequest(request)) => {
-                let kind = match classmesh_protocol::teacher_interaction::validate_request(request) {
+                let kind = match classmesh_protocol::teacher_interaction::validate_request(request)
+                {
                     Ok(kind) => kind,
                     Err(_) => {
                         connection.close(0_u32.into(), b"teacher interaction invalid");
@@ -2460,7 +2461,10 @@ async fn run_established_session(
                     eprintln!(
                         "ClassMesh Teacher interaction rejected: control.teacher_interaction.capability_not_negotiated"
                     );
-                    connection.close(0_u32.into(), b"teacher interaction capability not negotiated");
+                    connection.close(
+                        0_u32.into(),
+                        b"teacher interaction capability not negotiated",
+                    );
                     return;
                 }
 
