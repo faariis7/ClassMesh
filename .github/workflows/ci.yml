@@ -58,7 +58,6 @@ jobs:
     runs-on: [self-hosted, Windows, X64, parallels, classmesh]
     env:
       CARGO_BUILD_JOBS: 2
-      CARGO_TARGET_DIR: C:\ClassMeshCI\target
     steps:
       - name: Checkout
         uses: actions/checkout@v5
