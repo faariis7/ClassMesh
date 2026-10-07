@@ -19,8 +19,8 @@ pub const IPC_MAGIC: u32 = 0x434D_4950; // "CMIP"
 pub const IPC_HEADER_LEN: usize = 12;
 pub const MAX_IPC_MESSAGE: usize = 1_048_576;
 pub const IPC_VERSION_MAJOR: u8 = 0;
-/// IPC minor 9 adds the typed Service -> Worker workstation-lock control command.
-/// Older minors must reject that command instead of treating it as a legacy control action.
+/// IPC minor 10 adds the typed Service -> Worker teacher-interaction request/result contract.
+/// Older minors must reject those messages instead of treating them as legacy IPC.
 pub const IPC_VERSION_MINOR: u8 = 10;
 
 const MESSAGE_WORKER_HELLO: u16 = 1;
@@ -505,7 +505,11 @@ pub struct WorkerTeacherInteractionResult {
 
 impl WorkerTeacherInteractionResult {
     fn validate(&self) -> Result<(), IpcMessageError> {
-        if self.process_id == 0 || self.session_id == 0 || self.control_session_id == 0 || self.request_id == 0 {
+        if self.process_id == 0
+            || self.session_id == 0
+            || self.control_session_id == 0
+            || self.request_id == 0
+        {
             return Err(IpcMessageError::InvalidPayload);
         }
         validate_teacher_interaction_result(&self.result)
@@ -755,6 +759,8 @@ pub enum IpcMessage {
     WorkerPresentationKeyInstallResult(WorkerPresentationKeyInstallResult),
     ServicePresentationKeyClear(ServicePresentationKeyClear),
     WorkerPresentationFeedback(WorkerPresentationFeedback),
+    ServiceTeacherInteractionRequest(ServiceTeacherInteractionRequest),
+    WorkerTeacherInteractionResult(WorkerTeacherInteractionResult),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2603,6 +2609,93 @@ mod tests {
         dirty_reserved.payload[39] = 1;
         assert_eq!(
             dirty_reserved.message(),
+            Err(IpcMessageError::InvalidPayload)
+        );
+    }
+
+    #[test]
+    fn teacher_interaction_ipc_round_trips_exact_correlation() {
+        use classmesh_protocol::control_wire::{
+            TeacherInteractionState, TeacherMessage, teacher_interaction_request,
+        };
+
+        let request = ServiceTeacherInteractionRequest {
+            control_session_id: 77,
+            request_id: 44,
+            request: TeacherInteractionRequest {
+                action: Some(teacher_interaction_request::Action::Message(TeacherMessage {
+                    text_utf8: "Class starts now.".to_owned(),
+                })),
+            },
+        };
+        let frame =
+            IpcFrame::service_teacher_interaction_request(&request).expect("valid request");
+        assert_eq!(
+            frame.message().expect("typed request"),
+            IpcMessage::ServiceTeacherInteractionRequest(request)
+        );
+
+        let result = WorkerTeacherInteractionResult {
+            process_id: 42,
+            session_id: 7,
+            control_session_id: 77,
+            request_id: 44,
+            result: TeacherInteractionResult {
+                kind: TeacherInteractionKind::Message as i32,
+                state: TeacherInteractionState::Accepted as i32,
+                diagnostic: String::new(),
+            },
+        };
+        let frame = IpcFrame::worker_teacher_interaction_result(&result).expect("valid result");
+        assert_eq!(
+            frame.message().expect("typed result"),
+            IpcMessage::WorkerTeacherInteractionResult(result)
+        );
+    }
+
+    #[test]
+    fn teacher_interaction_ipc_fails_closed_on_bad_binding_result_and_downgrade() {
+        use classmesh_protocol::control_wire::{
+            TeacherInteractionState, TeacherMessage, teacher_interaction_request,
+        };
+
+        let valid = ServiceTeacherInteractionRequest {
+            control_session_id: 77,
+            request_id: 44,
+            request: TeacherInteractionRequest {
+                action: Some(teacher_interaction_request::Action::Message(TeacherMessage {
+                    text_utf8: "hello".to_owned(),
+                })),
+            },
+        };
+        let mut zero_request = valid.clone();
+        zero_request.request_id = 0;
+        assert_eq!(
+            IpcFrame::service_teacher_interaction_request(&zero_request),
+            Err(IpcMessageError::InvalidPayload)
+        );
+
+        let mut downgraded =
+            IpcFrame::service_teacher_interaction_request(&valid).expect("valid request");
+        downgraded.header.version_minor = TEACHER_INTERACTION_IPC_MIN_MINOR - 1;
+        assert_eq!(
+            downgraded.message(),
+            Err(IpcMessageError::UnsupportedVersion)
+        );
+
+        let invalid_result = WorkerTeacherInteractionResult {
+            process_id: 42,
+            session_id: 7,
+            control_session_id: 77,
+            request_id: 44,
+            result: TeacherInteractionResult {
+                kind: TeacherInteractionKind::Message as i32,
+                state: TeacherInteractionState::Unspecified as i32,
+                diagnostic: String::new(),
+            },
+        };
+        assert_eq!(
+            IpcFrame::worker_teacher_interaction_result(&invalid_result),
             Err(IpcMessageError::InvalidPayload)
         );
     }
