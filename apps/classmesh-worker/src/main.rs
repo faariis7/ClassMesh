@@ -1129,11 +1129,13 @@ where
                         Ok(AppIdentity::Calculator) => WindowsAppIdentity::Calculator,
                         Ok(AppIdentity::TextEditor) => WindowsAppIdentity::TextEditor,
                         Ok(AppIdentity::Unspecified) | Err(_) => {
-                            return Ok(classmesh_protocol::control_wire::TeacherInteractionResult {
-                                kind: kind as i32,
-                                state: TeacherInteractionState::Rejected as i32,
-                                diagnostic: "teacher_interaction.invalid_request".to_owned(),
-                            });
+                            return Ok(
+                                classmesh_protocol::control_wire::TeacherInteractionResult {
+                                    kind: kind as i32,
+                                    state: TeacherInteractionState::Rejected as i32,
+                                    diagnostic: "teacher_interaction.invalid_request".to_owned(),
+                                },
+                            );
                         }
                     };
                     target_launcher.open_app(app)
@@ -1817,9 +1819,7 @@ mod focused_profile_tests {
     fn teacher_message_request(
         text: &str,
     ) -> classmesh_protocol::control_wire::TeacherInteractionRequest {
-        use classmesh_protocol::control_wire::{
-            TeacherMessage, teacher_interaction_request,
-        };
+        use classmesh_protocol::control_wire::{TeacherMessage, teacher_interaction_request};
 
         classmesh_protocol::control_wire::TeacherInteractionRequest {
             action: Some(teacher_interaction_request::Action::Message(
@@ -1864,9 +1864,7 @@ mod focused_profile_tests {
 
     #[test]
     fn teacher_message_execution_revalidates_and_uses_injected_presenter() {
-        use classmesh_protocol::control_wire::{
-            TeacherInteractionKind, TeacherInteractionState,
-        };
+        use classmesh_protocol::control_wire::{TeacherInteractionKind, TeacherInteractionState};
 
         let mut presenter = RecordingTeacherMessagePresenter::default();
         let mut launcher = RecordingOpenTargetLauncher::default();
@@ -1940,9 +1938,7 @@ mod focused_profile_tests {
 
     #[test]
     fn teacher_interaction_validation_fails_before_executor_side_effect() {
-        use classmesh_protocol::control_wire::{
-            TeacherInteractionKind, TeacherInteractionState,
-        };
+        use classmesh_protocol::control_wire::{TeacherInteractionKind, TeacherInteractionState};
 
         let mut presenter = RecordingTeacherMessagePresenter::default();
         let mut launcher = RecordingOpenTargetLauncher::default();
@@ -1964,9 +1960,7 @@ mod focused_profile_tests {
 
     #[test]
     fn teacher_interaction_executor_failure_is_bounded_and_non_sensitive() {
-        use classmesh_protocol::control_wire::{
-            TeacherInteractionKind, TeacherInteractionState,
-        };
+        use classmesh_protocol::control_wire::{TeacherInteractionKind, TeacherInteractionState};
 
         let mut presenter = RecordingTeacherMessagePresenter::default();
         let mut launcher = RecordingOpenTargetLauncher {
