@@ -2392,6 +2392,10 @@ mod windows_service_app {
 
             if Instant::now() >= next_worker_poll {
                 let event = workers.poll();
+                fail_pending_teacher_interaction_on_worker_change(
+                    &mut pending_teacher_interaction,
+                    event,
+                );
                 if !matches!(event, WorkerManagerEvent::None) {
                     if let Some(pending) = pending_presentation_key_install.take() {
                         let _ = pending
@@ -2591,6 +2595,20 @@ mod windows_service_app {
         }
     }
 
+    fn fail_pending_teacher_interaction_on_worker_change(
+        pending: &mut Option<PendingTeacherInteraction>,
+        event: WorkerManagerEvent,
+    ) {
+        if matches!(event, WorkerManagerEvent::None) {
+            return;
+        }
+        if let Some(pending) = pending.take() {
+            let _ = pending
+                .reply_tx
+                .send(TeacherInteractionDispatchOutcome::WorkerUnavailable);
+        }
+    }
+
     fn handle_worker_event(
         event: WorkerManagerEvent,
         supervisor: &mut SessionSupervisor,
@@ -2616,6 +2634,52 @@ mod windows_service_app {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn worker_change_fails_pending_teacher_interaction_instead_of_hanging() {
+            let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+            let mut pending = Some(PendingTeacherInteraction {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                reply_tx,
+            });
+
+            fail_pending_teacher_interaction_on_worker_change(
+                &mut pending,
+                WorkerManagerEvent::RestartScheduled(SessionId(7)),
+            );
+
+            assert!(pending.is_none());
+            assert_eq!(
+                reply_rx.try_recv(),
+                Ok(TeacherInteractionDispatchOutcome::WorkerUnavailable)
+            );
+        }
+
+        #[test]
+        fn no_worker_change_keeps_pending_teacher_interaction() {
+            let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+            let mut pending = Some(PendingTeacherInteraction {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                reply_tx,
+            });
+
+            fail_pending_teacher_interaction_on_worker_change(
+                &mut pending,
+                WorkerManagerEvent::None,
+            );
+
+            assert!(pending.is_some());
+            assert!(matches!(
+                reply_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+        }
 
         fn pending_key_install(
             binding: PresentationKeyInstallBinding,
