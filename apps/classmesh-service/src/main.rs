@@ -33,11 +33,12 @@ mod windows_service_app {
     };
     use classmesh_windows_runtime::ipc::{
         IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage,
-        ServicePresentationMulticastStart, ServicePresentationUnicastStart, ServiceUdpStreamStart,
+        ServicePresentationMulticastStart, ServicePresentationUnicastStart,
+        ServiceTeacherInteractionRequest, ServiceUdpStreamStart,
         WorkerPresentationKeyInstallResult, WorkerPresentationKeyInstallStatus,
         WorkerPresentationMulticastStartResult, WorkerPresentationMulticastStartStatus,
         WorkerPresentationUnicastStartResult, WorkerPresentationUnicastStartStatus,
-        ServiceTeacherInteractionRequest, WorkerTeacherInteractionResult,
+        WorkerTeacherInteractionResult,
     };
     use classmesh_windows_runtime::ipc_sensitive::{
         PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
@@ -90,7 +91,8 @@ mod windows_service_app {
         PresentationFeedbackBus, PresentationKeyInstallDispatch,
         PresentationMulticastStartDispatch, PresentationUnicastStartDispatch, SystemActionDispatch,
         SystemActionDispatchChannels, SystemActionDispatchOutcome, TeacherInteractionDispatch,
-        TeacherInteractionDispatchChannels, TeacherInteractionDispatchOutcome, WorkerCapabilityState,
+        TeacherInteractionDispatchChannels, TeacherInteractionDispatchOutcome,
+        WorkerCapabilityState,
     };
     use crate::system_action_power::ServicePowerSystemActionExecutor;
 
@@ -337,7 +339,9 @@ mod windows_service_app {
                                     presentation_unicast_result_tx: self
                                         .presentation_unicast_result_tx
                                         .clone(),
-                                    teacher_interaction_result_tx: self.teacher_interaction_result_tx.clone(),
+                                    teacher_interaction_result_tx: self
+                                        .teacher_interaction_result_tx
+                                        .clone(),
                                     presentation_feedback: self.presentation_feedback.clone(),
                                 },
                                 WorkerCapabilityReaderIdentity {
@@ -605,15 +609,24 @@ mod windows_service_app {
             &self,
             request: ServiceTeacherInteractionRequest,
         ) -> Result<(u32, u32), WorkerControlSendError> {
-            let process = self.process.as_ref().ok_or(WorkerControlSendError::Unavailable)?;
+            let process = self
+                .process
+                .as_ref()
+                .ok_or(WorkerControlSendError::Unavailable)?;
             if !process.is_running().unwrap_or(false) {
                 return Err(WorkerControlSendError::Unavailable);
             }
-            let pipe = self.pipe.as_ref().ok_or(WorkerControlSendError::Unavailable)?;
+            let pipe = self
+                .pipe
+                .as_ref()
+                .ok_or(WorkerControlSendError::Unavailable)?;
             let frame = IpcFrame::service_teacher_interaction_request(&request)
                 .map_err(|_| WorkerControlSendError::WriteFailed)?;
-            let encoded = frame.encode().map_err(|_| WorkerControlSendError::WriteFailed)?;
-            pipe.write_all(&encoded).map_err(|_| WorkerControlSendError::WriteFailed)?;
+            let encoded = frame
+                .encode()
+                .map_err(|_| WorkerControlSendError::WriteFailed)?;
+            pipe.write_all(&encoded)
+                .map_err(|_| WorkerControlSendError::WriteFailed)?;
             Ok((process.process_id(), process.session_id()))
         }
 
@@ -1083,7 +1096,11 @@ mod windows_service_app {
                             if result.process_id == expected_process_id
                                 && result.session_id == expected_session_id =>
                         {
-                            if !capabilities.is_current(generation, result.process_id, result.session_id) {
+                            if !capabilities.is_current(
+                                generation,
+                                result.process_id,
+                                result.session_id,
+                            ) {
                                 eprintln!("Stale Worker Teacher interaction result ignored");
                                 return;
                             }
@@ -1094,7 +1111,10 @@ mod windows_service_app {
                         Ok(IpcMessage::WorkerTeacherInteractionResult(result)) => {
                             eprintln!(
                                 "Worker Teacher interaction identity mismatch: expected pid {} session {}, received pid {} session {}",
-                                expected_process_id, expected_session_id, result.process_id, result.session_id
+                                expected_process_id,
+                                expected_session_id,
+                                result.process_id,
+                                result.session_id
                             );
                             return;
                         }
@@ -1600,7 +1620,9 @@ mod windows_service_app {
             tx: system_action_tx,
         };
         let (teacher_interaction_tx, teacher_interaction_rx) =
-            mpsc::sync_channel::<TeacherInteractionDispatch>(TEACHER_INTERACTION_DISPATCH_QUEUE_CAPACITY);
+            mpsc::sync_channel::<TeacherInteractionDispatch>(
+                TEACHER_INTERACTION_DISPATCH_QUEUE_CAPACITY,
+            );
         let teacher_interaction_channels = TeacherInteractionDispatchChannels {
             tx: teacher_interaction_tx,
         };
@@ -1764,11 +1786,17 @@ mod windows_service_app {
                     continue;
                 };
                 if !pending.matches(&result) {
-                    eprintln!("ClassMesh Service ignored miscorrelated Worker Teacher interaction result");
+                    eprintln!(
+                        "ClassMesh Service ignored miscorrelated Worker Teacher interaction result"
+                    );
                     continue;
                 }
-                let pending = pending_teacher_interaction.take().expect("pending interaction checked");
-                let _ = pending.reply_tx.send(TeacherInteractionDispatchOutcome::Result(result.result));
+                let pending = pending_teacher_interaction
+                    .take()
+                    .expect("pending interaction checked");
+                let _ = pending
+                    .reply_tx
+                    .send(TeacherInteractionDispatchOutcome::Result(result.result));
             }
 
             for _ in 0..MAX_TEACHER_INTERACTIONS_PER_TICK {
@@ -1776,12 +1804,19 @@ mod windows_service_app {
                     Ok(dispatch) => dispatch,
                     Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
                 };
-                if dispatch.control_session_id == 0 || dispatch.request_id == 0 || !dispatch.commit.try_commit() {
-                    let _ = dispatch.reply_tx.send(TeacherInteractionDispatchOutcome::Cancelled);
+                if dispatch.control_session_id == 0
+                    || dispatch.request_id == 0
+                    || !dispatch.commit.try_commit()
+                {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(TeacherInteractionDispatchOutcome::Cancelled);
                     continue;
                 }
                 if pending_teacher_interaction.is_some() {
-                    let _ = dispatch.reply_tx.send(TeacherInteractionDispatchOutcome::Backpressure);
+                    let _ = dispatch
+                        .reply_tx
+                        .send(TeacherInteractionDispatchOutcome::Backpressure);
                     continue;
                 }
                 let request = ServiceTeacherInteractionRequest {
@@ -1800,10 +1835,14 @@ mod windows_service_app {
                         });
                     }
                     Err(WorkerControlSendError::Unavailable) => {
-                        let _ = dispatch.reply_tx.send(TeacherInteractionDispatchOutcome::WorkerUnavailable);
+                        let _ = dispatch
+                            .reply_tx
+                            .send(TeacherInteractionDispatchOutcome::WorkerUnavailable);
                     }
                     Err(WorkerControlSendError::WriteFailed) => {
-                        let _ = dispatch.reply_tx.send(TeacherInteractionDispatchOutcome::WriteFailed);
+                        let _ = dispatch
+                            .reply_tx
+                            .send(TeacherInteractionDispatchOutcome::WriteFailed);
                     }
                 }
             }
