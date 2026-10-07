@@ -7,11 +7,11 @@ use classmesh_protocol::control_wire::{
     InputEvent, StreamReconfigure, TeacherInteractionKind, TeacherInteractionRequest,
     TeacherInteractionResult,
 };
+use classmesh_protocol::feedback::FeedbackMessage;
 use classmesh_protocol::teacher_interaction::{
     validate_request as validate_teacher_interaction_request,
     validate_result as validate_teacher_interaction_result,
 };
-use classmesh_protocol::feedback::FeedbackMessage;
 use prost::Message;
 use zeroize::Zeroize;
 
@@ -1068,26 +1068,38 @@ impl IpcFrame {
         ))
     }
 
-    pub fn service_teacher_interaction_request(request: &ServiceTeacherInteractionRequest) -> Result<Self, IpcMessageError> {
+    pub fn service_teacher_interaction_request(
+        request: &ServiceTeacherInteractionRequest,
+    ) -> Result<Self, IpcMessageError> {
         request.validate()?;
         let encoded = request.request.encode_to_vec();
-        let mut payload = Vec::with_capacity(SERVICE_TEACHER_INTERACTION_BINDING_LEN + encoded.len());
+        let mut payload =
+            Vec::with_capacity(SERVICE_TEACHER_INTERACTION_BINDING_LEN + encoded.len());
         payload.extend_from_slice(&request.control_session_id.to_be_bytes());
         payload.extend_from_slice(&request.request_id.to_be_bytes());
         payload.extend_from_slice(&encoded);
-        Ok(Self::new(MESSAGE_SERVICE_TEACHER_INTERACTION_REQUEST, payload))
+        Ok(Self::new(
+            MESSAGE_SERVICE_TEACHER_INTERACTION_REQUEST,
+            payload,
+        ))
     }
 
-    pub fn worker_teacher_interaction_result(result: &WorkerTeacherInteractionResult) -> Result<Self, IpcMessageError> {
+    pub fn worker_teacher_interaction_result(
+        result: &WorkerTeacherInteractionResult,
+    ) -> Result<Self, IpcMessageError> {
         result.validate()?;
         let encoded = result.result.encode_to_vec();
-        let mut payload = Vec::with_capacity(WORKER_TEACHER_INTERACTION_BINDING_LEN + encoded.len());
+        let mut payload =
+            Vec::with_capacity(WORKER_TEACHER_INTERACTION_BINDING_LEN + encoded.len());
         payload.extend_from_slice(&result.process_id.to_be_bytes());
         payload.extend_from_slice(&result.session_id.to_be_bytes());
         payload.extend_from_slice(&result.control_session_id.to_be_bytes());
         payload.extend_from_slice(&result.request_id.to_be_bytes());
         payload.extend_from_slice(&encoded);
-        Ok(Self::new(MESSAGE_WORKER_TEACHER_INTERACTION_RESULT, payload))
+        Ok(Self::new(
+            MESSAGE_WORKER_TEACHER_INTERACTION_RESULT,
+            payload,
+        ))
     }
 
     pub fn service_media_feedback(feedback: &FeedbackMessage) -> Result<Self, IpcMessageError> {
@@ -1715,25 +1727,51 @@ impl IpcFrame {
                 Ok(IpcMessage::ServicePresentationSenderUnicastAction(action))
             }
             MESSAGE_SERVICE_TEACHER_INTERACTION_REQUEST => {
-                if self.header.version_minor < TEACHER_INTERACTION_IPC_MIN_MINOR { return Err(IpcMessageError::UnsupportedVersion); }
-                if self.payload.len() <= SERVICE_TEACHER_INTERACTION_BINDING_LEN { return Err(IpcMessageError::InvalidPayload); }
+                if self.header.version_minor < TEACHER_INTERACTION_IPC_MIN_MINOR {
+                    return Err(IpcMessageError::UnsupportedVersion);
+                }
+                if self.payload.len() <= SERVICE_TEACHER_INTERACTION_BINDING_LEN {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
                 let request = ServiceTeacherInteractionRequest {
-                    control_session_id: u64::from_be_bytes(self.payload[0..8].try_into().expect("eight bytes")),
-                    request_id: u64::from_be_bytes(self.payload[8..16].try_into().expect("eight bytes")),
-                    request: TeacherInteractionRequest::decode(&self.payload[SERVICE_TEACHER_INTERACTION_BINDING_LEN..]).map_err(|_| IpcMessageError::InvalidPayload)?,
+                    control_session_id: u64::from_be_bytes(
+                        self.payload[0..8].try_into().expect("eight bytes"),
+                    ),
+                    request_id: u64::from_be_bytes(
+                        self.payload[8..16].try_into().expect("eight bytes"),
+                    ),
+                    request: TeacherInteractionRequest::decode(
+                        &self.payload[SERVICE_TEACHER_INTERACTION_BINDING_LEN..],
+                    )
+                    .map_err(|_| IpcMessageError::InvalidPayload)?,
                 };
                 request.validate()?;
                 Ok(IpcMessage::ServiceTeacherInteractionRequest(request))
             }
             MESSAGE_WORKER_TEACHER_INTERACTION_RESULT => {
-                if self.header.version_minor < TEACHER_INTERACTION_IPC_MIN_MINOR { return Err(IpcMessageError::UnsupportedVersion); }
-                if self.payload.len() <= WORKER_TEACHER_INTERACTION_BINDING_LEN { return Err(IpcMessageError::InvalidPayload); }
+                if self.header.version_minor < TEACHER_INTERACTION_IPC_MIN_MINOR {
+                    return Err(IpcMessageError::UnsupportedVersion);
+                }
+                if self.payload.len() <= WORKER_TEACHER_INTERACTION_BINDING_LEN {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
                 let result = WorkerTeacherInteractionResult {
-                    process_id: u32::from_be_bytes(self.payload[0..4].try_into().expect("four bytes")),
-                    session_id: u32::from_be_bytes(self.payload[4..8].try_into().expect("four bytes")),
-                    control_session_id: u64::from_be_bytes(self.payload[8..16].try_into().expect("eight bytes")),
-                    request_id: u64::from_be_bytes(self.payload[16..24].try_into().expect("eight bytes")),
-                    result: TeacherInteractionResult::decode(&self.payload[WORKER_TEACHER_INTERACTION_BINDING_LEN..]).map_err(|_| IpcMessageError::InvalidPayload)?,
+                    process_id: u32::from_be_bytes(
+                        self.payload[0..4].try_into().expect("four bytes"),
+                    ),
+                    session_id: u32::from_be_bytes(
+                        self.payload[4..8].try_into().expect("four bytes"),
+                    ),
+                    control_session_id: u64::from_be_bytes(
+                        self.payload[8..16].try_into().expect("eight bytes"),
+                    ),
+                    request_id: u64::from_be_bytes(
+                        self.payload[16..24].try_into().expect("eight bytes"),
+                    ),
+                    result: TeacherInteractionResult::decode(
+                        &self.payload[WORKER_TEACHER_INTERACTION_BINDING_LEN..],
+                    )
+                    .map_err(|_| IpcMessageError::InvalidPayload)?,
                 };
                 result.validate()?;
                 Ok(IpcMessage::WorkerTeacherInteractionResult(result))
@@ -2623,13 +2661,14 @@ mod tests {
             control_session_id: 77,
             request_id: 44,
             request: TeacherInteractionRequest {
-                action: Some(teacher_interaction_request::Action::Message(TeacherMessage {
-                    text_utf8: "Class starts now.".to_owned(),
-                })),
+                action: Some(teacher_interaction_request::Action::Message(
+                    TeacherMessage {
+                        text_utf8: "Class starts now.".to_owned(),
+                    },
+                )),
             },
         };
-        let frame =
-            IpcFrame::service_teacher_interaction_request(&request).expect("valid request");
+        let frame = IpcFrame::service_teacher_interaction_request(&request).expect("valid request");
         assert_eq!(
             frame.message().expect("typed request"),
             IpcMessage::ServiceTeacherInteractionRequest(request)
@@ -2663,9 +2702,11 @@ mod tests {
             control_session_id: 77,
             request_id: 44,
             request: TeacherInteractionRequest {
-                action: Some(teacher_interaction_request::Action::Message(TeacherMessage {
-                    text_utf8: "hello".to_owned(),
-                })),
+                action: Some(teacher_interaction_request::Action::Message(
+                    TeacherMessage {
+                        text_utf8: "hello".to_owned(),
+                    },
+                )),
             },
         };
         let mut zero_request = valid.clone();
