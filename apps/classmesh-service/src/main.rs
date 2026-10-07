@@ -136,8 +136,7 @@ mod windows_service_app {
                 && result.session_id == self.expected_session_id
                 && result.control_session_id == self.control_session_id
                 && result.request_id == self.request_id
-                && TeacherInteractionKind::try_from(result.result.kind)
-                    == Ok(self.expected_kind)
+                && TeacherInteractionKind::try_from(result.result.kind) == Ok(self.expected_kind)
         }
     }
 
@@ -1809,17 +1808,17 @@ mod windows_service_app {
                     Ok(dispatch) => dispatch,
                     Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
                 };
-                let expected_kind =
-                    match classmesh_protocol::teacher_interaction::validate_request(&dispatch.request)
-                    {
-                        Ok(kind) => kind,
-                        Err(_) => {
-                            let _ = dispatch
-                                .reply_tx
-                                .send(TeacherInteractionDispatchOutcome::Cancelled);
-                            continue;
-                        }
-                    };
+                let expected_kind = match classmesh_protocol::teacher_interaction::validate_request(
+                    &dispatch.request,
+                ) {
+                    Ok(kind) => kind,
+                    Err(_) => {
+                        let _ = dispatch
+                            .reply_tx
+                            .send(TeacherInteractionDispatchOutcome::Cancelled);
+                        continue;
+                    }
+                };
                 if dispatch.control_session_id == 0
                     || dispatch.request_id == 0
                     || !dispatch.commit.try_commit()
@@ -2670,7 +2669,8 @@ mod windows_service_app {
                 request_id: 44,
                 result: classmesh_protocol::control_wire::TeacherInteractionResult {
                     kind: TeacherInteractionKind::Message as i32,
-                    state: classmesh_protocol::control_wire::TeacherInteractionState::Accepted as i32,
+                    state: classmesh_protocol::control_wire::TeacherInteractionState::Accepted
+                        as i32,
                     diagnostic: String::new(),
                 },
             };
