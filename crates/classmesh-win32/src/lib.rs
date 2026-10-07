@@ -11,6 +11,8 @@ mod session;
 #[cfg(windows)]
 mod session_process;
 #[cfg(windows)]
+mod teacher_interaction;
+#[cfg(windows)]
 mod workstation;
 
 #[cfg(windows)]
@@ -32,5 +34,11 @@ pub use session_process::{
     LaunchError, SessionProcess, launch_worker_in_session, session_user_sid,
 };
 
+#[cfg(windows)]
+pub use teacher_interaction::{
+    OpenTargetLauncher, TeacherInteractionAcceptance, TeacherInteractionExecutionError,
+    TeacherMessagePresenter, Win32OpenTargetLauncher, Win32TeacherMessagePresenter,
+    WindowsAppIdentity,
+};
 #[cfg(windows)]
 pub use workstation::{Win32WorkstationLocker, WorkstationLockError, WorkstationLocker};
