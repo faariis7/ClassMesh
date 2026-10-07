@@ -2,7 +2,7 @@ use std::fmt::{Display, Formatter};
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::System::RemoteDesktop::{WTSSendMessageW, WTS_CURRENT_SERVER_HANDLE};
+use windows_sys::Win32::System::RemoteDesktop::{WTS_CURRENT_SERVER_HANDLE, WTSSendMessageW};
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, SW_SHOWNORMAL};
 
@@ -189,9 +189,7 @@ fn utf16_with_nul(value: &str) -> Result<Vec<u16>, TeacherInteractionExecutionEr
     Ok(encoded)
 }
 
-fn utf16_payload_bytes(
-    encoded_with_nul: &[u16],
-) -> Result<u32, TeacherInteractionExecutionError> {
+fn utf16_payload_bytes(encoded_with_nul: &[u16]) -> Result<u32, TeacherInteractionExecutionError> {
     let payload_units = encoded_with_nul
         .len()
         .checked_sub(1)
