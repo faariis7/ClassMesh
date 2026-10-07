@@ -9,7 +9,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::time::{Duration, Instant};
 
     use classmesh_capture_win::CaptureStep;
-    use classmesh_win32::{InputInjector, NamedPipeClient, Win32WorkstationLocker};
+    use classmesh_win32::{
+        InputInjector, NamedPipeClient, Win32OpenTargetLauncher, Win32TeacherMessagePresenter,
+        Win32WorkstationLocker,
+    };
     use classmesh_windows_runtime::ipc::{IpcFrame, IpcMessage};
 
     let args: Vec<String> = std::env::args().collect();
@@ -87,6 +90,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut captured_frames = 0_u64;
     let mut input_injector = InputInjector::default();
     let mut workstation_locker = Win32WorkstationLocker;
+    let mut teacher_message_presenter = Win32TeacherMessagePresenter;
+    let mut open_target_launcher = Win32OpenTargetLauncher;
     let mut group_media_keys =
         classmesh_worker::group_media_receive::WorkerGroupMediaKeyState::default();
     let mut presentation_multicast: Option<
@@ -276,20 +281,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             Ok(WorkerEvent::TeacherInteraction(interaction)) => {
-                use classmesh_protocol::control_wire::TeacherInteractionState;
-                let kind =
-                    classmesh_protocol::teacher_interaction::validate_request(&interaction.request)
-                        .map_err(|_| "worker.teacher_interaction.invalid_request")?;
+                let result = match execute_teacher_interaction(
+                    actual_session,
+                    &interaction.request,
+                    &mut teacher_message_presenter,
+                    &mut open_target_launcher,
+                ) {
+                    Ok(result) => result,
+                    Err(code) => {
+                        eprintln!(
+                            "ClassMesh Worker rejected malformed Teacher interaction before execution: {code}"
+                        );
+                        continue;
+                    }
+                };
                 let result = classmesh_windows_runtime::ipc::WorkerTeacherInteractionResult {
                     process_id: std::process::id(),
                     session_id: actual_session,
                     control_session_id: interaction.control_session_id,
                     request_id: interaction.request_id,
-                    result: classmesh_protocol::control_wire::TeacherInteractionResult {
-                        kind: kind as i32,
-                        state: TeacherInteractionState::Rejected as i32,
-                        diagnostic: "teacher_interaction.executor_unavailable".to_owned(),
-                    },
+                    result,
                 };
                 let frame =
                     classmesh_windows_runtime::ipc::IpcFrame::worker_teacher_interaction_result(
@@ -1070,6 +1081,89 @@ where
     locker
         .lock_workstation()
         .map_err(WorkstationLockFlowError::Lock)
+}
+
+#[cfg(windows)]
+fn execute_teacher_interaction<M, L>(
+    session_id: u32,
+    request: &classmesh_protocol::control_wire::TeacherInteractionRequest,
+    message_presenter: &mut M,
+    target_launcher: &mut L,
+) -> Result<classmesh_protocol::control_wire::TeacherInteractionResult, &'static str>
+where
+    M: classmesh_win32::TeacherMessagePresenter,
+    L: classmesh_win32::OpenTargetLauncher,
+{
+    use classmesh_protocol::control_wire::{
+        AppIdentity, TeacherInteractionKind, TeacherInteractionState, open_target,
+        teacher_interaction_request,
+    };
+    use classmesh_win32::{TeacherInteractionAcceptance, WindowsAppIdentity};
+
+    let kind = match request.action.as_ref() {
+        Some(teacher_interaction_request::Action::Message(_)) => TeacherInteractionKind::Message,
+        Some(teacher_interaction_request::Action::OpenTarget(_)) => {
+            TeacherInteractionKind::OpenTarget
+        }
+        None => return Err("worker.teacher_interaction.invalid_request"),
+    };
+
+    if classmesh_protocol::teacher_interaction::validate_request(request).is_err() {
+        return Ok(classmesh_protocol::control_wire::TeacherInteractionResult {
+            kind: kind as i32,
+            state: TeacherInteractionState::Rejected as i32,
+            diagnostic: "teacher_interaction.invalid_request".to_owned(),
+        });
+    }
+
+    let execution = match request.action.as_ref() {
+        Some(teacher_interaction_request::Action::Message(message)) => {
+            message_presenter.present_message(session_id, &message.text_utf8)
+        }
+        Some(teacher_interaction_request::Action::OpenTarget(target)) => {
+            match target.target.as_ref() {
+                Some(open_target::Target::HttpsUrl(url)) => target_launcher.open_https(url),
+                Some(open_target::Target::App(value)) => {
+                    let app = match AppIdentity::try_from(*value) {
+                        Ok(AppIdentity::DefaultBrowser) => WindowsAppIdentity::DefaultBrowser,
+                        Ok(AppIdentity::Calculator) => WindowsAppIdentity::Calculator,
+                        Ok(AppIdentity::TextEditor) => WindowsAppIdentity::TextEditor,
+                        Ok(AppIdentity::Unspecified) | Err(_) => {
+                            return Ok(classmesh_protocol::control_wire::TeacherInteractionResult {
+                                kind: kind as i32,
+                                state: TeacherInteractionState::Rejected as i32,
+                                diagnostic: "teacher_interaction.invalid_request".to_owned(),
+                            });
+                        }
+                    };
+                    target_launcher.open_app(app)
+                }
+                None => {
+                    return Ok(classmesh_protocol::control_wire::TeacherInteractionResult {
+                        kind: kind as i32,
+                        state: TeacherInteractionState::Rejected as i32,
+                        diagnostic: "teacher_interaction.invalid_request".to_owned(),
+                    });
+                }
+            }
+        }
+        None => return Err("worker.teacher_interaction.invalid_request"),
+    };
+
+    match execution {
+        Ok(TeacherInteractionAcceptance::Accepted) => {
+            Ok(classmesh_protocol::control_wire::TeacherInteractionResult {
+                kind: kind as i32,
+                state: TeacherInteractionState::Accepted as i32,
+                diagnostic: String::new(),
+            })
+        }
+        Err(error) => Ok(classmesh_protocol::control_wire::TeacherInteractionResult {
+            kind: kind as i32,
+            state: TeacherInteractionState::Failed as i32,
+            diagnostic: error.diagnostic_code().to_owned(),
+        }),
+    }
 }
 
 #[cfg(windows)]
