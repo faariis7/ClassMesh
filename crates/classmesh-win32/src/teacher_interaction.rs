@@ -1,4 +1,5 @@
 use std::fmt::{Display, Formatter};
+use std::mem::size_of;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::System::RemoteDesktop::{WTSSendMessageW, WTS_CURRENT_SERVER_HANDLE};
