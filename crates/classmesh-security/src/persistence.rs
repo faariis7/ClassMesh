@@ -416,6 +416,8 @@ fn permission_to_u8(permission: Permission) -> u8 {
         Permission::ManagePolicy => 12,
         Permission::ReadClipboard => 13,
         Permission::WriteClipboard => 14,
+        Permission::SendTeacherMessage => 15,
+        Permission::OpenTarget => 16,
     }
 }
 
@@ -435,6 +437,8 @@ fn permission_from_u8(value: u8) -> Result<Permission, PersistenceError> {
         12 => Ok(Permission::ManagePolicy),
         13 => Ok(Permission::ReadClipboard),
         14 => Ok(Permission::WriteClipboard),
+        15 => Ok(Permission::SendTeacherMessage),
+        16 => Ok(Permission::OpenTarget),
         _ => Err(PersistenceError::InvalidPermission(value)),
     }
 }
@@ -554,6 +558,20 @@ mod tests {
         assert_eq!(
             permission_from_u8(14).expect("write clipboard permission"),
             Permission::WriteClipboard
+        );
+    }
+
+    #[test]
+    fn teacher_interaction_permission_ids_append_after_existing_ids() {
+        assert_eq!(permission_to_u8(Permission::SendTeacherMessage), 15);
+        assert_eq!(permission_to_u8(Permission::OpenTarget), 16);
+        assert_eq!(
+            permission_from_u8(15).expect("teacher message permission"),
+            Permission::SendTeacherMessage
+        );
+        assert_eq!(
+            permission_from_u8(16).expect("open target permission"),
+            Permission::OpenTarget
         );
     }
 
