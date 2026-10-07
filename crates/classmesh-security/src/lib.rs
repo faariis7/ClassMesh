@@ -37,6 +37,8 @@ pub enum Permission {
     ManagePolicy,
     ReadClipboard,
     WriteClipboard,
+    SendTeacherMessage,
+    OpenTarget,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

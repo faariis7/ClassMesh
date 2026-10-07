@@ -129,6 +129,15 @@ pub const fn privileged_dispatch_diagnostic_code(error: &PrivilegedDispatchError
             "control.command.system_action_requires_v0_5"
         }
         PrivilegedDispatchError::InvalidSystemAction(_) => "control.command.system_action_invalid",
+        PrivilegedDispatchError::TeacherInteractionRequestMissingId => {
+            "control.command.teacher_interaction_missing_request_id"
+        }
+        PrivilegedDispatchError::TeacherInteractionRequiresProtocolV6 => {
+            "control.command.teacher_interaction_requires_v0_6"
+        }
+        PrivilegedDispatchError::InvalidTeacherInteraction(_) => {
+            "control.command.teacher_interaction_invalid"
+        }
         PrivilegedDispatchError::Authorization(error) => {
             command_authorization_diagnostic_code(error)
         }
@@ -265,6 +274,30 @@ mod tests {
                 classmesh_protocol::system_action::SystemActionControlError::InvalidAction
             )),
             "control.command.system_action_invalid"
+        );
+    }
+
+    #[test]
+    fn teacher_interaction_codes_are_stable_and_non_sensitive() {
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(
+                &PrivilegedDispatchError::TeacherInteractionRequestMissingId
+            ),
+            "control.command.teacher_interaction_missing_request_id"
+        );
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(
+                &PrivilegedDispatchError::TeacherInteractionRequiresProtocolV6
+            ),
+            "control.command.teacher_interaction_requires_v0_6"
+        );
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(
+                &PrivilegedDispatchError::InvalidTeacherInteraction(
+                    classmesh_protocol::teacher_interaction::TeacherInteractionError::MissingAction
+                )
+            ),
+            "control.command.teacher_interaction_invalid"
         );
     }
 
