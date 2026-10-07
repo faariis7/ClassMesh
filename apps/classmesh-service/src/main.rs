@@ -20,7 +20,9 @@ mod windows_service_app {
         SystemActionExecutionError, SystemActionExecutionOutcome, SystemActionExecutor,
     };
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity};
-    use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure, SystemAction};
+    use classmesh_protocol::control_wire::{
+        InputEvent, StreamReconfigure, SystemAction, TeacherInteractionKind,
+    };
     use classmesh_protocol::feedback::FeedbackMessage;
     use classmesh_security::persistence::DurableAuthorizationState;
     use classmesh_security::{CredentialFingerprint, PrincipalId};
@@ -124,6 +126,7 @@ mod windows_service_app {
         expected_session_id: u32,
         control_session_id: u64,
         request_id: u64,
+        expected_kind: TeacherInteractionKind,
         reply_tx: tokio::sync::oneshot::Sender<TeacherInteractionDispatchOutcome>,
     }
 
@@ -133,6 +136,8 @@ mod windows_service_app {
                 && result.session_id == self.expected_session_id
                 && result.control_session_id == self.control_session_id
                 && result.request_id == self.request_id
+                && TeacherInteractionKind::try_from(result.result.kind)
+                    == Ok(self.expected_kind)
         }
     }
 
@@ -1804,6 +1809,17 @@ mod windows_service_app {
                     Ok(dispatch) => dispatch,
                     Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
                 };
+                let expected_kind =
+                    match classmesh_protocol::teacher_interaction::validate_request(&dispatch.request)
+                    {
+                        Ok(kind) => kind,
+                        Err(_) => {
+                            let _ = dispatch
+                                .reply_tx
+                                .send(TeacherInteractionDispatchOutcome::Cancelled);
+                            continue;
+                        }
+                    };
                 if dispatch.control_session_id == 0
                     || dispatch.request_id == 0
                     || !dispatch.commit.try_commit()
@@ -1831,6 +1847,7 @@ mod windows_service_app {
                             expected_session_id: session_id,
                             control_session_id: dispatch.control_session_id,
                             request_id: dispatch.request_id,
+                            expected_kind,
                             reply_tx: dispatch.reply_tx,
                         });
                     }
@@ -2636,6 +2653,35 @@ mod windows_service_app {
         use super::*;
 
         #[test]
+        fn pending_teacher_interaction_requires_exact_action_kind() {
+            let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+            let pending = PendingTeacherInteraction {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                expected_kind: TeacherInteractionKind::Message,
+                reply_tx,
+            };
+            let exact = WorkerTeacherInteractionResult {
+                process_id: 42,
+                session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                result: classmesh_protocol::control_wire::TeacherInteractionResult {
+                    kind: TeacherInteractionKind::Message as i32,
+                    state: classmesh_protocol::control_wire::TeacherInteractionState::Accepted as i32,
+                    diagnostic: String::new(),
+                },
+            };
+            assert!(pending.matches(&exact));
+
+            let mut wrong = exact;
+            wrong.result.kind = TeacherInteractionKind::OpenTarget as i32;
+            assert!(!pending.matches(&wrong));
+        }
+
+        #[test]
         fn worker_change_fails_pending_teacher_interaction_instead_of_hanging() {
             let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
             let mut pending = Some(PendingTeacherInteraction {
@@ -2643,6 +2689,7 @@ mod windows_service_app {
                 expected_session_id: 7,
                 control_session_id: 77,
                 request_id: 44,
+                expected_kind: TeacherInteractionKind::Message,
                 reply_tx,
             });
 
@@ -2666,6 +2713,7 @@ mod windows_service_app {
                 expected_session_id: 7,
                 control_session_id: 77,
                 request_id: 44,
+                expected_kind: TeacherInteractionKind::Message,
                 reply_tx,
             });
 
