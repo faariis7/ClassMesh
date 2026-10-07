@@ -87,6 +87,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut captured_frames = 0_u64;
     let mut input_injector = InputInjector::default();
     let mut workstation_locker = Win32WorkstationLocker;
+    let mut teacher_message_presenter = classmesh_win32::Win32TeacherMessagePresenter;
+    let mut open_target_launcher = classmesh_win32::Win32OpenTargetLauncher;
     let mut group_media_keys =
         classmesh_worker::group_media_receive::WorkerGroupMediaKeyState::default();
     let mut presentation_multicast: Option<
@@ -276,20 +278,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             Ok(WorkerEvent::TeacherInteraction(interaction)) => {
-                use classmesh_protocol::control_wire::TeacherInteractionState;
-                let kind =
-                    classmesh_protocol::teacher_interaction::validate_request(&interaction.request)
-                        .map_err(|_| "worker.teacher_interaction.invalid_request")?;
+                let interaction_result = match execute_teacher_interaction(
+                    actual_session,
+                    &interaction.request,
+                    &mut teacher_message_presenter,
+                    &mut open_target_launcher,
+                ) {
+                    Ok(result) => result,
+                    Err(code) => {
+                        eprintln!(
+                            "ClassMesh Worker rejected malformed Teacher interaction before execution: {code}"
+                        );
+                        continue;
+                    }
+                };
                 let result = classmesh_windows_runtime::ipc::WorkerTeacherInteractionResult {
                     process_id: std::process::id(),
                     session_id: actual_session,
                     control_session_id: interaction.control_session_id,
                     request_id: interaction.request_id,
-                    result: classmesh_protocol::control_wire::TeacherInteractionResult {
-                        kind: kind as i32,
-                        state: TeacherInteractionState::Rejected as i32,
-                        diagnostic: "teacher_interaction.executor_unavailable".to_owned(),
-                    },
+                    result: interaction_result,
                 };
                 let frame =
                     classmesh_windows_runtime::ipc::IpcFrame::worker_teacher_interaction_result(
@@ -1040,6 +1048,109 @@ fn next_capture_due(profile: Option<FocusedWorkerProfile>) -> std::time::Instant
 }
 
 #[cfg(windows)]
+fn execute_teacher_interaction<P, L>(
+    session_id: u32,
+    request: &classmesh_protocol::control_wire::TeacherInteractionRequest,
+    presenter: &mut P,
+    launcher: &mut L,
+) -> Result<classmesh_protocol::control_wire::TeacherInteractionResult, &'static str>
+where
+    P: classmesh_win32::TeacherMessagePresenter,
+    L: classmesh_win32::OpenTargetLauncher,
+{
+    use classmesh_protocol::control_wire::{
+        AppIdentity, TeacherInteractionKind, TeacherInteractionState, open_target,
+        teacher_interaction_request,
+    };
+
+    let kind = match request.action.as_ref() {
+        Some(teacher_interaction_request::Action::Message(_)) => TeacherInteractionKind::Message,
+        Some(teacher_interaction_request::Action::OpenTarget(_)) => {
+            TeacherInteractionKind::OpenTarget
+        }
+        None => return Err("worker.teacher_interaction.missing_action"),
+    };
+
+    if classmesh_protocol::teacher_interaction::validate_request(request).is_err() {
+        return Ok(teacher_interaction_result(
+            kind,
+            TeacherInteractionState::Rejected,
+            "teacher_interaction.invalid_request",
+        ));
+    }
+
+    let execution = match request.action.as_ref() {
+        Some(teacher_interaction_request::Action::Message(message)) => {
+            presenter.present_message(session_id, &message.text_utf8)
+        }
+        Some(teacher_interaction_request::Action::OpenTarget(target)) => {
+            let Some(target) = target.target.as_ref() else {
+                return Ok(teacher_interaction_result(
+                    kind,
+                    TeacherInteractionState::Rejected,
+                    "teacher_interaction.invalid_request",
+                ));
+            };
+            match target {
+                open_target::Target::HttpsUrl(url) => launcher.open_https(url),
+                open_target::Target::App(raw_app) => {
+                    let app = AppIdentity::try_from(*raw_app)
+                        .ok()
+                        .and_then(windows_app_identity);
+                    let Some(app) = app else {
+                        return Ok(teacher_interaction_result(
+                            kind,
+                            TeacherInteractionState::Rejected,
+                            "teacher_interaction.invalid_request",
+                        ));
+                    };
+                    launcher.open_app(app)
+                }
+            }
+        }
+        None => return Err("worker.teacher_interaction.missing_action"),
+    };
+
+    match execution {
+        Ok(classmesh_win32::TeacherInteractionAcceptance::Accepted) => Ok(
+            teacher_interaction_result(kind, TeacherInteractionState::Accepted, ""),
+        ),
+        Err(error) => Ok(teacher_interaction_result(
+            kind,
+            TeacherInteractionState::Failed,
+            error.diagnostic_code(),
+        )),
+    }
+}
+
+#[cfg(windows)]
+const fn windows_app_identity(
+    app: classmesh_protocol::control_wire::AppIdentity,
+) -> Option<classmesh_win32::WindowsAppIdentity> {
+    use classmesh_protocol::control_wire::AppIdentity;
+
+    match app {
+        AppIdentity::DefaultBrowser => Some(classmesh_win32::WindowsAppIdentity::DefaultBrowser),
+        AppIdentity::Calculator => Some(classmesh_win32::WindowsAppIdentity::Calculator),
+        AppIdentity::TextEditor => Some(classmesh_win32::WindowsAppIdentity::TextEditor),
+        AppIdentity::Unspecified => None,
+    }
+}
+
+#[cfg(windows)]
+fn teacher_interaction_result(
+    kind: classmesh_protocol::control_wire::TeacherInteractionKind,
+    state: classmesh_protocol::control_wire::TeacherInteractionState,
+    diagnostic: &'static str,
+) -> classmesh_protocol::control_wire::TeacherInteractionResult {
+    classmesh_protocol::control_wire::TeacherInteractionResult {
+        kind: kind as i32,
+        state: state as i32,
+        diagnostic: diagnostic.to_owned(),
+    }
+}
+
+#[cfg(windows)]
 #[derive(Debug)]
 enum WorkstationLockFlowError {
     Input(classmesh_win32::InputError),
@@ -1658,6 +1769,240 @@ mod focused_profile_tests {
 
         assert!(matches!(result, Err(WorkstationLockFlowError::Input(_))));
         assert!(!called.get());
+    }
+
+    #[derive(Default)]
+    struct RecordingTeacherMessagePresenter {
+        calls: Vec<(u32, String)>,
+        fail: Option<classmesh_win32::TeacherInteractionExecutionError>,
+    }
+
+    impl classmesh_win32::TeacherMessagePresenter for RecordingTeacherMessagePresenter {
+        fn present_message(
+            &mut self,
+            session_id: u32,
+            text: &str,
+        ) -> Result<
+            classmesh_win32::TeacherInteractionAcceptance,
+            classmesh_win32::TeacherInteractionExecutionError,
+        > {
+            self.calls.push((session_id, text.to_owned()));
+            match self.fail {
+                Some(error) => Err(error),
+                None => Ok(classmesh_win32::TeacherInteractionAcceptance::Accepted),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingOpenTargetLauncher {
+        https_calls: Vec<String>,
+        app_calls: Vec<classmesh_win32::WindowsAppIdentity>,
+        fail: Option<classmesh_win32::TeacherInteractionExecutionError>,
+    }
+
+    impl classmesh_win32::OpenTargetLauncher for RecordingOpenTargetLauncher {
+        fn open_https(
+            &mut self,
+            url: &str,
+        ) -> Result<
+            classmesh_win32::TeacherInteractionAcceptance,
+            classmesh_win32::TeacherInteractionExecutionError,
+        > {
+            self.https_calls.push(url.to_owned());
+            match self.fail {
+                Some(error) => Err(error),
+                None => Ok(classmesh_win32::TeacherInteractionAcceptance::Accepted),
+            }
+        }
+
+        fn open_app(
+            &mut self,
+            app: classmesh_win32::WindowsAppIdentity,
+        ) -> Result<
+            classmesh_win32::TeacherInteractionAcceptance,
+            classmesh_win32::TeacherInteractionExecutionError,
+        > {
+            self.app_calls.push(app);
+            match self.fail {
+                Some(error) => Err(error),
+                None => Ok(classmesh_win32::TeacherInteractionAcceptance::Accepted),
+            }
+        }
+    }
+
+    #[test]
+    fn teacher_message_revalidates_and_executes_through_recording_boundary() {
+        use classmesh_protocol::control_wire::{
+            TeacherInteractionKind, TeacherInteractionRequest, TeacherInteractionState,
+            TeacherMessage, teacher_interaction_request,
+        };
+
+        let request = TeacherInteractionRequest {
+            action: Some(teacher_interaction_request::Action::Message(
+                TeacherMessage {
+                    text_utf8: "Class starts now.".to_owned(),
+                },
+            )),
+        };
+        let mut presenter = RecordingTeacherMessagePresenter::default();
+        let mut launcher = RecordingOpenTargetLauncher::default();
+
+        let result = execute_teacher_interaction(7, &request, &mut presenter, &mut launcher)
+            .expect("known interaction shape");
+
+        assert_eq!(result.kind, TeacherInteractionKind::Message as i32);
+        assert_eq!(result.state, TeacherInteractionState::Accepted as i32);
+        assert!(result.diagnostic.is_empty());
+        assert_eq!(presenter.calls, vec![(7, "Class starts now.".to_owned())]);
+        assert!(launcher.https_calls.is_empty());
+        assert!(launcher.app_calls.is_empty());
+    }
+
+    #[test]
+    fn teacher_https_target_revalidates_before_recording_launch() {
+        use classmesh_protocol::control_wire::{
+            OpenTarget, TeacherInteractionKind, TeacherInteractionRequest, TeacherInteractionState,
+            open_target, teacher_interaction_request,
+        };
+
+        let request = TeacherInteractionRequest {
+            action: Some(teacher_interaction_request::Action::OpenTarget(
+                OpenTarget {
+                    target: Some(open_target::Target::HttpsUrl(
+                        "https://example.com/lesson?id=7".to_owned(),
+                    )),
+                },
+            )),
+        };
+        let mut presenter = RecordingTeacherMessagePresenter::default();
+        let mut launcher = RecordingOpenTargetLauncher::default();
+
+        let result = execute_teacher_interaction(7, &request, &mut presenter, &mut launcher)
+            .expect("known interaction shape");
+
+        assert_eq!(result.kind, TeacherInteractionKind::OpenTarget as i32);
+        assert_eq!(result.state, TeacherInteractionState::Accepted as i32);
+        assert!(result.diagnostic.is_empty());
+        assert_eq!(
+            launcher.https_calls,
+            vec!["https://example.com/lesson?id=7".to_owned()]
+        );
+        assert!(launcher.app_calls.is_empty());
+        assert!(presenter.calls.is_empty());
+    }
+
+    #[test]
+    fn teacher_closed_app_targets_map_exactly_without_raw_executable_input() {
+        use classmesh_protocol::control_wire::{
+            AppIdentity, OpenTarget, TeacherInteractionRequest, TeacherInteractionState,
+            open_target, teacher_interaction_request,
+        };
+
+        for (wire, expected) in [
+            (
+                AppIdentity::DefaultBrowser,
+                classmesh_win32::WindowsAppIdentity::DefaultBrowser,
+            ),
+            (
+                AppIdentity::Calculator,
+                classmesh_win32::WindowsAppIdentity::Calculator,
+            ),
+            (
+                AppIdentity::TextEditor,
+                classmesh_win32::WindowsAppIdentity::TextEditor,
+            ),
+        ] {
+            let request = TeacherInteractionRequest {
+                action: Some(teacher_interaction_request::Action::OpenTarget(
+                    OpenTarget {
+                        target: Some(open_target::Target::App(wire as i32)),
+                    },
+                )),
+            };
+            let mut presenter = RecordingTeacherMessagePresenter::default();
+            let mut launcher = RecordingOpenTargetLauncher::default();
+
+            let result = execute_teacher_interaction(7, &request, &mut presenter, &mut launcher)
+                .expect("known interaction shape");
+
+            assert_eq!(result.state, TeacherInteractionState::Accepted as i32);
+            assert_eq!(launcher.app_calls, vec![expected]);
+            assert!(launcher.https_calls.is_empty());
+            assert!(presenter.calls.is_empty());
+        }
+    }
+
+    #[test]
+    fn invalid_teacher_request_fails_before_any_executor_call() {
+        use classmesh_protocol::control_wire::{
+            TeacherInteractionRequest, TeacherInteractionState, TeacherMessage,
+            teacher_interaction_request,
+        };
+
+        let request = TeacherInteractionRequest {
+            action: Some(teacher_interaction_request::Action::Message(
+                TeacherMessage {
+                    text_utf8: "bad\0message".to_owned(),
+                },
+            )),
+        };
+        let mut presenter = RecordingTeacherMessagePresenter::default();
+        let mut launcher = RecordingOpenTargetLauncher::default();
+
+        let result = execute_teacher_interaction(7, &request, &mut presenter, &mut launcher)
+            .expect("known interaction shape");
+
+        assert_eq!(result.state, TeacherInteractionState::Rejected as i32);
+        assert_eq!(result.diagnostic, "teacher_interaction.invalid_request");
+        assert!(presenter.calls.is_empty());
+        assert!(launcher.https_calls.is_empty());
+        assert!(launcher.app_calls.is_empty());
+    }
+
+    #[test]
+    fn teacher_executor_failure_maps_to_bounded_non_sensitive_result() {
+        use classmesh_protocol::control_wire::{
+            TeacherInteractionRequest, TeacherInteractionState, TeacherMessage,
+            teacher_interaction_request,
+        };
+
+        let request = TeacherInteractionRequest {
+            action: Some(teacher_interaction_request::Action::Message(
+                TeacherMessage {
+                    text_utf8: "hello".to_owned(),
+                },
+            )),
+        };
+        let mut presenter = RecordingTeacherMessagePresenter {
+            calls: Vec::new(),
+            fail: Some(classmesh_win32::TeacherInteractionExecutionError::MessageRejected),
+        };
+        let mut launcher = RecordingOpenTargetLauncher::default();
+
+        let result = execute_teacher_interaction(7, &request, &mut presenter, &mut launcher)
+            .expect("known interaction shape");
+
+        assert_eq!(result.state, TeacherInteractionState::Failed as i32);
+        assert_eq!(result.diagnostic, "teacher_interaction.message_rejected");
+        assert_eq!(presenter.calls.len(), 1);
+        assert!(launcher.https_calls.is_empty());
+        assert!(launcher.app_calls.is_empty());
+    }
+
+    #[test]
+    fn missing_teacher_action_never_reaches_an_executor() {
+        let request = classmesh_protocol::control_wire::TeacherInteractionRequest { action: None };
+        let mut presenter = RecordingTeacherMessagePresenter::default();
+        let mut launcher = RecordingOpenTargetLauncher::default();
+
+        assert_eq!(
+            execute_teacher_interaction(7, &request, &mut presenter, &mut launcher),
+            Err("worker.teacher_interaction.missing_action")
+        );
+        assert!(presenter.calls.is_empty());
+        assert!(launcher.https_calls.is_empty());
+        assert!(launcher.app_calls.is_empty());
     }
 
     #[test]
