@@ -30,7 +30,7 @@ Phase 5 tracking issue #32 and Phase 11 Issue #298 are complete. Active product 
 
 ## Current priority
 
-1. **Phase 12C2c is implemented in PR #361 and is awaiting required CI; Phase 12C3a is the next implementation slice once #361 merges.** Do not merge #361 unless Portable + Windows required checks are green and the reviewed head SHA is unchanged.
+1. **Phase 12C2c is complete in PR #361 with Portable + Windows CI #1448 green; Phase 12C3a is current under Issue #328.**
 2. **12C3a — narrow injectable Windows interaction executors.** Add a display-only Teacher-message boundary and a typed HTTPS/closed-app activation boundary in `classmesh-win32`; hosted tests must inject recordings and must never display or launch content.
 3. Revalidate the bounded 12C1 request at the Worker execution boundary. HTTPS execution remains HTTPS-only; app activation maps only the closed `AppIdentity` allow policy; arbitrary executable paths, command lines, shell fragments, environment expansion and arbitrary arguments remain forbidden.
 4. Keep execution outcomes bounded and truthful: asynchronous Windows acceptance may report `Accepted`; policy rejection and OS failures map to fixed non-sensitive diagnostics. Do not claim user dismissal, application readiness or completion without evidence.
