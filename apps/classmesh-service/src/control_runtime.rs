@@ -658,6 +658,11 @@ impl WorkerCapabilityState {
         true
     }
 
+    fn has_live_worker(&self) -> bool {
+        let snapshot = *self.lock_snapshot();
+        snapshot.generation != 0 && snapshot.process_id != 0 && snapshot.session_id != 0
+    }
+
     fn hello_capabilities(&self) -> BTreeSet<Capability> {
         let snapshot = *self.lock_snapshot();
         let mut capabilities = BTreeSet::from([Capability::ServiceSessionWorker]);
@@ -2440,7 +2445,25 @@ async fn run_established_session(
                     return;
                 }
             }
-            Some(control_envelope::Payload::TeacherInteractionRequest(_)) => {
+            Some(control_envelope::Payload::TeacherInteractionRequest(request)) => {
+                let kind = match classmesh_protocol::teacher_interaction::validate_request(request) {
+                    Ok(kind) => kind,
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"teacher interaction invalid");
+                        return;
+                    }
+                };
+                if !teacher_interaction_capability_negotiated(
+                    kind,
+                    &session.negotiated.capabilities,
+                ) {
+                    eprintln!(
+                        "ClassMesh Teacher interaction rejected: control.teacher_interaction.capability_not_negotiated"
+                    );
+                    connection.close(0_u32.into(), b"teacher interaction capability not negotiated");
+                    return;
+                }
+
                 let now_unix_ms = match unix_time_ms() {
                     Ok(value) => value,
                     Err(_) => {
@@ -2468,14 +2491,13 @@ async fn run_established_session(
                         return;
                     }
                 };
-                let kind = match classmesh_protocol::teacher_interaction::validate_request(&request)
-                {
-                    Ok(kind) => kind,
-                    Err(_) => {
+                match classmesh_protocol::teacher_interaction::validate_request(&request) {
+                    Ok(revalidated_kind) if revalidated_kind == kind => {}
+                    _ => {
                         connection.close(0_u32.into(), b"teacher interaction invalid");
                         return;
                     }
-                };
+                }
                 let request_id = envelope.request_id;
                 let commit = SystemActionCommit::pending();
                 let (reply_tx, mut reply_rx) = oneshot::channel();
@@ -2650,6 +2672,10 @@ fn service_hello_capabilities(
     capabilities.insert(Capability::TeacherPresentation);
     capabilities.insert(Capability::SframeGroupMedia);
     capabilities.insert(Capability::SystemActions);
+    if worker_capabilities.has_live_worker() {
+        capabilities.insert(Capability::TeacherMessage);
+        capabilities.insert(Capability::OpenTarget);
+    }
     if udp_multicast_available {
         capabilities.insert(Capability::UdpMulticast);
     }
@@ -2688,6 +2714,17 @@ fn presentation_capability_negotiated(capabilities: &BTreeSet<Capability>) -> bo
 
 fn system_action_capability_negotiated(capabilities: &BTreeSet<Capability>) -> bool {
     capabilities.contains(&Capability::SystemActions)
+}
+
+fn teacher_interaction_capability_negotiated(
+    kind: TeacherInteractionKind,
+    capabilities: &BTreeSet<Capability>,
+) -> bool {
+    match kind {
+        TeacherInteractionKind::Message => capabilities.contains(&Capability::TeacherMessage),
+        TeacherInteractionKind::OpenTarget => capabilities.contains(&Capability::OpenTarget),
+        TeacherInteractionKind::Unspecified => false,
+    }
 }
 
 fn group_media_capability_negotiated(capabilities: &BTreeSet<Capability>) -> bool {
