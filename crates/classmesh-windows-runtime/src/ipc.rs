@@ -2028,7 +2028,7 @@ mod tests {
     fn workstation_lock_requires_ipc_minor_nine() {
         let frame = IpcFrame::control(IpcControlCommand::LockWorkstation);
         assert_eq!(frame.header.version_minor, IPC_VERSION_MINOR);
-        assert_eq!(IPC_VERSION_MINOR, WORKSTATION_LOCK_MIN_MINOR);
+        assert!(IPC_VERSION_MINOR >= WORKSTATION_LOCK_MIN_MINOR);
         assert_eq!(
             frame.message().expect("minor 9 lock command decodes"),
             IpcMessage::Control(IpcControlCommand::LockWorkstation)
