@@ -223,7 +223,9 @@ pub fn dispatch_privileged_command(
             };
 
             guard.authorize(authorization, envelope, permission, now_unix_ms)?;
-            Ok(PrivilegedControlCommand::TeacherInteraction(request.clone()))
+            Ok(PrivilegedControlCommand::TeacherInteraction(
+                request.clone(),
+            ))
         }
         _ => Err(PrivilegedDispatchError::UnsupportedPayload),
     }
@@ -236,9 +238,9 @@ mod tests {
     use classmesh_protocol::ProtocolVersion;
     use classmesh_protocol::clipboard::MAX_CLIPBOARD_TEXT_BYTES;
     use classmesh_protocol::control_wire::{
-        ClipboardReadRequest, ClipboardWrite, Heartbeat, PresentationKeyGrant, PresentationStart,
-        PresentationStop, ProtocolVersion as WireProtocolVersion, ReleaseAllInput,
-        OpenTarget, SystemActionRequest, TeacherInteractionRequest, TeacherMessage,
+        ClipboardReadRequest, ClipboardWrite, Heartbeat, OpenTarget, PresentationKeyGrant,
+        PresentationStart, PresentationStop, ProtocolVersion as WireProtocolVersion,
+        ReleaseAllInput, SystemActionRequest, TeacherInteractionRequest, TeacherMessage,
         input_event, open_target, teacher_interaction_request,
     };
     use classmesh_security::{
@@ -395,7 +397,9 @@ mod tests {
                 minor: u32::from(version.minor),
             }),
             request_id,
-            payload: Some(control_envelope::Payload::TeacherInteractionRequest(request)),
+            payload: Some(control_envelope::Payload::TeacherInteractionRequest(
+                request,
+            )),
         }
     }
 
@@ -474,15 +478,16 @@ mod tests {
     fn teacher_interactions_require_v06_request_id_and_valid_payload_before_sequence_consumption() {
         let authorization = store(BTreeSet::from([Permission::SendTeacherMessage]));
         let request = TeacherInteractionRequest {
-            action: Some(teacher_interaction_request::Action::Message(TeacherMessage {
-                text_utf8: "hello class".to_owned(),
-            })),
+            action: Some(teacher_interaction_request::Action::Message(
+                TeacherMessage {
+                    text_utf8: "hello class".to_owned(),
+                },
+            )),
         };
 
         let old_version = ProtocolVersion { major: 0, minor: 5 };
         let mut old_guard = AuthenticatedControlGuard::new(identity(), 77, old_version, 1);
-        let old_envelope =
-            teacher_interaction_envelope(2, 700, request.clone(), old_version);
+        let old_envelope = teacher_interaction_envelope(2, 700, request.clone(), old_version);
         assert_eq!(
             dispatch_privileged_command(&mut old_guard, &authorization, &old_envelope, 150),
             Err(PrivilegedDispatchError::TeacherInteractionRequiresProtocolV6)
@@ -491,8 +496,7 @@ mod tests {
 
         let mut missing_id_guard =
             AuthenticatedControlGuard::new(identity(), 77, TEACHER_VERSION, 1);
-        let missing_id =
-            teacher_interaction_envelope(2, 0, request.clone(), TEACHER_VERSION);
+        let missing_id = teacher_interaction_envelope(2, 0, request.clone(), TEACHER_VERSION);
         assert_eq!(
             dispatch_privileged_command(&mut missing_id_guard, &authorization, &missing_id, 150),
             Err(PrivilegedDispatchError::TeacherInteractionRequestMissingId)
@@ -502,8 +506,7 @@ mod tests {
         let malformed = TeacherInteractionRequest { action: None };
         let mut malformed_guard =
             AuthenticatedControlGuard::new(identity(), 77, TEACHER_VERSION, 1);
-        let malformed_envelope =
-            teacher_interaction_envelope(2, 701, malformed, TEACHER_VERSION);
+        let malformed_envelope = teacher_interaction_envelope(2, 701, malformed, TEACHER_VERSION);
         assert_eq!(
             dispatch_privileged_command(
                 &mut malformed_guard,
@@ -523,34 +526,39 @@ mod tests {
         let cases = [
             (
                 TeacherInteractionRequest {
-                    action: Some(teacher_interaction_request::Action::Message(TeacherMessage {
-                        text_utf8: "lesson starts now".to_owned(),
-                    })),
+                    action: Some(teacher_interaction_request::Action::Message(
+                        TeacherMessage {
+                            text_utf8: "lesson starts now".to_owned(),
+                        },
+                    )),
                 },
                 Permission::SendTeacherMessage,
             ),
             (
                 TeacherInteractionRequest {
-                    action: Some(teacher_interaction_request::Action::OpenTarget(OpenTarget {
-                        target: Some(open_target::Target::HttpsUrl(
-                            "https://example.com/lesson".to_owned(),
-                        )),
-                    })),
+                    action: Some(teacher_interaction_request::Action::OpenTarget(
+                        OpenTarget {
+                            target: Some(open_target::Target::HttpsUrl(
+                                "https://example.com/lesson".to_owned(),
+                            )),
+                        },
+                    )),
                 },
                 Permission::OpenTarget,
             ),
         ];
 
         for (request, permission) in cases {
-            let envelope =
-                teacher_interaction_envelope(2, 702, request.clone(), TEACHER_VERSION);
+            let envelope = teacher_interaction_envelope(2, 702, request.clone(), TEACHER_VERSION);
 
             let allowed = store(BTreeSet::from([permission]));
             let mut allowed_guard =
                 AuthenticatedControlGuard::new(identity(), 77, TEACHER_VERSION, 1);
             assert_eq!(
                 dispatch_privileged_command(&mut allowed_guard, &allowed, &envelope, 150),
-                Ok(PrivilegedControlCommand::TeacherInteraction(request.clone()))
+                Ok(PrivilegedControlCommand::TeacherInteraction(
+                    request.clone()
+                ))
             );
             assert_eq!(allowed_guard.last_sequence(), 2);
 
