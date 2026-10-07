@@ -30,12 +30,12 @@ Phase 5 tracking issue #32 and Phase 11 Issue #298 are complete. Active product 
 
 ## Current priority
 
-1. **Phase 12C3a is complete in PR #363 with Portable + Windows CI #1456 green; Phase 12C3b is current under Issue #328.**
-2. Reuse the existing exact-bound `ServiceTeacherInteractionRequest` Worker event path. Revalidate the full 12C1 request immediately before execution, then invoke only the injected 12C3a message/target boundaries.
-3. Map only `DefaultBrowser`, `Calculator` and `TextEditor` to the closed Win32 app identity enum. Reject missing/unknown values before any side effect; HTTPS must pass the existing strict protocol validator again.
-4. Preserve exact process/session/control-session/request/action correlation in `WorkerTeacherInteractionResult`. Map asynchronous acceptance only to `Accepted`; validation or OS rejection returns bounded non-sensitive `Failed`/diagnostic results rather than crashing the Worker.
-5. Keep `TeacherMessage` / `OpenTarget` Hello advertisement disabled until 12C3b is merged and the end-to-end execution path is serviceable; do not alter Phase 6E clipboard or media protocol ownership.
-6. Keep Phase 4, 6F, 7D/7H, 8D, 9F, 10G and Phase 12B4b physical gates open; preserve Phase 13 installer/update/recovery and Phase 14 hardening in roadmap order.
+1. **Phase 12C3b is complete in PR #365 with Portable + Windows CI #1462 green; Phase 12C4a is current under Issue #328.**
+2. **12C4a — live-Worker-gated Teacher interaction capabilities.** Advertise `TeacherMessage` / `OpenTarget` only while an exact live interactive Worker identity is active; absence, clear or stale Worker state must fail closed.
+3. Require the exact action capability to have been negotiated for the control session before authorizing/dispatching a Teacher interaction, matching the existing SystemActions/presentation capability gates.
+4. Keep protocol v0.6, the existing authenticated authorization path, bounded Service→Worker seam, 12C3 execution boundaries and exact correlation; do not add raw executable paths, command lines, shell fragments, environment expansion or arbitrary arguments.
+5. **12C4b follows** through the existing Phase 11 typed Teacher UI action boundaries and one-item pending-action seam, with capability-aware controls and separate Windows runtime/visual qualification.
+6. Keep Phase 4, 6F, 7D/7H, 8D, 9F, 10G and Phase 12B4b physical gates open; hosted CI must not be treated as physical qualification. Preserve Phase 13 installer/update/recovery and Phase 14 hardening in roadmap order.
 
 ## Rules while Phase 4 hardware is unavailable
 
