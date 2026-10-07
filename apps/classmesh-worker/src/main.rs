@@ -275,6 +275,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 continue;
             }
+            Ok(WorkerEvent::TeacherInteraction(interaction)) => {
+                use classmesh_protocol::control_wire::TeacherInteractionState;
+                let kind =
+                    classmesh_protocol::teacher_interaction::validate_request(&interaction.request)
+                        .map_err(|_| "worker.teacher_interaction.invalid_request")?;
+                let result = classmesh_windows_runtime::ipc::WorkerTeacherInteractionResult {
+                    process_id: std::process::id(),
+                    session_id: actual_session,
+                    control_session_id: interaction.control_session_id,
+                    request_id: interaction.request_id,
+                    result: classmesh_protocol::control_wire::TeacherInteractionResult {
+                        kind: kind as i32,
+                        state: TeacherInteractionState::Rejected as i32,
+                        diagnostic: "teacher_interaction.executor_unavailable".to_owned(),
+                    },
+                };
+                let frame =
+                    classmesh_windows_runtime::ipc::IpcFrame::worker_teacher_interaction_result(
+                        &result,
+                    )
+                    .map_err(ipc_message_error)?;
+                pipe.write_all(&frame.encode().map_err(ipc_frame_error)?)?;
+                continue;
+            }
             Ok(WorkerEvent::StreamReconfigure(reconfigure)) => {
                 match FocusedWorkerProfile::from_reconfigure(&reconfigure) {
                     Ok(profile) => {
@@ -933,6 +957,7 @@ enum WorkerEvent {
     PresentationSenderUnicastAction(
         classmesh_windows_runtime::ipc::ServicePresentationSenderUnicastAction,
     ),
+    TeacherInteraction(classmesh_windows_runtime::ipc::ServiceTeacherInteractionRequest),
     IpcFailure(String),
 }
 
@@ -1409,6 +1434,9 @@ fn worker_event_from_decoded_frame(
             Ok(IpcMessage::ServiceEncoderCacheResult(result)) => {
                 Ok(WorkerEvent::EncoderCacheResult(result))
             }
+            Ok(IpcMessage::ServiceTeacherInteractionRequest(request)) => {
+                Ok(WorkerEvent::TeacherInteraction(request))
+            }
             Ok(unexpected) => Err(format!(
                 "unexpected IPC message after handshake: {unexpected:?}"
             )),
@@ -1630,6 +1658,35 @@ mod focused_profile_tests {
 
         assert!(matches!(result, Err(WorkstationLockFlowError::Input(_))));
         assert!(!called.get());
+    }
+
+    #[test]
+    fn teacher_interaction_routes_without_executing_an_os_side_effect() {
+        use classmesh_protocol::control_wire::{
+            TeacherInteractionRequest, TeacherMessage, teacher_interaction_request,
+        };
+        use classmesh_windows_runtime::ipc::{IpcFrame, ServiceTeacherInteractionRequest};
+        use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+
+        let request = ServiceTeacherInteractionRequest {
+            control_session_id: 77,
+            request_id: 44,
+            request: TeacherInteractionRequest {
+                action: Some(teacher_interaction_request::Action::Message(
+                    TeacherMessage {
+                        text_utf8: "hello class".to_owned(),
+                    },
+                )),
+            },
+        };
+        let frame =
+            IpcFrame::service_teacher_interaction_request(&request).expect("valid interaction");
+        let event = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
+            .expect("interaction routes");
+        let WorkerEvent::TeacherInteraction(received) = event else {
+            panic!("expected teacher interaction event");
+        };
+        assert_eq!(received, request);
     }
 
     #[test]

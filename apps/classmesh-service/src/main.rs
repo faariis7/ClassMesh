@@ -20,7 +20,9 @@ mod windows_service_app {
         SystemActionExecutionError, SystemActionExecutionOutcome, SystemActionExecutor,
     };
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity};
-    use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure, SystemAction};
+    use classmesh_protocol::control_wire::{
+        InputEvent, StreamReconfigure, SystemAction, TeacherInteractionKind,
+    };
     use classmesh_protocol::feedback::FeedbackMessage;
     use classmesh_security::persistence::DurableAuthorizationState;
     use classmesh_security::{CredentialFingerprint, PrincipalId};
@@ -33,10 +35,12 @@ mod windows_service_app {
     };
     use classmesh_windows_runtime::ipc::{
         IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage,
-        ServicePresentationMulticastStart, ServicePresentationUnicastStart, ServiceUdpStreamStart,
+        ServicePresentationMulticastStart, ServicePresentationUnicastStart,
+        ServiceTeacherInteractionRequest, ServiceUdpStreamStart,
         WorkerPresentationKeyInstallResult, WorkerPresentationKeyInstallStatus,
         WorkerPresentationMulticastStartResult, WorkerPresentationMulticastStartStatus,
         WorkerPresentationUnicastStartResult, WorkerPresentationUnicastStartStatus,
+        WorkerTeacherInteractionResult,
     };
     use classmesh_windows_runtime::ipc_sensitive::{
         PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
@@ -66,6 +70,9 @@ mod windows_service_app {
     const INPUT_CLEANUP_QUEUE_CAPACITY: usize = 1;
     const SYSTEM_ACTION_DISPATCH_QUEUE_CAPACITY: usize = 1;
     const MAX_SYSTEM_ACTIONS_PER_TICK: usize = 1;
+    const TEACHER_INTERACTION_DISPATCH_QUEUE_CAPACITY: usize = 1;
+    const WORKER_TEACHER_INTERACTION_RESULT_QUEUE_CAPACITY: usize = 4;
+    const MAX_TEACHER_INTERACTIONS_PER_TICK: usize = 1;
     const FOCUSED_MEDIA_QUEUE_CAPACITY: usize = 4;
     const FOCUSED_MEDIA_FEEDBACK_QUEUE_CAPACITY: usize = 32;
     const PRESENTATION_KEY_INSTALL_QUEUE_CAPACITY: usize = 1;
@@ -85,7 +92,9 @@ mod windows_service_app {
         FocusedMediaStart, InputAvailability, InputDispatchChannels, PresentationDispatchChannels,
         PresentationFeedbackBus, PresentationKeyInstallDispatch,
         PresentationMulticastStartDispatch, PresentationUnicastStartDispatch, SystemActionDispatch,
-        SystemActionDispatchChannels, SystemActionDispatchOutcome, WorkerCapabilityState,
+        SystemActionDispatchChannels, SystemActionDispatchOutcome, TeacherInteractionDispatch,
+        TeacherInteractionDispatchChannels, TeacherInteractionDispatchOutcome,
+        WorkerCapabilityState,
     };
     use crate::system_action_power::ServicePowerSystemActionExecutor;
 
@@ -109,6 +118,26 @@ mod windows_service_app {
     enum WorkerControlSendError {
         Unavailable,
         WriteFailed,
+    }
+
+    #[derive(Debug)]
+    struct PendingTeacherInteraction {
+        expected_process_id: u32,
+        expected_session_id: u32,
+        control_session_id: u64,
+        request_id: u64,
+        expected_kind: TeacherInteractionKind,
+        reply_tx: tokio::sync::oneshot::Sender<TeacherInteractionDispatchOutcome>,
+    }
+
+    impl PendingTeacherInteraction {
+        fn matches(&self, result: &WorkerTeacherInteractionResult) -> bool {
+            result.process_id == self.expected_process_id
+                && result.session_id == self.expected_session_id
+                && result.control_session_id == self.control_session_id
+                && result.request_id == self.request_id
+                && TeacherInteractionKind::try_from(result.result.kind) == Ok(self.expected_kind)
+        }
     }
 
     #[derive(Debug)]
@@ -191,6 +220,7 @@ mod windows_service_app {
         presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
         presentation_multicast_result_tx: mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
         presentation_unicast_result_tx: mpsc::SyncSender<WorkerPresentationUnicastStartResult>,
+        teacher_interaction_result_tx: mpsc::SyncSender<WorkerTeacherInteractionResult>,
         presentation_feedback: PresentationFeedbackBus,
         watchdog: WorkerWatchdog,
         pending_restart: Option<(SessionId, Instant)>,
@@ -207,6 +237,7 @@ mod windows_service_app {
                 WorkerPresentationMulticastStartResult,
             >,
             presentation_unicast_result_tx: mpsc::SyncSender<WorkerPresentationUnicastStartResult>,
+            teacher_interaction_result_tx: mpsc::SyncSender<WorkerTeacherInteractionResult>,
             presentation_feedback: PresentationFeedbackBus,
         ) -> Self {
             let executable = std::env::current_exe().ok().map(|service| {
@@ -224,6 +255,7 @@ mod windows_service_app {
                 presentation_key_result_tx,
                 presentation_multicast_result_tx,
                 presentation_unicast_result_tx,
+                teacher_interaction_result_tx,
                 presentation_feedback,
                 watchdog: WorkerWatchdog::new(WorkerRestartPolicy::default()),
                 pending_restart: None,
@@ -310,6 +342,9 @@ mod windows_service_app {
                                         .clone(),
                                     presentation_unicast_result_tx: self
                                         .presentation_unicast_result_tx
+                                        .clone(),
+                                    teacher_interaction_result_tx: self
+                                        .teacher_interaction_result_tx
                                         .clone(),
                                     presentation_feedback: self.presentation_feedback.clone(),
                                 },
@@ -574,6 +609,31 @@ mod windows_service_app {
             Ok((process.process_id(), process.session_id()))
         }
 
+        fn send_teacher_interaction(
+            &self,
+            request: ServiceTeacherInteractionRequest,
+        ) -> Result<(u32, u32), WorkerControlSendError> {
+            let process = self
+                .process
+                .as_ref()
+                .ok_or(WorkerControlSendError::Unavailable)?;
+            if !process.is_running().unwrap_or(false) {
+                return Err(WorkerControlSendError::Unavailable);
+            }
+            let pipe = self
+                .pipe
+                .as_ref()
+                .ok_or(WorkerControlSendError::Unavailable)?;
+            let frame = IpcFrame::service_teacher_interaction_request(&request)
+                .map_err(|_| WorkerControlSendError::WriteFailed)?;
+            let encoded = frame
+                .encode()
+                .map_err(|_| WorkerControlSendError::WriteFailed)?;
+            pipe.write_all(&encoded)
+                .map_err(|_| WorkerControlSendError::WriteFailed)?;
+            Ok((process.process_id(), process.session_id()))
+        }
+
         fn clear_focused_profile(&self) -> Result<(), String> {
             let process = self
                 .process
@@ -745,6 +805,7 @@ mod windows_service_app {
         presentation_key_result_tx: mpsc::SyncSender<WorkerPresentationKeyInstallResult>,
         presentation_multicast_result_tx: mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
         presentation_unicast_result_tx: mpsc::SyncSender<WorkerPresentationUnicastStartResult>,
+        teacher_interaction_result_tx: mpsc::SyncSender<WorkerTeacherInteractionResult>,
         presentation_feedback: PresentationFeedbackBus,
     }
 
@@ -766,6 +827,7 @@ mod windows_service_app {
             presentation_key_result_tx,
             presentation_multicast_result_tx,
             presentation_unicast_result_tx,
+            teacher_interaction_result_tx,
             presentation_feedback,
         } = runtime;
         let WorkerCapabilityReaderIdentity {
@@ -1031,6 +1093,32 @@ mod windows_service_app {
                                 expected_session_id,
                                 evidence.process_id,
                                 evidence.session_id
+                            );
+                            return;
+                        }
+                        Ok(IpcMessage::WorkerTeacherInteractionResult(result))
+                            if result.process_id == expected_process_id
+                                && result.session_id == expected_session_id =>
+                        {
+                            if !capabilities.is_current(
+                                generation,
+                                result.process_id,
+                                result.session_id,
+                            ) {
+                                eprintln!("Stale Worker Teacher interaction result ignored");
+                                return;
+                            }
+                            if teacher_interaction_result_tx.send(result).is_err() {
+                                return;
+                            }
+                        }
+                        Ok(IpcMessage::WorkerTeacherInteractionResult(result)) => {
+                            eprintln!(
+                                "Worker Teacher interaction identity mismatch: expected pid {} session {}, received pid {} session {}",
+                                expected_process_id,
+                                expected_session_id,
+                                result.process_id,
+                                result.session_id
                             );
                             return;
                         }
@@ -1535,6 +1623,13 @@ mod windows_service_app {
         let system_action_channels = SystemActionDispatchChannels {
             tx: system_action_tx,
         };
+        let (teacher_interaction_tx, teacher_interaction_rx) =
+            mpsc::sync_channel::<TeacherInteractionDispatch>(
+                TEACHER_INTERACTION_DISPATCH_QUEUE_CAPACITY,
+            );
+        let teacher_interaction_channels = TeacherInteractionDispatchChannels {
+            tx: teacher_interaction_tx,
+        };
         let (media_start_tx, media_start_rx) =
             mpsc::sync_channel::<FocusedMediaStart>(FOCUSED_MEDIA_QUEUE_CAPACITY);
         let (media_reconfigure_tx, media_reconfigure_rx) =
@@ -1575,6 +1670,10 @@ mod windows_service_app {
             mpsc::sync_channel::<WorkerPresentationUnicastStartResult>(
                 WORKER_PRESENTATION_UNICAST_RESULT_QUEUE_CAPACITY,
             );
+        let (worker_teacher_interaction_result_tx, worker_teacher_interaction_result_rx) =
+            mpsc::sync_channel::<WorkerTeacherInteractionResult>(
+                WORKER_TEACHER_INTERACTION_RESULT_QUEUE_CAPACITY,
+            );
         let released_media_session_floor = Arc::new(AtomicU64::new(0));
         let media_owner = Arc::new(AtomicU64::new(0));
         let media_channels = FocusedMediaDispatchChannels {
@@ -1602,6 +1701,7 @@ mod windows_service_app {
         let control_dispatch = ControlRuntimeDispatch::new(
             input_channels,
             system_action_channels,
+            teacher_interaction_channels,
             media_channels,
             presentation_channels,
             presentation_feedback.clone(),
@@ -1629,6 +1729,7 @@ mod windows_service_app {
             worker_presentation_key_result_tx,
             worker_presentation_multicast_result_tx,
             worker_presentation_unicast_result_tx,
+            worker_teacher_interaction_result_tx,
             presentation_feedback,
         );
         let mut power_executor = ServicePowerSystemActionExecutor::new(Win32SystemPowerController);
@@ -1645,6 +1746,7 @@ mod windows_service_app {
         let mut next_media_start_attempt = Instant::now();
         let mut next_media_reconfigure_attempt = Instant::now();
         let mut next_worker_poll = Instant::now();
+        let mut pending_teacher_interaction: Option<PendingTeacherInteraction> = None;
         let mut pending_presentation_key_install: Option<PendingPresentationKeyInstall> = None;
         let mut pending_presentation_multicast_start: Option<PendingPresentationMulticastStart> =
             None;
@@ -1673,6 +1775,92 @@ mod windows_service_app {
                     None => power_system_action_outcome(power_executor.execute(dispatch.action)),
                 };
                 let _ = dispatch.reply_tx.send(outcome);
+            }
+
+            if pending_teacher_interaction
+                .as_ref()
+                .is_some_and(|pending| pending.reply_tx.is_closed())
+            {
+                pending_teacher_interaction = None;
+            }
+
+            while let Ok(result) = worker_teacher_interaction_result_rx.try_recv() {
+                let Some(pending) = pending_teacher_interaction.as_ref() else {
+                    eprintln!("ClassMesh Service ignored stale Worker Teacher interaction result");
+                    continue;
+                };
+                if !pending.matches(&result) {
+                    eprintln!(
+                        "ClassMesh Service ignored miscorrelated Worker Teacher interaction result"
+                    );
+                    continue;
+                }
+                let pending = pending_teacher_interaction
+                    .take()
+                    .expect("pending interaction checked");
+                let _ = pending
+                    .reply_tx
+                    .send(TeacherInteractionDispatchOutcome::Result(result.result));
+            }
+
+            for _ in 0..MAX_TEACHER_INTERACTIONS_PER_TICK {
+                let dispatch = match teacher_interaction_rx.try_recv() {
+                    Ok(dispatch) => dispatch,
+                    Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+                };
+                let expected_kind = match classmesh_protocol::teacher_interaction::validate_request(
+                    &dispatch.request,
+                ) {
+                    Ok(kind) => kind,
+                    Err(_) => {
+                        let _ = dispatch
+                            .reply_tx
+                            .send(TeacherInteractionDispatchOutcome::Cancelled);
+                        continue;
+                    }
+                };
+                if dispatch.control_session_id == 0
+                    || dispatch.request_id == 0
+                    || !dispatch.commit.try_commit()
+                {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(TeacherInteractionDispatchOutcome::Cancelled);
+                    continue;
+                }
+                if pending_teacher_interaction.is_some() {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(TeacherInteractionDispatchOutcome::Backpressure);
+                    continue;
+                }
+                let request = ServiceTeacherInteractionRequest {
+                    control_session_id: dispatch.control_session_id,
+                    request_id: dispatch.request_id,
+                    request: dispatch.request,
+                };
+                match workers.send_teacher_interaction(request) {
+                    Ok((process_id, session_id)) => {
+                        pending_teacher_interaction = Some(PendingTeacherInteraction {
+                            expected_process_id: process_id,
+                            expected_session_id: session_id,
+                            control_session_id: dispatch.control_session_id,
+                            request_id: dispatch.request_id,
+                            expected_kind,
+                            reply_tx: dispatch.reply_tx,
+                        });
+                    }
+                    Err(WorkerControlSendError::Unavailable) => {
+                        let _ = dispatch
+                            .reply_tx
+                            .send(TeacherInteractionDispatchOutcome::WorkerUnavailable);
+                    }
+                    Err(WorkerControlSendError::WriteFailed) => {
+                        let _ = dispatch
+                            .reply_tx
+                            .send(TeacherInteractionDispatchOutcome::WriteFailed);
+                    }
+                }
             }
 
             while let Ok(binding) = presentation_key_clear_rx.try_recv() {
@@ -2220,6 +2408,10 @@ mod windows_service_app {
 
             if Instant::now() >= next_worker_poll {
                 let event = workers.poll();
+                fail_pending_teacher_interaction_on_worker_change(
+                    &mut pending_teacher_interaction,
+                    event,
+                );
                 if !matches!(event, WorkerManagerEvent::None) {
                     if let Some(pending) = pending_presentation_key_install.take() {
                         let _ = pending
@@ -2419,6 +2611,20 @@ mod windows_service_app {
         }
     }
 
+    fn fail_pending_teacher_interaction_on_worker_change(
+        pending: &mut Option<PendingTeacherInteraction>,
+        event: WorkerManagerEvent,
+    ) {
+        if matches!(event, WorkerManagerEvent::None) {
+            return;
+        }
+        if let Some(pending) = pending.take() {
+            let _ = pending
+                .reply_tx
+                .send(TeacherInteractionDispatchOutcome::WorkerUnavailable);
+        }
+    }
+
     fn handle_worker_event(
         event: WorkerManagerEvent,
         supervisor: &mut SessionSupervisor,
@@ -2444,6 +2650,84 @@ mod windows_service_app {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn pending_teacher_interaction_requires_exact_action_kind() {
+            let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+            let pending = PendingTeacherInteraction {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                expected_kind: TeacherInteractionKind::Message,
+                reply_tx,
+            };
+            let exact = WorkerTeacherInteractionResult {
+                process_id: 42,
+                session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                result: classmesh_protocol::control_wire::TeacherInteractionResult {
+                    kind: TeacherInteractionKind::Message as i32,
+                    state: classmesh_protocol::control_wire::TeacherInteractionState::Accepted
+                        as i32,
+                    diagnostic: String::new(),
+                },
+            };
+            assert!(pending.matches(&exact));
+
+            let mut wrong = exact;
+            wrong.result.kind = TeacherInteractionKind::OpenTarget as i32;
+            assert!(!pending.matches(&wrong));
+        }
+
+        #[test]
+        fn worker_change_fails_pending_teacher_interaction_instead_of_hanging() {
+            let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+            let mut pending = Some(PendingTeacherInteraction {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                expected_kind: TeacherInteractionKind::Message,
+                reply_tx,
+            });
+
+            fail_pending_teacher_interaction_on_worker_change(
+                &mut pending,
+                WorkerManagerEvent::RestartScheduled(SessionId(7)),
+            );
+
+            assert!(pending.is_none());
+            assert_eq!(
+                reply_rx.try_recv(),
+                Ok(TeacherInteractionDispatchOutcome::WorkerUnavailable)
+            );
+        }
+
+        #[test]
+        fn no_worker_change_keeps_pending_teacher_interaction() {
+            let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+            let mut pending = Some(PendingTeacherInteraction {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                expected_kind: TeacherInteractionKind::Message,
+                reply_tx,
+            });
+
+            fail_pending_teacher_interaction_on_worker_change(
+                &mut pending,
+                WorkerManagerEvent::None,
+            );
+
+            assert!(pending.is_some());
+            assert!(matches!(
+                reply_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+        }
 
         fn pending_key_install(
             binding: PresentationKeyInstallBinding,
