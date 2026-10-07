@@ -3031,6 +3031,60 @@ mod tests {
     }
 
     #[test]
+    fn teacher_interaction_capabilities_require_an_exact_live_worker() {
+        let worker = WorkerCapabilityState::default();
+
+        let unavailable = service_hello_capabilities(&worker, false);
+        assert!(!unavailable.contains(&Capability::TeacherMessage));
+        assert!(!unavailable.contains(&Capability::OpenTarget));
+
+        worker.activate(3, 42, 7);
+        let available = service_hello_capabilities(&worker, false);
+        assert!(available.contains(&Capability::TeacherMessage));
+        assert!(available.contains(&Capability::OpenTarget));
+
+        assert!(!worker.is_current(2, 42, 7));
+        assert!(worker.is_current(3, 42, 7));
+        worker.clear();
+
+        let cleared = service_hello_capabilities(&worker, false);
+        assert!(!cleared.contains(&Capability::TeacherMessage));
+        assert!(!cleared.contains(&Capability::OpenTarget));
+    }
+
+    #[test]
+    fn teacher_interaction_negotiation_requires_the_exact_action_capability() {
+        let message_only = BTreeSet::from([Capability::TeacherMessage]);
+        assert!(teacher_interaction_capability_negotiated(
+            TeacherInteractionKind::Message,
+            &message_only,
+        ));
+        assert!(!teacher_interaction_capability_negotiated(
+            TeacherInteractionKind::OpenTarget,
+            &message_only,
+        ));
+
+        let target_only = BTreeSet::from([Capability::OpenTarget]);
+        assert!(teacher_interaction_capability_negotiated(
+            TeacherInteractionKind::OpenTarget,
+            &target_only,
+        ));
+        assert!(!teacher_interaction_capability_negotiated(
+            TeacherInteractionKind::Message,
+            &target_only,
+        ));
+
+        assert!(!teacher_interaction_capability_negotiated(
+            TeacherInteractionKind::Unspecified,
+            &BTreeSet::from([Capability::TeacherMessage, Capability::OpenTarget]),
+        ));
+        assert!(!teacher_interaction_capability_negotiated(
+            TeacherInteractionKind::Message,
+            &BTreeSet::new(),
+        ));
+    }
+
+    #[test]
     fn presentation_runtime_capability_is_explicit_and_probe_gated() {
         let worker = WorkerCapabilityState::default();
         let capabilities = service_hello_capabilities(&worker, false);
@@ -3038,6 +3092,8 @@ mod tests {
         assert!(capabilities.contains(&Capability::SframeGroupMedia));
         assert!(capabilities.contains(&Capability::ServiceSessionWorker));
         assert!(capabilities.contains(&Capability::SystemActions));
+        assert!(!capabilities.contains(&Capability::TeacherMessage));
+        assert!(!capabilities.contains(&Capability::OpenTarget));
         assert!(!capabilities.contains(&Capability::UdpUnicast));
         assert!(!capabilities.contains(&Capability::QuicDatagram));
         assert!(!capabilities.contains(&Capability::UdpMulticast));
