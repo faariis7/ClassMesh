@@ -3,7 +3,14 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use classmesh_core::adaptation::StreamProfile;
 use classmesh_core::keyframe::PresentationKeyframeRequest;
-use classmesh_protocol::control_wire::{InputEvent, StreamReconfigure};
+use classmesh_protocol::control_wire::{
+    InputEvent, StreamReconfigure, TeacherInteractionKind, TeacherInteractionRequest,
+    TeacherInteractionResult,
+};
+use classmesh_protocol::teacher_interaction::{
+    validate_request as validate_teacher_interaction_request,
+    validate_result as validate_teacher_interaction_result,
+};
 use classmesh_protocol::feedback::FeedbackMessage;
 use prost::Message;
 use zeroize::Zeroize;
@@ -14,7 +21,7 @@ pub const MAX_IPC_MESSAGE: usize = 1_048_576;
 pub const IPC_VERSION_MAJOR: u8 = 0;
 /// IPC minor 9 adds the typed Service -> Worker workstation-lock control command.
 /// Older minors must reject that command instead of treating it as a legacy control action.
-pub const IPC_VERSION_MINOR: u8 = 9;
+pub const IPC_VERSION_MINOR: u8 = 10;
 
 const MESSAGE_WORKER_HELLO: u16 = 1;
 const MESSAGE_SERVICE_READY: u16 = 2;
@@ -37,6 +44,8 @@ const MESSAGE_SERVICE_PRESENTATION_UNICAST_START: u16 = 25;
 const MESSAGE_WORKER_PRESENTATION_UNICAST_START_RESULT: u16 = 26;
 const MESSAGE_SERVICE_PRESENTATION_KEYFRAME_REQUEST: u16 = 27;
 const MESSAGE_SERVICE_PRESENTATION_SENDER_UNICAST_ACTION: u16 = 28;
+const MESSAGE_SERVICE_TEACHER_INTERACTION_REQUEST: u16 = 29;
+const MESSAGE_WORKER_TEACHER_INTERACTION_RESULT: u16 = 30;
 const SERVICE_UDP_STREAM_START_LEN: usize = 32;
 const SERVICE_PRESENTATION_MULTICAST_START_LEN: usize = 56;
 const WORKER_PRESENTATION_MULTICAST_START_RESULT_LEN: usize = 40;
@@ -52,6 +61,9 @@ const WORKER_PRESENTATION_FEEDBACK_MIN_MINOR: u8 = 6;
 const PRESENTATION_KEYFRAME_REQUEST_MIN_MINOR: u8 = 7;
 const PRESENTATION_SENDER_UNICAST_ACTION_MIN_MINOR: u8 = 8;
 const WORKSTATION_LOCK_MIN_MINOR: u8 = 9;
+const TEACHER_INTERACTION_IPC_MIN_MINOR: u8 = 10;
+const SERVICE_TEACHER_INTERACTION_BINDING_LEN: usize = 16;
+const WORKER_TEACHER_INTERACTION_BINDING_LEN: usize = 24;
 
 const MAX_EVIDENCE_ADAPTER_IDENTITY: usize = 128;
 const MAX_EVIDENCE_DRIVER_VERSION: usize = 128;
@@ -462,6 +474,42 @@ impl ServicePresentationSenderUnicastAction {
             return Err(IpcMessageError::InvalidPayload);
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceTeacherInteractionRequest {
+    pub control_session_id: u64,
+    pub request_id: u64,
+    pub request: TeacherInteractionRequest,
+}
+
+impl ServiceTeacherInteractionRequest {
+    fn validate(&self) -> Result<TeacherInteractionKind, IpcMessageError> {
+        if self.control_session_id == 0 || self.request_id == 0 {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        validate_teacher_interaction_request(&self.request)
+            .map_err(|_| IpcMessageError::InvalidPayload)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerTeacherInteractionResult {
+    pub process_id: u32,
+    pub session_id: u32,
+    pub control_session_id: u64,
+    pub request_id: u64,
+    pub result: TeacherInteractionResult,
+}
+
+impl WorkerTeacherInteractionResult {
+    fn validate(&self) -> Result<(), IpcMessageError> {
+        if self.process_id == 0 || self.session_id == 0 || self.control_session_id == 0 || self.request_id == 0 {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        validate_teacher_interaction_result(&self.result)
+            .map_err(|_| IpcMessageError::InvalidPayload)
     }
 }
 
@@ -1012,6 +1060,28 @@ impl IpcFrame {
             MESSAGE_WORKER_PRESENTATION_UNICAST_START_RESULT,
             payload,
         ))
+    }
+
+    pub fn service_teacher_interaction_request(request: &ServiceTeacherInteractionRequest) -> Result<Self, IpcMessageError> {
+        request.validate()?;
+        let encoded = request.request.encode_to_vec();
+        let mut payload = Vec::with_capacity(SERVICE_TEACHER_INTERACTION_BINDING_LEN + encoded.len());
+        payload.extend_from_slice(&request.control_session_id.to_be_bytes());
+        payload.extend_from_slice(&request.request_id.to_be_bytes());
+        payload.extend_from_slice(&encoded);
+        Ok(Self::new(MESSAGE_SERVICE_TEACHER_INTERACTION_REQUEST, payload))
+    }
+
+    pub fn worker_teacher_interaction_result(result: &WorkerTeacherInteractionResult) -> Result<Self, IpcMessageError> {
+        result.validate()?;
+        let encoded = result.result.encode_to_vec();
+        let mut payload = Vec::with_capacity(WORKER_TEACHER_INTERACTION_BINDING_LEN + encoded.len());
+        payload.extend_from_slice(&result.process_id.to_be_bytes());
+        payload.extend_from_slice(&result.session_id.to_be_bytes());
+        payload.extend_from_slice(&result.control_session_id.to_be_bytes());
+        payload.extend_from_slice(&result.request_id.to_be_bytes());
+        payload.extend_from_slice(&encoded);
+        Ok(Self::new(MESSAGE_WORKER_TEACHER_INTERACTION_RESULT, payload))
     }
 
     pub fn service_media_feedback(feedback: &FeedbackMessage) -> Result<Self, IpcMessageError> {
@@ -1637,6 +1707,30 @@ impl IpcFrame {
                 };
                 action.validate()?;
                 Ok(IpcMessage::ServicePresentationSenderUnicastAction(action))
+            }
+            MESSAGE_SERVICE_TEACHER_INTERACTION_REQUEST => {
+                if self.header.version_minor < TEACHER_INTERACTION_IPC_MIN_MINOR { return Err(IpcMessageError::UnsupportedVersion); }
+                if self.payload.len() <= SERVICE_TEACHER_INTERACTION_BINDING_LEN { return Err(IpcMessageError::InvalidPayload); }
+                let request = ServiceTeacherInteractionRequest {
+                    control_session_id: u64::from_be_bytes(self.payload[0..8].try_into().expect("eight bytes")),
+                    request_id: u64::from_be_bytes(self.payload[8..16].try_into().expect("eight bytes")),
+                    request: TeacherInteractionRequest::decode(&self.payload[SERVICE_TEACHER_INTERACTION_BINDING_LEN..]).map_err(|_| IpcMessageError::InvalidPayload)?,
+                };
+                request.validate()?;
+                Ok(IpcMessage::ServiceTeacherInteractionRequest(request))
+            }
+            MESSAGE_WORKER_TEACHER_INTERACTION_RESULT => {
+                if self.header.version_minor < TEACHER_INTERACTION_IPC_MIN_MINOR { return Err(IpcMessageError::UnsupportedVersion); }
+                if self.payload.len() <= WORKER_TEACHER_INTERACTION_BINDING_LEN { return Err(IpcMessageError::InvalidPayload); }
+                let result = WorkerTeacherInteractionResult {
+                    process_id: u32::from_be_bytes(self.payload[0..4].try_into().expect("four bytes")),
+                    session_id: u32::from_be_bytes(self.payload[4..8].try_into().expect("four bytes")),
+                    control_session_id: u64::from_be_bytes(self.payload[8..16].try_into().expect("eight bytes")),
+                    request_id: u64::from_be_bytes(self.payload[16..24].try_into().expect("eight bytes")),
+                    result: TeacherInteractionResult::decode(&self.payload[WORKER_TEACHER_INTERACTION_BINDING_LEN..]).map_err(|_| IpcMessageError::InvalidPayload)?,
+                };
+                result.validate()?;
+                Ok(IpcMessage::WorkerTeacherInteractionResult(result))
             }
             MESSAGE_SERVICE_PRESENTATION_KEY_CLEAR => {
                 if self.payload.len() != SERVICE_PRESENTATION_KEY_CLEAR_LEN {
