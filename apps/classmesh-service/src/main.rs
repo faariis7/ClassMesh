@@ -321,11 +321,11 @@ mod windows_service_app {
                         let decision = self.watchdog.launch_failed(session);
                         return self.apply_restart_decision(decision);
                     }
-                    self.capabilities
-                        .activate(worker_generation, process_id, session.0);
 
                     match pipe.try_clone() {
                         Ok(reader) => {
+                            self.capabilities
+                                .activate(worker_generation, process_id, session.0);
                             let _capability_reader = spawn_worker_capability_reader(
                                 reader,
                                 WorkerCapabilityReaderRuntime {
