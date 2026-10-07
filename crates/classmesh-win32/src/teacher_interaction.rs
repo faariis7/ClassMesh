@@ -71,7 +71,7 @@ impl TeacherMessagePresenter for Win32TeacherMessagePresenter {
         let mut message = utf16_with_nul(text)?;
         let title_bytes = utf16_payload_bytes(&title)?;
         let message_bytes = utf16_payload_bytes(&message)?;
-        let mut response = 0_u32;
+        let mut response = 0_i32;
 
         // SAFETY: title/message are owned, writable, NUL-terminated UTF-16 buffers.
         // The byte lengths intentionally exclude their terminators as required by
