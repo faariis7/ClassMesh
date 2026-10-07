@@ -1,7 +1,8 @@
 use classmesh_protocol::clipboard::{ClipboardTextError, validate_text};
 use classmesh_protocol::control_wire::{
     ClipboardReadRequest, ClipboardWrite, ControlEnvelope, InputEvent, PresentationStart,
-    PresentationStop, SystemAction, control_envelope,
+    PresentationStop, SystemAction, TeacherInteractionKind, TeacherInteractionRequest,
+    control_envelope,
 };
 use classmesh_protocol::presentation::{
     PresentationControlError, validate_start as validate_presentation_start,
@@ -9,6 +10,10 @@ use classmesh_protocol::presentation::{
 };
 use classmesh_protocol::system_action::{
     SYSTEM_ACTION_MIN_VERSION, SystemActionControlError, system_action,
+};
+use classmesh_protocol::teacher_interaction::{
+    TEACHER_INTERACTION_MIN_VERSION, TeacherInteractionError,
+    validate_request as validate_teacher_interaction_request,
 };
 use classmesh_security::{AuthorizationStore, Permission};
 
@@ -45,6 +50,7 @@ pub enum PrivilegedControlCommand {
     PresentationStart(PresentationStart),
     PresentationStop(PresentationStop),
     SystemAction(AuthorizedSystemAction),
+    TeacherInteraction(TeacherInteractionRequest),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +66,9 @@ pub enum PrivilegedDispatchError {
     SystemActionRequestMissingId,
     SystemActionRequiresProtocolV5,
     InvalidSystemAction(SystemActionControlError),
+    TeacherInteractionRequestMissingId,
+    TeacherInteractionRequiresProtocolV6,
+    InvalidTeacherInteraction(TeacherInteractionError),
     Authorization(CommandAuthorizationError),
 }
 
@@ -190,6 +199,32 @@ pub fn dispatch_privileged_command(
                 .map_err(PrivilegedDispatchError::InvalidSystemAction)?;
             Ok(PrivilegedControlCommand::SystemAction(authorized))
         }
+        control_envelope::Payload::TeacherInteractionRequest(request) => {
+            let version = guard.protocol_version();
+            if version.major != TEACHER_INTERACTION_MIN_VERSION.major
+                || version.minor < TEACHER_INTERACTION_MIN_VERSION.minor
+            {
+                return Err(PrivilegedDispatchError::TeacherInteractionRequiresProtocolV6);
+            }
+            if envelope.request_id == 0 {
+                return Err(PrivilegedDispatchError::TeacherInteractionRequestMissingId);
+            }
+
+            let kind = validate_teacher_interaction_request(request)
+                .map_err(PrivilegedDispatchError::InvalidTeacherInteraction)?;
+            let permission = match kind {
+                TeacherInteractionKind::Message => Permission::SendTeacherMessage,
+                TeacherInteractionKind::OpenTarget => Permission::OpenTarget,
+                TeacherInteractionKind::Unspecified => {
+                    return Err(PrivilegedDispatchError::InvalidTeacherInteraction(
+                        TeacherInteractionError::MissingAction,
+                    ));
+                }
+            };
+
+            guard.authorize(authorization, envelope, permission, now_unix_ms)?;
+            Ok(PrivilegedControlCommand::TeacherInteraction(request.clone()))
+        }
         _ => Err(PrivilegedDispatchError::UnsupportedPayload),
     }
 }
@@ -203,7 +238,8 @@ mod tests {
     use classmesh_protocol::control_wire::{
         ClipboardReadRequest, ClipboardWrite, Heartbeat, PresentationKeyGrant, PresentationStart,
         PresentationStop, ProtocolVersion as WireProtocolVersion, ReleaseAllInput,
-        SystemActionRequest, input_event,
+        OpenTarget, SystemActionRequest, TeacherInteractionRequest, TeacherMessage,
+        input_event, open_target, teacher_interaction_request,
     };
     use classmesh_security::{
         CredentialFingerprint, CredentialRecord, Principal, PrincipalId, PrincipalKind,
@@ -214,6 +250,7 @@ mod tests {
 
     const VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 3 };
     const SYSTEM_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 5 };
+    const TEACHER_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 6 };
 
     fn identity() -> AuthenticatedPeerIdentity {
         AuthenticatedPeerIdentity {
@@ -344,6 +381,24 @@ mod tests {
         }
     }
 
+    fn teacher_interaction_envelope(
+        sequence: u64,
+        request_id: u64,
+        request: TeacherInteractionRequest,
+        version: ProtocolVersion,
+    ) -> ControlEnvelope {
+        ControlEnvelope {
+            control_session_id: 77,
+            sequence,
+            protocol_version: Some(WireProtocolVersion {
+                major: u32::from(version.major),
+                minor: u32::from(version.minor),
+            }),
+            request_id,
+            payload: Some(control_envelope::Payload::TeacherInteractionRequest(request)),
+        }
+    }
+
     #[test]
     fn system_actions_require_v05_request_id_and_valid_action_before_sequence_consumption() {
         let authorization = store(BTreeSet::from([Permission::LockDevice]));
@@ -412,6 +467,103 @@ mod tests {
                 2,
                 "an otherwise valid denied system action must consume its sequence"
             );
+        }
+    }
+
+    #[test]
+    fn teacher_interactions_require_v06_request_id_and_valid_payload_before_sequence_consumption() {
+        let authorization = store(BTreeSet::from([Permission::SendTeacherMessage]));
+        let request = TeacherInteractionRequest {
+            action: Some(teacher_interaction_request::Action::Message(TeacherMessage {
+                text_utf8: "hello class".to_owned(),
+            })),
+        };
+
+        let old_version = ProtocolVersion { major: 0, minor: 5 };
+        let mut old_guard = AuthenticatedControlGuard::new(identity(), 77, old_version, 1);
+        let old_envelope =
+            teacher_interaction_envelope(2, 700, request.clone(), old_version);
+        assert_eq!(
+            dispatch_privileged_command(&mut old_guard, &authorization, &old_envelope, 150),
+            Err(PrivilegedDispatchError::TeacherInteractionRequiresProtocolV6)
+        );
+        assert_eq!(old_guard.last_sequence(), 1);
+
+        let mut missing_id_guard =
+            AuthenticatedControlGuard::new(identity(), 77, TEACHER_VERSION, 1);
+        let missing_id =
+            teacher_interaction_envelope(2, 0, request.clone(), TEACHER_VERSION);
+        assert_eq!(
+            dispatch_privileged_command(&mut missing_id_guard, &authorization, &missing_id, 150),
+            Err(PrivilegedDispatchError::TeacherInteractionRequestMissingId)
+        );
+        assert_eq!(missing_id_guard.last_sequence(), 1);
+
+        let malformed = TeacherInteractionRequest { action: None };
+        let mut malformed_guard =
+            AuthenticatedControlGuard::new(identity(), 77, TEACHER_VERSION, 1);
+        let malformed_envelope =
+            teacher_interaction_envelope(2, 701, malformed, TEACHER_VERSION);
+        assert_eq!(
+            dispatch_privileged_command(
+                &mut malformed_guard,
+                &authorization,
+                &malformed_envelope,
+                150,
+            ),
+            Err(PrivilegedDispatchError::InvalidTeacherInteraction(
+                TeacherInteractionError::MissingAction
+            ))
+        );
+        assert_eq!(malformed_guard.last_sequence(), 1);
+    }
+
+    #[test]
+    fn teacher_interaction_permissions_are_exact_and_denials_consume_sequence() {
+        let cases = [
+            (
+                TeacherInteractionRequest {
+                    action: Some(teacher_interaction_request::Action::Message(TeacherMessage {
+                        text_utf8: "lesson starts now".to_owned(),
+                    })),
+                },
+                Permission::SendTeacherMessage,
+            ),
+            (
+                TeacherInteractionRequest {
+                    action: Some(teacher_interaction_request::Action::OpenTarget(OpenTarget {
+                        target: Some(open_target::Target::HttpsUrl(
+                            "https://example.com/lesson".to_owned(),
+                        )),
+                    })),
+                },
+                Permission::OpenTarget,
+            ),
+        ];
+
+        for (request, permission) in cases {
+            let envelope =
+                teacher_interaction_envelope(2, 702, request.clone(), TEACHER_VERSION);
+
+            let allowed = store(BTreeSet::from([permission]));
+            let mut allowed_guard =
+                AuthenticatedControlGuard::new(identity(), 77, TEACHER_VERSION, 1);
+            assert_eq!(
+                dispatch_privileged_command(&mut allowed_guard, &allowed, &envelope, 150),
+                Ok(PrivilegedControlCommand::TeacherInteraction(request.clone()))
+            );
+            assert_eq!(allowed_guard.last_sequence(), 2);
+
+            let denied = store(BTreeSet::new());
+            let mut denied_guard =
+                AuthenticatedControlGuard::new(identity(), 77, TEACHER_VERSION, 1);
+            assert_eq!(
+                dispatch_privileged_command(&mut denied_guard, &denied, &envelope, 150),
+                Err(PrivilegedDispatchError::Authorization(
+                    CommandAuthorizationError::Unauthorized { permission }
+                ))
+            );
+            assert_eq!(denied_guard.last_sequence(), 2);
         }
     }
 
