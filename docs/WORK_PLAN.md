@@ -33,8 +33,9 @@ Phase 5 tracking issue #32 and Phase 11 Issue #298 are complete. Active product 
 1. **Phase 12C4b Teacher UI implementation merged in PR #371, Portable + Windows CI #1491 green.** The exact Session 1 Windows runtime/visual and accessibility check is still open and is NOT replaced by hosted CI; no Phase 12C physical closeout claim.
 2. **Phase 12D1 CURRENT — portable additive file-transfer contract (Issue #328).** Add control protocol v0.7 plus explicit `FileTransfer` capability and strictly bounded typed offer/chunk/finish/cancel/status-resume messages with tests. Retain v0.6 negotiation compatibility; do not advertise the capability from production peers until routing works.
 3. Keep 16-byte nonzero opaque transfer IDs, <= 255 UTF-8 byte leaf filenames (no separator, control or traversal), exact 32-byte SHA-256, <= 64 KiB non-empty chunks below the 256 KiB framing cap, <= 1 KiB bounded diagnostic, app-owned inbox destination only, and transfer-ID-based cancellation. No raw paths, shell or filesystem side effects in 12D1.
-4. Follow with 12D2 authorized bounded push/SendFile and 12D3 ReceiveFile pull orchestration using the existing authenticated control/session and dedicated permissions; only later stage physical acceptance.
-5. Keep Phase 4, 6F, 7D/7H, 8D, 9F, 10G, 12B4b and 12C4 runtime/visual gates open; hosted CI is not physical evidence. Preserve Phase 13 installer/update/recovery and Phase 14 hardening in roadmap order.
+4. **12D2a pre-implementation, stacked after 12D1:** add only centralized authenticated file-offer admission (version v0.7, nonzero request correlation, D1 offer validation, exact `SendFile` permission) on the existing `dispatch_privileged_command` seam. Keep network handling and capability advertisement disabled. Merge only after #373 is green and integrated.
+5. Follow with 12D2b bounded coordinator/sink and 12D2c Service delivery; later 12D3 ReceiveFile pull orchestration, then runtime qualification.
+6. Keep Phase 4, 6F, 7D/7H, 8D, 9F, 10G, 12B4b and 12C4 runtime/visual gates open; hosted CI is not physical evidence. Preserve Phase 13 installer/update/recovery and Phase 14 hardening in roadmap order.
 
 ## Rules while Phase 4 hardware is unavailable
 
