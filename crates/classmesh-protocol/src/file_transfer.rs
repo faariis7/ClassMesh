@@ -83,9 +83,7 @@ pub fn validate_offer(offer: &FileTransferOffer) -> Result<(), FileTransferError
     if offer.sha256.len() != SHA256_BYTES {
         return Err(FileTransferError::InvalidHash);
     }
-    if FileDestinationPolicy::try_from(offer.destination)
-        != Ok(FileDestinationPolicy::AppInbox)
-    {
+    if FileDestinationPolicy::try_from(offer.destination) != Ok(FileDestinationPolicy::AppInbox) {
         return Err(FileTransferError::InvalidDestination);
     }
     Ok(())
@@ -157,11 +155,26 @@ mod tests {
     #[test]
     fn availability_requires_additive_v07_and_explicit_capability() {
         let caps = BTreeSet::from([Capability::FileTransfer]);
-        assert!(!file_transfer_available(ProtocolVersion { major: 0, minor: 6 }, &caps));
-        assert!(!file_transfer_available(ProtocolVersion { major: 1, minor: 7 }, &caps));
-        assert!(!file_transfer_available(FILE_TRANSFER_MIN_VERSION, &BTreeSet::new()));
-        assert!(file_transfer_available(FILE_TRANSFER_MIN_VERSION, &caps));
-        assert!(file_transfer_available(ProtocolVersion { major: 0, minor: 8 }, &caps));
+        assert!(!file_transfer_available(
+            ProtocolVersion { major: 0, minor: 6 },
+            &caps
+        ));
+        assert!(!file_transfer_available(
+            ProtocolVersion { major: 1, minor: 7 },
+            &caps
+        ));
+        assert!(!file_transfer_available(
+            FILE_TRANSFER_MIN_VERSION,
+            &BTreeSet::new()
+        ));
+        assert!(file_transfer_available(
+            FILE_TRANSFER_MIN_VERSION,
+            &caps
+        ));
+        assert!(file_transfer_available(
+            ProtocolVersion { major: 0, minor: 8 },
+            &caps
+        ));
     }
 
     #[test]
