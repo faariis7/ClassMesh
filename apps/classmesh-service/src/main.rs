@@ -312,10 +312,7 @@ mod windows_service_app {
                         return self.apply_restart_decision(decision);
                     }
 
-                    self.capabilities
-                        .activate(worker_generation, process_id, session.0);
                     if let Err(error) = authenticate_worker(&pipe, process_id, session) {
-                        self.capabilities.clear();
                         eprintln!(
                             "Worker IPC handshake failed for pid {process_id}, session {}: {error}",
                             session.0
@@ -327,6 +324,8 @@ mod windows_service_app {
 
                     match pipe.try_clone() {
                         Ok(reader) => {
+                            self.capabilities
+                                .activate(worker_generation, process_id, session.0);
                             let _capability_reader = spawn_worker_capability_reader(
                                 reader,
                                 WorkerCapabilityReaderRuntime {
