@@ -1,8 +1,11 @@
 use classmesh_protocol::clipboard::{ClipboardTextError, validate_text};
 use classmesh_protocol::control_wire::{
-    ClipboardReadRequest, ClipboardWrite, ControlEnvelope, InputEvent, PresentationStart,
-    PresentationStop, SystemAction, TeacherInteractionKind, TeacherInteractionRequest,
-    control_envelope,
+    ClipboardReadRequest, ClipboardWrite, ControlEnvelope, FileTransferOffer, InputEvent,
+    PresentationStart, PresentationStop, SystemAction, TeacherInteractionKind,
+    TeacherInteractionRequest, control_envelope,
+};
+use classmesh_protocol::file_transfer::{
+    FILE_TRANSFER_MIN_VERSION, FileTransferError, validate_offer as validate_file_transfer_offer,
 };
 use classmesh_protocol::presentation::{
     PresentationControlError, validate_start as validate_presentation_start,
@@ -51,6 +54,7 @@ pub enum PrivilegedControlCommand {
     PresentationStop(PresentationStop),
     SystemAction(AuthorizedSystemAction),
     TeacherInteraction(TeacherInteractionRequest),
+    FileTransferOffer(FileTransferOffer),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +73,9 @@ pub enum PrivilegedDispatchError {
     TeacherInteractionRequestMissingId,
     TeacherInteractionRequiresProtocolV6,
     InvalidTeacherInteraction(TeacherInteractionError),
+    FileTransferOfferRequestMissingId,
+    FileTransferRequiresProtocolV7,
+    InvalidFileTransferOffer(FileTransferError),
     Authorization(CommandAuthorizationError),
 }
 
@@ -227,6 +234,22 @@ pub fn dispatch_privileged_command(
                 request.clone(),
             ))
         }
+        control_envelope::Payload::FileTransferOffer(offer) => {
+            let version = guard.protocol_version();
+            if version.major != FILE_TRANSFER_MIN_VERSION.major
+                || version.minor < FILE_TRANSFER_MIN_VERSION.minor
+            {
+                return Err(PrivilegedDispatchError::FileTransferRequiresProtocolV7);
+            }
+            if envelope.request_id == 0 {
+                return Err(PrivilegedDispatchError::FileTransferOfferRequestMissingId);
+            }
+            validate_file_transfer_offer(offer)
+                .map_err(PrivilegedDispatchError::InvalidFileTransferOffer)?;
+
+            guard.authorize(authorization, envelope, Permission::SendFile, now_unix_ms)?;
+            Ok(PrivilegedControlCommand::FileTransferOffer(offer.clone()))
+        }
         _ => Err(PrivilegedDispatchError::UnsupportedPayload),
     }
 }
@@ -238,10 +261,11 @@ mod tests {
     use classmesh_protocol::ProtocolVersion;
     use classmesh_protocol::clipboard::MAX_CLIPBOARD_TEXT_BYTES;
     use classmesh_protocol::control_wire::{
-        ClipboardReadRequest, ClipboardWrite, Heartbeat, OpenTarget, PresentationKeyGrant,
-        PresentationStart, PresentationStop, ProtocolVersion as WireProtocolVersion,
-        ReleaseAllInput, SystemActionRequest, TeacherInteractionRequest, TeacherMessage,
-        input_event, open_target, teacher_interaction_request,
+        ClipboardReadRequest, ClipboardWrite, FileDestinationPolicy, FileTransferOffer, Heartbeat,
+        OpenTarget, PresentationKeyGrant, PresentationStart, PresentationStop,
+        ProtocolVersion as WireProtocolVersion, ReleaseAllInput, SystemActionRequest,
+        TeacherInteractionRequest, TeacherMessage, input_event, open_target,
+        teacher_interaction_request,
     };
     use classmesh_security::{
         CredentialFingerprint, CredentialRecord, Principal, PrincipalId, PrincipalKind,
@@ -253,6 +277,7 @@ mod tests {
     const VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 3 };
     const SYSTEM_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 5 };
     const TEACHER_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 6 };
+    const FILE_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 7 };
 
     fn identity() -> AuthenticatedPeerIdentity {
         AuthenticatedPeerIdentity {
@@ -401,6 +426,101 @@ mod tests {
                 request,
             )),
         }
+    }
+
+    fn file_offer_envelope(
+        sequence: u64,
+        request_id: u64,
+        version: ProtocolVersion,
+    ) -> ControlEnvelope {
+        ControlEnvelope {
+            control_session_id: 77,
+            sequence,
+            protocol_version: Some(WireProtocolVersion {
+                major: u32::from(version.major),
+                minor: u32::from(version.minor),
+            }),
+            request_id,
+            payload: Some(control_envelope::Payload::FileTransferOffer(
+                FileTransferOffer {
+                    transfer_id: vec![7; 16],
+                    filename: "lesson.pdf".to_owned(),
+                    total_size: 128,
+                    sha256: vec![9; 32],
+                    destination: FileDestinationPolicy::AppInbox as i32,
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn file_offer_requires_v07_nonzero_correlation_and_valid_metadata_before_sequence() {
+        let authorization = store(BTreeSet::from([Permission::SendFile]));
+
+        let older = ProtocolVersion { major: 0, minor: 6 };
+        let mut old_guard = AuthenticatedControlGuard::new(identity(), 77, older, 1);
+        let old_offer = file_offer_envelope(2, 51, older);
+        assert_eq!(
+            dispatch_privileged_command(&mut old_guard, &authorization, &old_offer, 150),
+            Err(PrivilegedDispatchError::FileTransferRequiresProtocolV7)
+        );
+        assert_eq!(old_guard.last_sequence(), 1);
+
+        let mut no_id_guard = AuthenticatedControlGuard::new(identity(), 77, FILE_VERSION, 1);
+        let no_id = file_offer_envelope(2, 0, FILE_VERSION);
+        assert_eq!(
+            dispatch_privileged_command(&mut no_id_guard, &authorization, &no_id, 150),
+            Err(PrivilegedDispatchError::FileTransferOfferRequestMissingId)
+        );
+        assert_eq!(no_id_guard.last_sequence(), 1);
+
+        let mut malformed_guard = AuthenticatedControlGuard::new(identity(), 77, FILE_VERSION, 1);
+        let mut malformed = file_offer_envelope(2, 52, FILE_VERSION);
+        let Some(control_envelope::Payload::FileTransferOffer(offer)) = &mut malformed.payload
+        else {
+            panic!("expected file-transfer offer")
+        };
+        offer.sha256.clear();
+        assert_eq!(
+            dispatch_privileged_command(&mut malformed_guard, &authorization, &malformed, 150),
+            Err(PrivilegedDispatchError::InvalidFileTransferOffer(
+                FileTransferError::InvalidHash
+            ))
+        );
+        assert_eq!(malformed_guard.last_sequence(), 1);
+    }
+
+    #[test]
+    fn file_offer_uses_exact_send_permission_and_authenticated_replay_window() {
+        let envelope = file_offer_envelope(2, 51, FILE_VERSION);
+        let authorization = store(BTreeSet::from([Permission::SendFile]));
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, FILE_VERSION, 1);
+        let accepted = dispatch_privileged_command(&mut guard, &authorization, &envelope, 150)
+            .expect("exact SendFile permission accepts the offer");
+        let PrivilegedControlCommand::FileTransferOffer(offer) = accepted else {
+            panic!("expected typed authorized offer")
+        };
+        assert_eq!(offer.filename, "lesson.pdf");
+        assert_eq!(guard.last_sequence(), 2);
+
+        assert!(matches!(
+            dispatch_privileged_command(&mut guard, &authorization, &envelope, 150),
+            Err(PrivilegedDispatchError::Authorization(
+                CommandAuthorizationError::NonIncreasingSequence { .. }
+            ))
+        ));
+
+        let only_receive = store(BTreeSet::from([Permission::ReceiveFile]));
+        let mut denied_guard = AuthenticatedControlGuard::new(identity(), 77, FILE_VERSION, 1);
+        assert_eq!(
+            dispatch_privileged_command(&mut denied_guard, &only_receive, &envelope, 150),
+            Err(PrivilegedDispatchError::Authorization(
+                CommandAuthorizationError::Unauthorized {
+                    permission: Permission::SendFile
+                }
+            ))
+        );
+        assert_eq!(denied_guard.last_sequence(), 2);
     }
 
     #[test]
