@@ -6,6 +6,8 @@ pub mod monitoring;
 pub mod monitoring_promotion;
 pub mod presentation_view;
 #[cfg(windows)]
+pub mod ui_actions;
+#[cfg(windows)]
 pub mod ui_classroom;
 #[cfg(windows)]
 pub mod ui_diagnostics;
