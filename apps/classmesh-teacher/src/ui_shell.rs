@@ -117,22 +117,6 @@ pub fn prepare_teacher_interaction_ui_action(
     classroom: &TeacherClassroomViewModel,
     context: Option<&TeacherInteractionUiContext>,
 ) -> Result<TeacherInteractionUiAction, TeacherInteractionUiActionError> {
-    let selected = classroom.selected();
-    if selected != Some(source_id) {
-        return Err(TeacherInteractionUiActionError::SelectionChanged {
-            expected: source_id,
-            selected,
-        });
-    }
-
-    let context = context.ok_or(TeacherInteractionUiActionError::MissingControlContext)?;
-    if context.source_id != source_id {
-        return Err(TeacherInteractionUiActionError::ContextSourceChanged {
-            expected: source_id,
-            actual: context.source_id,
-        });
-    }
-
     let request = match request {
         TeacherInteractionUiRequest::Message(text) => TeacherInteractionRequest {
             action: Some(teacher_interaction_request::Action::Message(
@@ -154,8 +138,33 @@ pub fn prepare_teacher_interaction_ui_action(
             )),
         },
     };
+    let action = TeacherInteractionUiAction { source_id, request };
+    validate_teacher_interaction_ui_action(&action, classroom, context)?;
+    Ok(action)
+}
 
-    let kind = classmesh_protocol::teacher_interaction::validate_request(&request)
+pub fn validate_teacher_interaction_ui_action(
+    action: &TeacherInteractionUiAction,
+    classroom: &TeacherClassroomViewModel,
+    context: Option<&TeacherInteractionUiContext>,
+) -> Result<(), TeacherInteractionUiActionError> {
+    let selected = classroom.selected();
+    if selected != Some(action.source_id) {
+        return Err(TeacherInteractionUiActionError::SelectionChanged {
+            expected: action.source_id,
+            selected,
+        });
+    }
+
+    let context = context.ok_or(TeacherInteractionUiActionError::MissingControlContext)?;
+    if context.source_id != action.source_id {
+        return Err(TeacherInteractionUiActionError::ContextSourceChanged {
+            expected: action.source_id,
+            actual: context.source_id,
+        });
+    }
+
+    let kind = classmesh_protocol::teacher_interaction::validate_request(&action.request)
         .map_err(TeacherInteractionUiActionError::InvalidRequest)?;
     let available = match kind {
         TeacherInteractionKind::Message => {
@@ -176,7 +185,7 @@ pub fn prepare_teacher_interaction_ui_action(
         return Err(TeacherInteractionUiActionError::CapabilityUnavailable(kind));
     }
 
-    Ok(TeacherInteractionUiAction { source_id, request })
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -598,6 +607,39 @@ mod tests {
                 expected: MonitoringSourceId(7),
                 actual: MonitoringSourceId(8),
             })
+        );
+    }
+
+    #[test]
+    fn queued_teacher_interaction_revalidates_selection_and_capability_before_dispatch() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let message_context =
+            teacher_interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+        let action = prepare_teacher_interaction_ui_action(
+            MonitoringSourceId(7),
+            TeacherInteractionUiRequest::Message("hello".to_owned()),
+            &classroom,
+            Some(&message_context),
+        )
+        .expect("message action");
+
+        classroom.select(None).unwrap();
+        assert_eq!(
+            validate_teacher_interaction_ui_action(&action, &classroom, Some(&message_context)),
+            Err(TeacherInteractionUiActionError::SelectionChanged {
+                expected: MonitoringSourceId(7),
+                selected: None,
+            })
+        );
+
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let open_only = teacher_interaction_context(BTreeSet::from([Capability::OpenTarget]));
+        assert_eq!(
+            validate_teacher_interaction_ui_action(&action, &classroom, Some(&open_only)),
+            Err(TeacherInteractionUiActionError::CapabilityUnavailable(
+                TeacherInteractionKind::Message
+            ))
         );
     }
 
