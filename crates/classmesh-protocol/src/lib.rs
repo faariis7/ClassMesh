@@ -7,13 +7,14 @@ pub mod media;
 pub mod presentation;
 pub mod system_action;
 pub mod teacher_interaction;
+pub mod file_transfer;
 
 /// Generated Protocol Buffers types for the reliable control plane.
 pub mod control_wire {
     include!(concat!(env!("OUT_DIR"), "/classmesh.control.v1.rs"));
 }
 
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 6 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 7 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProtocolVersion {
@@ -66,6 +67,7 @@ pub enum Capability {
     SystemActions,
     TeacherMessage,
     OpenTarget,
+    FileTransfer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,8 +156,12 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_minor_six_and_preserves_additive_negotiation() {
-        assert_eq!(PROTOCOL_VERSION, ProtocolVersion { major: 0, minor: 6 });
+    fn protocol_version_is_minor_seven_and_preserves_additive_negotiation() {
+        assert_eq!(PROTOCOL_VERSION, ProtocolVersion { major: 0, minor: 7 });
+        assert_eq!(
+            PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 6 }),
+            Some(ProtocolVersion { major: 0, minor: 6 })
+        );
         assert_eq!(
             PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 5 }),
             Some(ProtocolVersion { major: 0, minor: 5 })
