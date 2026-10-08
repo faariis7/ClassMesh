@@ -4,8 +4,12 @@ use classmesh_core::MediaState;
 use classmesh_core::adaptation::QualityTier;
 use classmesh_core::presence::PresenceState;
 use classmesh_core::transport_topology::TransportTopologyEvidence;
-use classmesh_protocol::Capability;
-use classmesh_protocol::control_wire::StreamOffer;
+use classmesh_protocol::control_wire::{
+    AppIdentity, OpenTarget, StreamOffer, TeacherInteractionKind, TeacherInteractionRequest,
+    TeacherMessage, open_target, teacher_interaction_request,
+};
+use classmesh_protocol::teacher_interaction::TeacherInteractionError;
+use classmesh_protocol::{Capability, ProtocolVersion};
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::classroom_view::{ClassroomViewError, TeacherClassroomViewModel};
@@ -25,6 +29,7 @@ pub enum TeacherUiSection {
     Classroom,
     Focus,
     Presentation,
+    DeviceActions,
     Diagnostics,
 }
 
@@ -71,12 +76,149 @@ pub struct TeacherDiagnosticsUiAction {
     pub request: TroubleshootingOverrideRequest,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeacherInteractionUiRequest {
+    Message(String),
+    HttpsUrl(String),
+    App(AppIdentity),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeacherInteractionUiContext {
+    pub source_id: MonitoringSourceId,
+    pub control_session_id: u64,
+    pub version: ProtocolVersion,
+    pub capabilities: BTreeSet<Capability>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TeacherInteractionUiAction {
+    pub source_id: MonitoringSourceId,
+    pub control_session_id: u64,
+    pub request: TeacherInteractionRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeacherInteractionUiActionError {
+    SelectionChanged {
+        expected: MonitoringSourceId,
+        selected: Option<MonitoringSourceId>,
+    },
+    MissingControlContext,
+    ContextSourceChanged {
+        expected: MonitoringSourceId,
+        actual: MonitoringSourceId,
+    },
+    InvalidControlSession,
+    ControlSessionChanged {
+        expected: u64,
+        actual: u64,
+    },
+    InvalidRequest(TeacherInteractionError),
+    CapabilityUnavailable(TeacherInteractionKind),
+}
+
+pub fn prepare_teacher_interaction_ui_action(
+    source_id: MonitoringSourceId,
+    request: TeacherInteractionUiRequest,
+    classroom: &TeacherClassroomViewModel,
+    context: Option<&TeacherInteractionUiContext>,
+) -> Result<TeacherInteractionUiAction, TeacherInteractionUiActionError> {
+    let request = match request {
+        TeacherInteractionUiRequest::Message(text) => TeacherInteractionRequest {
+            action: Some(teacher_interaction_request::Action::Message(
+                TeacherMessage { text_utf8: text },
+            )),
+        },
+        TeacherInteractionUiRequest::HttpsUrl(url) => TeacherInteractionRequest {
+            action: Some(teacher_interaction_request::Action::OpenTarget(
+                OpenTarget {
+                    target: Some(open_target::Target::HttpsUrl(url)),
+                },
+            )),
+        },
+        TeacherInteractionUiRequest::App(app) => TeacherInteractionRequest {
+            action: Some(teacher_interaction_request::Action::OpenTarget(
+                OpenTarget {
+                    target: Some(open_target::Target::App(app as i32)),
+                },
+            )),
+        },
+    };
+    let context = context.ok_or(TeacherInteractionUiActionError::MissingControlContext)?;
+    if context.control_session_id == 0 {
+        return Err(TeacherInteractionUiActionError::InvalidControlSession);
+    }
+    let action = TeacherInteractionUiAction {
+        source_id,
+        control_session_id: context.control_session_id,
+        request,
+    };
+    validate_teacher_interaction_ui_action(&action, classroom, Some(context))?;
+    Ok(action)
+}
+
+pub fn validate_teacher_interaction_ui_action(
+    action: &TeacherInteractionUiAction,
+    classroom: &TeacherClassroomViewModel,
+    context: Option<&TeacherInteractionUiContext>,
+) -> Result<(), TeacherInteractionUiActionError> {
+    let selected = classroom.selected();
+    if selected != Some(action.source_id) {
+        return Err(TeacherInteractionUiActionError::SelectionChanged {
+            expected: action.source_id,
+            selected,
+        });
+    }
+
+    let context = context.ok_or(TeacherInteractionUiActionError::MissingControlContext)?;
+    if context.source_id != action.source_id {
+        return Err(TeacherInteractionUiActionError::ContextSourceChanged {
+            expected: action.source_id,
+            actual: context.source_id,
+        });
+    }
+    if context.control_session_id == 0 || action.control_session_id == 0 {
+        return Err(TeacherInteractionUiActionError::InvalidControlSession);
+    }
+    if context.control_session_id != action.control_session_id {
+        return Err(TeacherInteractionUiActionError::ControlSessionChanged {
+            expected: action.control_session_id,
+            actual: context.control_session_id,
+        });
+    }
+
+    let kind = classmesh_protocol::teacher_interaction::validate_request(&action.request)
+        .map_err(TeacherInteractionUiActionError::InvalidRequest)?;
+    let available = match kind {
+        TeacherInteractionKind::Message => {
+            classmesh_protocol::teacher_interaction::teacher_message_available(
+                context.version,
+                &context.capabilities,
+            )
+        }
+        TeacherInteractionKind::OpenTarget => {
+            classmesh_protocol::teacher_interaction::open_target_available(
+                context.version,
+                &context.capabilities,
+            )
+        }
+        TeacherInteractionKind::Unspecified => false,
+    };
+    if !available {
+        return Err(TeacherInteractionUiActionError::CapabilityUnavailable(kind));
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum TeacherUiAction {
     SelectDevice(Option<MonitoringSourceId>),
     Focus(TeacherFocusUiAction),
     Presentation(TeacherPresentationUiAction),
     Diagnostics(TeacherDiagnosticsUiAction),
+    TeacherInteraction(TeacherInteractionUiAction),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,9 +236,10 @@ impl TeacherUiAction {
             Self::SelectDevice(source_id) => classroom
                 .select(source_id)
                 .map_err(TeacherUiClassroomActionError::Classroom),
-            Self::Focus(_) | Self::Presentation(_) | Self::Diagnostics(_) => {
-                Err(TeacherUiClassroomActionError::NotClassroomAction)
-            }
+            Self::Focus(_)
+            | Self::Presentation(_)
+            | Self::Diagnostics(_)
+            | Self::TeacherInteraction(_) => Err(TeacherUiClassroomActionError::NotClassroomAction),
         }
     }
 }
@@ -385,6 +528,208 @@ mod tests {
 
     fn capabilities() -> BTreeSet<Capability> {
         BTreeSet::from([Capability::UdpUnicast])
+    }
+
+    fn teacher_interaction_context(
+        capabilities: BTreeSet<Capability>,
+    ) -> TeacherInteractionUiContext {
+        TeacherInteractionUiContext {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            version: classmesh_protocol::PROTOCOL_VERSION,
+            capabilities,
+        }
+    }
+
+    #[test]
+    fn teacher_message_action_is_source_bound_capability_aware_and_protocol_valid() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let context = teacher_interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+
+        let action = prepare_teacher_interaction_ui_action(
+            MonitoringSourceId(7),
+            TeacherInteractionUiRequest::Message("Class starts now.".to_owned()),
+            &classroom,
+            Some(&context),
+        )
+        .expect("message capability is negotiated for the selected source");
+
+        assert_eq!(action.source_id, MonitoringSourceId(7));
+        assert_eq!(
+            classmesh_protocol::teacher_interaction::validate_request(&action.request),
+            Ok(TeacherInteractionKind::Message)
+        );
+    }
+
+    #[test]
+    fn teacher_open_target_action_requires_exact_open_target_capability() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let message_only =
+            teacher_interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+
+        assert_eq!(
+            prepare_teacher_interaction_ui_action(
+                MonitoringSourceId(7),
+                TeacherInteractionUiRequest::HttpsUrl("https://example.com/lesson".to_owned()),
+                &classroom,
+                Some(&message_only),
+            ),
+            Err(TeacherInteractionUiActionError::CapabilityUnavailable(
+                TeacherInteractionKind::OpenTarget
+            ))
+        );
+
+        let open = teacher_interaction_context(BTreeSet::from([Capability::OpenTarget]));
+        let action = prepare_teacher_interaction_ui_action(
+            MonitoringSourceId(7),
+            TeacherInteractionUiRequest::App(AppIdentity::Calculator),
+            &classroom,
+            Some(&open),
+        )
+        .expect("closed app identity is available");
+        assert_eq!(
+            classmesh_protocol::teacher_interaction::validate_request(&action.request),
+            Ok(TeacherInteractionKind::OpenTarget)
+        );
+    }
+
+    #[test]
+    fn teacher_interaction_rejects_stale_selection_or_context_before_queueing() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let context = teacher_interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+
+        classroom.select(None).unwrap();
+        assert_eq!(
+            prepare_teacher_interaction_ui_action(
+                MonitoringSourceId(7),
+                TeacherInteractionUiRequest::Message("hello".to_owned()),
+                &classroom,
+                Some(&context),
+            ),
+            Err(TeacherInteractionUiActionError::SelectionChanged {
+                expected: MonitoringSourceId(7),
+                selected: None,
+            })
+        );
+
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let wrong_context = TeacherInteractionUiContext {
+            source_id: MonitoringSourceId(8),
+            control_session_id: 88,
+            version: classmesh_protocol::PROTOCOL_VERSION,
+            capabilities: BTreeSet::from([Capability::TeacherMessage]),
+        };
+        assert_eq!(
+            prepare_teacher_interaction_ui_action(
+                MonitoringSourceId(7),
+                TeacherInteractionUiRequest::Message("hello".to_owned()),
+                &classroom,
+                Some(&wrong_context),
+            ),
+            Err(TeacherInteractionUiActionError::ContextSourceChanged {
+                expected: MonitoringSourceId(7),
+                actual: MonitoringSourceId(8),
+            })
+        );
+    }
+
+    #[test]
+    fn queued_teacher_interaction_revalidates_selection_and_capability_before_dispatch() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let message_context =
+            teacher_interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+        let action = prepare_teacher_interaction_ui_action(
+            MonitoringSourceId(7),
+            TeacherInteractionUiRequest::Message("hello".to_owned()),
+            &classroom,
+            Some(&message_context),
+        )
+        .expect("message action");
+
+        classroom.select(None).unwrap();
+        assert_eq!(
+            validate_teacher_interaction_ui_action(&action, &classroom, Some(&message_context)),
+            Err(TeacherInteractionUiActionError::SelectionChanged {
+                expected: MonitoringSourceId(7),
+                selected: None,
+            })
+        );
+
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let open_only = teacher_interaction_context(BTreeSet::from([Capability::OpenTarget]));
+        assert_eq!(
+            validate_teacher_interaction_ui_action(&action, &classroom, Some(&open_only)),
+            Err(TeacherInteractionUiActionError::CapabilityUnavailable(
+                TeacherInteractionKind::Message
+            ))
+        );
+    }
+
+    #[test]
+    fn teacher_interaction_rejects_zero_or_changed_control_session() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+
+        let zero = TeacherInteractionUiContext {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 0,
+            version: classmesh_protocol::PROTOCOL_VERSION,
+            capabilities: BTreeSet::from([Capability::TeacherMessage]),
+        };
+        assert_eq!(
+            prepare_teacher_interaction_ui_action(
+                MonitoringSourceId(7),
+                TeacherInteractionUiRequest::Message("hello".to_owned()),
+                &classroom,
+                Some(&zero),
+            ),
+            Err(TeacherInteractionUiActionError::InvalidControlSession)
+        );
+
+        let current = teacher_interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+        let action = prepare_teacher_interaction_ui_action(
+            MonitoringSourceId(7),
+            TeacherInteractionUiRequest::Message("hello".to_owned()),
+            &classroom,
+            Some(&current),
+        )
+        .expect("message action");
+        let reconnected = TeacherInteractionUiContext {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 78,
+            version: current.version,
+            capabilities: current.capabilities.clone(),
+        };
+        assert_eq!(
+            validate_teacher_interaction_ui_action(&action, &classroom, Some(&reconnected)),
+            Err(TeacherInteractionUiActionError::ControlSessionChanged {
+                expected: 77,
+                actual: 78,
+            })
+        );
+    }
+
+    #[test]
+    fn teacher_interaction_rejects_invalid_typed_input_before_action_creation() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let context = teacher_interaction_context(BTreeSet::from([Capability::OpenTarget]));
+
+        assert_eq!(
+            prepare_teacher_interaction_ui_action(
+                MonitoringSourceId(7),
+                TeacherInteractionUiRequest::HttpsUrl("file:///C:/Windows/cmd.exe".to_owned()),
+                &classroom,
+                Some(&context),
+            ),
+            Err(TeacherInteractionUiActionError::InvalidRequest(
+                TeacherInteractionError::UnsupportedUrlScheme
+            ))
+        );
     }
 
     #[test]
