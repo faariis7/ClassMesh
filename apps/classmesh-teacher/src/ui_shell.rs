@@ -4,8 +4,12 @@ use classmesh_core::MediaState;
 use classmesh_core::adaptation::QualityTier;
 use classmesh_core::presence::PresenceState;
 use classmesh_core::transport_topology::TransportTopologyEvidence;
-use classmesh_protocol::Capability;
-use classmesh_protocol::control_wire::StreamOffer;
+use classmesh_protocol::{Capability, ProtocolVersion};
+use classmesh_protocol::control_wire::{
+    AppIdentity, OpenTarget, StreamOffer, TeacherInteractionKind, TeacherInteractionRequest,
+    TeacherMessage, open_target, teacher_interaction_request,
+};
+use classmesh_protocol::teacher_interaction::TeacherInteractionError;
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::classroom_view::{ClassroomViewError, TeacherClassroomViewModel};
@@ -71,12 +75,108 @@ pub struct TeacherDiagnosticsUiAction {
     pub request: TroubleshootingOverrideRequest,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeacherInteractionUiRequest {
+    Message(String),
+    HttpsUrl(String),
+    App(AppIdentity),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeacherInteractionUiContext {
+    pub source_id: MonitoringSourceId,
+    pub version: ProtocolVersion,
+    pub capabilities: BTreeSet<Capability>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TeacherInteractionUiAction {
+    pub source_id: MonitoringSourceId,
+    pub request: TeacherInteractionRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeacherInteractionUiActionError {
+    SelectionChanged {
+        expected: MonitoringSourceId,
+        selected: Option<MonitoringSourceId>,
+    },
+    MissingControlContext,
+    ContextSourceChanged {
+        expected: MonitoringSourceId,
+        actual: MonitoringSourceId,
+    },
+    InvalidRequest(TeacherInteractionError),
+    CapabilityUnavailable(TeacherInteractionKind),
+}
+
+pub fn prepare_teacher_interaction_ui_action(
+    source_id: MonitoringSourceId,
+    request: TeacherInteractionUiRequest,
+    classroom: &TeacherClassroomViewModel,
+    context: Option<&TeacherInteractionUiContext>,
+) -> Result<TeacherInteractionUiAction, TeacherInteractionUiActionError> {
+    let selected = classroom.selected();
+    if selected != Some(source_id) {
+        return Err(TeacherInteractionUiActionError::SelectionChanged {
+            expected: source_id,
+            selected,
+        });
+    }
+
+    let context = context.ok_or(TeacherInteractionUiActionError::MissingControlContext)?;
+    if context.source_id != source_id {
+        return Err(TeacherInteractionUiActionError::ContextSourceChanged {
+            expected: source_id,
+            actual: context.source_id,
+        });
+    }
+
+    let request = match request {
+        TeacherInteractionUiRequest::Message(text) => TeacherInteractionRequest {
+            action: Some(teacher_interaction_request::Action::Message(
+                TeacherMessage { text_utf8: text },
+            )),
+        },
+        TeacherInteractionUiRequest::HttpsUrl(url) => TeacherInteractionRequest {
+            action: Some(teacher_interaction_request::Action::OpenTarget(OpenTarget {
+                target: Some(open_target::Target::HttpsUrl(url)),
+            })),
+        },
+        TeacherInteractionUiRequest::App(app) => TeacherInteractionRequest {
+            action: Some(teacher_interaction_request::Action::OpenTarget(OpenTarget {
+                target: Some(open_target::Target::App(app as i32)),
+            })),
+        },
+    };
+
+    let kind = classmesh_protocol::teacher_interaction::validate_request(&request)
+        .map_err(TeacherInteractionUiActionError::InvalidRequest)?;
+    let available = match kind {
+        TeacherInteractionKind::Message => classmesh_protocol::teacher_interaction::teacher_message_available(
+            context.version,
+            &context.capabilities,
+        ),
+        TeacherInteractionKind::OpenTarget => classmesh_protocol::teacher_interaction::open_target_available(
+            context.version,
+            &context.capabilities,
+        ),
+        TeacherInteractionKind::Unspecified => false,
+    };
+    if !available {
+        return Err(TeacherInteractionUiActionError::CapabilityUnavailable(kind));
+    }
+
+    Ok(TeacherInteractionUiAction { source_id, request })
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum TeacherUiAction {
     SelectDevice(Option<MonitoringSourceId>),
     Focus(TeacherFocusUiAction),
     Presentation(TeacherPresentationUiAction),
     Diagnostics(TeacherDiagnosticsUiAction),
+    TeacherInteraction(TeacherInteractionUiAction),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +194,10 @@ impl TeacherUiAction {
             Self::SelectDevice(source_id) => classroom
                 .select(source_id)
                 .map_err(TeacherUiClassroomActionError::Classroom),
-            Self::Focus(_) | Self::Presentation(_) | Self::Diagnostics(_) => {
+            Self::Focus(_)
+            | Self::Presentation(_)
+            | Self::Diagnostics(_)
+            | Self::TeacherInteraction(_) => {
                 Err(TeacherUiClassroomActionError::NotClassroomAction)
             }
         }
