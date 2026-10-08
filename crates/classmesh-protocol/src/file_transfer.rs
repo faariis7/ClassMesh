@@ -183,15 +183,24 @@ mod tests {
         assert_eq!(validate_offer(&valid), Ok(()));
         let mut bad = valid.clone();
         bad.transfer_id = vec![0; TRANSFER_ID_BYTES];
-        assert_eq!(validate_offer(&bad), Err(FileTransferError::InvalidTransferId));
+        assert_eq!(
+            validate_offer(&bad),
+            Err(FileTransferError::InvalidTransferId)
+        );
         bad = valid.clone();
         bad.sha256.pop();
         assert_eq!(validate_offer(&bad), Err(FileTransferError::InvalidHash));
         bad = valid.clone();
         bad.destination = FileDestinationPolicy::Unspecified as i32;
-        assert_eq!(validate_offer(&bad), Err(FileTransferError::InvalidDestination));
+        assert_eq!(
+            validate_offer(&bad),
+            Err(FileTransferError::InvalidDestination)
+        );
         bad.destination = i32::MAX;
-        assert_eq!(validate_offer(&bad), Err(FileTransferError::InvalidDestination));
+        assert_eq!(
+            validate_offer(&bad),
+            Err(FileTransferError::InvalidDestination)
+        );
         bad = valid.clone();
         bad.total_size = 0;
         assert_eq!(validate_offer(&bad), Err(FileTransferError::FileTooLarge));
@@ -235,23 +244,36 @@ mod tests {
         assert_eq!(validate_chunk(&bad), Err(FileTransferError::ChunkTooLarge));
         bad = chunk.clone();
         bad.offset = u64::MAX;
-        assert_eq!(validate_chunk(&bad), Err(FileTransferError::InvalidOffset));
+        assert_eq!(
+            validate_chunk(&bad),
+            Err(FileTransferError::InvalidOffset)
+        );
         bad.offset = MAX_FILE_TRANSFER_BYTES;
-        assert_eq!(validate_chunk(&bad), Err(FileTransferError::InvalidOffset));
+        assert_eq!(
+            validate_chunk(&bad),
+            Err(FileTransferError::InvalidOffset)
+        );
         bad = chunk;
         bad.transfer_id = vec![3; 15];
-        assert_eq!(validate_chunk(&bad), Err(FileTransferError::InvalidTransferId));
+        assert_eq!(
+            validate_chunk(&bad),
+            Err(FileTransferError::InvalidTransferId)
+        );
     }
 
     #[test]
     fn finish_cancel_and_status_are_exact_bounded_control_messages() {
         let id = transfer_id();
         assert_eq!(
-            validate_finish(&FileTransferFinish { transfer_id: id.clone() }),
+            validate_finish(&FileTransferFinish {
+                transfer_id: id.clone()
+            }),
             Ok(())
         );
         assert_eq!(
-            validate_cancel(&FileTransferCancel { transfer_id: id.clone() }),
+            validate_cancel(&FileTransferCancel {
+                transfer_id: id.clone()
+            }),
             Ok(())
         );
         let mut status = FileTransferStatus {
@@ -262,14 +284,26 @@ mod tests {
         };
         assert_eq!(validate_status(&status), Ok(()));
         status.state = FileTransferState::Unspecified as i32;
-        assert_eq!(validate_status(&status), Err(FileTransferError::InvalidState));
+        assert_eq!(
+            validate_status(&status),
+            Err(FileTransferError::InvalidState)
+        );
         status.state = FileTransferState::Accepted as i32;
         status.next_offset = MAX_FILE_TRANSFER_BYTES + 1;
-        assert_eq!(validate_status(&status), Err(FileTransferError::InvalidOffset));
+        assert_eq!(
+            validate_status(&status),
+            Err(FileTransferError::InvalidOffset)
+        );
         status.next_offset = 0;
         status.diagnostic = "x".repeat(MAX_TRANSFER_DIAGNOSTIC_BYTES + 1);
-        assert_eq!(validate_status(&status), Err(FileTransferError::DiagnosticTooLarge));
+        assert_eq!(
+            validate_status(&status),
+            Err(FileTransferError::DiagnosticTooLarge)
+        );
         status.diagnostic = "bad\nline".to_owned();
-        assert_eq!(validate_status(&status), Err(FileTransferError::InvalidDiagnostic));
+        assert_eq!(
+            validate_status(&status),
+            Err(FileTransferError::InvalidDiagnostic)
+        );
     }
 }
