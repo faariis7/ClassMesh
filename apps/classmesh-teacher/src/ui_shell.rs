@@ -29,6 +29,7 @@ pub enum TeacherUiSection {
     Classroom,
     Focus,
     Presentation,
+    DeviceActions,
     Diagnostics,
 }
 
