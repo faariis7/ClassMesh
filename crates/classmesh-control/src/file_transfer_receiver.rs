@@ -1,6 +1,6 @@
 use classmesh_protocol::control_wire::{
-    FileTransferCancel, FileTransferChunk, FileTransferFinish, FileTransferOffer, FileTransferState,
-    FileTransferStatus,
+    FileTransferCancel, FileTransferChunk, FileTransferFinish, FileTransferOffer,
+    FileTransferState, FileTransferStatus,
 };
 use classmesh_protocol::file_transfer::{
     FileTransferError, validate_cancel, validate_chunk, validate_finish, validate_offer,
@@ -35,14 +35,8 @@ pub enum ReceiveError {
 pub trait FileTransferInboxSink {
     type Error;
 
-    fn begin(&mut self, id: &[u8; 16], filename: &str, size: u64)
-        -> Result<(), Self::Error>;
-    fn append(
-        &mut self,
-        id: &[u8; 16],
-        offset: u64,
-        content: &[u8],
-    ) -> Result<(), Self::Error>;
+    fn begin(&mut self, id: &[u8; 16], filename: &str, size: u64) -> Result<(), Self::Error>;
+    fn append(&mut self, id: &[u8; 16], offset: u64, content: &[u8]) -> Result<(), Self::Error>;
     fn complete(&mut self, id: &[u8; 16]) -> Result<(), Self::Error>;
     fn abort(&mut self, id: &[u8; 16]);
 }
@@ -97,7 +91,11 @@ impl<S: FileTransferInboxSink> FileTransferReceiver<S> {
         }
 
         let id = validated_id(&offer.transfer_id);
-        if self.sink.begin(&id, &offer.filename, offer.total_size).is_err() {
+        if self
+            .sink
+            .begin(&id, &offer.filename, offer.total_size)
+            .is_err()
+        {
             self.sink.abort(&id);
             return Err(ReceiveError::SinkFailure);
         }
@@ -136,11 +134,7 @@ impl<S: FileTransferInboxSink> FileTransferReceiver<S> {
         let active = self.active.as_mut().ok_or(ReceiveError::NoActiveTransfer)?;
         active.sha256.update(&chunk.content);
         active.next_offset = end;
-        Ok(status(
-            &chunk.transfer_id,
-            FileTransferState::Progress,
-            end,
-        ))
+        Ok(status(&chunk.transfer_id, FileTransferState::Progress, end))
     }
 
     pub fn finish(
@@ -256,9 +250,12 @@ mod tests {
     impl FileTransferInboxSink for RecordingSink {
         type Error = ();
 
-        fn begin(&mut self, _id: &[u8; 16], _filename: &str, _size: u64)
-            -> Result<(), Self::Error>
-        {
+        fn begin(
+            &mut self,
+            _id: &[u8; 16],
+            _filename: &str,
+            _size: u64,
+        ) -> Result<(), Self::Error> {
             self.starts += 1;
             Ok(())
         }
@@ -315,7 +312,9 @@ mod tests {
     }
 
     fn finish() -> FileTransferFinish {
-        FileTransferFinish { transfer_id: vec![9; 16] }
+        FileTransferFinish {
+            transfer_id: vec![9; 16],
+        }
     }
 
     #[test]
@@ -323,14 +322,31 @@ mod tests {
         let mut receiver = FileTransferReceiver::new(RecordingSink::default());
         let data = b"abcdef";
         assert_eq!(receiver.offer(peer(), &offer(data)).unwrap().next_offset, 0);
-        assert_eq!(receiver.chunk(peer(), &chunk(0, b"abc")).unwrap().next_offset, 3);
+        assert_eq!(
+            receiver
+                .chunk(peer(), &chunk(0, b"abc"))
+                .unwrap()
+                .next_offset,
+            3
+        );
         assert_eq!(receiver.offer(peer(), &offer(data)).unwrap().next_offset, 3);
-        assert_eq!(receiver.chunk(peer(), &chunk(3, b"def")).unwrap().next_offset, 6);
-        assert_eq!(receiver.finish(peer(), &finish()).unwrap().state,
-            FileTransferState::Completed as i32);
+        assert_eq!(
+            receiver
+                .chunk(peer(), &chunk(3, b"def"))
+                .unwrap()
+                .next_offset,
+            6
+        );
+        assert_eq!(
+            receiver.finish(peer(), &finish()).unwrap().state,
+            FileTransferState::Completed as i32
+        );
         let sink = receiver.sink();
         assert_eq!(sink.bytes, data);
-        assert_eq!((sink.starts, sink.writes, sink.commits, sink.aborts), (1, 2, 1, 0));
+        assert_eq!(
+            (sink.starts, sink.writes, sink.commits, sink.aborts),
+            (1, 2, 1, 0)
+        );
     }
 
     #[test]
@@ -338,17 +354,31 @@ mod tests {
         let mut receiver = FileTransferReceiver::new(RecordingSink::default());
         let data = b"abcdef";
         receiver.offer(peer(), &offer(data)).unwrap();
-        assert_eq!(receiver.chunk(peer(), &chunk(3, b"abc")),
-            Err(ReceiveError::NonSequentialChunk));
+        assert_eq!(
+            receiver.chunk(peer(), &chunk(3, b"abc")),
+            Err(ReceiveError::NonSequentialChunk)
+        );
         let mut other = peer();
         other.control_session_id = 32;
-        assert_eq!(receiver.chunk(other, &chunk(0, b"abc")),
-            Err(ReceiveError::WrongTransferOrSession));
-        assert_eq!(receiver.offer(other, &offer(data)),
-            Err(ReceiveError::WrongTransferOrSession));
-        assert_eq!(receiver.chunk(peer(), &chunk(0, b"abc")).unwrap().next_offset, 3);
-        assert_eq!(receiver.chunk(peer(), &chunk(0, b"abc")),
-            Err(ReceiveError::NonSequentialChunk));
+        assert_eq!(
+            receiver.chunk(other, &chunk(0, b"abc")),
+            Err(ReceiveError::WrongTransferOrSession)
+        );
+        assert_eq!(
+            receiver.offer(other, &offer(data)),
+            Err(ReceiveError::WrongTransferOrSession)
+        );
+        assert_eq!(
+            receiver
+                .chunk(peer(), &chunk(0, b"abc"))
+                .unwrap()
+                .next_offset,
+            3
+        );
+        assert_eq!(
+            receiver.chunk(peer(), &chunk(0, b"abc")),
+            Err(ReceiveError::NonSequentialChunk)
+        );
         let sink = receiver.sink();
         assert_eq!(sink.writes, 1);
     }
@@ -362,13 +392,21 @@ mod tests {
         let mut bad = offer(data);
         bad.sha256 = vec![0; 32];
         assert_eq!(receiver.offer(peer(), &bad), Err(ReceiveError::Busy));
-        let cancelled = receiver.cancel(
-            peer(), &FileTransferCancel { transfer_id: vec![9; 16] }
-        ).unwrap();
+        let cancelled = receiver
+            .cancel(
+                peer(),
+                &FileTransferCancel {
+                    transfer_id: vec![9; 16],
+                },
+            )
+            .unwrap();
         assert_eq!(cancelled.state, FileTransferState::Cancelled as i32);
         receiver.offer(peer(), &bad).unwrap();
         receiver.chunk(peer(), &chunk(0, data)).unwrap();
-        assert_eq!(receiver.finish(peer(), &finish()), Err(ReceiveError::HashMismatch));
+        assert_eq!(
+            receiver.finish(peer(), &finish()),
+            Err(ReceiveError::HashMismatch)
+        );
         let sink = receiver.sink();
         assert_eq!(sink.commits, 0);
         assert_eq!(sink.aborts, 2);
@@ -376,13 +414,20 @@ mod tests {
 
     #[test]
     fn sink_failure_aborts_and_cannot_advance_resumable_offset() {
-        let sink = RecordingSink { fail_next_write: true, ..RecordingSink::default() };
+        let sink = RecordingSink {
+            fail_next_write: true,
+            ..RecordingSink::default()
+        };
         let mut receiver = FileTransferReceiver::new(sink);
         receiver.offer(peer(), &offer(b"abc")).unwrap();
-        assert_eq!(receiver.chunk(peer(), &chunk(0, b"abc")),
-            Err(ReceiveError::SinkFailure));
-        assert_eq!(receiver.finish(peer(), &finish()),
-            Err(ReceiveError::NoActiveTransfer));
+        assert_eq!(
+            receiver.chunk(peer(), &chunk(0, b"abc")),
+            Err(ReceiveError::SinkFailure)
+        );
+        assert_eq!(
+            receiver.finish(peer(), &finish()),
+            Err(ReceiveError::NoActiveTransfer)
+        );
         let sink = receiver.sink();
         assert_eq!((sink.writes, sink.commits, sink.aborts), (1, 0, 1));
     }
@@ -393,12 +438,25 @@ mod tests {
         receiver.offer(peer(), &offer(b"abc")).unwrap();
         let mut other_offer = offer(b"abcd");
         other_offer.transfer_id = vec![8; 16];
-        assert_eq!(receiver.offer(peer(), &other_offer),
-            Err(ReceiveError::WrongTransferOrSession));
-        assert_eq!(receiver.finish(peer(), &finish()), Err(ReceiveError::Incomplete));
-        assert_eq!(receiver.chunk(peer(), &chunk(0, b"abcd")),
-            Err(ReceiveError::PastDeclaredSize));
-        assert_eq!(receiver.chunk(peer(), &chunk(0, b"abc")).unwrap().next_offset, 3);
+        assert_eq!(
+            receiver.offer(peer(), &other_offer),
+            Err(ReceiveError::WrongTransferOrSession)
+        );
+        assert_eq!(
+            receiver.finish(peer(), &finish()),
+            Err(ReceiveError::Incomplete)
+        );
+        assert_eq!(
+            receiver.chunk(peer(), &chunk(0, b"abcd")),
+            Err(ReceiveError::PastDeclaredSize)
+        );
+        assert_eq!(
+            receiver
+                .chunk(peer(), &chunk(0, b"abc"))
+                .unwrap()
+                .next_offset,
+            3
+        );
         assert_eq!(receiver.finish(peer(), &finish()).unwrap().next_offset, 3);
     }
 }
