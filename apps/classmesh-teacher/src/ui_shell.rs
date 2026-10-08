@@ -86,6 +86,7 @@ pub enum TeacherInteractionUiRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TeacherInteractionUiContext {
     pub source_id: MonitoringSourceId,
+    pub control_session_id: u64,
     pub version: ProtocolVersion,
     pub capabilities: BTreeSet<Capability>,
 }
@@ -93,6 +94,7 @@ pub struct TeacherInteractionUiContext {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TeacherInteractionUiAction {
     pub source_id: MonitoringSourceId,
+    pub control_session_id: u64,
     pub request: TeacherInteractionRequest,
 }
 
@@ -106,6 +108,11 @@ pub enum TeacherInteractionUiActionError {
     ContextSourceChanged {
         expected: MonitoringSourceId,
         actual: MonitoringSourceId,
+    },
+    InvalidControlSession,
+    ControlSessionChanged {
+        expected: u64,
+        actual: u64,
     },
     InvalidRequest(TeacherInteractionError),
     CapabilityUnavailable(TeacherInteractionKind),
@@ -138,8 +145,16 @@ pub fn prepare_teacher_interaction_ui_action(
             )),
         },
     };
-    let action = TeacherInteractionUiAction { source_id, request };
-    validate_teacher_interaction_ui_action(&action, classroom, context)?;
+    let context = context.ok_or(TeacherInteractionUiActionError::MissingControlContext)?;
+    if context.control_session_id == 0 {
+        return Err(TeacherInteractionUiActionError::InvalidControlSession);
+    }
+    let action = TeacherInteractionUiAction {
+        source_id,
+        control_session_id: context.control_session_id,
+        request,
+    };
+    validate_teacher_interaction_ui_action(&action, classroom, Some(context))?;
     Ok(action)
 }
 
@@ -161,6 +176,15 @@ pub fn validate_teacher_interaction_ui_action(
         return Err(TeacherInteractionUiActionError::ContextSourceChanged {
             expected: action.source_id,
             actual: context.source_id,
+        });
+    }
+    if context.control_session_id == 0 || action.control_session_id == 0 {
+        return Err(TeacherInteractionUiActionError::InvalidControlSession);
+    }
+    if context.control_session_id != action.control_session_id {
+        return Err(TeacherInteractionUiActionError::ControlSessionChanged {
+            expected: action.control_session_id,
+            actual: context.control_session_id,
         });
     }
 
@@ -511,6 +535,7 @@ mod tests {
     ) -> TeacherInteractionUiContext {
         TeacherInteractionUiContext {
             source_id: MonitoringSourceId(7),
+            control_session_id: 77,
             version: classmesh_protocol::PROTOCOL_VERSION,
             capabilities,
         }
@@ -593,6 +618,7 @@ mod tests {
         classroom.select(Some(MonitoringSourceId(7))).unwrap();
         let wrong_context = TeacherInteractionUiContext {
             source_id: MonitoringSourceId(8),
+            control_session_id: 88,
             version: classmesh_protocol::PROTOCOL_VERSION,
             capabilities: BTreeSet::from([Capability::TeacherMessage]),
         };
@@ -640,6 +666,50 @@ mod tests {
             Err(TeacherInteractionUiActionError::CapabilityUnavailable(
                 TeacherInteractionKind::Message
             ))
+        );
+    }
+
+    #[test]
+    fn teacher_interaction_rejects_zero_or_changed_control_session() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+
+        let zero = TeacherInteractionUiContext {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 0,
+            version: classmesh_protocol::PROTOCOL_VERSION,
+            capabilities: BTreeSet::from([Capability::TeacherMessage]),
+        };
+        assert_eq!(
+            prepare_teacher_interaction_ui_action(
+                MonitoringSourceId(7),
+                TeacherInteractionUiRequest::Message("hello".to_owned()),
+                &classroom,
+                Some(&zero),
+            ),
+            Err(TeacherInteractionUiActionError::InvalidControlSession)
+        );
+
+        let current = teacher_interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+        let action = prepare_teacher_interaction_ui_action(
+            MonitoringSourceId(7),
+            TeacherInteractionUiRequest::Message("hello".to_owned()),
+            &classroom,
+            Some(&current),
+        )
+        .expect("message action");
+        let reconnected = TeacherInteractionUiContext {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 78,
+            version: current.version,
+            capabilities: current.capabilities.clone(),
+        };
+        assert_eq!(
+            validate_teacher_interaction_ui_action(&action, &classroom, Some(&reconnected)),
+            Err(TeacherInteractionUiActionError::ControlSessionChanged {
+                expected: 77,
+                actual: 78,
+            })
         );
     }
 
