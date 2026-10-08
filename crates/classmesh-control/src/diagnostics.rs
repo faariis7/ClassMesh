@@ -138,6 +138,15 @@ pub const fn privileged_dispatch_diagnostic_code(error: &PrivilegedDispatchError
         PrivilegedDispatchError::InvalidTeacherInteraction(_) => {
             "control.command.teacher_interaction_invalid"
         }
+        PrivilegedDispatchError::FileTransferOfferRequestMissingId => {
+            "control.command.file_offer_missing_request_id"
+        }
+        PrivilegedDispatchError::FileTransferRequiresProtocolV7 => {
+            "control.command.file_transfer_requires_v0_7"
+        }
+        PrivilegedDispatchError::InvalidFileTransferOffer(_) => {
+            "control.command.file_offer_invalid"
+        }
         PrivilegedDispatchError::Authorization(error) => {
             command_authorization_diagnostic_code(error)
         }
@@ -150,6 +159,24 @@ mod tests {
     use classmesh_security::Permission;
 
     use super::*;
+
+    #[test]
+    fn file_offer_dispatch_codes_are_bounded_and_non_sensitive() {
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(
+                &PrivilegedDispatchError::FileTransferRequiresProtocolV7
+            ),
+            "control.command.file_transfer_requires_v0_7"
+        );
+        assert_eq!(
+            privileged_dispatch_diagnostic_code(
+                &PrivilegedDispatchError::InvalidFileTransferOffer(
+                    classmesh_protocol::file_transfer::FileTransferError::InvalidFilename
+                )
+            ),
+            "control.command.file_offer_invalid"
+        );
+    }
 
     #[test]
     fn command_codes_do_not_embed_peer_values() {
