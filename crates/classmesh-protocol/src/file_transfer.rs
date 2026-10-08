@@ -211,9 +211,22 @@ mod tests {
     #[test]
     fn filename_rejects_traversal_paths_device_names_and_controls() {
         for filename in [
-            "", ".", "..", "../a.txt", "a/b.txt", "C:\\temp\\a.txt",
-            "a:b.txt", "hello\0.txt", "CON.txt", "nul", "LPT9.log",
-            "file.", " file.txt", "file.txt ", "a?b", "a|b",
+            "",
+            ".",
+            "..",
+            "../a.txt",
+            "a/b.txt",
+            "C:\\temp\\a.txt",
+            "a:b.txt",
+            "hello\0.txt",
+            "CON.txt",
+            "nul",
+            "LPT9.log",
+            "file.",
+            " file.txt",
+            "file.txt ",
+            "a?b",
+            "a|b",
         ] {
             assert_eq!(
                 validate_filename(filename),
