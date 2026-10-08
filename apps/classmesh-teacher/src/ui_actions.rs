@@ -47,8 +47,7 @@ pub fn show_device_actions(
 
     ui.small("Actions target only the currently selected classroom device.");
 
-    let message_available =
-        teacher_message_available(context.version, &context.capabilities);
+    let message_available = teacher_message_available(context.version, &context.capabilities);
     let open_available = open_target_available(context.version, &context.capabilities);
 
     ui.separator();
@@ -70,17 +69,14 @@ pub fn show_device_actions(
         )
         .clicked()
     {
-        return Some(TeacherInteractionUiRequest::Message(
-            draft.message.clone(),
-        ));
+        return Some(TeacherInteractionUiRequest::Message(draft.message.clone()));
     }
 
     ui.separator();
     ui.strong("Open HTTPS link");
     ui.add_enabled(
         open_available && !action_pending,
-        egui::TextEdit::singleline(&mut draft.https_url)
-            .hint_text("https://example.com/lesson"),
+        egui::TextEdit::singleline(&mut draft.https_url).hint_text("https://example.com/lesson"),
     );
     if !open_available {
         ui.small("Open-target actions are unavailable for this device.");
