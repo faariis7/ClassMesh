@@ -9,11 +9,17 @@ use crate::device_diagnostics::{
 use crate::presentation_view::{
     PresentationRuntimeSnapshot, PresentationViewState, TeacherPresentationViewModel,
 };
+use crate::ui_actions::{
+    TeacherInteractionDraft, reset_teacher_interaction_draft, show_device_actions,
+};
 use crate::ui_classroom::show_classroom;
 use crate::ui_diagnostics::{DiagnosticsOverrideDraft, show_diagnostics};
 use crate::ui_focus::show_focus;
 use crate::ui_presentation::show_presentation;
-use crate::ui_shell::{TeacherUiAction, TeacherUiMessage, TeacherUiSection, TeacherUiShellState};
+use crate::ui_shell::{
+    TeacherInteractionUiContext, TeacherInteractionUiRequest, TeacherUiAction, TeacherUiMessage,
+    TeacherUiSection, TeacherUiShellState, prepare_teacher_interaction_ui_action,
+};
 
 const APP_TITLE: &str = "ClassMesh Teacher";
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [800.0, 600.0];
@@ -28,6 +34,8 @@ pub struct TeacherEguiShell {
     diagnostics_model: TeacherDeviceDiagnosticsViewModel,
     diagnostics: Option<DeviceDiagnosticsView>,
     diagnostics_draft: DiagnosticsOverrideDraft,
+    teacher_interaction_context: Option<TeacherInteractionUiContext>,
+    teacher_interaction_draft: TeacherInteractionDraft,
     pending_action: Option<TeacherUiAction>,
 }
 
@@ -48,6 +56,8 @@ impl Default for TeacherEguiShell {
             .expect("default diagnostics view configuration is valid"),
             diagnostics: None,
             diagnostics_draft: DiagnosticsOverrideDraft::default(),
+            teacher_interaction_context: None,
+            teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
         }
     }
@@ -72,8 +82,27 @@ impl TeacherEguiShell {
             .expect("default diagnostics view configuration is valid"),
             diagnostics: None,
             diagnostics_draft: DiagnosticsOverrideDraft::default(),
+            teacher_interaction_context: None,
+            teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
         }
+    }
+
+    pub fn set_teacher_interaction_context(&mut self, context: TeacherInteractionUiContext) {
+        if self
+            .teacher_interaction_context
+            .as_ref()
+            .map(|current| current.source_id)
+            != Some(context.source_id)
+        {
+            reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
+        }
+        self.teacher_interaction_context = Some(context);
+    }
+
+    pub fn clear_teacher_interaction_context(&mut self) {
+        self.teacher_interaction_context = None;
+        reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
     }
 
     pub fn set_presentation_snapshot(&mut self, snapshot: PresentationRuntimeSnapshot) {
@@ -108,6 +137,21 @@ impl TeacherEguiShell {
         }
     }
 
+    fn queue_teacher_interaction_request(&mut self, request: TeacherInteractionUiRequest) {
+        let Some(source_id) = self.classroom.selected() else {
+            return;
+        };
+        let Ok(action) = prepare_teacher_interaction_ui_action(
+            source_id,
+            request,
+            &self.classroom,
+            self.teacher_interaction_context.as_ref(),
+        ) else {
+            return;
+        };
+        self.queue_action(TeacherUiAction::TeacherInteraction(action));
+    }
+
     fn navigate(&mut self, section: TeacherUiSection) {
         let _ = self.shell.handle(TeacherUiMessage::Navigate(section));
     }
@@ -118,6 +162,7 @@ impl TeacherEguiShell {
                 (TeacherUiSection::Classroom, "Classroom"),
                 (TeacherUiSection::Focus, "Focus"),
                 (TeacherUiSection::Presentation, "Presentation"),
+                (TeacherUiSection::DeviceActions, "Device Actions"),
                 (TeacherUiSection::Diagnostics, "Diagnostics"),
             ] {
                 let selected = self.shell.active_section() == section;
@@ -149,6 +194,17 @@ impl TeacherEguiShell {
                     if let Some(action) = self.shell.handle(message) {
                         self.queue_action(action);
                     }
+                }
+            }
+            TeacherUiSection::DeviceActions => {
+                if let Some(request) = show_device_actions(
+                    ui,
+                    self.classroom.selected(),
+                    self.teacher_interaction_context.as_ref(),
+                    &mut self.teacher_interaction_draft,
+                    self.pending_action.is_some(),
+                ) {
+                    self.queue_teacher_interaction_request(request);
                 }
             }
             TeacherUiSection::Diagnostics => {
