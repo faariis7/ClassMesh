@@ -93,8 +93,8 @@ impl TeacherEguiShell {
         if self
             .teacher_interaction_context
             .as_ref()
-            .map(|current| current.source_id)
-            != Some(context.source_id)
+            .map(|current| (current.source_id, current.control_session_id))
+            != Some((context.source_id, context.control_session_id))
         {
             reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
         }
@@ -379,9 +379,28 @@ mod tests {
     fn interaction_context(capabilities: BTreeSet<Capability>) -> TeacherInteractionUiContext {
         TeacherInteractionUiContext {
             source_id: MonitoringSourceId(7),
+            control_session_id: 77,
             version: classmesh_protocol::PROTOCOL_VERSION,
             capabilities,
         }
+    }
+
+    #[test]
+    fn control_session_change_resets_teacher_interaction_draft_and_stales_pending_action() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::from([
+            Capability::TeacherMessage,
+        ])));
+        app.queue_teacher_interaction_request(TeacherInteractionUiRequest::Message(
+            "hello".to_owned(),
+        ));
+
+        let mut reconnected = interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+        reconnected.control_session_id = 78;
+        app.set_teacher_interaction_context(reconnected);
+
+        assert_eq!(app.take_pending_action(), None);
     }
 
     #[test]
@@ -418,6 +437,7 @@ mod tests {
 
         app.set_teacher_interaction_context(TeacherInteractionUiContext {
             source_id: MonitoringSourceId(8),
+            control_session_id: 88,
             version: classmesh_protocol::PROTOCOL_VERSION,
             capabilities: BTreeSet::from([Capability::TeacherMessage]),
         });
