@@ -2,12 +2,12 @@
 
 pub mod clipboard;
 pub mod feedback;
+pub mod file_transfer;
 pub mod group_media_control;
 pub mod media;
 pub mod presentation;
 pub mod system_action;
 pub mod teacher_interaction;
-pub mod file_transfer;
 
 /// Generated Protocol Buffers types for the reliable control plane.
 pub mod control_wire {
