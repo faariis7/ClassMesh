@@ -4,12 +4,12 @@ use classmesh_core::MediaState;
 use classmesh_core::adaptation::QualityTier;
 use classmesh_core::presence::PresenceState;
 use classmesh_core::transport_topology::TransportTopologyEvidence;
-use classmesh_protocol::{Capability, ProtocolVersion};
 use classmesh_protocol::control_wire::{
     AppIdentity, OpenTarget, StreamOffer, TeacherInteractionKind, TeacherInteractionRequest,
     TeacherMessage, open_target, teacher_interaction_request,
 };
 use classmesh_protocol::teacher_interaction::TeacherInteractionError;
+use classmesh_protocol::{Capability, ProtocolVersion};
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::classroom_view::{ClassroomViewError, TeacherClassroomViewModel};
@@ -139,28 +139,36 @@ pub fn prepare_teacher_interaction_ui_action(
             )),
         },
         TeacherInteractionUiRequest::HttpsUrl(url) => TeacherInteractionRequest {
-            action: Some(teacher_interaction_request::Action::OpenTarget(OpenTarget {
-                target: Some(open_target::Target::HttpsUrl(url)),
-            })),
+            action: Some(teacher_interaction_request::Action::OpenTarget(
+                OpenTarget {
+                    target: Some(open_target::Target::HttpsUrl(url)),
+                },
+            )),
         },
         TeacherInteractionUiRequest::App(app) => TeacherInteractionRequest {
-            action: Some(teacher_interaction_request::Action::OpenTarget(OpenTarget {
-                target: Some(open_target::Target::App(app as i32)),
-            })),
+            action: Some(teacher_interaction_request::Action::OpenTarget(
+                OpenTarget {
+                    target: Some(open_target::Target::App(app as i32)),
+                },
+            )),
         },
     };
 
     let kind = classmesh_protocol::teacher_interaction::validate_request(&request)
         .map_err(TeacherInteractionUiActionError::InvalidRequest)?;
     let available = match kind {
-        TeacherInteractionKind::Message => classmesh_protocol::teacher_interaction::teacher_message_available(
-            context.version,
-            &context.capabilities,
-        ),
-        TeacherInteractionKind::OpenTarget => classmesh_protocol::teacher_interaction::open_target_available(
-            context.version,
-            &context.capabilities,
-        ),
+        TeacherInteractionKind::Message => {
+            classmesh_protocol::teacher_interaction::teacher_message_available(
+                context.version,
+                &context.capabilities,
+            )
+        }
+        TeacherInteractionKind::OpenTarget => {
+            classmesh_protocol::teacher_interaction::open_target_available(
+                context.version,
+                &context.capabilities,
+            )
+        }
         TeacherInteractionKind::Unspecified => false,
     };
     if !available {
@@ -197,9 +205,7 @@ impl TeacherUiAction {
             Self::Focus(_)
             | Self::Presentation(_)
             | Self::Diagnostics(_)
-            | Self::TeacherInteraction(_) => {
-                Err(TeacherUiClassroomActionError::NotClassroomAction)
-            }
+            | Self::TeacherInteraction(_) => Err(TeacherUiClassroomActionError::NotClassroomAction),
         }
     }
 }
@@ -540,8 +546,7 @@ mod tests {
             ))
         );
 
-        let open =
-            teacher_interaction_context(BTreeSet::from([Capability::OpenTarget]));
+        let open = teacher_interaction_context(BTreeSet::from([Capability::OpenTarget]));
         let action = prepare_teacher_interaction_ui_action(
             MonitoringSourceId(7),
             TeacherInteractionUiRequest::App(AppIdentity::Calculator),
@@ -599,8 +604,7 @@ mod tests {
     fn teacher_interaction_rejects_invalid_typed_input_before_action_creation() {
         let mut classroom = classroom();
         classroom.select(Some(MonitoringSourceId(7))).unwrap();
-        let context =
-            teacher_interaction_context(BTreeSet::from([Capability::OpenTarget]));
+        let context = teacher_interaction_context(BTreeSet::from([Capability::OpenTarget]));
 
         assert_eq!(
             prepare_teacher_interaction_ui_action(
