@@ -1,8 +1,8 @@
 use classmesh_protocol::clipboard::{ClipboardTextError, validate_text};
 use classmesh_protocol::control_wire::{
-    ClipboardReadRequest, ClipboardWrite, ControlEnvelope, FileTransferOffer, InputEvent, PresentationStart,
-    PresentationStop, SystemAction, TeacherInteractionKind, TeacherInteractionRequest,
-    control_envelope,
+    ClipboardReadRequest, ClipboardWrite, ControlEnvelope, FileTransferOffer, InputEvent,
+    PresentationStart, PresentationStop, SystemAction, TeacherInteractionKind,
+    TeacherInteractionRequest, control_envelope,
 };
 use classmesh_protocol::file_transfer::{
     FILE_TRANSFER_MIN_VERSION, FileTransferError, validate_offer as validate_file_transfer_offer,
@@ -247,12 +247,7 @@ pub fn dispatch_privileged_command(
             validate_file_transfer_offer(offer)
                 .map_err(PrivilegedDispatchError::InvalidFileTransferOffer)?;
 
-            guard.authorize(
-                authorization,
-                envelope,
-                Permission::SendFile,
-                now_unix_ms,
-            )?;
+            guard.authorize(authorization, envelope, Permission::SendFile, now_unix_ms)?;
             Ok(PrivilegedControlCommand::FileTransferOffer(offer.clone()))
         }
         _ => Err(PrivilegedDispatchError::UnsupportedPayload),
@@ -266,10 +261,11 @@ mod tests {
     use classmesh_protocol::ProtocolVersion;
     use classmesh_protocol::clipboard::MAX_CLIPBOARD_TEXT_BYTES;
     use classmesh_protocol::control_wire::{
-        ClipboardReadRequest, ClipboardWrite, FileDestinationPolicy, FileTransferOffer, Heartbeat, OpenTarget, PresentationKeyGrant,
-        PresentationStart, PresentationStop, ProtocolVersion as WireProtocolVersion,
-        ReleaseAllInput, SystemActionRequest, TeacherInteractionRequest, TeacherMessage,
-        input_event, open_target, teacher_interaction_request,
+        ClipboardReadRequest, ClipboardWrite, FileDestinationPolicy, FileTransferOffer, Heartbeat,
+        OpenTarget, PresentationKeyGrant, PresentationStart, PresentationStop,
+        ProtocolVersion as WireProtocolVersion, ReleaseAllInput, SystemActionRequest,
+        TeacherInteractionRequest, TeacherMessage, input_event, open_target,
+        teacher_interaction_request,
     };
     use classmesh_security::{
         CredentialFingerprint, CredentialRecord, Principal, PrincipalId, PrincipalKind,
@@ -499,9 +495,8 @@ mod tests {
         let envelope = file_offer_envelope(2, 51, FILE_VERSION);
         let authorization = store(BTreeSet::from([Permission::SendFile]));
         let mut guard = AuthenticatedControlGuard::new(identity(), 77, FILE_VERSION, 1);
-        let accepted =
-            dispatch_privileged_command(&mut guard, &authorization, &envelope, 150)
-                .expect("exact SendFile permission accepts the offer");
+        let accepted = dispatch_privileged_command(&mut guard, &authorization, &envelope, 150)
+            .expect("exact SendFile permission accepts the offer");
         let PrivilegedControlCommand::FileTransferOffer(offer) = accepted else {
             panic!("expected typed authorized offer")
         };
