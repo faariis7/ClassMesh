@@ -179,9 +179,8 @@ mod tests {
     #[test]
     fn file_transfer_delivery_messages_round_trip_on_v07() {
         use control_wire::{
-            FileDestinationPolicy, FileTransferCancel, FileTransferChunk,
-            FileTransferFinish, FileTransferOffer, FileTransferState, FileTransferStatus,
-            control_envelope,
+            FileDestinationPolicy, FileTransferCancel, FileTransferChunk, FileTransferFinish,
+            FileTransferOffer, FileTransferState, FileTransferStatus, control_envelope,
         };
 
         let id = vec![7; 16];
