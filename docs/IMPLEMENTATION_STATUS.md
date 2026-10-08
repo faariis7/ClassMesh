@@ -155,7 +155,7 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 ## Next implementation sequence
 
 1. Finish **Phase 12C4b** by merging PR #371 only after required Portable + Windows CI is green at the reviewed head. Keep the exact-artifact interactive Windows runtime/visual evidence open until it is actually collected.
-2. Implement **Phase 12D1 next** as a portable, additive v0.7 file-transfer delivery contract only: `FileTransfer` capability plus bounded offer/chunk/finish/cancel/status types and validators. No filesystem write/read side effect belongs in 12D1.
+2. Implement **Phase 12D1 next** as a portable, additive v0.7 file-transfer delivery contract only: `FileTransfer` capability contract plus bounded offer/chunk/finish/cancel/status types and validators, with production advertisement still disabled. No filesystem write/read side effect belongs in 12D1.
 3. Keep each chunk at or below 64 KiB under the existing 256 KiB control-frame limit; require opaque non-zero transfer identity, exact 32-byte SHA-256, bounded filename/display metadata, explicit ClassMesh-owned inbox destination policy, bounded status diagnostics and resumable next-offset semantics.
 4. Do not carry arbitrary sender/receiver paths, executable paths, shell fragments, command lines, environment expansion or arbitrary arguments. Reuse `SendFile` / `ReceiveFile` permissions in later push/pull orchestration slices.
 5. Follow 12D1 with separate bounded push/send and pull/receive orchestration so each direction has explicit permission mapping, backpressure, cancellation/recovery and testable ownership.
