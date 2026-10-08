@@ -19,6 +19,7 @@ use crate::ui_presentation::show_presentation;
 use crate::ui_shell::{
     TeacherInteractionUiContext, TeacherInteractionUiRequest, TeacherUiAction, TeacherUiMessage,
     TeacherUiSection, TeacherUiShellState, prepare_teacher_interaction_ui_action,
+    validate_teacher_interaction_ui_action,
 };
 
 const APP_TITLE: &str = "ClassMesh Teacher";
@@ -128,7 +129,16 @@ impl TeacherEguiShell {
 
     #[must_use]
     pub fn take_pending_action(&mut self) -> Option<TeacherUiAction> {
-        self.pending_action.take()
+        let action = self.pending_action.take()?;
+        if let TeacherUiAction::TeacherInteraction(interaction) = &action {
+            validate_teacher_interaction_ui_action(
+                interaction,
+                &self.classroom,
+                self.teacher_interaction_context.as_ref(),
+            )
+            .ok()?;
+        }
+        Some(action)
     }
 
     fn queue_action(&mut self, action: TeacherUiAction) {
@@ -440,6 +450,38 @@ mod tests {
             app.take_pending_action(),
             Some(TeacherUiAction::TeacherInteraction(_))
         ));
+    }
+
+    #[test]
+    fn queued_teacher_interaction_is_revalidated_at_dispatch_handoff() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::from([
+            Capability::TeacherMessage,
+        ])));
+        app.queue_teacher_interaction_request(TeacherInteractionUiRequest::Message(
+            "hello".to_owned(),
+        ));
+
+        app.classroom.select(None).unwrap();
+        assert_eq!(app.take_pending_action(), None);
+    }
+
+    #[test]
+    fn queued_teacher_interaction_is_dropped_if_capability_changes_before_handoff() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::from([
+            Capability::TeacherMessage,
+        ])));
+        app.queue_teacher_interaction_request(TeacherInteractionUiRequest::Message(
+            "hello".to_owned(),
+        ));
+
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::from([
+            Capability::OpenTarget,
+        ])));
+        assert_eq!(app.take_pending_action(), None);
     }
 
     #[test]
