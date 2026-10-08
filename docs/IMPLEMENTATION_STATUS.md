@@ -154,9 +154,9 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 
 ## Next implementation sequence
 
-1. Implement **Phase 12C4b current** through the existing Phase 11 typed Teacher UI action boundaries and one-item bounded pending-action seam.
-2. Make message / HTTPS / closed-app controls capability-aware for the exact selected device; stale selection, missing capability or invalid typed input must fail before queueing.
-3. Build only the bounded v0.6 `TeacherInteractionRequest` shapes already implemented; no raw shell, executable path or arbitrary argument surface may enter UI state.
-4. Keep UI/runtime qualification separate: hosted CI covers contracts/builds only; connected Windows runtime/visual checks are required before claiming 12C4 qualification.
-5. Preserve exact Worker PID/session/control-session/request/action correlation and bounded non-sensitive result diagnostics from 12C3/12C4a.
-6. Keep Issue #3, Phase 6F, Phase 7D/7H, Phase 8D, Phase 9F, Phase 10G and Phase 12B4b open until their own physical evidence exists.
+1. Finish **Phase 12C4b** by merging PR #371 only after required Portable + Windows CI is green at the reviewed head. Keep the exact-artifact interactive Windows runtime/visual evidence open until it is actually collected.
+2. Implement **Phase 12D1 next** as a portable, additive v0.7 file-transfer delivery contract only: `FileTransfer` capability plus bounded offer/chunk/finish/cancel/status types and validators. No filesystem write/read side effect belongs in 12D1.
+3. Keep each chunk at or below 64 KiB under the existing 256 KiB control-frame limit; require opaque non-zero transfer identity, exact 32-byte SHA-256, bounded filename/display metadata, explicit ClassMesh-owned inbox destination policy, bounded status diagnostics and resumable next-offset semantics.
+4. Do not carry arbitrary sender/receiver paths, executable paths, shell fragments, command lines, environment expansion or arbitrary arguments. Reuse `SendFile` / `ReceiveFile` permissions in later push/pull orchestration slices.
+5. Follow 12D1 with separate bounded push/send and pull/receive orchestration so each direction has explicit permission mapping, backpressure, cancellation/recovery and testable ownership.
+6. Keep Issue #3, Phase 6F, Phase 7D/7H, Phase 8D, Phase 9F, Phase 10G, Phase 12B4b and pending Phase 12C4 runtime/visual evidence open until their own physical evidence exists.
