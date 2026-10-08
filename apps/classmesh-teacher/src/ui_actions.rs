@@ -162,6 +162,7 @@ mod tests {
     fn context(capabilities: BTreeSet<Capability>) -> TeacherInteractionUiContext {
         TeacherInteractionUiContext {
             source_id: MonitoringSourceId(7),
+            control_session_id: 77,
             version: PROTOCOL_VERSION,
             capabilities,
         }
