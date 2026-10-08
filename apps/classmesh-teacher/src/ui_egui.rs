@@ -256,12 +256,16 @@ pub fn run_teacher_ui() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use classmesh_core::MediaState;
     use classmesh_core::presence::{DeviceHealth, PresenceState};
     use classmesh_core::transport_topology::TransportTopologyEvidence;
+    use classmesh_protocol::Capability;
+    use classmesh_protocol::control_wire::TeacherInteractionKind;
     use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
-    use crate::classroom_view::ClassroomDeviceRow;
+    use crate::classroom_view::{ClassroomDeviceRow, ClassroomDeviceSnapshot};
     use crate::device_diagnostics::{DEFAULT_MAX_DIAGNOSTIC_CODES, DeviceDiagnosticsError};
     use crate::ui_shell::TeacherFocusUiAction;
 
@@ -343,6 +347,101 @@ mod tests {
         assert!(app.diagnostics.is_none());
     }
 
+    fn select_test_device(app: &mut TeacherEguiShell) {
+        app.classroom
+            .upsert(ClassroomDeviceSnapshot {
+                source_id: MonitoringSourceId(7),
+                display_name: "Student 07".to_owned(),
+                health: DeviceHealth {
+                    presence: PresenceState::Online,
+                    media: MediaState::Idle,
+                    worker_ready: true,
+                    service_ready: true,
+                },
+                quality_tier: None,
+                thumbnail_available: true,
+                interactive_active: false,
+            })
+            .unwrap();
+        app.classroom.select(Some(MonitoringSourceId(7))).unwrap();
+    }
+
+    fn interaction_context(capabilities: BTreeSet<Capability>) -> TeacherInteractionUiContext {
+        TeacherInteractionUiContext {
+            source_id: MonitoringSourceId(7),
+            version: classmesh_protocol::PROTOCOL_VERSION,
+            capabilities,
+        }
+    }
+
+    #[test]
+    fn device_action_queue_builds_only_valid_source_bound_protocol_action() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::from([
+            Capability::TeacherMessage,
+        ])));
+
+        app.queue_teacher_interaction_request(TeacherInteractionUiRequest::Message(
+            "Class starts now.".to_owned(),
+        ));
+
+        let Some(TeacherUiAction::TeacherInteraction(action)) = app.take_pending_action() else {
+            panic!("expected Teacher interaction action");
+        };
+        assert_eq!(action.source_id, MonitoringSourceId(7));
+        assert_eq!(
+            classmesh_protocol::teacher_interaction::validate_request(&action.request),
+            Ok(TeacherInteractionKind::Message)
+        );
+    }
+
+    #[test]
+    fn device_action_queue_fails_closed_for_missing_or_stale_context() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+
+        app.queue_teacher_interaction_request(TeacherInteractionUiRequest::Message(
+            "hello".to_owned(),
+        ));
+        assert_eq!(app.take_pending_action(), None);
+
+        app.set_teacher_interaction_context(TeacherInteractionUiContext {
+            source_id: MonitoringSourceId(8),
+            version: classmesh_protocol::PROTOCOL_VERSION,
+            capabilities: BTreeSet::from([Capability::TeacherMessage]),
+        });
+        app.queue_teacher_interaction_request(TeacherInteractionUiRequest::Message(
+            "hello".to_owned(),
+        ));
+        assert_eq!(app.take_pending_action(), None);
+    }
+
+    #[test]
+    fn device_action_queue_respects_exact_open_target_capability() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::from([
+            Capability::TeacherMessage,
+        ])));
+
+        app.queue_teacher_interaction_request(TeacherInteractionUiRequest::App(
+            classmesh_protocol::control_wire::AppIdentity::Calculator,
+        ));
+        assert_eq!(app.take_pending_action(), None);
+
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::from([
+            Capability::OpenTarget,
+        ])));
+        app.queue_teacher_interaction_request(TeacherInteractionUiRequest::App(
+            classmesh_protocol::control_wire::AppIdentity::Calculator,
+        ));
+        assert!(matches!(
+            app.take_pending_action(),
+            Some(TeacherUiAction::TeacherInteraction(_))
+        ));
+    }
+
     #[test]
     fn pending_action_slot_is_bounded_and_preserves_oldest_action() {
         let mut app = TeacherEguiShell::default();
@@ -351,7 +450,7 @@ mod tests {
             source_id: MonitoringSourceId(7),
         });
 
-        app.queue_action(first);
+        app.queue_action(first.clone());
         app.queue_action(second);
 
         assert_eq!(app.take_pending_action(), Some(first));
