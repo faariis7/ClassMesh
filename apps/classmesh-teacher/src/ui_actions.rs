@@ -2,7 +2,8 @@ use eframe::egui;
 
 use classmesh_protocol::control_wire::AppIdentity;
 use classmesh_protocol::teacher_interaction::{
-    open_target_available, teacher_message_available, validate_https_url, validate_message,
+    MAX_OPEN_URL_BYTES, MAX_TEACHER_MESSAGE_BYTES, open_target_available,
+    teacher_message_available, validate_https_url, validate_message,
 };
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
@@ -58,6 +59,7 @@ pub fn show_device_actions(
             .desired_rows(3)
             .hint_text("Message to display on the selected device"),
     );
+    truncate_utf8_bytes(&mut draft.message, MAX_TEACHER_MESSAGE_BYTES);
     if !message_available {
         ui.small("Teacher messages are unavailable for this device.");
     }
@@ -78,6 +80,7 @@ pub fn show_device_actions(
         open_available && !action_pending,
         egui::TextEdit::singleline(&mut draft.https_url).hint_text("https://example.com/lesson"),
     );
+    truncate_utf8_bytes(&mut draft.https_url, MAX_OPEN_URL_BYTES);
     if !open_available {
         ui.small("Open-target actions are unavailable for this device.");
     }
@@ -128,6 +131,17 @@ pub fn reset_teacher_interaction_draft(draft: &mut TeacherInteractionDraft) {
     draft.clear();
 }
 
+fn truncate_utf8_bytes(value: &mut String, max_bytes: usize) {
+    if value.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes.min(value.len());
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+}
+
 const fn app_label(app: AppIdentity) -> &'static str {
     match app {
         AppIdentity::DefaultBrowser => "Default browser",
@@ -170,6 +184,18 @@ mod tests {
         };
         reset_teacher_interaction_draft(&mut draft);
         assert_eq!(draft, TeacherInteractionDraft::default());
+    }
+
+    #[test]
+    fn draft_byte_bounds_preserve_utf8_boundaries() {
+        let mut value = "é".repeat(MAX_TEACHER_MESSAGE_BYTES);
+        truncate_utf8_bytes(&mut value, MAX_TEACHER_MESSAGE_BYTES);
+        assert!(value.len() <= MAX_TEACHER_MESSAGE_BYTES);
+        assert!(std::str::from_utf8(value.as_bytes()).is_ok());
+
+        let mut url = format!("https://example.com/{}", "x".repeat(MAX_OPEN_URL_BYTES));
+        truncate_utf8_bytes(&mut url, MAX_OPEN_URL_BYTES);
+        assert_eq!(url.len(), MAX_OPEN_URL_BYTES);
     }
 
     #[test]
