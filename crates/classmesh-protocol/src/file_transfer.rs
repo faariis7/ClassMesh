@@ -167,10 +167,7 @@ mod tests {
             FILE_TRANSFER_MIN_VERSION,
             &BTreeSet::new()
         ));
-        assert!(file_transfer_available(
-            FILE_TRANSFER_MIN_VERSION,
-            &caps
-        ));
+        assert!(file_transfer_available(FILE_TRANSFER_MIN_VERSION, &caps));
         assert!(file_transfer_available(
             ProtocolVersion { major: 0, minor: 8 },
             &caps
@@ -257,15 +254,9 @@ mod tests {
         assert_eq!(validate_chunk(&bad), Err(FileTransferError::ChunkTooLarge));
         bad = chunk.clone();
         bad.offset = u64::MAX;
-        assert_eq!(
-            validate_chunk(&bad),
-            Err(FileTransferError::InvalidOffset)
-        );
+        assert_eq!(validate_chunk(&bad), Err(FileTransferError::InvalidOffset));
         bad.offset = MAX_FILE_TRANSFER_BYTES;
-        assert_eq!(
-            validate_chunk(&bad),
-            Err(FileTransferError::InvalidOffset)
-        );
+        assert_eq!(validate_chunk(&bad), Err(FileTransferError::InvalidOffset));
         bad = chunk;
         bad.transfer_id = vec![3; 15];
         assert_eq!(
