@@ -70,8 +70,8 @@ impl<S: FileTransferInboxSink> FileTransferReceiver<S> {
     }
 
     #[must_use]
-    pub fn into_sink(self) -> S {
-        self.sink
+    pub const fn sink(&self) -> &S {
+        &self.sink
     }
 
     pub fn offer(
@@ -97,9 +97,10 @@ impl<S: FileTransferInboxSink> FileTransferReceiver<S> {
         }
 
         let id = validated_id(&offer.transfer_id);
-        self.sink
-            .begin(&id, &offer.filename, offer.total_size)
-            .map_err(|_| ReceiveError::SinkFailure)?;
+        if self.sink.begin(&id, &offer.filename, offer.total_size).is_err() {
+            self.sink.abort(&id);
+            return Err(ReceiveError::SinkFailure);
+        }
         self.active = Some(ActiveTransfer {
             peer,
             offer: offer.clone(),
@@ -203,6 +204,15 @@ impl<S: FileTransferInboxSink> FileTransferReceiver<S> {
             return Err(ReceiveError::WrongTransferOrSession);
         }
         Ok(active)
+    }
+}
+
+impl<S: FileTransferInboxSink> Drop for FileTransferReceiver<S> {
+    fn drop(&mut self) {
+        if let Some(active) = self.active.take() {
+            let id = validated_id(&active.offer.transfer_id);
+            self.sink.abort(&id);
+        }
     }
 }
 
@@ -318,7 +328,7 @@ mod tests {
         assert_eq!(receiver.chunk(peer(), &chunk(3, b"def")).unwrap().next_offset, 6);
         assert_eq!(receiver.finish(peer(), &finish()).unwrap().state,
             FileTransferState::Completed as i32);
-        let sink = receiver.into_sink();
+        let sink = receiver.sink();
         assert_eq!(sink.bytes, data);
         assert_eq!((sink.starts, sink.writes, sink.commits, sink.aborts), (1, 2, 1, 0));
     }
@@ -339,7 +349,7 @@ mod tests {
         assert_eq!(receiver.chunk(peer(), &chunk(0, b"abc")).unwrap().next_offset, 3);
         assert_eq!(receiver.chunk(peer(), &chunk(0, b"abc")),
             Err(ReceiveError::NonSequentialChunk));
-        let sink = receiver.into_sink();
+        let sink = receiver.sink();
         assert_eq!(sink.writes, 1);
     }
 
@@ -359,7 +369,7 @@ mod tests {
         receiver.offer(peer(), &bad).unwrap();
         receiver.chunk(peer(), &chunk(0, data)).unwrap();
         assert_eq!(receiver.finish(peer(), &finish()), Err(ReceiveError::HashMismatch));
-        let sink = receiver.into_sink();
+        let sink = receiver.sink();
         assert_eq!(sink.commits, 0);
         assert_eq!(sink.aborts, 2);
     }
@@ -373,7 +383,7 @@ mod tests {
             Err(ReceiveError::SinkFailure));
         assert_eq!(receiver.finish(peer(), &finish()),
             Err(ReceiveError::NoActiveTransfer));
-        let sink = receiver.into_sink();
+        let sink = receiver.sink();
         assert_eq!((sink.writes, sink.commits, sink.aborts), (1, 0, 1));
     }
 
