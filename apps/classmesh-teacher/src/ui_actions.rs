@@ -100,17 +100,19 @@ pub fn show_device_actions(
 
     ui.separator();
     ui.strong("Open approved app");
-    egui::ComboBox::from_id_salt("classmesh_teacher_action_app")
-        .selected_text(draft.app.map(app_label).unwrap_or("Select app"))
-        .show_ui(ui, |ui| {
-            for app in [
-                AppIdentity::DefaultBrowser,
-                AppIdentity::Calculator,
-                AppIdentity::TextEditor,
-            ] {
-                ui.selectable_value(&mut draft.app, Some(app), app_label(app));
-            }
-        });
+    ui.add_enabled_ui(open_available && !action_pending, |ui| {
+        egui::ComboBox::from_id_salt("classmesh_teacher_action_app")
+            .selected_text(draft.app.map(app_label).unwrap_or("Select app"))
+            .show_ui(ui, |ui| {
+                for app in [
+                    AppIdentity::DefaultBrowser,
+                    AppIdentity::Calculator,
+                    AppIdentity::TextEditor,
+                ] {
+                    ui.selectable_value(&mut draft.app, Some(app), app_label(app));
+                }
+            });
+    });
     if let Some(app) = draft.app {
         if ui
             .add_enabled(
