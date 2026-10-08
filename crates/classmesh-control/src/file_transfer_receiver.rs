@@ -160,12 +160,12 @@ impl<S: FileTransferInboxSink> FileTransferReceiver<S> {
             self.active = None;
             return Err(ReceiveError::HashMismatch);
         }
+        let total = active.next_offset;
         if self.sink.complete(&id).is_err() {
             self.sink.abort(&id);
             self.active = None;
             return Err(ReceiveError::SinkFailure);
         }
-        let total = active.next_offset;
         self.active = None;
         Ok(status(
             &finish.transfer_id,
