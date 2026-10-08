@@ -490,6 +490,131 @@ mod tests {
         BTreeSet::from([Capability::UdpUnicast])
     }
 
+    fn teacher_interaction_context(
+        capabilities: BTreeSet<Capability>,
+    ) -> TeacherInteractionUiContext {
+        TeacherInteractionUiContext {
+            source_id: MonitoringSourceId(7),
+            version: classmesh_protocol::PROTOCOL_VERSION,
+            capabilities,
+        }
+    }
+
+    #[test]
+    fn teacher_message_action_is_source_bound_capability_aware_and_protocol_valid() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let context = teacher_interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+
+        let action = prepare_teacher_interaction_ui_action(
+            MonitoringSourceId(7),
+            TeacherInteractionUiRequest::Message("Class starts now.".to_owned()),
+            &classroom,
+            Some(&context),
+        )
+        .expect("message capability is negotiated for the selected source");
+
+        assert_eq!(action.source_id, MonitoringSourceId(7));
+        assert_eq!(
+            classmesh_protocol::teacher_interaction::validate_request(&action.request),
+            Ok(TeacherInteractionKind::Message)
+        );
+    }
+
+    #[test]
+    fn teacher_open_target_action_requires_exact_open_target_capability() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let message_only =
+            teacher_interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+
+        assert_eq!(
+            prepare_teacher_interaction_ui_action(
+                MonitoringSourceId(7),
+                TeacherInteractionUiRequest::HttpsUrl("https://example.com/lesson".to_owned()),
+                &classroom,
+                Some(&message_only),
+            ),
+            Err(TeacherInteractionUiActionError::CapabilityUnavailable(
+                TeacherInteractionKind::OpenTarget
+            ))
+        );
+
+        let open =
+            teacher_interaction_context(BTreeSet::from([Capability::OpenTarget]));
+        let action = prepare_teacher_interaction_ui_action(
+            MonitoringSourceId(7),
+            TeacherInteractionUiRequest::App(AppIdentity::Calculator),
+            &classroom,
+            Some(&open),
+        )
+        .expect("closed app identity is available");
+        assert_eq!(
+            classmesh_protocol::teacher_interaction::validate_request(&action.request),
+            Ok(TeacherInteractionKind::OpenTarget)
+        );
+    }
+
+    #[test]
+    fn teacher_interaction_rejects_stale_selection_or_context_before_queueing() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let context = teacher_interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+
+        classroom.select(None).unwrap();
+        assert_eq!(
+            prepare_teacher_interaction_ui_action(
+                MonitoringSourceId(7),
+                TeacherInteractionUiRequest::Message("hello".to_owned()),
+                &classroom,
+                Some(&context),
+            ),
+            Err(TeacherInteractionUiActionError::SelectionChanged {
+                expected: MonitoringSourceId(7),
+                selected: None,
+            })
+        );
+
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let wrong_context = TeacherInteractionUiContext {
+            source_id: MonitoringSourceId(8),
+            version: classmesh_protocol::PROTOCOL_VERSION,
+            capabilities: BTreeSet::from([Capability::TeacherMessage]),
+        };
+        assert_eq!(
+            prepare_teacher_interaction_ui_action(
+                MonitoringSourceId(7),
+                TeacherInteractionUiRequest::Message("hello".to_owned()),
+                &classroom,
+                Some(&wrong_context),
+            ),
+            Err(TeacherInteractionUiActionError::ContextSourceChanged {
+                expected: MonitoringSourceId(7),
+                actual: MonitoringSourceId(8),
+            })
+        );
+    }
+
+    #[test]
+    fn teacher_interaction_rejects_invalid_typed_input_before_action_creation() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let context =
+            teacher_interaction_context(BTreeSet::from([Capability::OpenTarget]));
+
+        assert_eq!(
+            prepare_teacher_interaction_ui_action(
+                MonitoringSourceId(7),
+                TeacherInteractionUiRequest::HttpsUrl("file:///C:/Windows/cmd.exe".to_owned()),
+                &classroom,
+                Some(&context),
+            ),
+            Err(TeacherInteractionUiActionError::InvalidRequest(
+                TeacherInteractionError::UnsupportedUrlScheme
+            ))
+        );
+    }
+
     #[test]
     fn shell_defaults_to_classroom_without_engine_action() {
         let shell = TeacherUiShellState::default();
