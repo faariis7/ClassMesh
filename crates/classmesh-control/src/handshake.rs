@@ -555,6 +555,7 @@ fn capability_to_wire(capability: Capability) -> i32 {
         Capability::SystemActions => 14,
         Capability::TeacherMessage => 15,
         Capability::OpenTarget => 16,
+        Capability::FileTransfer => 17,
     }
 }
 
@@ -576,6 +577,7 @@ fn capability_from_wire(value: i32) -> Option<Capability> {
         14 => Some(Capability::SystemActions),
         15 => Some(Capability::TeacherMessage),
         16 => Some(Capability::OpenTarget),
+        17 => Some(Capability::FileTransfer),
         _ => None,
     }
 }
@@ -586,6 +588,14 @@ mod tests {
 
     fn id(value: u8) -> PrincipalId {
         PrincipalId([value; 32])
+    }
+
+    #[test]
+    fn v07_file_transfer_capability_has_explicit_additive_wire_mapping() {
+        assert_eq!(capability_to_wire(Capability::FileTransfer), 17);
+        assert_eq!(capability_from_wire(17), Some(Capability::FileTransfer));
+        assert_eq!(capability_from_wire(16), Some(Capability::OpenTarget));
+        assert_eq!(capability_from_wire(18), None);
     }
 
     fn capabilities(values: &[Capability]) -> BTreeSet<Capability> {

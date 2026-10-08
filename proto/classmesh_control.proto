@@ -25,6 +25,7 @@ enum Capability {
   CAPABILITY_SYSTEM_ACTIONS = 14;
   CAPABILITY_TEACHER_MESSAGE = 15;
   CAPABILITY_OPEN_TARGET = 16;
+  CAPABILITY_FILE_TRANSFER = 17;
 }
 
 enum PrincipalRole {
@@ -365,6 +366,57 @@ message TeacherInteractionResult {
   string diagnostic = 3;
 }
 
+// Protocol v0.7 delivery-only file-transfer primitives. These messages
+// contain no filesystem path, command, executable or shell input. The receiver
+// is confined to its own application-managed inbox by the typed destination.
+enum FileDestinationPolicy {
+  FILE_DESTINATION_POLICY_UNSPECIFIED = 0;
+  FILE_DESTINATION_POLICY_APP_INBOX = 1;
+}
+
+message FileTransferOffer {
+  // Opaque nonzero 16-byte transfer identifier; envelope.request_id still
+  // supplies the independent nonzero authenticated command correlation.
+  bytes transfer_id = 1;
+  string filename = 2;
+  uint64 total_size = 3;
+  bytes sha256 = 4;
+  FileDestinationPolicy destination = 5;
+}
+
+message FileTransferChunk {
+  bytes transfer_id = 1;
+  uint64 offset = 2;
+  bytes content = 3;
+}
+
+message FileTransferFinish {
+  bytes transfer_id = 1;
+}
+
+message FileTransferCancel {
+  bytes transfer_id = 1;
+}
+
+enum FileTransferState {
+  FILE_TRANSFER_STATE_UNSPECIFIED = 0;
+  FILE_TRANSFER_STATE_ACCEPTED = 1;
+  FILE_TRANSFER_STATE_PROGRESS = 2;
+  FILE_TRANSFER_STATE_COMPLETED = 3;
+  FILE_TRANSFER_STATE_REJECTED = 4;
+  FILE_TRANSFER_STATE_CANCELLED = 5;
+  FILE_TRANSFER_STATE_FAILED = 6;
+}
+
+message FileTransferStatus {
+  bytes transfer_id = 1;
+  FileTransferState state = 2;
+  // Receiver-acknowledged next contiguous offset for bounded resume. The
+  // later transfer coordinator validates monotonicity and declared total size.
+  uint64 next_offset = 3;
+  string diagnostic = 4;
+}
+
 // Phase 7 presentation lifecycle is transport-neutral. Media transport/profile
 // negotiation remains in StreamOffer so lifecycle control does not select a
 // multicast/unicast transport before the relevant physical evidence exists.
@@ -471,5 +523,10 @@ message ControlEnvelope {
     SystemActionResult system_action_result = 45;
     TeacherInteractionRequest teacher_interaction_request = 46;
     TeacherInteractionResult teacher_interaction_result = 47;
+    FileTransferOffer file_transfer_offer = 48;
+    FileTransferChunk file_transfer_chunk = 49;
+    FileTransferFinish file_transfer_finish = 50;
+    FileTransferCancel file_transfer_cancel = 51;
+    FileTransferStatus file_transfer_status = 52;
   }
 }
