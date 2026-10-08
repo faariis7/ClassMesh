@@ -45,6 +45,10 @@ pub fn show_device_actions(
         ui.label("Control capabilities are stale for the current selection.");
         return None;
     }
+    if context.control_session_id == 0 {
+        ui.label("An authenticated control session is not available for the selected device.");
+        return None;
+    }
 
     ui.small("Actions target only the currently selected classroom device.");
 
@@ -197,6 +201,26 @@ mod tests {
         let mut url = format!("https://example.com/{}", "x".repeat(MAX_OPEN_URL_BYTES));
         truncate_utf8_bytes(&mut url, MAX_OPEN_URL_BYTES);
         assert_eq!(url.len(), MAX_OPEN_URL_BYTES);
+    }
+
+    #[test]
+    fn zero_control_session_is_never_an_actionable_context() {
+        let mut context = context(BTreeSet::from([
+            Capability::TeacherMessage,
+            Capability::OpenTarget,
+        ]));
+        context.control_session_id = 0;
+        assert_eq!(context.control_session_id, 0);
+        assert!(teacher_message_available(
+            context.version,
+            &context.capabilities
+        ));
+        assert!(open_target_available(
+            context.version,
+            &context.capabilities
+        ));
+        // Rendering checks the session binding separately before enabling any
+        // controls; protocol capability helpers intentionally remain pure.
     }
 
     #[test]
