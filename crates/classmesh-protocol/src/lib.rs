@@ -177,6 +177,58 @@ mod tests {
     }
 
     #[test]
+    fn file_transfer_delivery_messages_round_trip_on_v07() {
+        use control_wire::{
+            FileDestinationPolicy, FileTransferCancel, FileTransferChunk,
+            FileTransferFinish, FileTransferOffer, FileTransferState, FileTransferStatus,
+            control_envelope,
+        };
+
+        let id = vec![7; 16];
+        let payloads = [
+            control_envelope::Payload::FileTransferOffer(FileTransferOffer {
+                transfer_id: id.clone(),
+                filename: "lesson.pdf".to_owned(),
+                total_size: 6,
+                sha256: vec![5; 32],
+                destination: FileDestinationPolicy::AppInbox as i32,
+            }),
+            control_envelope::Payload::FileTransferChunk(FileTransferChunk {
+                transfer_id: id.clone(),
+                offset: 0,
+                content: vec![1, 2, 3, 4, 5, 6],
+            }),
+            control_envelope::Payload::FileTransferFinish(FileTransferFinish {
+                transfer_id: id.clone(),
+            }),
+            control_envelope::Payload::FileTransferCancel(FileTransferCancel {
+                transfer_id: id.clone(),
+            }),
+            control_envelope::Payload::FileTransferStatus(FileTransferStatus {
+                transfer_id: id,
+                state: FileTransferState::Progress as i32,
+                next_offset: 6,
+                diagnostic: String::new(),
+            }),
+        ];
+
+        for (i, payload) in payloads.into_iter().enumerate() {
+            let envelope = control_wire::ControlEnvelope {
+                control_session_id: 31,
+                sequence: (i + 1) as u64,
+                protocol_version: Some(control_wire::ProtocolVersion { major: 0, minor: 7 }),
+                request_id: 42,
+                payload: Some(payload),
+            };
+            let encoded = envelope.encode_to_vec();
+            assert!(encoded.len() < 256 * 1024);
+            let decoded = control_wire::ControlEnvelope::decode(encoded.as_slice())
+                .expect("file-transfer envelope must decode");
+            assert_eq!(decoded, envelope);
+        }
+    }
+
+    #[test]
     fn presentation_start_round_trips_on_v03() {
         let envelope = control_wire::ControlEnvelope {
             control_session_id: 44,
