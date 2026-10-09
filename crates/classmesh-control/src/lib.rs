@@ -10,6 +10,7 @@ pub mod dispatch;
 pub mod enrollment;
 pub mod enrollment_result;
 pub mod file_transfer_receiver;
+pub mod file_transfer_source;
 pub mod framing;
 pub mod group_media_delivery;
 pub mod group_media_feedback;
