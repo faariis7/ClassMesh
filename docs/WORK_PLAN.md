@@ -31,10 +31,10 @@ Phase 5 tracking issue #32 and Phase 11 Issue #298 are complete. Active product 
 ## Current priority
 
 1. **Phase 12C4b Teacher UI implementation merged in PR #371, Portable + Windows CI #1491 green.** The exact Session 1 Windows runtime/visual and accessibility check remains open and is not replaced by hosted CI.
-2. **Phase 12D1 COMPLETE in PR #373 (CI #1503 green), 12D2a COMPLETE in PR #376 (CI #1511 green), 12D2b COMPLETE in PR #377 (CI #1517 green), and 12D2c1 COMPLETE in PR #380 (CI #1528 green). Phase 12D2c2 is CURRENT in PR #381.**
-3. **12D2c2 — bounded Service routing:** capacity-one authenticated principal/control-session/request-bound dispatch, exact typed transfer payloads, bounded commit/cancel/timeout/backpressure semantics, validated FileTransferStatus responses and fail-closed storage-unavailable behavior until production inbox storage exists.
-4. Keep production `FileTransfer` capability advertisement OFF until a real app-owned storage boundary is wired and the end-to-end path is serviceable. No raw paths, shell fragments, executable paths or Windows/filesystem side effects in 12D2c2.
-5. After 12D2c2, proceed directly to **12D3 ReceiveFile pull/recovery** using portable/app-owned typed source boundaries. Production Windows inbox/source storage and capability enablement remain owned by **12D4**.
+2. **Phase 12D1 COMPLETE (#373, CI #1503), 12D2a COMPLETE (#376, CI #1511), 12D2b COMPLETE (#377, CI #1517), 12D2c1 COMPLETE (#380, CI #1528), and 12D2c2 COMPLETE in PR #381 with CI #1532 green (merge `cf74941`). Phase 12D3a is CURRENT in PR #383.**
+3. **12D3a — portable app-owned source boundary:** one active authenticated peer/session/transfer/source binding, opaque nonzero source IDs, validated v0.7 offer metadata, bounded <=64 KiB offset reads for later resume, and deterministic close on cancel/complete/drop. No raw filesystem path or Windows side effect.
+4. **12D3b1 is prepared in PR #384** as an additive v0.8 typed pull-initiation contract only. Existing delivery primitives remain v0.7 and production `FileTransfer` capability advertisement remains OFF.
+5. After 12D3a, land the minimal pull contract/authorization/routing slices, then keep production Windows source/inbox storage and capability enablement owned by **12D4**.
 6. Keep Phase 4, 6F, 7D/7H, 8D, 9F, 10G, 12B4b and 12C4 runtime/visual gates open; hosted CI is not physical evidence. Preserve Phase 13 installer/update/recovery and Phase 14 hardening in roadmap order.
 
 ## Rules while Phase 4 hardware is unavailable
