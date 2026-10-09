@@ -89,8 +89,9 @@ mod windows_service_app {
     const MAX_MEDIA_RECONFIGURE_ATTEMPTS: u8 = 4;
 
     use crate::control_runtime::{
-        ControlRuntime, ControlRuntimeConfig, ControlRuntimeDispatch, ControlRuntimeState,
-        FileTransferDispatch, FileTransferDispatchChannels, FileTransferDispatchOutcome,
+        AdministrativeDispatchChannels, ControlRuntime, ControlRuntimeConfig, ControlRuntimeDispatch,
+        ControlRuntimeState, FileTransferDispatch, FileTransferDispatchChannels,
+        FileTransferDispatchOutcome,
         FocusedMediaDispatchChannels, FocusedMediaFeedback, FocusedMediaReconfigure,
         FocusedMediaStart, InputAvailability, InputDispatchChannels, PresentationDispatchChannels,
         PresentationFeedbackBus, PresentationKeyInstallDispatch,
@@ -1637,6 +1638,11 @@ mod windows_service_app {
         let file_transfer_channels = FileTransferDispatchChannels {
             tx: file_transfer_tx,
         };
+        let administrative_channels = AdministrativeDispatchChannels {
+            system_actions: system_action_channels,
+            teacher_interactions: teacher_interaction_channels,
+            file_transfers: file_transfer_channels,
+        };
         let (media_start_tx, media_start_rx) =
             mpsc::sync_channel::<FocusedMediaStart>(FOCUSED_MEDIA_QUEUE_CAPACITY);
         let (media_reconfigure_tx, media_reconfigure_rx) =
@@ -1707,9 +1713,7 @@ mod windows_service_app {
         let presentation_feedback = PresentationFeedbackBus::default();
         let control_dispatch = ControlRuntimeDispatch::new(
             input_channels,
-            system_action_channels,
-            teacher_interaction_channels,
-            file_transfer_channels,
+            administrative_channels,
             media_channels,
             presentation_channels,
             presentation_feedback.clone(),
@@ -1799,6 +1803,10 @@ mod windows_service_app {
                         .send(FileTransferDispatchOutcome::Cancelled);
                     continue;
                 }
+                // Preserve and consume the exact authenticated binding and typed payload at the
+                // Service boundary even while production inbox storage is intentionally absent.
+                let _authenticated_principal = dispatch.principal_id();
+                let _transfer_id = dispatch.payload().transfer_id();
                 let _ = dispatch
                     .reply_tx
                     .send(FileTransferDispatchOutcome::StorageUnavailable);
