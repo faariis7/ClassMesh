@@ -695,8 +695,7 @@ mod tests {
         assert_eq!(guard.last_sequence(), 2);
 
         let older_version = ProtocolVersion { major: 0, minor: 7 };
-        let mut old_guard =
-            AuthenticatedControlGuard::new(identity(), 77, older_version, 1);
+        let mut old_guard = AuthenticatedControlGuard::new(identity(), 77, older_version, 1);
         let older = ControlEnvelope {
             protocol_version: Some(WireProtocolVersion { major: 0, minor: 7 }),
             ..envelope.clone()
