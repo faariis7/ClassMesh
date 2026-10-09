@@ -392,17 +392,13 @@ mod tests {
         assert_eq!(resumed.offset, MAX_FILE_CHUNK_BYTES as u64);
         assert_eq!(
             session.source().reads,
-            vec![
-                (0, MAX_FILE_CHUNK_BYTES),
-                (MAX_FILE_CHUNK_BYTES as u64, 7),
-            ]
+            vec![(0, MAX_FILE_CHUNK_BYTES), (MAX_FILE_CHUNK_BYTES as u64, 7),]
         );
     }
 
     #[test]
     fn wrong_peer_or_transfer_rejects_before_source_read() {
-        let mut session =
-            FileTransferSourceSession::new(RecordingSource::new(b"abcdef".to_vec()));
+        let mut session = FileTransferSourceSession::new(RecordingSource::new(b"abcdef".to_vec()));
         session.offer(peer(), &transfer_id(), source_id()).unwrap();
 
         let mut other = peer();
@@ -469,8 +465,7 @@ mod tests {
             Err(SourceError::InvalidSourceId)
         );
 
-        let mut session =
-            FileTransferSourceSession::new(RecordingSource::new(b"abc".to_vec()));
+        let mut session = FileTransferSourceSession::new(RecordingSource::new(b"abc".to_vec()));
         let mut invalid_peer = peer();
         invalid_peer.control_session_id = 0;
         assert_eq!(
@@ -479,7 +474,9 @@ mod tests {
         );
         assert!(matches!(
             session.offer(peer(), &[0; 16], source_id()),
-            Err(SourceError::InvalidPayload(FileTransferError::InvalidTransferId))
+            Err(SourceError::InvalidPayload(
+                FileTransferError::InvalidTransferId
+            ))
         ));
 
         let closes = Arc::new(AtomicUsize::new(0));
