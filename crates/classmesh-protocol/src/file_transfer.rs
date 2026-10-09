@@ -111,9 +111,7 @@ pub fn validate_offer(offer: &FileTransferOffer) -> Result<(), FileTransferError
     Ok(())
 }
 
-pub fn validate_pull_request(
-    request: &FileTransferPullRequest,
-) -> Result<(), FileTransferError> {
+pub fn validate_pull_request(request: &FileTransferPullRequest) -> Result<(), FileTransferError> {
     validate_transfer_id(&request.transfer_id)?;
     validate_source_id(&request.source_id)?;
     if FileSourcePolicy::try_from(request.source) != Ok(FileSourcePolicy::AppOutbox) {
