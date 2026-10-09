@@ -51,7 +51,9 @@ use classmesh_protocol::control_wire::{
     TeacherInteractionState, control_envelope,
 };
 use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
-use classmesh_protocol::file_transfer::{file_transfer_available, validate_status as validate_file_transfer_status};
+use classmesh_protocol::file_transfer::{
+    file_transfer_available, validate_status as validate_file_transfer_status,
+};
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION, ProtocolVersion};
 use classmesh_security::{AuthorizationStore, Permission, PrincipalId};
 use classmesh_windows_runtime::ipc::{
@@ -269,14 +271,12 @@ fn file_transfer_failure(
             FileTransferState::Failed,
             "file_transfer.service_reply_dropped",
         ),
-        FileTransferDispatchOutcome::TimedOut => (
-            FileTransferState::Failed,
-            "file_transfer.service_timeout",
-        ),
-        FileTransferDispatchOutcome::Cancelled => (
-            FileTransferState::Cancelled,
-            "file_transfer.cancelled",
-        ),
+        FileTransferDispatchOutcome::TimedOut => {
+            (FileTransferState::Failed, "file_transfer.service_timeout")
+        }
+        FileTransferDispatchOutcome::Cancelled => {
+            (FileTransferState::Cancelled, "file_transfer.cancelled")
+        }
     };
     FileTransferStatus {
         transfer_id: transfer_id.to_vec(),
@@ -2725,9 +2725,7 @@ async fn run_established_session(
                 };
                 let outcome = match file_transfers.tx.try_send(dispatch) {
                     Ok(()) => await_file_transfer_dispatch(commit, &mut reply_rx).await,
-                    Err(mpsc::TrySendError::Full(_)) => {
-                        FileTransferDispatchOutcome::Backpressure
-                    }
+                    Err(mpsc::TrySendError::Full(_)) => FileTransferDispatchOutcome::Backpressure,
                     Err(mpsc::TrySendError::Disconnected(_)) => {
                         FileTransferDispatchOutcome::ServiceUnavailable
                     }
