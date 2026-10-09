@@ -90,8 +90,8 @@ mod windows_service_app {
 
     use crate::control_runtime::{
         ControlRuntime, ControlRuntimeConfig, ControlRuntimeDispatch, ControlRuntimeState,
-        FocusedMediaDispatchChannels, FocusedMediaFeedback, FocusedMediaReconfigure,
         FileTransferDispatch, FileTransferDispatchChannels, FileTransferDispatchOutcome,
+        FocusedMediaDispatchChannels, FocusedMediaFeedback, FocusedMediaReconfigure,
         FocusedMediaStart, InputAvailability, InputDispatchChannels, PresentationDispatchChannels,
         PresentationFeedbackBus, PresentationKeyInstallDispatch,
         PresentationMulticastStartDispatch, PresentationUnicastStartDispatch, SystemActionDispatch,
