@@ -617,8 +617,7 @@ mod tests {
 
             let mut missing_id = envelope.clone();
             missing_id.request_id = 0;
-            let mut missing_guard =
-                AuthenticatedControlGuard::new(identity(), 77, FILE_VERSION, 1);
+            let mut missing_guard = AuthenticatedControlGuard::new(identity(), 77, FILE_VERSION, 1);
             assert_eq!(
                 dispatch_privileged_command(&mut missing_guard, &authorization, &missing_id, 150),
                 Err(PrivilegedDispatchError::FileTransferRequestMissingId)
@@ -626,8 +625,7 @@ mod tests {
             assert_eq!(missing_guard.last_sequence(), 1);
 
             let denied = store(BTreeSet::from([Permission::ReceiveFile]));
-            let mut denied_guard =
-                AuthenticatedControlGuard::new(identity(), 77, FILE_VERSION, 1);
+            let mut denied_guard = AuthenticatedControlGuard::new(identity(), 77, FILE_VERSION, 1);
             assert!(matches!(
                 dispatch_privileged_command(&mut denied_guard, &denied, &envelope, 150),
                 Err(PrivilegedDispatchError::Authorization(
