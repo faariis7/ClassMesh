@@ -3304,6 +3304,82 @@ mod tests {
     }
 
     #[test]
+    fn file_transfer_routing_failure_statuses_are_bounded_and_valid() {
+        let transfer_id = vec![7_u8; 16];
+        for (outcome, expected_state, expected_diagnostic) in [
+            (
+                FileTransferDispatchOutcome::Backpressure,
+                FileTransferState::Rejected,
+                "file_transfer.service_backpressure",
+            ),
+            (
+                FileTransferDispatchOutcome::ServiceUnavailable,
+                FileTransferState::Rejected,
+                "file_transfer.service_unavailable",
+            ),
+            (
+                FileTransferDispatchOutcome::StorageUnavailable,
+                FileTransferState::Rejected,
+                "file_transfer.storage_unavailable",
+            ),
+            (
+                FileTransferDispatchOutcome::ReplyDropped,
+                FileTransferState::Failed,
+                "file_transfer.service_reply_dropped",
+            ),
+            (
+                FileTransferDispatchOutcome::TimedOut,
+                FileTransferState::Failed,
+                "file_transfer.service_timeout",
+            ),
+            (
+                FileTransferDispatchOutcome::Cancelled,
+                FileTransferState::Cancelled,
+                "file_transfer.cancelled",
+            ),
+        ] {
+            let status = file_transfer_failure(&transfer_id, outcome);
+            assert_eq!(status.transfer_id, transfer_id);
+            assert_eq!(status.state, expected_state as i32);
+            assert_eq!(status.next_offset, 0);
+            assert_eq!(status.diagnostic, expected_diagnostic);
+            assert_eq!(
+                classmesh_protocol::file_transfer::validate_status(&status),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn file_transfer_routing_preserves_valid_receiver_status() {
+        let status = FileTransferStatus {
+            transfer_id: vec![9_u8; 16],
+            state: FileTransferState::Progress as i32,
+            next_offset: 65_536,
+            diagnostic: String::new(),
+        };
+        assert_eq!(
+            file_transfer_failure(
+                &status.transfer_id,
+                FileTransferDispatchOutcome::Status(status.clone()),
+            ),
+            status
+        );
+    }
+
+    #[test]
+    fn file_transfer_capability_stays_off_until_storage_is_serviceable() {
+        let worker = WorkerCapabilityState::default();
+        let capabilities = service_hello_capabilities(&worker, false);
+        assert!(!capabilities.contains(&Capability::FileTransfer));
+
+        worker.activate(3, 42, 7);
+        let with_worker = service_hello_capabilities(&worker, false);
+        assert!(!with_worker.contains(&Capability::FileTransfer));
+        assert!(!file_transfer_available(PROTOCOL_VERSION, &with_worker));
+    }
+
+    #[test]
     fn presentation_runtime_capability_is_explicit_and_probe_gated() {
         let worker = WorkerCapabilityState::default();
         let capabilities = service_hello_capabilities(&worker, false);
