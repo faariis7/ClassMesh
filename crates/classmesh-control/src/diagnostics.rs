@@ -153,9 +153,7 @@ pub const fn privileged_dispatch_diagnostic_code(error: &PrivilegedDispatchError
         PrivilegedDispatchError::FileTransferPullRequiresProtocolV8 => {
             "control.command.file_pull_requires_v0_8"
         }
-        PrivilegedDispatchError::InvalidFileTransferPull(_) => {
-            "control.command.file_pull_invalid"
-        }
+        PrivilegedDispatchError::InvalidFileTransferPull(_) => "control.command.file_pull_invalid",
         PrivilegedDispatchError::InvalidFileTransferOffer(_) => {
             "control.command.file_offer_invalid"
         }
@@ -210,11 +208,9 @@ mod tests {
             "control.command.file_pull_requires_v0_8"
         );
         assert_eq!(
-            privileged_dispatch_diagnostic_code(
-                &PrivilegedDispatchError::InvalidFileTransferPull(
-                    classmesh_protocol::file_transfer::FileTransferError::InvalidSourceId
-                )
-            ),
+            privileged_dispatch_diagnostic_code(&PrivilegedDispatchError::InvalidFileTransferPull(
+                classmesh_protocol::file_transfer::FileTransferError::InvalidSourceId
+            )),
             "control.command.file_pull_invalid"
         );
     }
