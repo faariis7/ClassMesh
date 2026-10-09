@@ -42,7 +42,8 @@ use classmesh_core::{NetworkMetrics, StreamKind};
 use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver};
 use classmesh_network::runtime_multicast_probe::probe_local_multicast_interface;
 use classmesh_protocol::control_wire::{
-    ControlEnvelope, HeartbeatAck, InputEvent, KeyframeRequest,
+    ControlEnvelope, FileTransferCancel, FileTransferChunk, FileTransferFinish, FileTransferOffer,
+    FileTransferState, FileTransferStatus, HeartbeatAck, InputEvent, KeyframeRequest,
     MediaTransport as WireMediaTransport, Nack, PresentationState as WirePresentationState,
     PresentationStatus, ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamAnswer,
     StreamKind as WireStreamKind, StreamReconfigure, SystemAction, SystemActionResult,
@@ -50,6 +51,7 @@ use classmesh_protocol::control_wire::{
     TeacherInteractionState, control_envelope,
 };
 use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
+use classmesh_protocol::file_transfer::{file_transfer_available, validate_status as validate_file_transfer_status};
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION, ProtocolVersion};
 use classmesh_security::{AuthorizationStore, Permission, PrincipalId};
 use classmesh_windows_runtime::ipc::{
@@ -73,6 +75,7 @@ const PRESENTATION_KEY_INSTALL_TIMEOUT: Duration = Duration::from_secs(1);
 const PRESENTATION_START_TIMEOUT: Duration = Duration::from_secs(1);
 const SYSTEM_ACTION_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const TEACHER_INTERACTION_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
+const FILE_TRANSFER_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const PRESENTATION_FEEDBACK_BUS_CAPACITY: usize = 64;
 const CONTROL_INBOUND_QUEUE_CAPACITY: usize = 32;
 
@@ -194,6 +197,108 @@ pub(crate) struct TeacherInteractionDispatch {
 #[derive(Debug, Clone)]
 pub(crate) struct TeacherInteractionDispatchChannels {
     pub(crate) tx: mpsc::SyncSender<TeacherInteractionDispatch>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FileTransferDispatchPayload {
+    Offer(FileTransferOffer),
+    Chunk(FileTransferChunk),
+    Finish(FileTransferFinish),
+    Cancel(FileTransferCancel),
+}
+
+impl FileTransferDispatchPayload {
+    fn transfer_id(&self) -> &[u8] {
+        match self {
+            Self::Offer(value) => &value.transfer_id,
+            Self::Chunk(value) => &value.transfer_id,
+            Self::Finish(value) => &value.transfer_id,
+            Self::Cancel(value) => &value.transfer_id,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct FileTransferDispatch {
+    pub(crate) principal_id: PrincipalId,
+    pub(crate) control_session_id: u64,
+    pub(crate) request_id: u64,
+    pub(crate) payload: FileTransferDispatchPayload,
+    pub(crate) commit: SystemActionCommit,
+    pub(crate) reply_tx: oneshot::Sender<FileTransferDispatchOutcome>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FileTransferDispatchChannels {
+    pub(crate) tx: mpsc::SyncSender<FileTransferDispatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FileTransferDispatchOutcome {
+    Status(FileTransferStatus),
+    Backpressure,
+    ServiceUnavailable,
+    StorageUnavailable,
+    ReplyDropped,
+    TimedOut,
+    Cancelled,
+}
+
+fn file_transfer_failure(
+    transfer_id: &[u8],
+    outcome: FileTransferDispatchOutcome,
+) -> FileTransferStatus {
+    if let FileTransferDispatchOutcome::Status(status) = outcome {
+        return status;
+    }
+    let (state, diagnostic) = match outcome {
+        FileTransferDispatchOutcome::Status(_) => unreachable!(),
+        FileTransferDispatchOutcome::Backpressure => (
+            FileTransferState::Rejected,
+            "file_transfer.service_backpressure",
+        ),
+        FileTransferDispatchOutcome::ServiceUnavailable => (
+            FileTransferState::Rejected,
+            "file_transfer.service_unavailable",
+        ),
+        FileTransferDispatchOutcome::StorageUnavailable => (
+            FileTransferState::Rejected,
+            "file_transfer.storage_unavailable",
+        ),
+        FileTransferDispatchOutcome::ReplyDropped => (
+            FileTransferState::Failed,
+            "file_transfer.service_reply_dropped",
+        ),
+        FileTransferDispatchOutcome::TimedOut => (
+            FileTransferState::Failed,
+            "file_transfer.service_timeout",
+        ),
+        FileTransferDispatchOutcome::Cancelled => (
+            FileTransferState::Cancelled,
+            "file_transfer.cancelled",
+        ),
+    };
+    FileTransferStatus {
+        transfer_id: transfer_id.to_vec(),
+        state: state as i32,
+        next_offset: 0,
+        diagnostic: diagnostic.to_owned(),
+    }
+}
+
+async fn await_file_transfer_dispatch(
+    commit: SystemActionCommit,
+    reply_rx: &mut oneshot::Receiver<FileTransferDispatchOutcome>,
+) -> FileTransferDispatchOutcome {
+    match tokio::time::timeout(FILE_TRANSFER_REPLY_TIMEOUT, &mut *reply_rx).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(_)) => FileTransferDispatchOutcome::ReplyDropped,
+        Err(_) if commit.cancel() => FileTransferDispatchOutcome::TimedOut,
+        Err(_) if commit.is_committed() => reply_rx
+            .await
+            .unwrap_or(FileTransferDispatchOutcome::ReplyDropped),
+        Err(_) => FileTransferDispatchOutcome::Cancelled,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1050,6 +1155,7 @@ pub(crate) struct ControlRuntimeDispatch {
     input: InputDispatchChannels,
     system_actions: SystemActionDispatchChannels,
     teacher_interactions: TeacherInteractionDispatchChannels,
+    file_transfers: FileTransferDispatchChannels,
     media: FocusedMediaDispatchChannels,
     presentation_dispatch: PresentationDispatchChannels,
     presentation_feedback: PresentationFeedbackBus,
@@ -1061,6 +1167,7 @@ impl ControlRuntimeDispatch {
         input: InputDispatchChannels,
         system_actions: SystemActionDispatchChannels,
         teacher_interactions: TeacherInteractionDispatchChannels,
+        file_transfers: FileTransferDispatchChannels,
         media: FocusedMediaDispatchChannels,
         presentation_dispatch: PresentationDispatchChannels,
         presentation_feedback: PresentationFeedbackBus,
@@ -1070,6 +1177,7 @@ impl ControlRuntimeDispatch {
             input,
             system_actions,
             teacher_interactions,
+            file_transfers,
             media,
             presentation_dispatch,
             presentation_feedback,
@@ -1176,6 +1284,7 @@ async fn run_listener(
         input,
         system_actions,
         teacher_interactions,
+        file_transfers,
         media,
         presentation_dispatch,
         presentation_feedback,
@@ -1232,6 +1341,7 @@ async fn run_listener(
                 let input = input.clone();
                 let system_actions = system_actions.clone();
                 let teacher_interactions = teacher_interactions.clone();
+                let file_transfers = file_transfers.clone();
                 let media = media.clone();
                 let presentation_dispatch = presentation_dispatch.clone();
                 let presentation_feedback = presentation_feedback.clone();
@@ -1291,6 +1401,7 @@ async fn run_listener(
                                     input: &input,
                                     system_actions: &system_actions,
                                     teacher_interactions: &teacher_interactions,
+                                    file_transfers: &file_transfers,
                                     media: &media,
                                     presentation_dispatch: &presentation_dispatch,
                                     presentation_feedback: &presentation_feedback,
@@ -1330,6 +1441,7 @@ struct EstablishedSessionRuntime<'a> {
     input: &'a InputDispatchState,
     system_actions: &'a SystemActionDispatchChannels,
     teacher_interactions: &'a TeacherInteractionDispatchChannels,
+    file_transfers: &'a FileTransferDispatchChannels,
     media: &'a FocusedMediaDispatchChannels,
     presentation_dispatch: &'a PresentationDispatchChannels,
     presentation_feedback: &'a PresentationFeedbackBus,
@@ -1381,6 +1493,7 @@ async fn run_established_session(
         input,
         system_actions,
         teacher_interactions,
+        file_transfers,
         media,
         presentation_dispatch,
         presentation_feedback,
@@ -2543,6 +2656,108 @@ async fn run_established_session(
                         transport_diagnostic_code(&error)
                     );
                     connection.close(0_u32.into(), b"teacher interaction result failed");
+                    return;
+                }
+            }
+            Some(control_envelope::Payload::FileTransferOffer(_))
+            | Some(control_envelope::Payload::FileTransferChunk(_))
+            | Some(control_envelope::Payload::FileTransferFinish(_))
+            | Some(control_envelope::Payload::FileTransferCancel(_)) => {
+                if !file_transfer_available(
+                    session.negotiated.version,
+                    &session.negotiated.capabilities,
+                ) {
+                    eprintln!(
+                        "ClassMesh file transfer rejected: control.file_transfer.capability_not_negotiated"
+                    );
+                    connection.close(0_u32.into(), b"file transfer capability not negotiated");
+                    return;
+                }
+                let now_unix_ms = match unix_time_ms() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"invalid service clock");
+                        return;
+                    }
+                };
+                let payload = match dispatch_privileged_command(
+                    &mut guard,
+                    authorization,
+                    &envelope,
+                    now_unix_ms,
+                ) {
+                    Ok(PrivilegedControlCommand::FileTransferOffer(value)) => {
+                        FileTransferDispatchPayload::Offer(value)
+                    }
+                    Ok(PrivilegedControlCommand::FileTransferChunk(value)) => {
+                        FileTransferDispatchPayload::Chunk(value)
+                    }
+                    Ok(PrivilegedControlCommand::FileTransferFinish(value)) => {
+                        FileTransferDispatchPayload::Finish(value)
+                    }
+                    Ok(PrivilegedControlCommand::FileTransferCancel(value)) => {
+                        FileTransferDispatchPayload::Cancel(value)
+                    }
+                    Ok(_) => {
+                        connection.close(0_u32.into(), b"privileged payload mismatch");
+                        return;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "ClassMesh file transfer rejected: {}",
+                            privileged_dispatch_diagnostic_code(&error)
+                        );
+                        connection.close(0_u32.into(), b"privileged command rejected");
+                        return;
+                    }
+                };
+                let transfer_id = payload.transfer_id().to_vec();
+                let request_id = envelope.request_id;
+                let commit = SystemActionCommit::pending();
+                let (reply_tx, mut reply_rx) = oneshot::channel();
+                let dispatch = FileTransferDispatch {
+                    principal_id: peer.identity.principal_id(),
+                    control_session_id: session.control_session_id,
+                    request_id,
+                    payload,
+                    commit: commit.clone(),
+                    reply_tx,
+                };
+                let outcome = match file_transfers.tx.try_send(dispatch) {
+                    Ok(()) => await_file_transfer_dispatch(commit, &mut reply_rx).await,
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        FileTransferDispatchOutcome::Backpressure
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        FileTransferDispatchOutcome::ServiceUnavailable
+                    }
+                };
+                let status = file_transfer_failure(&transfer_id, outcome);
+                if validate_file_transfer_status(&status).is_err() {
+                    connection.close(0_u32.into(), b"file transfer status invalid");
+                    return;
+                }
+                let Some(next_sequence) = outbound_sequence.checked_add(1) else {
+                    connection.close(0_u32.into(), b"control sequence exhausted");
+                    return;
+                };
+                outbound_sequence = next_sequence;
+                let response = ControlEnvelope {
+                    control_session_id: session.control_session_id,
+                    sequence: outbound_sequence,
+                    protocol_version: Some(WireProtocolVersion {
+                        major: u32::from(session.negotiated.version.major),
+                        minor: u32::from(session.negotiated.version.minor),
+                    }),
+                    request_id,
+                    payload: Some(control_envelope::Payload::FileTransferStatus(status)),
+                };
+                if let Err(error) = send.send(&response).await {
+                    eprintln!(
+                        "ClassMesh file transfer status failed: {}",
+                        transport_diagnostic_code(&error)
+                    );
+                    connection.close(0_u32.into(), b"file transfer status failed");
                     return;
                 }
             }
