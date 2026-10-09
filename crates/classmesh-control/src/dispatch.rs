@@ -324,7 +324,12 @@ pub fn dispatch_privileged_command(
             }
             validate_file_transfer_pull_request(request)
                 .map_err(PrivilegedDispatchError::InvalidFileTransferPull)?;
-            guard.authorize(authorization, envelope, Permission::ReceiveFile, now_unix_ms)?;
+            guard.authorize(
+                authorization,
+                envelope,
+                Permission::ReceiveFile,
+                now_unix_ms,
+            )?;
             Ok(PrivilegedControlCommand::FileTransferPullRequest(
                 request.clone(),
             ))
@@ -340,12 +345,11 @@ mod tests {
     use classmesh_protocol::ProtocolVersion;
     use classmesh_protocol::clipboard::MAX_CLIPBOARD_TEXT_BYTES;
     use classmesh_protocol::control_wire::{
-        ClipboardReadRequest, ClipboardWrite, FileDestinationPolicy, FileTransferCancel,
-        FileSourcePolicy, FileTransferChunk, FileTransferFinish, FileTransferOffer,
-        FileTransferPullRequest, Heartbeat, OpenTarget,
-        PresentationKeyGrant, PresentationStart, PresentationStop,
-        ProtocolVersion as WireProtocolVersion, ReleaseAllInput, SystemActionRequest,
-        TeacherInteractionRequest, TeacherMessage, input_event, open_target,
+        ClipboardReadRequest, ClipboardWrite, FileDestinationPolicy, FileSourcePolicy,
+        FileTransferCancel, FileTransferChunk, FileTransferFinish, FileTransferOffer,
+        FileTransferPullRequest, Heartbeat, OpenTarget, PresentationKeyGrant, PresentationStart,
+        PresentationStop, ProtocolVersion as WireProtocolVersion, ReleaseAllInput,
+        SystemActionRequest, TeacherInteractionRequest, TeacherMessage, input_event, open_target,
         teacher_interaction_request,
     };
     use classmesh_security::{
@@ -681,8 +685,7 @@ mod tests {
         };
 
         let receive = store(BTreeSet::from([Permission::ReceiveFile]));
-        let mut guard =
-            AuthenticatedControlGuard::new(identity(), 77, FILE_PULL_VERSION, 1);
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, FILE_PULL_VERSION, 1);
         assert_eq!(
             dispatch_privileged_command(&mut guard, &receive, &envelope, 150),
             Ok(PrivilegedControlCommand::FileTransferPullRequest(
@@ -691,8 +694,7 @@ mod tests {
         );
         assert_eq!(guard.last_sequence(), 2);
 
-        let mut replay_guard =
-            AuthenticatedControlGuard::new(identity(), 77, FILE_PULL_VERSION, 1);
+        let mut replay_guard = AuthenticatedControlGuard::new(identity(), 77, FILE_PULL_VERSION, 1);
         let older = ControlEnvelope {
             protocol_version: Some(WireProtocolVersion { major: 0, minor: 7 }),
             ..envelope.clone()
@@ -731,8 +733,7 @@ mod tests {
         assert_eq!(invalid_guard.last_sequence(), 1);
 
         let send_only = store(BTreeSet::from([Permission::SendFile]));
-        let mut denied_guard =
-            AuthenticatedControlGuard::new(identity(), 77, FILE_PULL_VERSION, 1);
+        let mut denied_guard = AuthenticatedControlGuard::new(identity(), 77, FILE_PULL_VERSION, 1);
         assert_eq!(
             dispatch_privileged_command(&mut denied_guard, &send_only, &envelope, 150),
             Err(PrivilegedDispatchError::Authorization(
