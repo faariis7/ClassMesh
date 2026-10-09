@@ -154,9 +154,9 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 
 ## Next implementation sequence
 
-1. **Phase 12D1 COMPLETE (#373, CI #1503 green), 12D2a COMPLETE (#376, CI #1511 green), 12D2b COMPLETE (#377, CI #1517 green), and 12D2c1 COMPLETE (#380, CI #1528 green); Phase 12D2c2 CURRENT in #381.**
-2. Land the bounded Service file-transfer routing seam with exact authenticated principal/control-session/request correlation, capacity-one dispatch, commit/cancel/timeout/backpressure semantics and validated status responses.
-3. Keep `FileTransfer` capability advertisement OFF and fail closed with storage-unavailable until a real app-owned production inbox sink/storage boundary is wired.
-4. Then implement **12D3 ReceiveFile pull/recovery** with portable/app-owned typed source boundaries. Production Windows storage and capability enablement remain deferred to **12D4**.
+1. **Phase 12D2c2 COMPLETE in PR #381 with Portable + Windows CI #1532 green (merge `cf74941`); Phase 12D3a CURRENT in PR #383.**
+2. Land the portable app-owned source boundary with opaque source IDs, exact authenticated peer/session/transfer binding, bounded <=64 KiB offset reads, validated metadata and deterministic cleanup.
+3. **12D3b1 is prepared in PR #384** as the minimum additive v0.8 typed pull request; keep existing delivery primitives on v0.7 and production `FileTransfer` capability advertisement OFF.
+4. Follow with **12D3b2 authenticated ReceiveFile dispatch** and then bounded pull routing/recovery using the same correlation/backpressure/cancel discipline. Production Windows storage and capability enablement remain deferred to **12D4**.
 5. **12C4b UI implementation is merged (#371, CI #1491 green)** but Session 1 exact-build Windows runtime/visual acceptance remains an open gate.
 6. Keep unrelated Phase 4/6F/7D/7H/8D/9F/10G/12B4b physical gates open; hosted CI must not close them.
