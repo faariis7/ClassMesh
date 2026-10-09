@@ -694,16 +694,18 @@ mod tests {
         );
         assert_eq!(guard.last_sequence(), 2);
 
-        let mut replay_guard = AuthenticatedControlGuard::new(identity(), 77, FILE_PULL_VERSION, 1);
+        let older_version = ProtocolVersion { major: 0, minor: 7 };
+        let mut old_guard =
+            AuthenticatedControlGuard::new(identity(), 77, older_version, 1);
         let older = ControlEnvelope {
             protocol_version: Some(WireProtocolVersion { major: 0, minor: 7 }),
             ..envelope.clone()
         };
         assert_eq!(
-            dispatch_privileged_command(&mut replay_guard, &receive, &older, 150),
+            dispatch_privileged_command(&mut old_guard, &receive, &older, 150),
             Err(PrivilegedDispatchError::FileTransferPullRequiresProtocolV8)
         );
-        assert_eq!(replay_guard.last_sequence(), 1);
+        assert_eq!(old_guard.last_sequence(), 1);
 
         let mut missing = envelope.clone();
         missing.request_id = 0;
