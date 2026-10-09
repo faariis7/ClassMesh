@@ -141,11 +141,19 @@ pub const fn privileged_dispatch_diagnostic_code(error: &PrivilegedDispatchError
         PrivilegedDispatchError::FileTransferOfferRequestMissingId => {
             "control.command.file_offer_missing_request_id"
         }
+        PrivilegedDispatchError::FileTransferRequestMissingId => {
+            "control.command.file_transfer_missing_request_id"
+        }
         PrivilegedDispatchError::FileTransferRequiresProtocolV7 => {
             "control.command.file_transfer_requires_v0_7"
         }
         PrivilegedDispatchError::InvalidFileTransferOffer(_) => {
             "control.command.file_offer_invalid"
+        }
+        PrivilegedDispatchError::InvalidFileTransferChunk(_)
+        | PrivilegedDispatchError::InvalidFileTransferFinish(_)
+        | PrivilegedDispatchError::InvalidFileTransferCancel(_) => {
+            "control.command.file_transfer_invalid"
         }
         PrivilegedDispatchError::Authorization(error) => {
             command_authorization_diagnostic_code(error)
