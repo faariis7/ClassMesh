@@ -89,14 +89,14 @@ mod windows_service_app {
     const MAX_MEDIA_RECONFIGURE_ATTEMPTS: u8 = 4;
 
     use crate::control_runtime::{
-        AdministrativeDispatchChannels, ControlRuntime, ControlRuntimeConfig, ControlRuntimeDispatch,
-        ControlRuntimeState, FileTransferDispatch, FileTransferDispatchChannels,
-        FileTransferDispatchOutcome,
-        FocusedMediaDispatchChannels, FocusedMediaFeedback, FocusedMediaReconfigure,
-        FocusedMediaStart, InputAvailability, InputDispatchChannels, PresentationDispatchChannels,
-        PresentationFeedbackBus, PresentationKeyInstallDispatch,
-        PresentationMulticastStartDispatch, PresentationUnicastStartDispatch, SystemActionDispatch,
-        SystemActionDispatchChannels, SystemActionDispatchOutcome, TeacherInteractionDispatch,
+        AdministrativeDispatchChannels, ControlRuntime, ControlRuntimeConfig,
+        ControlRuntimeDispatch, ControlRuntimeState, FileTransferDispatch,
+        FileTransferDispatchChannels, FileTransferDispatchOutcome, FocusedMediaDispatchChannels,
+        FocusedMediaFeedback, FocusedMediaReconfigure, FocusedMediaStart, InputAvailability,
+        InputDispatchChannels, PresentationDispatchChannels, PresentationFeedbackBus,
+        PresentationKeyInstallDispatch, PresentationMulticastStartDispatch,
+        PresentationUnicastStartDispatch, SystemActionDispatch, SystemActionDispatchChannels,
+        SystemActionDispatchOutcome, TeacherInteractionDispatch,
         TeacherInteractionDispatchChannels, TeacherInteractionDispatchOutcome,
         WorkerCapabilityState,
     };
