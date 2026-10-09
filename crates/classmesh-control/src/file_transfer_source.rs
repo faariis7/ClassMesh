@@ -262,7 +262,9 @@ fn offer_from_active(active: &ActiveSource) -> FileTransferOffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use classmesh_protocol::file_transfer::MAX_FILE_TRANSFER_BYTES;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use classmesh_security::PrincipalId;
     use sha2::{Digest, Sha256};
 
@@ -270,7 +272,8 @@ mod tests {
     struct RecordingSource {
         bytes: Vec<u8>,
         reads: Vec<(u64, usize)>,
-        closes: usize,
+        closes: Arc<AtomicUsize>,
+        metadata_calls: usize,
         fail_read: bool,
         oversize_read: bool,
     }
@@ -280,7 +283,8 @@ mod tests {
             Self {
                 bytes,
                 reads: Vec::new(),
-                closes: 0,
+                closes: Arc::new(AtomicUsize::new(0)),
+                metadata_calls: 0,
                 fail_read: false,
                 oversize_read: false,
             }
@@ -294,6 +298,7 @@ mod tests {
             &mut self,
             _source_id: FileSourceId,
         ) -> Result<FileTransferSourceMetadata, Self::Error> {
+            self.metadata_calls += 1;
             Ok(FileTransferSourceMetadata {
                 filename: "lesson.pdf".to_owned(),
                 total_size: self.bytes.len() as u64,
@@ -323,7 +328,7 @@ mod tests {
         }
 
         fn close(&mut self, _source_id: FileSourceId) {
-            self.closes += 1;
+            self.closes.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -356,11 +361,12 @@ mod tests {
         assert_eq!(offer.destination, FileDestinationPolicy::AppInbox as i32);
         assert_eq!(validate_offer(&offer), Ok(()));
 
-        // Exact replay is idempotent and does not reopen a second source.
+        // Exact replay is idempotent and does not reopen or re-resolve the source.
         assert_eq!(
             session.offer(peer(), &transfer_id(), source_id()).unwrap(),
             offer
         );
+        assert_eq!(session.source().metadata_calls, 1);
     }
 
     #[test]
@@ -408,19 +414,23 @@ mod tests {
 
     #[test]
     fn cancel_complete_and_drop_close_the_app_owned_source() {
-        let mut session =
-            FileTransferSourceSession::new(RecordingSource::new(b"abc".to_vec()));
+        let closes = Arc::new(AtomicUsize::new(0));
+        let mut source = RecordingSource::new(b"abc".to_vec());
+        source.closes = Arc::clone(&closes);
+        let mut session = FileTransferSourceSession::new(source);
+
         session.offer(peer(), &transfer_id(), source_id()).unwrap();
         let cancel = session.cancel(peer(), &transfer_id()).unwrap();
         assert_eq!(validate_cancel(&cancel), Ok(()));
-        assert_eq!(session.source().closes, 1);
+        assert_eq!(closes.load(Ordering::Relaxed), 1);
 
         session.offer(peer(), &transfer_id(), source_id()).unwrap();
         session.complete(peer(), &transfer_id()).unwrap();
-        assert_eq!(session.source().closes, 2);
+        assert_eq!(closes.load(Ordering::Relaxed), 2);
 
         session.offer(peer(), &transfer_id(), source_id()).unwrap();
         drop(session);
+        assert_eq!(closes.load(Ordering::Relaxed), 3);
     }
 
     #[test]
@@ -466,7 +476,10 @@ mod tests {
             Err(SourceError::InvalidPayload(FileTransferError::InvalidTransferId))
         ));
 
-        let too_large = vec![1; usize::try_from(MAX_FILE_TRANSFER_BYTES.min(1024)).unwrap()];
-        let _ = too_large;
+        let mut empty = FileTransferSourceSession::new(RecordingSource::new(Vec::new()));
+        assert!(matches!(
+            empty.offer(peer(), &transfer_id(), source_id()),
+            Err(SourceError::InvalidPayload(FileTransferError::FileTooLarge))
+        ));
     }
 }
