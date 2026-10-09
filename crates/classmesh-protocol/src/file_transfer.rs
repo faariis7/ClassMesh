@@ -1,13 +1,16 @@
 use std::collections::BTreeSet;
 
 use crate::control_wire::{
-    FileDestinationPolicy, FileTransferCancel, FileTransferChunk, FileTransferFinish,
-    FileTransferOffer, FileTransferState, FileTransferStatus,
+    FileDestinationPolicy, FileSourcePolicy, FileTransferCancel, FileTransferChunk,
+    FileTransferFinish, FileTransferOffer, FileTransferPullRequest, FileTransferState,
+    FileTransferStatus,
 };
 use crate::{Capability, ProtocolVersion};
 
 pub const FILE_TRANSFER_MIN_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 7 };
+pub const FILE_TRANSFER_PULL_MIN_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 8 };
 pub const TRANSFER_ID_BYTES: usize = 16;
+pub const SOURCE_ID_BYTES: usize = 16;
 pub const SHA256_BYTES: usize = 32;
 pub const MAX_FILE_NAME_BYTES: usize = 255;
 pub const MAX_FILE_CHUNK_BYTES: usize = 64 * 1024;
@@ -17,6 +20,8 @@ pub const MAX_TRANSFER_DIAGNOSTIC_BYTES: usize = 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileTransferError {
     InvalidTransferId,
+    InvalidSourceId,
+    InvalidSource,
     InvalidFilename,
     FileTooLarge,
     InvalidHash,
@@ -39,9 +44,26 @@ pub fn file_transfer_available(
         && capabilities.contains(&Capability::FileTransfer)
 }
 
+#[must_use]
+pub fn file_transfer_pull_available(
+    version: ProtocolVersion,
+    capabilities: &BTreeSet<Capability>,
+) -> bool {
+    version.major == FILE_TRANSFER_PULL_MIN_VERSION.major
+        && version.minor >= FILE_TRANSFER_PULL_MIN_VERSION.minor
+        && capabilities.contains(&Capability::FileTransfer)
+}
+
 pub fn validate_transfer_id(id: &[u8]) -> Result<(), FileTransferError> {
     if id.len() != TRANSFER_ID_BYTES || id.iter().all(|byte| *byte == 0) {
         return Err(FileTransferError::InvalidTransferId);
+    }
+    Ok(())
+}
+
+pub fn validate_source_id(id: &[u8]) -> Result<(), FileTransferError> {
+    if id.len() != SOURCE_ID_BYTES || id.iter().all(|byte| *byte == 0) {
+        return Err(FileTransferError::InvalidSourceId);
     }
     Ok(())
 }
@@ -85,6 +107,17 @@ pub fn validate_offer(offer: &FileTransferOffer) -> Result<(), FileTransferError
     }
     if FileDestinationPolicy::try_from(offer.destination) != Ok(FileDestinationPolicy::AppInbox) {
         return Err(FileTransferError::InvalidDestination);
+    }
+    Ok(())
+}
+
+pub fn validate_pull_request(
+    request: &FileTransferPullRequest,
+) -> Result<(), FileTransferError> {
+    validate_transfer_id(&request.transfer_id)?;
+    validate_source_id(&request.source_id)?;
+    if FileSourcePolicy::try_from(request.source) != Ok(FileSourcePolicy::AppOutbox) {
+        return Err(FileTransferError::InvalidSource);
     }
     Ok(())
 }
@@ -172,6 +205,58 @@ mod tests {
             ProtocolVersion { major: 0, minor: 8 },
             &caps
         ));
+    }
+
+    #[test]
+    fn pull_availability_requires_additive_v08_and_explicit_capability() {
+        let caps = BTreeSet::from([Capability::FileTransfer]);
+        assert!(!file_transfer_pull_available(
+            FILE_TRANSFER_MIN_VERSION,
+            &caps
+        ));
+        assert!(!file_transfer_pull_available(
+            ProtocolVersion { major: 1, minor: 8 },
+            &caps
+        ));
+        assert!(!file_transfer_pull_available(
+            FILE_TRANSFER_PULL_MIN_VERSION,
+            &BTreeSet::new()
+        ));
+        assert!(file_transfer_pull_available(
+            FILE_TRANSFER_PULL_MIN_VERSION,
+            &caps
+        ));
+    }
+
+    #[test]
+    fn pull_request_uses_only_typed_app_owned_source_ids() {
+        let valid = FileTransferPullRequest {
+            transfer_id: transfer_id(),
+            source_id: vec![8; SOURCE_ID_BYTES],
+            source: FileSourcePolicy::AppOutbox as i32,
+        };
+        assert_eq!(validate_pull_request(&valid), Ok(()));
+
+        let mut bad = valid.clone();
+        bad.source_id = vec![0; SOURCE_ID_BYTES];
+        assert_eq!(
+            validate_pull_request(&bad),
+            Err(FileTransferError::InvalidSourceId)
+        );
+
+        bad = valid.clone();
+        bad.source_id = vec![8; SOURCE_ID_BYTES - 1];
+        assert_eq!(
+            validate_pull_request(&bad),
+            Err(FileTransferError::InvalidSourceId)
+        );
+
+        bad = valid;
+        bad.source = FileSourcePolicy::Unspecified as i32;
+        assert_eq!(
+            validate_pull_request(&bad),
+            Err(FileTransferError::InvalidSource)
+        );
     }
 
     #[test]
