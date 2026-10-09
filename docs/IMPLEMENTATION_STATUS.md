@@ -157,6 +157,6 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 1. **Phase 12D1 COMPLETE (#373, CI #1503 green), 12D2a COMPLETE (#376, CI #1511 green), 12D2b COMPLETE (#377, CI #1517 green), and 12D2c1 COMPLETE (#380, CI #1528 green); Phase 12D2c2 CURRENT in #381.**
 2. Land the bounded Service file-transfer routing seam with exact authenticated principal/control-session/request correlation, capacity-one dispatch, commit/cancel/timeout/backpressure semantics and validated status responses.
 3. Keep `FileTransfer` capability advertisement OFF and fail closed with storage-unavailable until a real app-owned production inbox sink/storage boundary is wired.
-4. Then implement production inbox storage/capability enablement, followed by **12D3 ReceiveFile pull/recovery** and **12D4 Windows storage + Teacher UI/qualification**.
+4. Then implement **12D3 ReceiveFile pull/recovery** with portable/app-owned typed source boundaries. Production Windows storage and capability enablement remain deferred to **12D4**.
 5. **12C4b UI implementation is merged (#371, CI #1491 green)** but Session 1 exact-build Windows runtime/visual acceptance remains an open gate.
 6. Keep unrelated Phase 4/6F/7D/7H/8D/9F/10G/12B4b physical gates open; hosted CI must not close them.
