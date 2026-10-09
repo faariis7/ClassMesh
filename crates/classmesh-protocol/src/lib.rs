@@ -238,13 +238,15 @@ mod tests {
             sequence: 9,
             protocol_version: Some(control_wire::ProtocolVersion { major: 0, minor: 8 }),
             request_id: 43,
-            payload: Some(control_wire::control_envelope::Payload::FileTransferPullRequest(
-                control_wire::FileTransferPullRequest {
-                    transfer_id: vec![7; 16],
-                    source_id: vec![8; 16],
-                    source: control_wire::FileSourcePolicy::AppOutbox as i32,
-                },
-            )),
+            payload: Some(
+                control_wire::control_envelope::Payload::FileTransferPullRequest(
+                    control_wire::FileTransferPullRequest {
+                        transfer_id: vec![7; 16],
+                        source_id: vec![8; 16],
+                        source: control_wire::FileSourcePolicy::AppOutbox as i32,
+                    },
+                ),
+            ),
         };
         let encoded = envelope.encode_to_vec();
         assert!(encoded.len() < 256 * 1024);
