@@ -9,6 +9,7 @@ pub mod diagnostics;
 pub mod dispatch;
 pub mod enrollment;
 pub mod enrollment_result;
+pub mod file_transfer_receiver;
 pub mod framing;
 pub mod group_media_delivery;
 pub mod group_media_feedback;

@@ -154,9 +154,9 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 
 ## Next implementation sequence
 
-1. **Phase 12D1 COMPLETE (#373, CI #1503 green); Phase 12D2a CURRENT:** add additive control protocol v0.7, `FileTransfer` capability and typed offer/chunk/finish/cancel/status-resume wire contract. Preserve v0.6 peer negotiation and existing media v0.4.
-2. Validate exact nonzero 16-byte transfer identity, 32-byte SHA-256, 255-byte leaf filename with no path separators/control/traversal, 64 KiB max non-empty chunk, <= 1 KiB bounded diagnostic and ClassMesh-owned inbox policy. Do not add raw paths or arbitrary executable/command surfaces.
-3. Keep FileTransfer capability advertisement OFF until real bounded authenticated SendFile/ReceiveFile orchestration exists. No filesystem writes or Windows effects in 12D1.
-4. **12D2a current:** extend only the existing authenticated privileged dispatch for v0.7 FileTransferOffer and exact SendFile, preserve pre-sequence validation and nonzero request correlation. No filesystem, network send or capability advertisement.
-5. Then implement 12D2b bounded coordinator and 12D2c Service routing; 12D3 receive/recovery follows.
-6. **12C4b UI implementation is merged (#371, CI #1491 green)** but Session 1 exact-build Windows runtime/visual acceptance remains an open gate. Keep unrelated Phase 4/6F/7D/7H/8D/9F/10G/12B4b physical gates open.
+1. **Phase 12D1 COMPLETE (#373, CI #1503 green) and 12D2a COMPLETE (#376, CI #1511 green); Phase 12D2b CURRENT.**
+2. Land the portable bounded receiver with exact authenticated principal/control-session/transfer binding, one active transfer, sequential <=64 KiB chunks, streaming SHA-256, re-offer/status resume, cancellation and an injectable app-owned sink.
+3. Keep `FileTransfer` capability advertisement OFF and keep production filesystem/Windows side effects out until 12D2c Service delivery exists.
+4. Then implement **12D2c bounded Service delivery** with exact correlation/backpressure/cancel semantics; 12D3 ReceiveFile pull/recovery follows.
+5. **12C4b UI implementation is merged (#371, CI #1491 green)** but Session 1 exact-build Windows runtime/visual acceptance remains an open gate.
+6. Keep unrelated Phase 4/6F/7D/7H/8D/9F/10G/12B4b physical gates open; hosted CI must not close them.
