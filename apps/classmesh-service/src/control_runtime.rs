@@ -201,6 +201,13 @@ pub(crate) struct TeacherInteractionDispatchChannels {
     pub(crate) tx: mpsc::SyncSender<TeacherInteractionDispatch>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct AdministrativeDispatchChannels {
+    pub(crate) system_actions: SystemActionDispatchChannels,
+    pub(crate) teacher_interactions: TeacherInteractionDispatchChannels,
+    pub(crate) file_transfers: FileTransferDispatchChannels,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum FileTransferDispatchPayload {
     Offer(FileTransferOffer),
@@ -210,7 +217,7 @@ pub(crate) enum FileTransferDispatchPayload {
 }
 
 impl FileTransferDispatchPayload {
-    fn transfer_id(&self) -> &[u8] {
+    pub(crate) fn transfer_id(&self) -> &[u8] {
         match self {
             Self::Offer(value) => &value.transfer_id,
             Self::Chunk(value) => &value.transfer_id,
@@ -222,12 +229,22 @@ impl FileTransferDispatchPayload {
 
 #[derive(Debug)]
 pub(crate) struct FileTransferDispatch {
-    pub(crate) principal_id: PrincipalId,
+    principal_id: PrincipalId,
     pub(crate) control_session_id: u64,
     pub(crate) request_id: u64,
-    pub(crate) payload: FileTransferDispatchPayload,
+    payload: FileTransferDispatchPayload,
     pub(crate) commit: SystemActionCommit,
     pub(crate) reply_tx: oneshot::Sender<FileTransferDispatchOutcome>,
+}
+
+impl FileTransferDispatch {
+    pub(crate) fn principal_id(&self) -> PrincipalId {
+        self.principal_id
+    }
+
+    pub(crate) fn payload(&self) -> &FileTransferDispatchPayload {
+        &self.payload
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -237,7 +254,6 @@ pub(crate) struct FileTransferDispatchChannels {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FileTransferDispatchOutcome {
-    Status(FileTransferStatus),
     Backpressure,
     ServiceUnavailable,
     StorageUnavailable,
@@ -250,11 +266,7 @@ fn file_transfer_failure(
     transfer_id: &[u8],
     outcome: FileTransferDispatchOutcome,
 ) -> FileTransferStatus {
-    if let FileTransferDispatchOutcome::Status(status) = outcome {
-        return status;
-    }
     let (state, diagnostic) = match outcome {
-        FileTransferDispatchOutcome::Status(_) => unreachable!(),
         FileTransferDispatchOutcome::Backpressure => (
             FileTransferState::Rejected,
             "file_transfer.service_backpressure",
@@ -1153,9 +1165,7 @@ impl ControlRuntimeConfig {
 
 pub(crate) struct ControlRuntimeDispatch {
     input: InputDispatchChannels,
-    system_actions: SystemActionDispatchChannels,
-    teacher_interactions: TeacherInteractionDispatchChannels,
-    file_transfers: FileTransferDispatchChannels,
+    administrative: AdministrativeDispatchChannels,
     media: FocusedMediaDispatchChannels,
     presentation_dispatch: PresentationDispatchChannels,
     presentation_feedback: PresentationFeedbackBus,
@@ -1165,9 +1175,7 @@ pub(crate) struct ControlRuntimeDispatch {
 impl ControlRuntimeDispatch {
     pub(crate) fn new(
         input: InputDispatchChannels,
-        system_actions: SystemActionDispatchChannels,
-        teacher_interactions: TeacherInteractionDispatchChannels,
-        file_transfers: FileTransferDispatchChannels,
+        administrative: AdministrativeDispatchChannels,
         media: FocusedMediaDispatchChannels,
         presentation_dispatch: PresentationDispatchChannels,
         presentation_feedback: PresentationFeedbackBus,
@@ -1175,9 +1183,7 @@ impl ControlRuntimeDispatch {
     ) -> Self {
         Self {
             input,
-            system_actions,
-            teacher_interactions,
-            file_transfers,
+            administrative,
             media,
             presentation_dispatch,
             presentation_feedback,
@@ -1282,9 +1288,7 @@ async fn run_listener(
 ) {
     let ControlRuntimeDispatch {
         input,
-        system_actions,
-        teacher_interactions,
-        file_transfers,
+        administrative,
         media,
         presentation_dispatch,
         presentation_feedback,
@@ -1339,9 +1343,9 @@ async fn run_listener(
                 let authorization = Arc::clone(&authorization);
                 let session_ids = Arc::clone(&session_ids);
                 let input = input.clone();
-                let system_actions = system_actions.clone();
-                let teacher_interactions = teacher_interactions.clone();
-                let file_transfers = file_transfers.clone();
+                let system_actions = administrative.system_actions.clone();
+                let teacher_interactions = administrative.teacher_interactions.clone();
+                let file_transfers = administrative.file_transfers.clone();
                 let media = media.clone();
                 let presentation_dispatch = presentation_dispatch.clone();
                 let presentation_feedback = presentation_feedback.clone();
@@ -3346,23 +3350,6 @@ mod tests {
                 Ok(())
             );
         }
-    }
-
-    #[test]
-    fn file_transfer_routing_preserves_valid_receiver_status() {
-        let status = FileTransferStatus {
-            transfer_id: vec![9_u8; 16],
-            state: FileTransferState::Progress as i32,
-            next_offset: 65_536,
-            diagnostic: String::new(),
-        };
-        assert_eq!(
-            file_transfer_failure(
-                &status.transfer_id,
-                FileTransferDispatchOutcome::Status(status.clone()),
-            ),
-            status
-        );
     }
 
     #[test]
