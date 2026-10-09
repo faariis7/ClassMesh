@@ -30,11 +30,11 @@ Phase 5 tracking issue #32 and Phase 11 Issue #298 are complete. Active product 
 
 ## Current priority
 
-1. **Phase 12C4b Teacher UI implementation merged in PR #371, Portable + Windows CI #1491 green.** The exact Session 1 Windows runtime/visual and accessibility check is still open and is NOT replaced by hosted CI; no Phase 12C physical closeout claim.
-2. **Phase 12D1 MERGED in PR #373 (CI #1503 green); Phase 12D2a CURRENT — exact authenticated file-offer admission (Issue #328).** Add control protocol v0.7 plus explicit `FileTransfer` capability and strictly bounded typed offer/chunk/finish/cancel/status-resume messages with tests. Retain v0.6 negotiation compatibility; do not advertise the capability from production peers until routing works.
-3. Keep 16-byte nonzero opaque transfer IDs, <= 255 UTF-8 byte leaf filenames (no separator, control or traversal), exact 32-byte SHA-256, <= 64 KiB non-empty chunks below the 256 KiB framing cap, <= 1 KiB bounded diagnostic, app-owned inbox destination only, and transfer-ID-based cancellation. No raw paths, shell or filesystem side effects in 12D1.
-4. **12D2a CURRENT:** require v0.7 negotiated control version, nonzero request_id, valid offer, authenticated exact `SendFile` permission and replay/session suppression before admission on existing `dispatch_privileged_command`. No Service routing, capability advertisement or filesystem effects yet.
-5. Follow with 12D2b bounded receiver state machine, 12D2c Service delivery and 12D3 ReceiveFile pull orchestration.
+1. **Phase 12C4b Teacher UI implementation merged in PR #371, Portable + Windows CI #1491 green.** The exact Session 1 Windows runtime/visual and accessibility check remains open and is not replaced by hosted CI.
+2. **Phase 12D1 COMPLETE in PR #373 (CI #1503 green) and Phase 12D2a COMPLETE in PR #376 (CI #1511 green); Phase 12D2b CURRENT under Issue #328.**
+3. **12D2b — bounded portable streaming receiver:** one active authenticated principal/control-session/transfer binding, sequential chunks, streaming SHA-256, re-offer/status resume, cancellation and an injectable ClassMesh-owned inbox sink. Hosted tests use only recording/in-memory sinks.
+4. Keep production `FileTransfer` capability advertisement OFF until 12D2c Service delivery is actually serviceable. No raw paths, shell fragments, executable paths or Windows/filesystem side effects in 12D2b.
+5. Follow with **12D2c bounded Service delivery**, then 12D3 ReceiveFile pull/recovery and 12D4 Windows storage + Teacher UI/qualification.
 6. Keep Phase 4, 6F, 7D/7H, 8D, 9F, 10G, 12B4b and 12C4 runtime/visual gates open; hosted CI is not physical evidence. Preserve Phase 13 installer/update/recovery and Phase 14 hardening in roadmap order.
 
 ## Rules while Phase 4 hardware is unavailable
