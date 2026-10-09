@@ -113,10 +113,13 @@ impl<S: FileTransferOutboxSource> FileTransferSourceSession<S> {
             return Ok(offer_from_active(active));
         }
 
-        let metadata = self
-            .source
-            .metadata(source_id)
-            .map_err(|_| SourceError::SourceFailure)?;
+        let metadata = match self.source.metadata(source_id) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                self.source.close(source_id);
+                return Err(SourceError::SourceFailure);
+            }
+        };
         let candidate = FileTransferOffer {
             transfer_id: id.to_vec(),
             filename: metadata.filename.clone(),
@@ -124,7 +127,10 @@ impl<S: FileTransferOutboxSource> FileTransferSourceSession<S> {
             sha256: metadata.sha256.to_vec(),
             destination: FileDestinationPolicy::AppInbox as i32,
         };
-        validate_offer(&candidate).map_err(SourceError::InvalidPayload)?;
+        if let Err(error) = validate_offer(&candidate) {
+            self.source.close(source_id);
+            return Err(SourceError::InvalidPayload(error));
+        }
 
         self.active = Some(ActiveSource {
             peer,
@@ -476,10 +482,14 @@ mod tests {
             Err(SourceError::InvalidPayload(FileTransferError::InvalidTransferId))
         ));
 
-        let mut empty = FileTransferSourceSession::new(RecordingSource::new(Vec::new()));
+        let closes = Arc::new(AtomicUsize::new(0));
+        let mut source = RecordingSource::new(Vec::new());
+        source.closes = Arc::clone(&closes);
+        let mut empty = FileTransferSourceSession::new(source);
         assert!(matches!(
             empty.offer(peer(), &transfer_id(), source_id()),
             Err(SourceError::InvalidPayload(FileTransferError::FileTooLarge))
         ));
+        assert_eq!(closes.load(Ordering::Relaxed), 1);
     }
 }
