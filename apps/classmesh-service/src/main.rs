@@ -73,6 +73,8 @@ mod windows_service_app {
     const TEACHER_INTERACTION_DISPATCH_QUEUE_CAPACITY: usize = 1;
     const WORKER_TEACHER_INTERACTION_RESULT_QUEUE_CAPACITY: usize = 4;
     const MAX_TEACHER_INTERACTIONS_PER_TICK: usize = 1;
+    const FILE_TRANSFER_DISPATCH_QUEUE_CAPACITY: usize = 1;
+    const MAX_FILE_TRANSFERS_PER_TICK: usize = 1;
     const FOCUSED_MEDIA_QUEUE_CAPACITY: usize = 4;
     const FOCUSED_MEDIA_FEEDBACK_QUEUE_CAPACITY: usize = 32;
     const PRESENTATION_KEY_INSTALL_QUEUE_CAPACITY: usize = 1;
@@ -87,12 +89,14 @@ mod windows_service_app {
     const MAX_MEDIA_RECONFIGURE_ATTEMPTS: u8 = 4;
 
     use crate::control_runtime::{
-        ControlRuntime, ControlRuntimeConfig, ControlRuntimeDispatch, ControlRuntimeState,
-        FocusedMediaDispatchChannels, FocusedMediaFeedback, FocusedMediaReconfigure,
-        FocusedMediaStart, InputAvailability, InputDispatchChannels, PresentationDispatchChannels,
-        PresentationFeedbackBus, PresentationKeyInstallDispatch,
-        PresentationMulticastStartDispatch, PresentationUnicastStartDispatch, SystemActionDispatch,
-        SystemActionDispatchChannels, SystemActionDispatchOutcome, TeacherInteractionDispatch,
+        AdministrativeDispatchChannels, ControlRuntime, ControlRuntimeConfig,
+        ControlRuntimeDispatch, ControlRuntimeState, FileTransferDispatch,
+        FileTransferDispatchChannels, FileTransferDispatchOutcome, FocusedMediaDispatchChannels,
+        FocusedMediaFeedback, FocusedMediaReconfigure, FocusedMediaStart, InputAvailability,
+        InputDispatchChannels, PresentationDispatchChannels, PresentationFeedbackBus,
+        PresentationKeyInstallDispatch, PresentationMulticastStartDispatch,
+        PresentationUnicastStartDispatch, SystemActionDispatch, SystemActionDispatchChannels,
+        SystemActionDispatchOutcome, TeacherInteractionDispatch,
         TeacherInteractionDispatchChannels, TeacherInteractionDispatchOutcome,
         WorkerCapabilityState,
     };
@@ -1629,6 +1633,16 @@ mod windows_service_app {
         let teacher_interaction_channels = TeacherInteractionDispatchChannels {
             tx: teacher_interaction_tx,
         };
+        let (file_transfer_tx, file_transfer_rx) =
+            mpsc::sync_channel::<FileTransferDispatch>(FILE_TRANSFER_DISPATCH_QUEUE_CAPACITY);
+        let file_transfer_channels = FileTransferDispatchChannels {
+            tx: file_transfer_tx,
+        };
+        let administrative_channels = AdministrativeDispatchChannels {
+            system_actions: system_action_channels,
+            teacher_interactions: teacher_interaction_channels,
+            file_transfers: file_transfer_channels,
+        };
         let (media_start_tx, media_start_rx) =
             mpsc::sync_channel::<FocusedMediaStart>(FOCUSED_MEDIA_QUEUE_CAPACITY);
         let (media_reconfigure_tx, media_reconfigure_rx) =
@@ -1699,8 +1713,7 @@ mod windows_service_app {
         let presentation_feedback = PresentationFeedbackBus::default();
         let control_dispatch = ControlRuntimeDispatch::new(
             input_channels,
-            system_action_channels,
-            teacher_interaction_channels,
+            administrative_channels,
             media_channels,
             presentation_channels,
             presentation_feedback.clone(),
@@ -1774,6 +1787,29 @@ mod windows_service_app {
                     None => power_system_action_outcome(power_executor.execute(dispatch.action)),
                 };
                 let _ = dispatch.reply_tx.send(outcome);
+            }
+
+            for _ in 0..MAX_FILE_TRANSFERS_PER_TICK {
+                let dispatch = match file_transfer_rx.try_recv() {
+                    Ok(dispatch) => dispatch,
+                    Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+                };
+                if dispatch.control_session_id == 0
+                    || dispatch.request_id == 0
+                    || !dispatch.commit.try_commit()
+                {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(FileTransferDispatchOutcome::Cancelled);
+                    continue;
+                }
+                // Preserve and consume the exact authenticated binding and typed payload at the
+                // Service boundary even while production inbox storage is intentionally absent.
+                let _authenticated_principal = dispatch.principal_id();
+                let _transfer_id = dispatch.payload().transfer_id();
+                let _ = dispatch
+                    .reply_tx
+                    .send(FileTransferDispatchOutcome::StorageUnavailable);
             }
 
             if pending_teacher_interaction
