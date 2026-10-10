@@ -1,4 +1,4 @@
-use classmesh_protocol::clipboard::{ClipboardTextError, validate_text};
+use classmesh_protocol::clipboard::{ClipboardTextError, validate_write};
 use classmesh_protocol::control_wire::{
     ClipboardReadRequest, ClipboardWrite, ControlEnvelope, FileTransferCancel, FileTransferChunk,
     FileTransferFinish, FileTransferOffer, FileTransferPullRequest, InputEvent, PresentationStart,
@@ -150,8 +150,7 @@ pub fn dispatch_privileged_command(
             Ok(PrivilegedControlCommand::ClipboardReadRequest(*request))
         }
         control_envelope::Payload::ClipboardWrite(write) => {
-            validate_text(&write.text_utf8)
-                .map_err(PrivilegedDispatchError::InvalidClipboardText)?;
+            validate_write(write).map_err(PrivilegedDispatchError::InvalidClipboardText)?;
             guard.authorize(
                 authorization,
                 envelope,
