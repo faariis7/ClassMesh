@@ -1,6 +1,6 @@
 # ClassMesh Implementation Status
 
-> **Live addendum (2026-10-11):** Phase 12D push/pull orchestration and Windows storage/source integration through D4a8 are merged (#398, CI #1622); readiness-gated production FileTransfer capability is implemented but not physically qualified. D4b1 portable Teacher file-pull UI contract is merged (#400, CI #1625); D4b2 (#401, CI #1631) and D4b3 (#402, CI #1632) remain open pending full CI and sequential squash merges. Trusted staged-file candidate production, real control transport dispatch and exact Windows UI/runtime/visual evidence remain open. Historical Phase 4/6/7/8/9/10 and Phase 12B4b/12C4 physical gates remain OPEN. This note supersedes outdated earlier Phase 12 claims.
+> **Live addendum (2026-10-11):** Phase 12D protocol, Service routing and Windows inbox/outbox readiness through D4a8 are merged. Teacher UI contracts and guarded actions D4b1–D4b5 are merged (#400–#405, latest #405 CI #1642 green; merge `d4385e1`). These are **code/hosted-CI completion only**: there is no claimed live staged-file producer, real end-to-end Teacher transport/result handoff, or exact-artifact physical Windows UI/transfer evidence. Retain all historical physical gates including Phase 4/6F/7D/7H/8D/9F/10G and 12B4b/12C4 as OPEN. Next: safely connect existing authenticated control seams, then qualify on connected Windows hardware. This addendum supersedes older Phase 12 entries.
 
 
 Last updated: 2026-10-11
