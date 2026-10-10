@@ -350,9 +350,7 @@ fn file_transfer_response_payload(
     }
 }
 
-fn validate_file_transfer_response_payload(
-    payload: &control_envelope::Payload,
-) -> Result<(), ()> {
+fn validate_file_transfer_response_payload(payload: &control_envelope::Payload) -> Result<(), ()> {
     match payload {
         control_envelope::Payload::FileTransferOffer(value) => {
             validate_file_transfer_offer(value).map_err(|_| ())
@@ -3442,10 +3440,7 @@ mod tests {
             )),
         )
         .expect("offer should produce a response");
-        assert_eq!(
-            payload,
-            control_envelope::Payload::FileTransferOffer(offer)
-        );
+        assert_eq!(payload, control_envelope::Payload::FileTransferOffer(offer));
         assert_eq!(validate_file_transfer_response_payload(&payload), Ok(()));
 
         assert_eq!(
