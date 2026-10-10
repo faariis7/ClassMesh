@@ -384,6 +384,19 @@ message FileTransferOffer {
   FileDestinationPolicy destination = 5;
 }
 
+// Protocol v0.8 pull initiation selects only an app-owned logical source.
+// source_id is opaque, nonzero and fixed-width; it is never a filesystem path.
+enum FileSourcePolicy {
+  FILE_SOURCE_POLICY_UNSPECIFIED = 0;
+  FILE_SOURCE_POLICY_APP_OUTBOX = 1;
+}
+
+message FileTransferPullRequest {
+  bytes transfer_id = 1;
+  bytes source_id = 2;
+  FileSourcePolicy source = 3;
+}
+
 message FileTransferChunk {
   bytes transfer_id = 1;
   uint64 offset = 2;
@@ -528,5 +541,6 @@ message ControlEnvelope {
     FileTransferFinish file_transfer_finish = 50;
     FileTransferCancel file_transfer_cancel = 51;
     FileTransferStatus file_transfer_status = 52;
+    FileTransferPullRequest file_transfer_pull_request = 53;
   }
 }

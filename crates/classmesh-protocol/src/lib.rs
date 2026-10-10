@@ -14,7 +14,7 @@ pub mod control_wire {
     include!(concat!(env!("OUT_DIR"), "/classmesh.control.v1.rs"));
 }
 
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 7 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 8 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProtocolVersion {
@@ -156,8 +156,12 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_minor_seven_and_preserves_additive_negotiation() {
-        assert_eq!(PROTOCOL_VERSION, ProtocolVersion { major: 0, minor: 7 });
+    fn protocol_version_is_minor_eight_and_preserves_additive_negotiation() {
+        assert_eq!(PROTOCOL_VERSION, ProtocolVersion { major: 0, minor: 8 });
+        assert_eq!(
+            PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 7 }),
+            Some(ProtocolVersion { major: 0, minor: 7 })
+        );
         assert_eq!(
             PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 6 }),
             Some(ProtocolVersion { major: 0, minor: 6 })
@@ -225,6 +229,30 @@ mod tests {
                 .expect("file-transfer envelope must decode");
             assert_eq!(decoded, envelope);
         }
+    }
+
+    #[test]
+    fn file_transfer_pull_request_round_trips_on_v08() {
+        let envelope = control_wire::ControlEnvelope {
+            control_session_id: 31,
+            sequence: 9,
+            protocol_version: Some(control_wire::ProtocolVersion { major: 0, minor: 8 }),
+            request_id: 43,
+            payload: Some(
+                control_wire::control_envelope::Payload::FileTransferPullRequest(
+                    control_wire::FileTransferPullRequest {
+                        transfer_id: vec![7; 16],
+                        source_id: vec![8; 16],
+                        source: control_wire::FileSourcePolicy::AppOutbox as i32,
+                    },
+                ),
+            ),
+        };
+        let encoded = envelope.encode_to_vec();
+        assert!(encoded.len() < 256 * 1024);
+        let decoded = control_wire::ControlEnvelope::decode(encoded.as_slice())
+            .expect("file-transfer pull request must decode");
+        assert_eq!(decoded, envelope);
     }
 
     #[test]
