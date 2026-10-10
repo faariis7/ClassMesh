@@ -43,16 +43,18 @@ use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_ce
 use classmesh_network::runtime_multicast_probe::probe_local_multicast_interface;
 use classmesh_protocol::control_wire::{
     ControlEnvelope, FileTransferCancel, FileTransferChunk, FileTransferFinish, FileTransferOffer,
-    FileTransferState, FileTransferStatus, HeartbeatAck, InputEvent, KeyframeRequest,
-    MediaTransport as WireMediaTransport, Nack, PresentationState as WirePresentationState,
-    PresentationStatus, ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamAnswer,
+    FileTransferPullRequest, FileTransferState, FileTransferStatus, HeartbeatAck, InputEvent,
+    KeyframeRequest, MediaTransport as WireMediaTransport, Nack,
+    PresentationState as WirePresentationState, PresentationStatus,
+    ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamAnswer,
     StreamKind as WireStreamKind, StreamReconfigure, SystemAction, SystemActionResult,
     SystemActionState, TeacherInteractionKind, TeacherInteractionRequest, TeacherInteractionResult,
     TeacherInteractionState, control_envelope,
 };
 use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
 use classmesh_protocol::file_transfer::{
-    file_transfer_available, validate_status as validate_file_transfer_status,
+    file_transfer_available, file_transfer_pull_available,
+    validate_status as validate_file_transfer_status,
 };
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION, ProtocolVersion};
 use classmesh_security::{AuthorizationStore, Permission, PrincipalId};
@@ -214,6 +216,7 @@ pub(crate) enum FileTransferDispatchPayload {
     Chunk(FileTransferChunk),
     Finish(FileTransferFinish),
     Cancel(FileTransferCancel),
+    PullRequest(FileTransferPullRequest),
 }
 
 impl FileTransferDispatchPayload {
@@ -223,6 +226,7 @@ impl FileTransferDispatchPayload {
             Self::Chunk(value) => &value.transfer_id,
             Self::Finish(value) => &value.transfer_id,
             Self::Cancel(value) => &value.transfer_id,
+            Self::PullRequest(value) => &value.transfer_id,
         }
     }
 }
@@ -257,6 +261,7 @@ pub(crate) enum FileTransferDispatchOutcome {
     Backpressure,
     ServiceUnavailable,
     StorageUnavailable,
+    SourceUnavailable,
     ReplyDropped,
     TimedOut,
     Cancelled,
@@ -278,6 +283,10 @@ fn file_transfer_failure(
         FileTransferDispatchOutcome::StorageUnavailable => (
             FileTransferState::Rejected,
             "file_transfer.storage_unavailable",
+        ),
+        FileTransferDispatchOutcome::SourceUnavailable => (
+            FileTransferState::Rejected,
+            "file_transfer.source_unavailable",
         ),
         FileTransferDispatchOutcome::ReplyDropped => (
             FileTransferState::Failed,
@@ -2666,11 +2675,21 @@ async fn run_established_session(
             Some(control_envelope::Payload::FileTransferOffer(_))
             | Some(control_envelope::Payload::FileTransferChunk(_))
             | Some(control_envelope::Payload::FileTransferFinish(_))
-            | Some(control_envelope::Payload::FileTransferCancel(_)) => {
-                if !file_transfer_available(
-                    session.negotiated.version,
-                    &session.negotiated.capabilities,
-                ) {
+            | Some(control_envelope::Payload::FileTransferCancel(_))
+            | Some(control_envelope::Payload::FileTransferPullRequest(_)) => {
+                let negotiated = match envelope.payload.as_ref() {
+                    Some(control_envelope::Payload::FileTransferPullRequest(_)) => {
+                        file_transfer_pull_available(
+                            session.negotiated.version,
+                            &session.negotiated.capabilities,
+                        )
+                    }
+                    _ => file_transfer_available(
+                        session.negotiated.version,
+                        &session.negotiated.capabilities,
+                    ),
+                };
+                if !negotiated {
                     eprintln!(
                         "ClassMesh file transfer rejected: control.file_transfer.capability_not_negotiated"
                     );
@@ -2701,6 +2720,9 @@ async fn run_established_session(
                     }
                     Ok(PrivilegedControlCommand::FileTransferCancel(value)) => {
                         FileTransferDispatchPayload::Cancel(value)
+                    }
+                    Ok(PrivilegedControlCommand::FileTransferPullRequest(value)) => {
+                        FileTransferDispatchPayload::PullRequest(value)
                     }
                     Ok(_) => {
                         connection.close(0_u32.into(), b"privileged payload mismatch");
@@ -3303,6 +3325,21 @@ mod tests {
             TeacherInteractionKind::Message,
             &BTreeSet::new(),
         ));
+    }
+
+    #[test]
+    fn file_pull_routing_failure_is_bounded_and_valid() {
+        let transfer_id = vec![6_u8; 16];
+        let status =
+            file_transfer_failure(&transfer_id, FileTransferDispatchOutcome::SourceUnavailable);
+        assert_eq!(status.transfer_id, transfer_id);
+        assert_eq!(status.state, FileTransferState::Rejected as i32);
+        assert_eq!(status.next_offset, 0);
+        assert_eq!(status.diagnostic, "file_transfer.source_unavailable");
+        assert_eq!(
+            classmesh_protocol::file_transfer::validate_status(&status),
+            Ok(())
+        );
     }
 
     #[test]
