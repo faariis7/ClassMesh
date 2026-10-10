@@ -61,6 +61,9 @@ impl WindowsFileTransferOutboxSource {
             .map_err(|_| WindowsOutboxSourceError::InvalidDisplayName)?;
         let path = self.root.join(format!("{}.bin", source_id_stem(source_id)));
         let metadata = fs::metadata(&path).map_err(|_| WindowsOutboxSourceError::MissingSource)?;
+        if !metadata.is_file() {
+            return Err(WindowsOutboxSourceError::MissingSource);
+        }
         let total_size = metadata.len();
         if total_size == 0 || total_size > MAX_FILE_TRANSFER_BYTES {
             return Err(WindowsOutboxSourceError::FileTooLarge);
@@ -401,6 +404,23 @@ mod tests {
 
         source.close(id);
         assert!(!staged.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn outbox_rejects_non_file_staged_sources() {
+        let root = test_root("outbox-non-file");
+        fs::create_dir_all(&root).expect("root");
+        let mut source = WindowsFileTransferOutboxSource::new(&root);
+        let id = source_id();
+        let staged = source.staged_path(id);
+        fs::create_dir_all(&staged).expect("seed staged directory");
+
+        assert_eq!(
+            source.register_staged_file(id, "lesson.pdf"),
+            Err(WindowsOutboxSourceError::MissingSource)
+        );
+
         let _ = fs::remove_dir_all(root);
     }
 
