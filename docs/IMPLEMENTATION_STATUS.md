@@ -154,9 +154,9 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 
 ## Next implementation sequence
 
-1. **Phase 12D1 COMPLETE (#373, CI #1503 green) and 12D2a COMPLETE (#376, CI #1511 green); Phase 12D2b CURRENT.**
-2. Land the portable bounded receiver with exact authenticated principal/control-session/transfer binding, one active transfer, sequential <=64 KiB chunks, streaming SHA-256, re-offer/status resume, cancellation and an injectable app-owned sink.
-3. Keep `FileTransfer` capability advertisement OFF and keep production filesystem/Windows side effects out until 12D2c Service delivery exists.
-4. Then implement **12D2c bounded Service delivery** with exact correlation/backpressure/cancel semantics; 12D3 ReceiveFile pull/recovery follows.
-5. **12C4b UI implementation is merged (#371, CI #1491 green)** but Session 1 exact-build Windows runtime/visual acceptance remains an open gate.
+1. **Phase 12D3b2 COMPLETE in PR #387 with CI #1557 green; Phase 12D3b3 CURRENT in clean PR #388.**
+2. Merge D3b3 only after required Portable + Windows CI is green at the reviewed head SHA.
+3. Then land **D4a1 Windows inbox storage** (#390), **D4a2 Windows outbox source** (#391) and **D4a3 Service inbox wiring** (#392) in dependency order, rebuilding stacked branches cleanly onto `main` after each squash merge.
+4. Keep production `FileTransfer` capability advertisement OFF until both push storage and pull egress are actually serviceable end to end. No sender-controlled filesystem paths or shell/command surface.
+5. **12C4b UI implementation remains merged (#371, CI #1491 green)** but Session 1 exact-build Windows runtime/visual acceptance remains an open gate.
 6. Keep unrelated Phase 4/6F/7D/7H/8D/9F/10G/12B4b physical gates open; hosted CI must not close them.
