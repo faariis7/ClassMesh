@@ -1,9 +1,9 @@
 # ClassMesh Living Work Plan
 
-> **Live addendum (2026-10-10):** Phase 12D1–D3 and Windows D4 inbox/outbox boundaries are merged. PR #395 (D4 egress + Windows outbox session) is merged on `main` at `dd45a99` after Portable/Windows CI #1602 passed. D4a6 disconnect cleanup (#396), D4a7 opaque staged outbox (#397), and D4a8 startup/readiness-gated FileTransfer advertisement (#398) are OPEN, with fresh CI pending on clean ancestry; do not count as complete until their own CI/merge. Next: merge sequentially only after required CI green; then Teacher UI and physical Windows runtime/visual qualification. Phase 4/6F/7D/7H/8D/9F/10G/12B4b/12C4 physical gates remain OPEN. This addendum supersedes stale "D2a/D2b current" status below.
+> **Live addendum (2026-10-11):** Phase 12D1–D3 and Windows D4a1–D4a8 implementation are merged through PR #398 (CI #1622 green; merge `649daaa`). PR #400 completed D4b1 portable Teacher file-pull action/validation (CI #1625 green; merge `e70e320`). D4b2 exact-session pending-action handoff (#401; CI #1631) and D4b3 gated staged-file UI control (#402; CI #1632) are OPEN and stacked on clean ancestry. A trusted runtime candidate producer, actual transport handoff, exact-build Windows interactive/visual qualification and evidence remain future work; no physical acceptance is claimed. Phase 4/6F/7D/7H/8D/9F/10G/12B4b/12C4 gates remain OPEN. This live addendum supersedes the stale 12D2a/D2b-current statements below.
 
 
-Last updated: 2026-10-07
+Last updated: 2026-10-11
 
 This is the active execution plan for ClassMesh. It is updated as implementation evidence changes so roadmap intent, code status, hosted-CI evidence, and physical validation are not confused.
 
