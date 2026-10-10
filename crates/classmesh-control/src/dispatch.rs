@@ -1,14 +1,17 @@
 use classmesh_protocol::clipboard::{ClipboardTextError, validate_text};
 use classmesh_protocol::control_wire::{
     ClipboardReadRequest, ClipboardWrite, ControlEnvelope, FileTransferCancel, FileTransferChunk,
-    FileTransferFinish, FileTransferOffer, InputEvent, PresentationStart, PresentationStop,
-    SystemAction, TeacherInteractionKind, TeacherInteractionRequest, control_envelope,
+    FileTransferFinish, FileTransferOffer, FileTransferPullRequest, InputEvent, PresentationStart,
+    PresentationStop, SystemAction, TeacherInteractionKind, TeacherInteractionRequest,
+    control_envelope,
 };
 use classmesh_protocol::file_transfer::{
-    FILE_TRANSFER_MIN_VERSION, FileTransferError, validate_cancel as validate_file_transfer_cancel,
+    FILE_TRANSFER_MIN_VERSION, FILE_TRANSFER_PULL_MIN_VERSION, FileTransferError,
+    validate_cancel as validate_file_transfer_cancel,
     validate_chunk as validate_file_transfer_chunk,
     validate_finish as validate_file_transfer_finish,
     validate_offer as validate_file_transfer_offer,
+    validate_pull_request as validate_file_transfer_pull_request,
 };
 use classmesh_protocol::presentation::{
     PresentationControlError, validate_start as validate_presentation_start,
@@ -61,6 +64,7 @@ pub enum PrivilegedControlCommand {
     FileTransferChunk(FileTransferChunk),
     FileTransferFinish(FileTransferFinish),
     FileTransferCancel(FileTransferCancel),
+    FileTransferPullRequest(FileTransferPullRequest),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +86,10 @@ pub enum PrivilegedDispatchError {
     FileTransferOfferRequestMissingId,
     FileTransferRequestMissingId,
     FileTransferRequiresProtocolV7,
+    FileTransferPullRequestMissingId,
+    FileTransferPullRequiresProtocolV8,
     InvalidFileTransferOffer(FileTransferError),
+    InvalidFileTransferPull(FileTransferError),
     InvalidFileTransferChunk(FileTransferError),
     InvalidFileTransferFinish(FileTransferError),
     InvalidFileTransferCancel(FileTransferError),
@@ -305,6 +312,28 @@ pub fn dispatch_privileged_command(
             guard.authorize(authorization, envelope, Permission::SendFile, now_unix_ms)?;
             Ok(PrivilegedControlCommand::FileTransferCancel(cancel.clone()))
         }
+        control_envelope::Payload::FileTransferPullRequest(request) => {
+            let version = guard.protocol_version();
+            if version.major != FILE_TRANSFER_PULL_MIN_VERSION.major
+                || version.minor < FILE_TRANSFER_PULL_MIN_VERSION.minor
+            {
+                return Err(PrivilegedDispatchError::FileTransferPullRequiresProtocolV8);
+            }
+            if envelope.request_id == 0 {
+                return Err(PrivilegedDispatchError::FileTransferPullRequestMissingId);
+            }
+            validate_file_transfer_pull_request(request)
+                .map_err(PrivilegedDispatchError::InvalidFileTransferPull)?;
+            guard.authorize(
+                authorization,
+                envelope,
+                Permission::ReceiveFile,
+                now_unix_ms,
+            )?;
+            Ok(PrivilegedControlCommand::FileTransferPullRequest(
+                request.clone(),
+            ))
+        }
         _ => Err(PrivilegedDispatchError::UnsupportedPayload),
     }
 }
@@ -316,11 +345,11 @@ mod tests {
     use classmesh_protocol::ProtocolVersion;
     use classmesh_protocol::clipboard::MAX_CLIPBOARD_TEXT_BYTES;
     use classmesh_protocol::control_wire::{
-        ClipboardReadRequest, ClipboardWrite, FileDestinationPolicy, FileTransferCancel,
-        FileTransferChunk, FileTransferFinish, FileTransferOffer, Heartbeat, OpenTarget,
-        PresentationKeyGrant, PresentationStart, PresentationStop,
-        ProtocolVersion as WireProtocolVersion, ReleaseAllInput, SystemActionRequest,
-        TeacherInteractionRequest, TeacherMessage, input_event, open_target,
+        ClipboardReadRequest, ClipboardWrite, FileDestinationPolicy, FileSourcePolicy,
+        FileTransferCancel, FileTransferChunk, FileTransferFinish, FileTransferOffer,
+        FileTransferPullRequest, Heartbeat, OpenTarget, PresentationKeyGrant, PresentationStart,
+        PresentationStop, ProtocolVersion as WireProtocolVersion, ReleaseAllInput,
+        SystemActionRequest, TeacherInteractionRequest, TeacherMessage, input_event, open_target,
         teacher_interaction_request,
     };
     use classmesh_security::{
@@ -334,6 +363,7 @@ mod tests {
     const SYSTEM_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 5 };
     const TEACHER_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 6 };
     const FILE_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 7 };
+    const FILE_PULL_VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 8 };
 
     fn identity() -> AuthenticatedPeerIdentity {
         AuthenticatedPeerIdentity {
@@ -635,6 +665,85 @@ mod tests {
                 ))
             ));
         }
+    }
+
+    #[test]
+    fn file_pull_requires_v08_nonzero_correlation_validation_and_receivefile() {
+        let request = FileTransferPullRequest {
+            transfer_id: vec![7; 16],
+            source_id: vec![8; 16],
+            source: FileSourcePolicy::AppOutbox as i32,
+        };
+        let envelope = ControlEnvelope {
+            control_session_id: 77,
+            sequence: 2,
+            protocol_version: Some(WireProtocolVersion { major: 0, minor: 8 }),
+            request_id: 92,
+            payload: Some(control_envelope::Payload::FileTransferPullRequest(
+                request.clone(),
+            )),
+        };
+
+        let receive = store(BTreeSet::from([Permission::ReceiveFile]));
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, FILE_PULL_VERSION, 1);
+        assert_eq!(
+            dispatch_privileged_command(&mut guard, &receive, &envelope, 150),
+            Ok(PrivilegedControlCommand::FileTransferPullRequest(
+                request.clone()
+            ))
+        );
+        assert_eq!(guard.last_sequence(), 2);
+
+        let older_version = ProtocolVersion { major: 0, minor: 7 };
+        let mut old_guard = AuthenticatedControlGuard::new(identity(), 77, older_version, 1);
+        let older = ControlEnvelope {
+            protocol_version: Some(WireProtocolVersion { major: 0, minor: 7 }),
+            ..envelope.clone()
+        };
+        assert_eq!(
+            dispatch_privileged_command(&mut old_guard, &receive, &older, 150),
+            Err(PrivilegedDispatchError::FileTransferPullRequiresProtocolV8)
+        );
+        assert_eq!(old_guard.last_sequence(), 1);
+
+        let mut missing = envelope.clone();
+        missing.request_id = 0;
+        let mut missing_guard =
+            AuthenticatedControlGuard::new(identity(), 77, FILE_PULL_VERSION, 1);
+        assert_eq!(
+            dispatch_privileged_command(&mut missing_guard, &receive, &missing, 150),
+            Err(PrivilegedDispatchError::FileTransferPullRequestMissingId)
+        );
+        assert_eq!(missing_guard.last_sequence(), 1);
+
+        let mut invalid = envelope.clone();
+        let Some(control_envelope::Payload::FileTransferPullRequest(value)) =
+            invalid.payload.as_mut()
+        else {
+            panic!("expected file-transfer pull request")
+        };
+        value.source_id.fill(0);
+        let mut invalid_guard =
+            AuthenticatedControlGuard::new(identity(), 77, FILE_PULL_VERSION, 1);
+        assert_eq!(
+            dispatch_privileged_command(&mut invalid_guard, &receive, &invalid, 150),
+            Err(PrivilegedDispatchError::InvalidFileTransferPull(
+                FileTransferError::InvalidSourceId
+            ))
+        );
+        assert_eq!(invalid_guard.last_sequence(), 1);
+
+        let send_only = store(BTreeSet::from([Permission::SendFile]));
+        let mut denied_guard = AuthenticatedControlGuard::new(identity(), 77, FILE_PULL_VERSION, 1);
+        assert_eq!(
+            dispatch_privileged_command(&mut denied_guard, &send_only, &envelope, 150),
+            Err(PrivilegedDispatchError::Authorization(
+                CommandAuthorizationError::Unauthorized {
+                    permission: Permission::ReceiveFile
+                }
+            ))
+        );
+        assert_eq!(denied_guard.last_sequence(), 2);
     }
 
     #[test]
