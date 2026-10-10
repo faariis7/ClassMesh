@@ -54,6 +54,10 @@ use classmesh_protocol::control_wire::{
 use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
 use classmesh_protocol::file_transfer::{
     file_transfer_available, file_transfer_pull_available,
+    validate_cancel as validate_file_transfer_cancel,
+    validate_chunk as validate_file_transfer_chunk,
+    validate_finish as validate_file_transfer_finish,
+    validate_offer as validate_file_transfer_offer,
     validate_status as validate_file_transfer_status,
 };
 use classmesh_protocol::{Capability, MediaHealth, PROTOCOL_VERSION, ProtocolVersion};
@@ -217,6 +221,7 @@ pub(crate) enum FileTransferDispatchPayload {
     Finish(FileTransferFinish),
     Cancel(FileTransferCancel),
     PullRequest(FileTransferPullRequest),
+    Status(FileTransferStatus),
 }
 
 impl FileTransferDispatchPayload {
@@ -227,6 +232,7 @@ impl FileTransferDispatchPayload {
             Self::Finish(value) => &value.transfer_id,
             Self::Cancel(value) => &value.transfer_id,
             Self::PullRequest(value) => &value.transfer_id,
+            Self::Status(value) => &value.transfer_id,
         }
     }
 }
@@ -257,8 +263,29 @@ pub(crate) struct FileTransferDispatchChannels {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FileTransferOutboundPayload {
+    Offer(FileTransferOffer),
+    Chunk(FileTransferChunk),
+    Finish(FileTransferFinish),
+    Cancel(FileTransferCancel),
+}
+
+impl FileTransferOutboundPayload {
+    fn into_control_payload(self) -> control_envelope::Payload {
+        match self {
+            Self::Offer(value) => control_envelope::Payload::FileTransferOffer(value),
+            Self::Chunk(value) => control_envelope::Payload::FileTransferChunk(value),
+            Self::Finish(value) => control_envelope::Payload::FileTransferFinish(value),
+            Self::Cancel(value) => control_envelope::Payload::FileTransferCancel(value),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FileTransferDispatchOutcome {
     Status(FileTransferStatus),
+    Outbound(FileTransferOutboundPayload),
+    NoResponse,
     Backpressure,
     ServiceUnavailable,
     SourceUnavailable,
@@ -275,7 +302,9 @@ fn file_transfer_failure(
         return status;
     }
     let (state, diagnostic) = match outcome {
-        FileTransferDispatchOutcome::Status(_) => unreachable!(),
+        FileTransferDispatchOutcome::Status(_)
+        | FileTransferDispatchOutcome::Outbound(_)
+        | FileTransferDispatchOutcome::NoResponse => unreachable!(),
         FileTransferDispatchOutcome::Backpressure => (
             FileTransferState::Rejected,
             "file_transfer.service_backpressure",
@@ -304,6 +333,40 @@ fn file_transfer_failure(
         state: state as i32,
         next_offset: 0,
         diagnostic: diagnostic.to_owned(),
+    }
+}
+
+fn file_transfer_response_payload(
+    transfer_id: &[u8],
+    outcome: FileTransferDispatchOutcome,
+) -> Option<control_envelope::Payload> {
+    match outcome {
+        FileTransferDispatchOutcome::Outbound(payload) => Some(payload.into_control_payload()),
+        FileTransferDispatchOutcome::NoResponse => None,
+        other => Some(control_envelope::Payload::FileTransferStatus(
+            file_transfer_failure(transfer_id, other),
+        )),
+    }
+}
+
+fn validate_file_transfer_response_payload(payload: &control_envelope::Payload) -> Result<(), ()> {
+    match payload {
+        control_envelope::Payload::FileTransferOffer(value) => {
+            validate_file_transfer_offer(value).map_err(|_| ())
+        }
+        control_envelope::Payload::FileTransferChunk(value) => {
+            validate_file_transfer_chunk(value).map_err(|_| ())
+        }
+        control_envelope::Payload::FileTransferFinish(value) => {
+            validate_file_transfer_finish(value).map_err(|_| ())
+        }
+        control_envelope::Payload::FileTransferCancel(value) => {
+            validate_file_transfer_cancel(value).map_err(|_| ())
+        }
+        control_envelope::Payload::FileTransferStatus(value) => {
+            validate_file_transfer_status(value).map_err(|_| ())
+        }
+        _ => Err(()),
     }
 }
 
@@ -2676,18 +2739,23 @@ async fn run_established_session(
             | Some(control_envelope::Payload::FileTransferChunk(_))
             | Some(control_envelope::Payload::FileTransferFinish(_))
             | Some(control_envelope::Payload::FileTransferCancel(_))
-            | Some(control_envelope::Payload::FileTransferPullRequest(_)) => {
-                let negotiated = match envelope.payload.as_ref() {
-                    Some(control_envelope::Payload::FileTransferPullRequest(_)) => {
-                        file_transfer_pull_available(
-                            session.negotiated.version,
-                            &session.negotiated.capabilities,
-                        )
-                    }
-                    _ => file_transfer_available(
+            | Some(control_envelope::Payload::FileTransferPullRequest(_))
+            | Some(control_envelope::Payload::FileTransferStatus(_)) => {
+                let pull_flow = matches!(
+                    envelope.payload.as_ref(),
+                    Some(control_envelope::Payload::FileTransferPullRequest(_))
+                        | Some(control_envelope::Payload::FileTransferStatus(_))
+                );
+                let negotiated = if pull_flow {
+                    file_transfer_pull_available(
                         session.negotiated.version,
                         &session.negotiated.capabilities,
-                    ),
+                    )
+                } else {
+                    file_transfer_available(
+                        session.negotiated.version,
+                        &session.negotiated.capabilities,
+                    )
                 };
                 if !negotiated {
                     eprintln!(
@@ -2696,47 +2764,70 @@ async fn run_established_session(
                     connection.close(0_u32.into(), b"file transfer capability not negotiated");
                     return;
                 }
-                let now_unix_ms = match unix_time_ms() {
-                    Ok(value) => value,
-                    Err(_) => {
-                        connection.close(0_u32.into(), b"invalid service clock");
-                        return;
+
+                let payload = match envelope.payload.as_ref() {
+                    Some(control_envelope::Payload::FileTransferStatus(status)) => {
+                        if envelope.request_id == 0
+                            || validate_file_transfer_status(status).is_err()
+                        {
+                            connection.close(0_u32.into(), b"file transfer status invalid");
+                            return;
+                        }
+                        if let Err(error) = guard.validate_envelope(&envelope) {
+                            eprintln!(
+                                "ClassMesh file transfer status rejected: {}",
+                                command_authorization_diagnostic_code(&error)
+                            );
+                            connection.close(0_u32.into(), b"invalid file transfer status");
+                            return;
+                        }
+                        FileTransferDispatchPayload::Status(status.clone())
+                    }
+                    _ => {
+                        let now_unix_ms = match unix_time_ms() {
+                            Ok(value) => value,
+                            Err(_) => {
+                                connection.close(0_u32.into(), b"invalid service clock");
+                                return;
+                            }
+                        };
+                        match dispatch_privileged_command(
+                            &mut guard,
+                            authorization,
+                            &envelope,
+                            now_unix_ms,
+                        ) {
+                            Ok(PrivilegedControlCommand::FileTransferOffer(value)) => {
+                                FileTransferDispatchPayload::Offer(value)
+                            }
+                            Ok(PrivilegedControlCommand::FileTransferChunk(value)) => {
+                                FileTransferDispatchPayload::Chunk(value)
+                            }
+                            Ok(PrivilegedControlCommand::FileTransferFinish(value)) => {
+                                FileTransferDispatchPayload::Finish(value)
+                            }
+                            Ok(PrivilegedControlCommand::FileTransferCancel(value)) => {
+                                FileTransferDispatchPayload::Cancel(value)
+                            }
+                            Ok(PrivilegedControlCommand::FileTransferPullRequest(value)) => {
+                                FileTransferDispatchPayload::PullRequest(value)
+                            }
+                            Ok(_) => {
+                                connection.close(0_u32.into(), b"privileged payload mismatch");
+                                return;
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "ClassMesh file transfer rejected: {}",
+                                    privileged_dispatch_diagnostic_code(&error)
+                                );
+                                connection.close(0_u32.into(), b"privileged command rejected");
+                                return;
+                            }
+                        }
                     }
                 };
-                let payload = match dispatch_privileged_command(
-                    &mut guard,
-                    authorization,
-                    &envelope,
-                    now_unix_ms,
-                ) {
-                    Ok(PrivilegedControlCommand::FileTransferOffer(value)) => {
-                        FileTransferDispatchPayload::Offer(value)
-                    }
-                    Ok(PrivilegedControlCommand::FileTransferChunk(value)) => {
-                        FileTransferDispatchPayload::Chunk(value)
-                    }
-                    Ok(PrivilegedControlCommand::FileTransferFinish(value)) => {
-                        FileTransferDispatchPayload::Finish(value)
-                    }
-                    Ok(PrivilegedControlCommand::FileTransferCancel(value)) => {
-                        FileTransferDispatchPayload::Cancel(value)
-                    }
-                    Ok(PrivilegedControlCommand::FileTransferPullRequest(value)) => {
-                        FileTransferDispatchPayload::PullRequest(value)
-                    }
-                    Ok(_) => {
-                        connection.close(0_u32.into(), b"privileged payload mismatch");
-                        return;
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "ClassMesh file transfer rejected: {}",
-                            privileged_dispatch_diagnostic_code(&error)
-                        );
-                        connection.close(0_u32.into(), b"privileged command rejected");
-                        return;
-                    }
-                };
+
                 let transfer_id = payload.transfer_id().to_vec();
                 let request_id = envelope.request_id;
                 let commit = SystemActionCommit::pending();
@@ -2756,11 +2847,15 @@ async fn run_established_session(
                         FileTransferDispatchOutcome::ServiceUnavailable
                     }
                 };
-                let status = file_transfer_failure(&transfer_id, outcome);
-                if validate_file_transfer_status(&status).is_err() {
-                    connection.close(0_u32.into(), b"file transfer status invalid");
+                let Some(response_payload) = file_transfer_response_payload(&transfer_id, outcome)
+                else {
+                    continue;
+                };
+                if validate_file_transfer_response_payload(&response_payload).is_err() {
+                    connection.close(0_u32.into(), b"file transfer response invalid");
                     return;
                 }
+
                 let Some(next_sequence) = outbound_sequence.checked_add(1) else {
                     connection.close(0_u32.into(), b"control sequence exhausted");
                     return;
@@ -2774,14 +2869,14 @@ async fn run_established_session(
                         minor: u32::from(session.negotiated.version.minor),
                     }),
                     request_id,
-                    payload: Some(control_envelope::Payload::FileTransferStatus(status)),
+                    payload: Some(response_payload),
                 };
                 if let Err(error) = send.send(&response).await {
                     eprintln!(
-                        "ClassMesh file transfer status failed: {}",
+                        "ClassMesh file transfer response failed: {}",
                         transport_diagnostic_code(&error)
                     );
-                    connection.close(0_u32.into(), b"file transfer status failed");
+                    connection.close(0_u32.into(), b"file transfer response failed");
                     return;
                 }
             }
@@ -3325,6 +3420,50 @@ mod tests {
             TeacherInteractionKind::Message,
             &BTreeSet::new(),
         ));
+    }
+
+    #[test]
+    fn file_transfer_response_payload_preserves_typed_egress_and_completion() {
+        let id = vec![6_u8; 16];
+        let offer = FileTransferOffer {
+            transfer_id: id.clone(),
+            filename: "lesson.pdf".to_owned(),
+            total_size: 3,
+            sha256: vec![7; 32],
+            destination: classmesh_protocol::control_wire::FileDestinationPolicy::AppInbox as i32,
+        };
+        let payload = file_transfer_response_payload(
+            &id,
+            FileTransferDispatchOutcome::Outbound(FileTransferOutboundPayload::Offer(
+                offer.clone(),
+            )),
+        )
+        .expect("offer should produce a response");
+        assert_eq!(payload, control_envelope::Payload::FileTransferOffer(offer));
+        assert_eq!(validate_file_transfer_response_payload(&payload), Ok(()));
+
+        assert_eq!(
+            file_transfer_response_payload(&id, FileTransferDispatchOutcome::NoResponse),
+            None
+        );
+    }
+
+    #[test]
+    fn file_transfer_status_can_be_routed_as_typed_inbound_payload() {
+        let status = FileTransferStatus {
+            transfer_id: vec![5_u8; 16],
+            state: FileTransferState::Progress as i32,
+            next_offset: 32,
+            diagnostic: String::new(),
+        };
+        let payload = FileTransferDispatchPayload::Status(status.clone());
+        assert_eq!(payload.transfer_id(), status.transfer_id.as_slice());
+        assert_eq!(
+            validate_file_transfer_response_payload(
+                &control_envelope::Payload::FileTransferStatus(status)
+            ),
+            Ok(())
+        );
     }
 
     #[test]
