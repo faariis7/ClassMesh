@@ -154,8 +154,8 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 
 ## Next implementation sequence
 
-1. **Phase 12D3b2 COMPLETE in PR #387 and Phase 12D3b3 COMPLETE in PR #388 with CI #1567 green. Phase 12D4a1 is current in clean PR #390.**
-2. Merge D4a1 only after its rebuilt clean branch passes required Portable + Windows CI at the reviewed head SHA.
+1. **Phase 12D3b2 COMPLETE in PR #387 and Phase 12D3b3 COMPLETE in PR #388 with CI #1567 green. Phase 12D4a1 is complete in PR #390 with CI #1578 green; D4a2 is current in clean PR #391.**
+2. Merge D4a2 only after its rebuilt clean branch passes required Portable + Windows CI at the reviewed head SHA.
 3. Then land **D4a1 Windows inbox storage** (#390), **D4a2 Windows outbox source** (#391) and **D4a3 Service inbox wiring** (#392) in dependency order, rebuilding stacked branches cleanly onto `main` after each squash merge.
 4. Keep production `FileTransfer` capability advertisement OFF until both push storage and pull egress are actually serviceable end to end. No sender-controlled filesystem paths or shell/command surface.
 5. **12C4b UI implementation remains merged (#371, CI #1491 green)** but Session 1 exact-build Windows runtime/visual acceptance remains an open gate.
