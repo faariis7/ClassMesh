@@ -1,5 +1,8 @@
 # ClassMesh Implementation Status
 
+> **Live addendum (2026-10-10):** Phase 12D1–D3, Windows D4 inbox/outbox storage boundaries and D4a1–D4a5 through merged PR #395 are implemented. PRs #396–#398 are open and under fresh CI; FileTransfer readiness advertisement is not yet merged. Hosted CI is not physical Windows qualification; Phase 12B4b, 12C4 and historical Phase 4/6/7/8/9/10 gates remain open. This note supersedes outdated earlier Phase 12 status in this file.
+
+
 Last updated: 2026-10-03
 
 This file distinguishes **implemented code**, **hosted-CI validation**, **real-hardware validation still required**, and **future product work**. Architecture documents must not be read as claims that every planned feature is already production-ready.
