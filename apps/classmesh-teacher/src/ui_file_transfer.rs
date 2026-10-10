@@ -98,9 +98,13 @@ mod tests {
 
     fn prepared() -> TeacherFilePullAction {
         prepare_file_pull_action(
-            MonitoringSourceId(7), [1; 16], [2; 16],
-            Some(MonitoringSourceId(7)), Some(&context()),
-        ).unwrap()
+            MonitoringSourceId(7),
+            [1; 16],
+            [2; 16],
+            Some(MonitoringSourceId(7)),
+            Some(&context()),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -151,7 +155,9 @@ mod tests {
         malformed.request.source_id = vec![0; 16];
         assert_eq!(
             validate_file_pull_action(&malformed, Some(MonitoringSourceId(7)), Some(&context())),
-            Err(TeacherFilePullError::InvalidRequest(FileTransferError::InvalidSourceId))
+            Err(TeacherFilePullError::InvalidRequest(
+                FileTransferError::InvalidSourceId
+            ))
         );
     }
 }
