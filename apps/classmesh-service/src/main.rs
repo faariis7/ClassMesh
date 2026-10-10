@@ -10,6 +10,7 @@ mod system_action_power;
 #[cfg(windows)]
 mod windows_service_app {
     use std::ffi::OsString;
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
     use std::sync::{Arc, mpsc};
@@ -1765,6 +1766,28 @@ mod windows_service_app {
             encoder_capability_cache.path().display()
         );
 
+        let state_root = match program_data_state_dir() {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("ClassMesh file transfer state path failed: {error}");
+                set_stopped_with_exit(&status_handle, 4)?;
+                return Ok(());
+            }
+        };
+        let inbox_root = state_root.join(FILE_INBOX_DIRECTORY);
+        let outbox_root = state_root.join(FILE_OUTBOX_DIRECTORY);
+        if let Err(error) =
+            fs::create_dir_all(&inbox_root).and_then(|()| fs::create_dir_all(&outbox_root))
+        {
+            eprintln!("ClassMesh file transfer storage preparation failed: {error}");
+            set_stopped_with_exit(&status_handle, 4)?;
+            return Ok(());
+        }
+        let mut file_receiver =
+            FileTransferReceiver::new(WindowsFileTransferInboxSink::new(inbox_root));
+        let mut file_source =
+            FileTransferSourceSession::new(WindowsFileTransferOutboxSource::new(outbox_root));
+
         let worker_capabilities = Arc::new(WorkerCapabilityState::default());
         let presentation_feedback = PresentationFeedbackBus::default();
         let control_dispatch = ControlRuntimeDispatch::new(
@@ -1774,6 +1797,7 @@ mod windows_service_app {
             presentation_channels,
             presentation_feedback.clone(),
             Arc::clone(&worker_capabilities),
+            true,
         );
         let mut control_runtime =
             match ControlRuntime::start(control_state, control_config, control_dispatch) {
@@ -1800,20 +1824,6 @@ mod windows_service_app {
             worker_teacher_interaction_result_tx,
             presentation_feedback,
         );
-        let state_root = match program_data_state_dir() {
-            Ok(path) => path,
-            Err(error) => {
-                eprintln!("ClassMesh file transfer state path failed: {error}");
-                set_stopped_with_exit(&status_handle, 4)?;
-                return Ok(());
-            }
-        };
-        let inbox_root = state_root.join(FILE_INBOX_DIRECTORY);
-        let outbox_root = state_root.join(FILE_OUTBOX_DIRECTORY);
-        let mut file_receiver =
-            FileTransferReceiver::new(WindowsFileTransferInboxSink::new(inbox_root));
-        let mut file_source =
-            FileTransferSourceSession::new(WindowsFileTransferOutboxSource::new(outbox_root));
         let mut power_executor = ServicePowerSystemActionExecutor::new(Win32SystemPowerController);
         let mut desired_focused_start: Option<ServiceUdpStreamStart> = None;
         let mut desired_focused_reconfigure: Option<StreamReconfigure> = None;
