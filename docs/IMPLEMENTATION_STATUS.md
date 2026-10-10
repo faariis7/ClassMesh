@@ -154,9 +154,10 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 
 ## Next implementation sequence
 
-1. **Phase 12D1 COMPLETE (#373, CI #1503 green) and 12D2a COMPLETE (#376, CI #1511 green); Phase 12D2b CURRENT.**
-2. Land the portable bounded receiver with exact authenticated principal/control-session/transfer binding, one active transfer, sequential <=64 KiB chunks, streaming SHA-256, re-offer/status resume, cancellation and an injectable app-owned sink.
-3. Keep `FileTransfer` capability advertisement OFF and keep production filesystem/Windows side effects out until 12D2c Service delivery exists.
-4. Then implement **12D2c bounded Service delivery** with exact correlation/backpressure/cancel semantics; 12D3 ReceiveFile pull/recovery follows.
-5. **12C4b UI implementation is merged (#371, CI #1491 green)** but Session 1 exact-build Windows runtime/visual acceptance remains an open gate.
-6. Keep unrelated Phase 4/6F/7D/7H/8D/9F/10G/12B4b physical gates open; hosted CI must not close them.
+1. **Phase 12D2 and 12D3 portable orchestration are complete through PR #388.** Push receiver/auth/Service routing and pull source/auth/routing are merged with Portable + Windows CI green.
+2. **Phase 12D4a1 and D4a2 are complete:** Windows app-owned inbox storage merged in #390 (CI #1578) and the app-owned outbox source boundary merged in #391 (CI #1589).
+3. **D4a3 CURRENT — PR #392:** wire the existing portable receiver into the fixed Windows inbox root while preserving exact authenticated principal/control-session/transfer binding. Keep pull source unavailable and `FileTransfer` capability OFF.
+4. **D4a4 PREPARED — PR #393:** add authenticated v0.8 receiver-status routing plus typed outbound Offer/Chunk/Finish/Cancel responses through the existing capacity-one Service seam. No outbox execution or capability advertisement yet.
+5. Next, wire the Windows outbox source session and bounded resume/cancel/completion state machine; only after push + pull are serviceable may production `FileTransfer` capability and capability-aware Teacher UI be enabled.
+6. **12C4b UI code is merged (#371, CI #1491 green)** but its exact Session 1 Windows runtime/visual acceptance remains open. Keep unrelated Phase 4/6F/7D/7H/8D/9F/10G/12B4b gates open; hosted CI must not close them.
+
