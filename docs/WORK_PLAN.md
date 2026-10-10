@@ -32,8 +32,8 @@ Phase 5 tracking issue #32 and Phase 11 Issue #298 are complete. Active product 
 
 1. **Phase 12C4b Teacher UI implementation merged in PR #371, Portable + Windows CI #1491 green.** Exact Session 1 Windows runtime/visual/accessibility evidence remains open and hosted CI does not close it.
 2. **Phase 12D1 COMPLETE (#373), D2a COMPLETE (#376), D2b COMPLETE (#377), D2c1 COMPLETE (#380), D2c2 COMPLETE (#381), D3a COMPLETE (#383), D3b1 COMPLETE (#386), and D3b2 COMPLETE (#387, CI #1557 green).**
-3. **Phase 12D3b3 CURRENT in clean PR #388 on `main`.** It routes authenticated v0.8 ReceiveFile pull requests through the bounded Service file-transfer seam while keeping unavailable-source outcomes explicit.
-4. **Phase 12D4 preparation is stacked and non-advertised:** D4a1 Windows app-owned inbox storage PR #390; D4a2 Windows app-owned outbox source PR #391; D4a3 Service inbox wiring PR #392. Production `FileTransfer` capability remains OFF until push and pull are serviceable end to end.
+3. **Phase 12D3b3 COMPLETE in PR #388 with CI #1567 green (merge `b69c434`).** It routes authenticated v0.8 ReceiveFile pull requests through the bounded Service file-transfer seam while keeping unavailable-source outcomes explicit.
+4. **Phase 12D4 preparation is stacked and non-advertised:** D4a1 Windows app-owned inbox storage CURRENT in clean PR #390; D4a2 Windows app-owned outbox source PR #391; D4a3 Service inbox wiring PR #392. Production `FileTransfer` capability remains OFF until push and pull are serviceable end to end.
 5. Keep raw sender paths, executable paths, shell fragments and arbitrary arguments out of file transfer. Windows storage derives opaque ID-based paths only beneath ClassMesh-owned ProgramData roots; hosted tests must not substitute for runtime/visual qualification.
 6. Keep Phase 4, 6F, 7D/7H, 8D, 9F, 10G, 12B4b and 12C4 runtime/visual gates open; hosted CI is not physical evidence. Preserve Phase 13 installer/update/recovery and Phase 14 hardening in roadmap order.
 
