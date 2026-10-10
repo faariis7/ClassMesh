@@ -21,6 +21,9 @@ mod windows_service_app {
     use classmesh_control::file_transfer_receiver::{
         FileTransferPeer, FileTransferReceiver, ReceiveError,
     };
+    use classmesh_control::file_transfer_source::{
+        FileSourceId, FileTransferSourceFrame, FileTransferSourceSession,
+    };
     use classmesh_control::system_action_execution::{
         SystemActionExecutionError, SystemActionExecutionOutcome, SystemActionExecutor,
     };
@@ -73,6 +76,7 @@ mod windows_service_app {
     const ENCODER_CAPABILITY_CACHE_FILE: &str = "encoder-capability.json";
     const CONTROL_RUNTIME_CONFIG_FILE: &str = "control-runtime.json";
     const FILE_INBOX_DIRECTORY: &str = "file-inbox";
+    const FILE_OUTBOX_DIRECTORY: &str = "file-outbox";
     const INPUT_QUEUE_CAPACITY: usize = 256;
     const INPUT_CLEANUP_QUEUE_CAPACITY: usize = 1;
     const SYSTEM_ACTION_DISPATCH_QUEUE_CAPACITY: usize = 1;
@@ -99,15 +103,17 @@ mod windows_service_app {
         AdministrativeDispatchChannels, ControlRuntime, ControlRuntimeConfig,
         ControlRuntimeDispatch, ControlRuntimeState, FileTransferDispatch,
         FileTransferDispatchChannels, FileTransferDispatchOutcome, FileTransferDispatchPayload,
-        FocusedMediaDispatchChannels, FocusedMediaFeedback, FocusedMediaReconfigure,
-        FocusedMediaStart, InputAvailability, InputDispatchChannels, PresentationDispatchChannels,
-        PresentationFeedbackBus, PresentationKeyInstallDispatch,
+        FileTransferOutboundPayload, FocusedMediaDispatchChannels, FocusedMediaFeedback,
+        FocusedMediaReconfigure, FocusedMediaStart, InputAvailability, InputDispatchChannels,
+        PresentationDispatchChannels, PresentationFeedbackBus, PresentationKeyInstallDispatch,
         PresentationMulticastStartDispatch, PresentationUnicastStartDispatch, SystemActionDispatch,
         SystemActionDispatchChannels, SystemActionDispatchOutcome, TeacherInteractionDispatch,
         TeacherInteractionDispatchChannels, TeacherInteractionDispatchOutcome,
         WorkerCapabilityState,
     };
-    use crate::file_transfer_storage::WindowsFileTransferInboxSink;
+    use crate::file_transfer_storage::{
+        WindowsFileTransferInboxSink, WindowsFileTransferOutboxSource,
+    };
     use crate::system_action_power::ServicePowerSystemActionExecutor;
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -149,6 +155,29 @@ mod windows_service_app {
                 && result.control_session_id == self.control_session_id
                 && result.request_id == self.request_id
                 && TeacherInteractionKind::try_from(result.result.kind) == Ok(self.expected_kind)
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct PendingFilePull {
+        principal_id: PrincipalId,
+        control_session_id: u64,
+        request_id: u64,
+        transfer_id: [u8; 16],
+    }
+
+    impl PendingFilePull {
+        fn matches(
+            self,
+            principal_id: PrincipalId,
+            control_session_id: u64,
+            request_id: u64,
+            transfer_id: &[u8],
+        ) -> bool {
+            self.principal_id == principal_id
+                && self.control_session_id == control_session_id
+                && self.request_id == request_id
+                && self.transfer_id.as_slice() == transfer_id
         }
     }
 
@@ -1768,16 +1797,20 @@ mod windows_service_app {
             worker_teacher_interaction_result_tx,
             presentation_feedback,
         );
-        let inbox_root = match program_data_state_dir() {
-            Ok(path) => path.join(FILE_INBOX_DIRECTORY),
+        let state_root = match program_data_state_dir() {
+            Ok(path) => path,
             Err(error) => {
-                eprintln!("ClassMesh file inbox path failed: {error}");
+                eprintln!("ClassMesh file transfer state path failed: {error}");
                 set_stopped_with_exit(&status_handle, 4)?;
                 return Ok(());
             }
         };
+        let inbox_root = state_root.join(FILE_INBOX_DIRECTORY);
+        let outbox_root = state_root.join(FILE_OUTBOX_DIRECTORY);
         let mut file_receiver =
             FileTransferReceiver::new(WindowsFileTransferInboxSink::new(inbox_root));
+        let mut file_source =
+            FileTransferSourceSession::new(WindowsFileTransferOutboxSource::new(outbox_root));
         let mut power_executor = ServicePowerSystemActionExecutor::new(Win32SystemPowerController);
         let mut desired_focused_start: Option<ServiceUdpStreamStart> = None;
         let mut desired_focused_reconfigure: Option<StreamReconfigure> = None;
@@ -1793,6 +1826,7 @@ mod windows_service_app {
         let mut next_media_reconfigure_attempt = Instant::now();
         let mut next_worker_poll = Instant::now();
         let mut pending_teacher_interaction: Option<PendingTeacherInteraction> = None;
+        let mut pending_file_pull: Option<PendingFilePull> = None;
         let mut pending_presentation_key_install: Option<PendingPresentationKeyInstall> = None;
         let mut pending_presentation_multicast_start: Option<PendingPresentationMulticastStart> =
             None;
@@ -1879,8 +1913,103 @@ mod windows_service_app {
                                 &error,
                             ))
                         }),
-                    FileTransferDispatchPayload::PullRequest(_) => {
-                        FileTransferDispatchOutcome::SourceUnavailable
+                    FileTransferDispatchPayload::PullRequest(request) => {
+                        if pending_file_pull.is_some() {
+                            FileTransferDispatchOutcome::SourceUnavailable
+                        } else {
+                            let source_id = <[u8; 16]>::try_from(request.source_id.as_slice())
+                                .ok()
+                                .and_then(|value| FileSourceId::new(value).ok());
+                            match source_id.and_then(|source_id| {
+                                file_source
+                                    .offer(peer, &request.transfer_id, source_id)
+                                    .ok()
+                                    .map(|offer| (source_id, offer))
+                            }) {
+                                Some((_source_id, offer)) => {
+                                    let mut exact_transfer_id = [0_u8; 16];
+                                    exact_transfer_id.copy_from_slice(&request.transfer_id);
+                                    pending_file_pull = Some(PendingFilePull {
+                                        principal_id: dispatch.principal_id(),
+                                        control_session_id: dispatch.control_session_id,
+                                        request_id: dispatch.request_id,
+                                        transfer_id: exact_transfer_id,
+                                    });
+                                    FileTransferDispatchOutcome::Outbound(
+                                        FileTransferOutboundPayload::Offer(offer),
+                                    )
+                                }
+                                None => FileTransferDispatchOutcome::SourceUnavailable,
+                            }
+                        }
+                    }
+                    FileTransferDispatchPayload::Status(status) => {
+                        let Some(pending) = pending_file_pull else {
+                            let _ = dispatch
+                                .reply_tx
+                                .send(FileTransferDispatchOutcome::NoResponse);
+                            continue;
+                        };
+                        if !pending.matches(
+                            dispatch.principal_id(),
+                            dispatch.control_session_id,
+                            dispatch.request_id,
+                            &status.transfer_id,
+                        ) {
+                            let _ = dispatch
+                                .reply_tx
+                                .send(FileTransferDispatchOutcome::NoResponse);
+                            continue;
+                        }
+
+                        match FileTransferState::try_from(status.state) {
+                            Ok(FileTransferState::Accepted | FileTransferState::Progress) => {
+                                match file_source.next(
+                                    peer,
+                                    &status.transfer_id,
+                                    status.next_offset,
+                                ) {
+                                    Ok(FileTransferSourceFrame::Chunk(chunk)) => {
+                                        FileTransferDispatchOutcome::Outbound(
+                                            FileTransferOutboundPayload::Chunk(chunk),
+                                        )
+                                    }
+                                    Ok(FileTransferSourceFrame::Finish(finish)) => {
+                                        FileTransferDispatchOutcome::Outbound(
+                                            FileTransferOutboundPayload::Finish(finish),
+                                        )
+                                    }
+                                    Err(_) => {
+                                        let outbound = file_source
+                                            .cancel(peer, &status.transfer_id)
+                                            .ok()
+                                            .map(FileTransferOutboundPayload::Cancel);
+                                        pending_file_pull = None;
+                                        outbound.map_or(
+                                            FileTransferDispatchOutcome::NoResponse,
+                                            FileTransferDispatchOutcome::Outbound,
+                                        )
+                                    }
+                                }
+                            }
+                            Ok(FileTransferState::Completed) => {
+                                let _ = file_source.complete(peer, &status.transfer_id);
+                                pending_file_pull = None;
+                                FileTransferDispatchOutcome::NoResponse
+                            }
+                            Ok(
+                                FileTransferState::Rejected
+                                | FileTransferState::Cancelled
+                                | FileTransferState::Failed,
+                            ) => {
+                                let _ = file_source.cancel(peer, &status.transfer_id);
+                                pending_file_pull = None;
+                                FileTransferDispatchOutcome::NoResponse
+                            }
+                            Ok(FileTransferState::Unspecified) | Err(_) => {
+                                FileTransferDispatchOutcome::NoResponse
+                            }
+                        }
                     }
                 };
                 let _ = dispatch.reply_tx.send(outcome);
@@ -2781,6 +2910,22 @@ mod windows_service_app {
                 classmesh_protocol::file_transfer::validate_status(&failed),
                 Ok(())
             );
+        }
+
+        #[test]
+        fn pending_file_pull_requires_exact_principal_session_request_and_transfer() {
+            let pending = PendingFilePull {
+                principal_id: PrincipalId([7; 32]),
+                control_session_id: 77,
+                request_id: 44,
+                transfer_id: [9; 16],
+            };
+
+            assert!(pending.matches(PrincipalId([7; 32]), 77, 44, &[9; 16]));
+            assert!(!pending.matches(PrincipalId([8; 32]), 77, 44, &[9; 16]));
+            assert!(!pending.matches(PrincipalId([7; 32]), 78, 44, &[9; 16]));
+            assert!(!pending.matches(PrincipalId([7; 32]), 77, 45, &[9; 16]));
+            assert!(!pending.matches(PrincipalId([7; 32]), 77, 44, &[8; 16]));
         }
 
         #[test]
