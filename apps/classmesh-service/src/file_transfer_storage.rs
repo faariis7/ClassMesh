@@ -106,6 +106,17 @@ impl WindowsFileTransferOutboxSource {
         Ok(())
     }
 
+    fn ensure_staged_source_registered(
+        &mut self,
+        source_id: FileSourceId,
+    ) -> Result<(), WindowsOutboxSourceError> {
+        if self.registered.contains_key(&source_id) {
+            return Ok(());
+        }
+        let display_filename = format!("{}.bin", source_id_stem(source_id));
+        self.register_staged_file(source_id, &display_filename)
+    }
+
     #[cfg(test)]
     fn staged_path(&self, source_id: FileSourceId) -> PathBuf {
         self.root.join(format!("{}.bin", source_id_stem(source_id)))
@@ -119,6 +130,7 @@ impl FileTransferOutboxSource for WindowsFileTransferOutboxSource {
         &mut self,
         source_id: FileSourceId,
     ) -> Result<FileTransferSourceMetadata, Self::Error> {
+        self.ensure_staged_source_registered(source_id)?;
         self.registered
             .get(&source_id)
             .map(|registered| registered.metadata.clone())
@@ -134,6 +146,7 @@ impl FileTransferOutboxSource for WindowsFileTransferOutboxSource {
         if max_bytes == 0 || max_bytes > MAX_FILE_CHUNK_BYTES {
             return Err(WindowsOutboxSourceError::ReadTooLarge);
         }
+        self.ensure_staged_source_registered(source_id)?;
         let registered = self
             .registered
             .get(&source_id)
@@ -400,6 +413,28 @@ mod tests {
         assert_eq!(
             source.read_at(id, 0, MAX_FILE_CHUNK_BYTES).expect("read"),
             b"classmesh-outbox"
+        );
+
+        source.close(id);
+        assert!(!staged.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn outbox_lazily_registers_only_the_opaque_app_owned_staged_path() {
+        let root = test_root("outbox-lazy-register");
+        fs::create_dir_all(&root).expect("root");
+        let mut source = WindowsFileTransferOutboxSource::new(&root);
+        let id = source_id();
+        let staged = source.staged_path(id);
+        fs::write(&staged, b"locally-staged").expect("seed staged source");
+
+        let metadata = source.metadata(id).expect("lazy metadata");
+        assert_eq!(metadata.filename, format!("{}.bin", source_id_stem(id)));
+        assert_eq!(metadata.total_size, 14);
+        assert_eq!(
+            source.read_at(id, 0, MAX_FILE_CHUNK_BYTES).expect("read"),
+            b"locally-staged"
         );
 
         source.close(id);
