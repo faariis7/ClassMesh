@@ -262,7 +262,7 @@ pub(crate) struct FileTransferDispatchChannels {
     pub(crate) tx: mpsc::SyncSender<FileTransferDispatch>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FileTransferOutboundPayload {
     Offer(FileTransferOffer),
     Chunk(FileTransferChunk),
