@@ -60,19 +60,25 @@ mod tests {
 
     #[test]
     fn existing_clipboard_wire_types_remain_text_only_and_bounded() {
-        assert!(validate_write(&ClipboardWrite {
-            text_utf8: String::new(),
-        })
-        .is_ok());
-        assert!(validate_write(&ClipboardWrite {
-            text_utf8: "a".repeat(MAX_CLIPBOARD_TEXT_BYTES + 1),
-        })
-        .is_err());
-        assert!(validate_read_response(&ClipboardReadResponse {
-            available: false,
-            text_utf8: String::new(),
-        })
-        .is_ok());
+        assert!(
+            validate_write(&ClipboardWrite {
+                text_utf8: String::new(),
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_write(&ClipboardWrite {
+                text_utf8: "a".repeat(MAX_CLIPBOARD_TEXT_BYTES + 1),
+            })
+            .is_err()
+        );
+        assert!(
+            validate_read_response(&ClipboardReadResponse {
+                available: false,
+                text_utf8: String::new(),
+            })
+            .is_ok()
+        );
         assert_eq!(
             validate_read_response(&ClipboardReadResponse {
                 available: false,
@@ -80,18 +86,21 @@ mod tests {
             }),
             Err(ClipboardTextError::UnavailableContainsText)
         );
-        assert!(validate_read_response(&ClipboardReadResponse {
-            available: true,
-            text_utf8: "é".repeat(MAX_CLIPBOARD_TEXT_BYTES / 2),
-        })
-        .is_ok());
-        assert!(validate_read_response(&ClipboardReadResponse {
-            available: true,
-            text_utf8: "é".repeat(MAX_CLIPBOARD_TEXT_BYTES / 2 + 1),
-        })
-        .is_err());
+        assert!(
+            validate_read_response(&ClipboardReadResponse {
+                available: true,
+                text_utf8: "é".repeat(MAX_CLIPBOARD_TEXT_BYTES / 2),
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_read_response(&ClipboardReadResponse {
+                available: true,
+                text_utf8: "é".repeat(MAX_CLIPBOARD_TEXT_BYTES / 2 + 1),
+            })
+            .is_err()
+        );
     }
-
 
     #[test]
     fn clipboard_text_limit_is_measured_in_utf8_bytes() {
