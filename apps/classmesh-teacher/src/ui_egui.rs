@@ -15,7 +15,8 @@ use crate::ui_actions::{
 use crate::ui_classroom::show_classroom;
 use crate::ui_diagnostics::{DiagnosticsOverrideDraft, show_diagnostics};
 use crate::ui_file_transfer::{
-    TeacherFilePullContext, prepare_file_pull_action, validate_file_pull_action,
+    TeacherFilePullContext, TeacherStagedFileCandidate, prepare_file_pull_action,
+    staged_file_candidate_ready, validate_file_pull_action,
 };
 use crate::ui_focus::show_focus;
 use crate::ui_presentation::show_presentation;
@@ -40,6 +41,7 @@ pub struct TeacherEguiShell {
     diagnostics_draft: DiagnosticsOverrideDraft,
     teacher_interaction_context: Option<TeacherInteractionUiContext>,
     file_pull_context: Option<TeacherFilePullContext>,
+    staged_file_candidate: Option<TeacherStagedFileCandidate>,
     teacher_interaction_draft: TeacherInteractionDraft,
     pending_action: Option<TeacherUiAction>,
 }
@@ -63,6 +65,7 @@ impl Default for TeacherEguiShell {
             diagnostics_draft: DiagnosticsOverrideDraft::default(),
             teacher_interaction_context: None,
             file_pull_context: None,
+            staged_file_candidate: None,
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
         }
@@ -90,6 +93,7 @@ impl TeacherEguiShell {
             diagnostics_draft: DiagnosticsOverrideDraft::default(),
             teacher_interaction_context: None,
             file_pull_context: None,
+            staged_file_candidate: None,
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
         }
@@ -118,6 +122,15 @@ impl TeacherEguiShell {
 
     pub fn clear_file_pull_context(&mut self) {
         self.file_pull_context = None;
+        self.staged_file_candidate = None;
+    }
+
+    pub fn set_staged_file_candidate(&mut self, candidate: TeacherStagedFileCandidate) {
+        self.staged_file_candidate = Some(candidate);
+    }
+
+    pub fn clear_staged_file_candidate(&mut self) {
+        self.staged_file_candidate = None;
     }
 
     pub fn set_presentation_snapshot(&mut self, snapshot: PresentationRuntimeSnapshot) {
@@ -253,6 +266,32 @@ impl TeacherEguiShell {
                     self.pending_action.is_some(),
                 ) {
                     self.queue_teacher_interaction_request(request);
+                }
+                ui.separator();
+                ui.strong("Receive staged file");
+                let ready = self.staged_file_candidate.is_some_and(|candidate| {
+                    staged_file_candidate_ready(
+                        candidate,
+                        self.classroom.selected(),
+                        self.file_pull_context.as_ref(),
+                    )
+                });
+                if !ready {
+                    ui.small("No authorized staged file is available for the selected device.");
+                }
+                if ui
+                    .add_enabled(
+                        ready && self.pending_action.is_none(),
+                        egui::Button::new("Receive staged file"),
+                    )
+                    .clicked()
+                {
+                    if let Some(candidate) = self.staged_file_candidate {
+                        self.queue_file_pull_request(
+                            candidate.transfer_id,
+                            candidate.opaque_source_id,
+                        );
+                    }
                 }
             }
             TeacherUiSection::Diagnostics => {
