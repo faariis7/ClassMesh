@@ -10,6 +10,37 @@ use classmesh_protocol::file_transfer::{
 use classmesh_protocol::{Capability, ProtocolVersion};
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TeacherStagedFileCandidate {
+    pub source_id: MonitoringSourceId,
+    pub control_session_id: u64,
+    pub transfer_id: [u8; 16],
+    pub opaque_source_id: [u8; 16],
+}
+
+pub fn staged_file_candidate_ready(
+    candidate: TeacherStagedFileCandidate,
+    selection: Option<MonitoringSourceId>,
+    context: Option<&TeacherFilePullContext>,
+) -> bool {
+    let Some(context) = context else {
+        return false;
+    };
+    if candidate.source_id != context.source_id
+        || candidate.control_session_id != context.control_session_id
+    {
+        return false;
+    }
+    prepare_file_pull_action(
+        candidate.source_id,
+        candidate.transfer_id,
+        candidate.opaque_source_id,
+        selection,
+        Some(context),
+    )
+    .is_ok()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TeacherFilePullContext {
     pub source_id: MonitoringSourceId,
@@ -105,6 +136,54 @@ mod tests {
             Some(&context()),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn staged_file_button_requires_exact_trusted_candidate_and_live_capability() {
+        let candidate = TeacherStagedFileCandidate {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 22,
+            transfer_id: [1; 16],
+            opaque_source_id: [2; 16],
+        };
+        assert!(staged_file_candidate_ready(
+            candidate,
+            Some(MonitoringSourceId(7)),
+            Some(&context())
+        ));
+        assert!(!staged_file_candidate_ready(
+            candidate,
+            Some(MonitoringSourceId(8)),
+            Some(&context())
+        ));
+        assert!(!staged_file_candidate_ready(
+            candidate,
+            Some(MonitoringSourceId(7)),
+            None
+        ));
+        assert!(!staged_file_candidate_ready(
+            TeacherStagedFileCandidate {
+                control_session_id: 23,
+                ..candidate
+            },
+            Some(MonitoringSourceId(7)),
+            Some(&context())
+        ));
+        let mut absent = context();
+        absent.capabilities.clear();
+        assert!(!staged_file_candidate_ready(
+            candidate,
+            Some(MonitoringSourceId(7)),
+            Some(&absent)
+        ));
+        assert!(!staged_file_candidate_ready(
+            TeacherStagedFileCandidate {
+                opaque_source_id: [0; 16],
+                ..candidate
+            },
+            Some(MonitoringSourceId(7)),
+            Some(&context())
+        ));
     }
 
     #[test]
