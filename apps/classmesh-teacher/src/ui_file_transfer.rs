@@ -18,7 +18,7 @@ pub struct TeacherFilePullContext {
     pub capabilities: BTreeSet<Capability>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TeacherFilePullAction {
     pub source_id: MonitoringSourceId,
     pub control_session_id: u64,
