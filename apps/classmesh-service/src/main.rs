@@ -103,11 +103,12 @@ mod windows_service_app {
         AdministrativeDispatchChannels, ControlRuntime, ControlRuntimeConfig,
         ControlRuntimeDispatch, ControlRuntimeState, FileTransferDispatch,
         FileTransferDispatchChannels, FileTransferDispatchOutcome, FileTransferDispatchPayload,
-        FileTransferOutboundPayload, FocusedMediaDispatchChannels, FocusedMediaFeedback,
-        FocusedMediaReconfigure, FocusedMediaStart, InputAvailability, InputDispatchChannels,
-        PresentationDispatchChannels, PresentationFeedbackBus, PresentationKeyInstallDispatch,
-        PresentationMulticastStartDispatch, PresentationUnicastStartDispatch, SystemActionDispatch,
-        SystemActionDispatchChannels, SystemActionDispatchOutcome, TeacherInteractionDispatch,
+        FileTransferOutboundPayload, FileTransferPullOwner, FocusedMediaDispatchChannels,
+        FocusedMediaFeedback, FocusedMediaReconfigure, FocusedMediaStart, InputAvailability,
+        InputDispatchChannels, PresentationDispatchChannels, PresentationFeedbackBus,
+        PresentationKeyInstallDispatch, PresentationMulticastStartDispatch,
+        PresentationUnicastStartDispatch, SystemActionDispatch, SystemActionDispatchChannels,
+        SystemActionDispatchOutcome, TeacherInteractionDispatch,
         TeacherInteractionDispatchChannels, TeacherInteractionDispatchOutcome,
         WorkerCapabilityState,
     };
@@ -1688,8 +1689,10 @@ mod windows_service_app {
         };
         let (file_transfer_tx, file_transfer_rx) =
             mpsc::sync_channel::<FileTransferDispatch>(FILE_TRANSFER_DISPATCH_QUEUE_CAPACITY);
+        let file_pull_owner = FileTransferPullOwner::default();
         let file_transfer_channels = FileTransferDispatchChannels {
             tx: file_transfer_tx,
+            pull_owner: file_pull_owner.clone(),
         };
         let administrative_channels = AdministrativeDispatchChannels {
             system_actions: system_action_channels,
@@ -1832,6 +1835,17 @@ mod windows_service_app {
             None;
         let mut pending_presentation_unicast_start: Option<PendingPresentationUnicastStart> = None;
         loop {
+            if let Some(pending) = pending_file_pull
+                && !file_pull_owner.is_owner(pending.control_session_id)
+            {
+                let peer = FileTransferPeer {
+                    principal: pending.principal_id,
+                    control_session_id: pending.control_session_id,
+                };
+                let _ = file_source.cancel(peer, &pending.transfer_id);
+                pending_file_pull = None;
+            }
+
             for _ in 0..MAX_SYSTEM_ACTIONS_PER_TICK {
                 let dispatch = match system_action_rx.try_recv() {
                     Ok(dispatch) => dispatch,
@@ -1914,7 +1928,9 @@ mod windows_service_app {
                             ))
                         }),
                     FileTransferDispatchPayload::PullRequest(request) => {
-                        if pending_file_pull.is_some() {
+                        if pending_file_pull.is_some()
+                            || !file_pull_owner.try_acquire(dispatch.control_session_id)
+                        {
                             FileTransferDispatchOutcome::SourceUnavailable
                         } else {
                             let source_id = <[u8; 16]>::try_from(request.source_id.as_slice())
@@ -1939,7 +1955,10 @@ mod windows_service_app {
                                         FileTransferOutboundPayload::Offer(offer),
                                     )
                                 }
-                                None => FileTransferDispatchOutcome::SourceUnavailable,
+                                None => {
+                                    let _ = file_pull_owner.release(dispatch.control_session_id);
+                                    FileTransferDispatchOutcome::SourceUnavailable
+                                }
                             }
                         }
                     }
@@ -1984,6 +2003,8 @@ mod windows_service_app {
                                             .cancel(peer, &status.transfer_id)
                                             .ok()
                                             .map(FileTransferOutboundPayload::Cancel);
+                                        let _ =
+                                            file_pull_owner.release(dispatch.control_session_id);
                                         pending_file_pull = None;
                                         outbound.map_or(
                                             FileTransferDispatchOutcome::NoResponse,
@@ -1994,6 +2015,7 @@ mod windows_service_app {
                             }
                             Ok(FileTransferState::Completed) => {
                                 let _ = file_source.complete(peer, &status.transfer_id);
+                                let _ = file_pull_owner.release(dispatch.control_session_id);
                                 pending_file_pull = None;
                                 FileTransferDispatchOutcome::NoResponse
                             }
@@ -2003,6 +2025,7 @@ mod windows_service_app {
                                 | FileTransferState::Failed,
                             ) => {
                                 let _ = file_source.cancel(peer, &status.transfer_id);
+                                let _ = file_pull_owner.release(dispatch.control_session_id);
                                 pending_file_pull = None;
                                 FileTransferDispatchOutcome::NoResponse
                             }

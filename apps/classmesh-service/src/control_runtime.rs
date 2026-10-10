@@ -257,9 +257,38 @@ impl FileTransferDispatch {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FileTransferPullOwner(Arc<AtomicU64>);
+
+impl FileTransferPullOwner {
+    pub(crate) fn try_acquire(&self, control_session_id: u64) -> bool {
+        if control_session_id == 0 {
+            return false;
+        }
+        match self
+            .0
+            .compare_exchange(0, control_session_id, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => true,
+            Err(current) => current == control_session_id,
+        }
+    }
+
+    pub(crate) fn is_owner(&self, control_session_id: u64) -> bool {
+        control_session_id != 0 && self.0.load(Ordering::Acquire) == control_session_id
+    }
+
+    pub(crate) fn release(&self, control_session_id: u64) -> bool {
+        self.0
+            .compare_exchange(control_session_id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct FileTransferDispatchChannels {
     pub(crate) tx: mpsc::SyncSender<FileTransferDispatch>,
+    pub(crate) pull_owner: FileTransferPullOwner,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1491,6 +1520,9 @@ async fn run_listener(
                                 peer.identity.principal_id(),
                                 session.control_session_id,
                             );
+                            let _ = file_transfers
+                                .pull_owner
+                                .release(session.control_session_id);
                             if media.release_owner(session.control_session_id) {
                                 media
                                     .released_session_floor
@@ -3464,6 +3496,20 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    #[test]
+    fn file_pull_owner_is_exact_and_disconnect_releasable() {
+        let owner = FileTransferPullOwner::default();
+        assert!(!owner.try_acquire(0));
+        assert!(owner.try_acquire(77));
+        assert!(owner.is_owner(77));
+        assert!(!owner.is_owner(78));
+        assert!(!owner.try_acquire(78));
+        assert!(!owner.release(78));
+        assert!(owner.release(77));
+        assert!(!owner.is_owner(77));
+        assert!(owner.try_acquire(78));
     }
 
     #[test]
