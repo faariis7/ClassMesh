@@ -155,9 +155,9 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 ## Next implementation sequence
 
 1. **Phase 12D2 and 12D3 portable orchestration are complete through PR #388.** Push receiver/auth/Service routing and pull source/auth/routing are merged with Portable + Windows CI green.
-2. **Phase 12D4a1 and D4a2 are complete:** Windows app-owned inbox storage merged in #390 (CI #1578) and the app-owned outbox source boundary merged in #391 (CI #1589).
-3. **D4a3 CURRENT — PR #392:** wire the existing portable receiver into the fixed Windows inbox root while preserving exact authenticated principal/control-session/transfer binding. Keep pull source unavailable and `FileTransfer` capability OFF.
-4. **D4a4 PREPARED — PR #393:** add authenticated v0.8 receiver-status routing plus typed outbound Offer/Chunk/Finish/Cancel responses through the existing capacity-one Service seam. No outbox execution or capability advertisement yet.
-5. Next, wire the Windows outbox source session and bounded resume/cancel/completion state machine; only after push + pull are serviceable may production `FileTransfer` capability and capability-aware Teacher UI be enabled.
+2. **Phase 12D4a1–D4a3 are complete:** Windows app-owned inbox storage #390 (CI #1578), app-owned outbox source #391 (CI #1589), and Service inbox wiring #392 (CI #1591; merge `1357226`).
+3. **D4a4 + D4a5 CURRENT — PR #395:** combine authenticated v0.8 receiver-status routing and typed outbound responses with the first real Windows outbox source-session constructor, exact principal/session/request/transfer correlation and receiver-driven resume. Production `FileTransfer` capability remains OFF.
+4. **D4a6 PREPARED — PR #396:** release the exact pull-session owner on control disconnect/terminal state and close the active source before another pull can claim it.
+5. Next, add a trusted local staged-source registration boundary; only then may production `FileTransfer` capability and capability-aware Teacher UI be enabled. Exact Windows runtime/visual qualification remains required.
 6. **12C4b UI code is merged (#371, CI #1491 green)** but its exact Session 1 Windows runtime/visual acceptance remains open. Keep unrelated Phase 4/6F/7D/7H/8D/9F/10G/12B4b gates open; hosted CI must not close them.
 
