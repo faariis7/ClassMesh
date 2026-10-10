@@ -34,8 +34,9 @@ Phase 5 tracking issue #32 and Phase 11 Issue #298 are complete. Active product 
 2. **Phase 12D4 Windows storage/source integration is current under Issue #328.** D4a1 Windows inbox storage merged in PR #390 (CI #1578), D4a2 Windows outbox source merged in PR #391 (CI #1589), and D4a3 Service inbox wiring merged in PR #392 (CI #1591; merge `1357226`).
 3. **D4a4 + D4a5 are current in PR #395.** The combined slice adds authenticated v0.8 receiver-status routing, typed outbound Offer/Chunk/Finish/Cancel, portable resume next-frame logic and exact Windows outbox source-session binding. PR #393 was superseded so the outbound enum is exercised by a real production constructor in the same slice.
 4. **D4a6 is prepared in stacked PR #396.** An exact control-session owner lease is released on disconnect/terminal state and observed by Service main to close the active app-owned source without a lossy cleanup queue.
-5. After D4a6, add the trusted local staged-source registration boundary, then enable `FileTransfer` capability only when push + pull are truthful end to end. Capability-aware Teacher UI and exact Windows runtime/visual qualification follow.
-6. Keep Phase 4, 6F, 7D/7H, 8D, 9F, 10G, 12B4b and 12C4 physical/runtime gates open; hosted CI is not physical evidence. Then continue Phase 12E clipboard integration, 12F configuration/roles, 12G administrative closeout, Phase 13 installer/update/recovery and Phase 14 hardening.
+5. **D4a7 and D4a8 are prepared in stacked PRs #397 and #398.** D4a7 restricts lazy staging to deterministic ClassMesh-owned opaque outbox files; D4a8 prepares fixed inbox/outbox roots before control startup and advertises `FileTransfer` only after storage/source readiness is true.
+6. After the D4a4–D4a8 stack merges, add capability-aware Teacher UI and retain exact Windows runtime/visual qualification before claiming Phase 12D acceptance.
+7. Keep Phase 4, 6F, 7D/7H, 8D, 9F, 10G, 12B4b and 12C4 physical/runtime gates open; hosted CI is not physical evidence. Then continue Phase 12E clipboard integration, 12F configuration/roles, 12G administrative closeout, Phase 13 installer/update/recovery and Phase 14 hardening.
 
 ## Rules while Phase 4 hardware is unavailable
 
