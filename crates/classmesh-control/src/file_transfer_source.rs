@@ -33,6 +33,12 @@ pub struct FileTransferSourceMetadata {
     pub sha256: [u8; 32],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileTransferSourceFrame {
+    Chunk(FileTransferChunk),
+    Finish(FileTransferFinish),
+}
+
 pub trait FileTransferOutboxSource {
     type Error;
 
@@ -94,6 +100,10 @@ impl<S: FileTransferOutboxSource> FileTransferSourceSession<S> {
     #[must_use]
     pub const fn source(&self) -> &S {
         &self.source
+    }
+
+    pub const fn source_mut(&mut self) -> &mut S {
+        &mut self.source
     }
 
     pub fn offer(
@@ -178,6 +188,25 @@ impl<S: FileTransferOutboxSource> FileTransferSourceSession<S> {
         };
         validate_chunk(&chunk).map_err(SourceError::InvalidPayload)?;
         Ok(chunk)
+    }
+
+    pub fn next(
+        &mut self,
+        peer: FileTransferPeer,
+        transfer_id: &[u8],
+        next_offset: u64,
+    ) -> Result<FileTransferSourceFrame, SourceError> {
+        let total_size = self.bound_active(peer, transfer_id)?.metadata.total_size;
+        if next_offset > total_size {
+            return Err(SourceError::InvalidOffset);
+        }
+        if next_offset == total_size {
+            return self
+                .finish(peer, transfer_id)
+                .map(FileTransferSourceFrame::Finish);
+        }
+        self.chunk(peer, transfer_id, next_offset)
+            .map(FileTransferSourceFrame::Chunk)
     }
 
     pub fn finish(
@@ -393,6 +422,27 @@ mod tests {
         assert_eq!(
             session.source().reads,
             vec![(0, MAX_FILE_CHUNK_BYTES), (MAX_FILE_CHUNK_BYTES as u64, 7),]
+        );
+    }
+
+    #[test]
+    fn source_next_selects_chunk_then_finish_from_receiver_offset() {
+        let data = b"abcdef".to_vec();
+        let mut session = FileTransferSourceSession::new(RecordingSource::new(data));
+        session.offer(peer(), &transfer_id(), source_id()).unwrap();
+
+        let first = session.next(peer(), &transfer_id(), 0).unwrap();
+        assert!(matches!(
+            first,
+            FileTransferSourceFrame::Chunk(FileTransferChunk { offset: 0, .. })
+        ));
+
+        let finish = session.next(peer(), &transfer_id(), 6).unwrap();
+        assert!(matches!(finish, FileTransferSourceFrame::Finish(_)));
+
+        assert_eq!(
+            session.next(peer(), &transfer_id(), 7),
+            Err(SourceError::InvalidOffset)
         );
     }
 
