@@ -1882,6 +1882,9 @@ mod windows_service_app {
                     FileTransferDispatchPayload::PullRequest(_) => {
                         FileTransferDispatchOutcome::SourceUnavailable
                     }
+                    FileTransferDispatchPayload::Status(_) => {
+                        FileTransferDispatchOutcome::NoResponse
+                    }
                 };
                 let _ = dispatch.reply_tx.send(outcome);
             }
