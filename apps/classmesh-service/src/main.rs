@@ -18,12 +18,16 @@ mod windows_service_app {
 
     use classmesh_codec_win::capability_cache::DurableEncoderCapabilityCache;
     use classmesh_codec_win::{EncoderBenchmarkResult, EncoderCapabilityCacheKey};
+    use classmesh_control::file_transfer_receiver::{
+        FileTransferPeer, FileTransferReceiver, ReceiveError,
+    };
     use classmesh_control::system_action_execution::{
         SystemActionExecutionError, SystemActionExecutionOutcome, SystemActionExecutor,
     };
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity};
     use classmesh_protocol::control_wire::{
-        InputEvent, StreamReconfigure, SystemAction, TeacherInteractionKind,
+        FileTransferState, FileTransferStatus, InputEvent, StreamReconfigure, SystemAction,
+        TeacherInteractionKind,
     };
     use classmesh_protocol::feedback::FeedbackMessage;
     use classmesh_security::persistence::DurableAuthorizationState;
@@ -68,6 +72,7 @@ mod windows_service_app {
     const AUTHORIZATION_FILE: &str = "authorization.json";
     const ENCODER_CAPABILITY_CACHE_FILE: &str = "encoder-capability.json";
     const CONTROL_RUNTIME_CONFIG_FILE: &str = "control-runtime.json";
+    const FILE_INBOX_DIRECTORY: &str = "file-inbox";
     const INPUT_QUEUE_CAPACITY: usize = 256;
     const INPUT_CLEANUP_QUEUE_CAPACITY: usize = 1;
     const SYSTEM_ACTION_DISPATCH_QUEUE_CAPACITY: usize = 1;
@@ -102,6 +107,7 @@ mod windows_service_app {
         TeacherInteractionDispatchChannels, TeacherInteractionDispatchOutcome,
         WorkerCapabilityState,
     };
+    use crate::file_transfer_storage::WindowsFileTransferInboxSink;
     use crate::system_action_power::ServicePowerSystemActionExecutor;
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -1479,6 +1485,22 @@ mod windows_service_app {
         ))
     }
 
+    fn file_receive_status(transfer_id: &[u8], error: &ReceiveError) -> FileTransferStatus {
+        let state = match error {
+            ReceiveError::HashMismatch | ReceiveError::SinkFailure => FileTransferState::Failed,
+            _ => FileTransferState::Rejected,
+        };
+        FileTransferStatus {
+            transfer_id: transfer_id.to_vec(),
+            state: state as i32,
+            next_offset: 0,
+            diagnostic: classmesh_control::diagnostics::file_transfer_receive_diagnostic_code(
+                error,
+            )
+            .to_owned(),
+        }
+    }
+
     fn unix_time_ms() -> Result<u64, String> {
         let duration = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1746,6 +1768,16 @@ mod windows_service_app {
             worker_teacher_interaction_result_tx,
             presentation_feedback,
         );
+        let inbox_root = match program_data_state_dir() {
+            Ok(path) => path.join(FILE_INBOX_DIRECTORY),
+            Err(error) => {
+                eprintln!("ClassMesh file inbox path failed: {error}");
+                set_stopped_with_exit(&status_handle, 4)?;
+                return Ok(());
+            }
+        };
+        let mut file_receiver =
+            FileTransferReceiver::new(WindowsFileTransferInboxSink::new(inbox_root));
         let mut power_executor = ServicePowerSystemActionExecutor::new(Win32SystemPowerController);
         let mut desired_focused_start: Option<ServiceUdpStreamStart> = None;
         let mut desired_focused_reconfigure: Option<StreamReconfigure> = None;
@@ -1805,19 +1837,50 @@ mod windows_service_app {
                         .send(FileTransferDispatchOutcome::Cancelled);
                     continue;
                 }
-                // Preserve and consume the exact authenticated binding and typed payload at the
-                // Service boundary even while production inbox storage is intentionally absent.
-                let _authenticated_principal = dispatch.principal_id();
-                let _transfer_id = dispatch.payload().transfer_id();
+                let peer = FileTransferPeer {
+                    principal: dispatch.principal_id(),
+                    control_session_id: dispatch.control_session_id,
+                };
+                let transfer_id = dispatch.payload().transfer_id().to_vec();
                 let outcome = match dispatch.payload() {
+                    FileTransferDispatchPayload::Offer(offer) => file_receiver
+                        .offer(peer, offer)
+                        .map(FileTransferDispatchOutcome::Status)
+                        .unwrap_or_else(|error| {
+                            FileTransferDispatchOutcome::Status(file_receive_status(
+                                &transfer_id,
+                                &error,
+                            ))
+                        }),
+                    FileTransferDispatchPayload::Chunk(chunk) => file_receiver
+                        .chunk(peer, chunk)
+                        .map(FileTransferDispatchOutcome::Status)
+                        .unwrap_or_else(|error| {
+                            FileTransferDispatchOutcome::Status(file_receive_status(
+                                &transfer_id,
+                                &error,
+                            ))
+                        }),
+                    FileTransferDispatchPayload::Finish(finish) => file_receiver
+                        .finish(peer, finish)
+                        .map(FileTransferDispatchOutcome::Status)
+                        .unwrap_or_else(|error| {
+                            FileTransferDispatchOutcome::Status(file_receive_status(
+                                &transfer_id,
+                                &error,
+                            ))
+                        }),
+                    FileTransferDispatchPayload::Cancel(cancel) => file_receiver
+                        .cancel(peer, cancel)
+                        .map(FileTransferDispatchOutcome::Status)
+                        .unwrap_or_else(|error| {
+                            FileTransferDispatchOutcome::Status(file_receive_status(
+                                &transfer_id,
+                                &error,
+                            ))
+                        }),
                     FileTransferDispatchPayload::PullRequest(_) => {
                         FileTransferDispatchOutcome::SourceUnavailable
-                    }
-                    FileTransferDispatchPayload::Offer(_)
-                    | FileTransferDispatchPayload::Chunk(_)
-                    | FileTransferDispatchPayload::Finish(_)
-                    | FileTransferDispatchPayload::Cancel(_) => {
-                        FileTransferDispatchOutcome::StorageUnavailable
                     }
                 };
                 let _ = dispatch.reply_tx.send(outcome);
@@ -2696,6 +2759,29 @@ mod windows_service_app {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn file_receive_status_maps_failures_to_bounded_states() {
+            let id = vec![7_u8; 16];
+
+            let rejected = file_receive_status(&id, &ReceiveError::NonSequentialChunk);
+            assert_eq!(rejected.transfer_id, id);
+            assert_eq!(rejected.state, FileTransferState::Rejected as i32);
+            assert_eq!(rejected.next_offset, 0);
+            assert_eq!(rejected.diagnostic, "file_transfer.non_sequential_chunk");
+            assert_eq!(
+                classmesh_protocol::file_transfer::validate_status(&rejected),
+                Ok(())
+            );
+
+            let failed = file_receive_status(&id, &ReceiveError::HashMismatch);
+            assert_eq!(failed.state, FileTransferState::Failed as i32);
+            assert_eq!(failed.diagnostic, "file_transfer.hash_mismatch");
+            assert_eq!(
+                classmesh_protocol::file_transfer::validate_status(&failed),
+                Ok(())
+            );
+        }
 
         #[test]
         fn pending_teacher_interaction_requires_exact_action_kind() {

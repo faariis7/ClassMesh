@@ -258,9 +258,9 @@ pub(crate) struct FileTransferDispatchChannels {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FileTransferDispatchOutcome {
+    Status(FileTransferStatus),
     Backpressure,
     ServiceUnavailable,
-    StorageUnavailable,
     SourceUnavailable,
     ReplyDropped,
     TimedOut,
@@ -271,7 +271,11 @@ fn file_transfer_failure(
     transfer_id: &[u8],
     outcome: FileTransferDispatchOutcome,
 ) -> FileTransferStatus {
+    if let FileTransferDispatchOutcome::Status(status) = outcome {
+        return status;
+    }
     let (state, diagnostic) = match outcome {
+        FileTransferDispatchOutcome::Status(_) => unreachable!(),
         FileTransferDispatchOutcome::Backpressure => (
             FileTransferState::Rejected,
             "file_transfer.service_backpressure",
@@ -279,10 +283,6 @@ fn file_transfer_failure(
         FileTransferDispatchOutcome::ServiceUnavailable => (
             FileTransferState::Rejected,
             "file_transfer.service_unavailable",
-        ),
-        FileTransferDispatchOutcome::StorageUnavailable => (
-            FileTransferState::Rejected,
-            "file_transfer.storage_unavailable",
         ),
         FileTransferDispatchOutcome::SourceUnavailable => (
             FileTransferState::Rejected,
@@ -3343,6 +3343,23 @@ mod tests {
     }
 
     #[test]
+    fn file_transfer_routing_preserves_receiver_status() {
+        let status = FileTransferStatus {
+            transfer_id: vec![4_u8; 16],
+            state: FileTransferState::Progress as i32,
+            next_offset: 65_536,
+            diagnostic: String::new(),
+        };
+        assert_eq!(
+            file_transfer_failure(
+                &status.transfer_id,
+                FileTransferDispatchOutcome::Status(status.clone()),
+            ),
+            status
+        );
+    }
+
+    #[test]
     fn file_transfer_routing_failure_statuses_are_bounded_and_valid() {
         let transfer_id = vec![7_u8; 16];
         for (outcome, expected_state, expected_diagnostic) in [
@@ -3355,11 +3372,6 @@ mod tests {
                 FileTransferDispatchOutcome::ServiceUnavailable,
                 FileTransferState::Rejected,
                 "file_transfer.service_unavailable",
-            ),
-            (
-                FileTransferDispatchOutcome::StorageUnavailable,
-                FileTransferState::Rejected,
-                "file_transfer.storage_unavailable",
             ),
             (
                 FileTransferDispatchOutcome::ReplyDropped,

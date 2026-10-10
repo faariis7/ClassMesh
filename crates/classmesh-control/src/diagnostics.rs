@@ -1,6 +1,7 @@
 use crate::HeartbeatError;
 use crate::authorization::CommandAuthorizationError;
 use crate::dispatch::PrivilegedDispatchError;
+use crate::file_transfer_receiver::ReceiveError;
 use crate::handshake::HandshakeError;
 use crate::quic::ControlTransportError;
 use crate::stream::StreamOfferError;
@@ -102,6 +103,22 @@ pub const fn stream_offer_diagnostic_code(error: &StreamOfferError) -> &'static 
 }
 
 #[must_use]
+pub const fn file_transfer_receive_diagnostic_code(error: &ReceiveError) -> &'static str {
+    match error {
+        ReceiveError::InvalidBinding => "file_transfer.invalid_binding",
+        ReceiveError::InvalidPayload(_) => "file_transfer.invalid_payload",
+        ReceiveError::Busy => "file_transfer.receiver_busy",
+        ReceiveError::NoActiveTransfer => "file_transfer.no_active_transfer",
+        ReceiveError::WrongTransferOrSession => "file_transfer.wrong_transfer_or_session",
+        ReceiveError::RecentlyFinalized => "file_transfer.recently_finalized",
+        ReceiveError::NonSequentialChunk => "file_transfer.non_sequential_chunk",
+        ReceiveError::PastDeclaredSize => "file_transfer.past_declared_size",
+        ReceiveError::Incomplete => "file_transfer.incomplete",
+        ReceiveError::HashMismatch => "file_transfer.hash_mismatch",
+        ReceiveError::SinkFailure => "file_transfer.storage_failed",
+    }
+}
+
 pub const fn privileged_dispatch_diagnostic_code(error: &PrivilegedDispatchError) -> &'static str {
     match error {
         PrivilegedDispatchError::UnsupportedPayload => "control.command.unsupported_payload",
@@ -213,6 +230,42 @@ mod tests {
             )),
             "control.command.file_pull_invalid"
         );
+    }
+
+    #[test]
+    fn file_transfer_receive_codes_are_bounded_and_non_sensitive() {
+        for (error, expected) in [
+            (
+                ReceiveError::InvalidBinding,
+                "file_transfer.invalid_binding",
+            ),
+            (ReceiveError::Busy, "file_transfer.receiver_busy"),
+            (
+                ReceiveError::NoActiveTransfer,
+                "file_transfer.no_active_transfer",
+            ),
+            (
+                ReceiveError::WrongTransferOrSession,
+                "file_transfer.wrong_transfer_or_session",
+            ),
+            (
+                ReceiveError::RecentlyFinalized,
+                "file_transfer.recently_finalized",
+            ),
+            (
+                ReceiveError::NonSequentialChunk,
+                "file_transfer.non_sequential_chunk",
+            ),
+            (
+                ReceiveError::PastDeclaredSize,
+                "file_transfer.past_declared_size",
+            ),
+            (ReceiveError::Incomplete, "file_transfer.incomplete"),
+            (ReceiveError::HashMismatch, "file_transfer.hash_mismatch"),
+            (ReceiveError::SinkFailure, "file_transfer.storage_failed"),
+        ] {
+            assert_eq!(file_transfer_receive_diagnostic_code(&error), expected);
+        }
     }
 
     #[test]
