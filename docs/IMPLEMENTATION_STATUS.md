@@ -1,9 +1,9 @@
 # ClassMesh Implementation Status
 
-> **Live addendum (2026-10-10):** Phase 12D1–D3, Windows D4 inbox/outbox storage boundaries and D4a1–D4a5 through merged PR #395 are implemented. PRs #396–#398 are open and under fresh CI; FileTransfer readiness advertisement is not yet merged. Hosted CI is not physical Windows qualification; Phase 12B4b, 12C4 and historical Phase 4/6/7/8/9/10 gates remain open. This note supersedes outdated earlier Phase 12 status in this file.
+> **Live addendum (2026-10-11):** Phase 12D push/pull orchestration and Windows storage/source integration through D4a8 are merged (#398, CI #1622); readiness-gated production FileTransfer capability is implemented but not physically qualified. D4b1 portable Teacher file-pull UI contract is merged (#400, CI #1625); D4b2 (#401, CI #1631) and D4b3 (#402, CI #1632) remain open pending full CI and sequential squash merges. Trusted staged-file candidate production, real control transport dispatch and exact Windows UI/runtime/visual evidence remain open. Historical Phase 4/6/7/8/9/10 and Phase 12B4b/12C4 physical gates remain OPEN. This note supersedes outdated earlier Phase 12 claims.
 
 
-Last updated: 2026-10-03
+Last updated: 2026-10-11
 
 This file distinguishes **implemented code**, **hosted-CI validation**, **real-hardware validation still required**, and **future product work**. Architecture documents must not be read as claims that every planned feature is already production-ready.
 
