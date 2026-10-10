@@ -281,7 +281,6 @@ impl FileTransferOutboundPayload {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FileTransferDispatchOutcome {
     Status(FileTransferStatus),
