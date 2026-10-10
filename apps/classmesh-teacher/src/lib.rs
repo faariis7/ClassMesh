@@ -13,12 +13,12 @@ pub mod ui_classroom;
 pub mod ui_diagnostics;
 #[cfg(windows)]
 pub mod ui_egui;
+pub mod ui_file_transfer;
 #[cfg(windows)]
 pub mod ui_focus;
 #[cfg(windows)]
 pub mod ui_presentation;
 pub mod ui_shell;
-pub mod ui_file_transfer;
 
 #[cfg(windows)]
 use classmesh_control::authorization::AuthenticatedControlGuard;
