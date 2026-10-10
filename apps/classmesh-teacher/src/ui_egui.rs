@@ -14,6 +14,9 @@ use crate::ui_actions::{
 };
 use crate::ui_classroom::show_classroom;
 use crate::ui_diagnostics::{DiagnosticsOverrideDraft, show_diagnostics};
+use crate::ui_file_transfer::{
+    TeacherFilePullContext, prepare_file_pull_action, validate_file_pull_action,
+};
 use crate::ui_focus::show_focus;
 use crate::ui_presentation::show_presentation;
 use crate::ui_shell::{
@@ -36,6 +39,7 @@ pub struct TeacherEguiShell {
     diagnostics: Option<DeviceDiagnosticsView>,
     diagnostics_draft: DiagnosticsOverrideDraft,
     teacher_interaction_context: Option<TeacherInteractionUiContext>,
+    file_pull_context: Option<TeacherFilePullContext>,
     teacher_interaction_draft: TeacherInteractionDraft,
     pending_action: Option<TeacherUiAction>,
 }
@@ -58,6 +62,7 @@ impl Default for TeacherEguiShell {
             diagnostics: None,
             diagnostics_draft: DiagnosticsOverrideDraft::default(),
             teacher_interaction_context: None,
+            file_pull_context: None,
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
         }
@@ -84,6 +89,7 @@ impl TeacherEguiShell {
             diagnostics: None,
             diagnostics_draft: DiagnosticsOverrideDraft::default(),
             teacher_interaction_context: None,
+            file_pull_context: None,
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
         }
@@ -104,6 +110,14 @@ impl TeacherEguiShell {
     pub fn clear_teacher_interaction_context(&mut self) {
         self.teacher_interaction_context = None;
         reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
+    }
+
+    pub fn set_file_pull_context(&mut self, context: TeacherFilePullContext) {
+        self.file_pull_context = Some(context);
+    }
+
+    pub fn clear_file_pull_context(&mut self) {
+        self.file_pull_context = None;
     }
 
     pub fn set_presentation_snapshot(&mut self, snapshot: PresentationRuntimeSnapshot) {
@@ -138,6 +152,14 @@ impl TeacherEguiShell {
             )
             .ok()?;
         }
+        if let TeacherUiAction::FilePull(pull) = &action {
+            validate_file_pull_action(
+                pull,
+                self.classroom.selected(),
+                self.file_pull_context.as_ref(),
+            )
+            .ok()?;
+        }
         Some(action)
     }
 
@@ -160,6 +182,22 @@ impl TeacherEguiShell {
             return;
         };
         self.queue_action(TeacherUiAction::TeacherInteraction(action));
+    }
+
+    pub fn queue_file_pull_request(&mut self, transfer_id: [u8; 16], source_id: [u8; 16]) {
+        let Some(selected) = self.classroom.selected() else {
+            return;
+        };
+        let Ok(action) = prepare_file_pull_action(
+            selected,
+            transfer_id,
+            source_id,
+            self.classroom.selected(),
+            self.file_pull_context.as_ref(),
+        ) else {
+            return;
+        };
+        self.queue_action(TeacherUiAction::FilePull(action));
     }
 
     fn navigate(&mut self, section: TeacherUiSection) {
@@ -502,6 +540,38 @@ mod tests {
             Capability::OpenTarget,
         ])));
         assert_eq!(app.take_pending_action(), None);
+    }
+
+    #[test]
+    fn file_pull_handoff_rechecks_exact_selection_session_and_capability() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let context = TeacherFilePullContext {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            version: classmesh_protocol::PROTOCOL_VERSION,
+            capabilities: BTreeSet::from([Capability::FileTransfer]),
+        };
+        app.set_file_pull_context(context.clone());
+        app.queue_file_pull_request([1; 16], [2; 16]);
+        app.set_file_pull_context(TeacherFilePullContext {
+            control_session_id: 78,
+            ..context.clone()
+        });
+        assert_eq!(app.take_pending_action(), None);
+
+        app.set_file_pull_context(context.clone());
+        app.queue_file_pull_request([1; 16], [2; 16]);
+        app.classroom.select(None).unwrap();
+        assert_eq!(app.take_pending_action(), None);
+
+        app.classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        app.set_file_pull_context(context);
+        app.queue_file_pull_request([1; 16], [2; 16]);
+        assert!(matches!(
+            app.take_pending_action(),
+            Some(TeacherUiAction::FilePull(_))
+        ));
     }
 
     #[test]

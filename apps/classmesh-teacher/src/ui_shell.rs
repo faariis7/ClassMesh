@@ -22,6 +22,7 @@ use crate::monitoring_promotion::TeacherMonitoringCoordinator;
 use crate::presentation_view::PresentationBindingView;
 #[cfg(windows)]
 use crate::presentation_view::TeacherPresentationViewModel;
+use crate::ui_file_transfer::TeacherFilePullAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TeacherUiSection {
@@ -219,6 +220,7 @@ pub enum TeacherUiAction {
     Presentation(TeacherPresentationUiAction),
     Diagnostics(TeacherDiagnosticsUiAction),
     TeacherInteraction(TeacherInteractionUiAction),
+    FilePull(TeacherFilePullAction),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,7 +241,8 @@ impl TeacherUiAction {
             Self::Focus(_)
             | Self::Presentation(_)
             | Self::Diagnostics(_)
-            | Self::TeacherInteraction(_) => Err(TeacherUiClassroomActionError::NotClassroomAction),
+            | Self::TeacherInteraction(_)
+            | Self::FilePull(_) => Err(TeacherUiClassroomActionError::NotClassroomAction),
         }
     }
 }
