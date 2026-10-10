@@ -91,12 +91,12 @@ mod windows_service_app {
     use crate::control_runtime::{
         AdministrativeDispatchChannels, ControlRuntime, ControlRuntimeConfig,
         ControlRuntimeDispatch, ControlRuntimeState, FileTransferDispatch,
-        FileTransferDispatchChannels, FileTransferDispatchOutcome, FocusedMediaDispatchChannels,
-        FocusedMediaFeedback, FocusedMediaReconfigure, FocusedMediaStart, InputAvailability,
-        InputDispatchChannels, PresentationDispatchChannels, PresentationFeedbackBus,
-        PresentationKeyInstallDispatch, PresentationMulticastStartDispatch,
-        PresentationUnicastStartDispatch, SystemActionDispatch, SystemActionDispatchChannels,
-        SystemActionDispatchOutcome, TeacherInteractionDispatch,
+        FileTransferDispatchChannels, FileTransferDispatchOutcome, FileTransferDispatchPayload,
+        FocusedMediaDispatchChannels, FocusedMediaFeedback, FocusedMediaReconfigure,
+        FocusedMediaStart, InputAvailability, InputDispatchChannels, PresentationDispatchChannels,
+        PresentationFeedbackBus, PresentationKeyInstallDispatch,
+        PresentationMulticastStartDispatch, PresentationUnicastStartDispatch, SystemActionDispatch,
+        SystemActionDispatchChannels, SystemActionDispatchOutcome, TeacherInteractionDispatch,
         TeacherInteractionDispatchChannels, TeacherInteractionDispatchOutcome,
         WorkerCapabilityState,
     };
@@ -1807,9 +1807,18 @@ mod windows_service_app {
                 // Service boundary even while production inbox storage is intentionally absent.
                 let _authenticated_principal = dispatch.principal_id();
                 let _transfer_id = dispatch.payload().transfer_id();
-                let _ = dispatch
-                    .reply_tx
-                    .send(FileTransferDispatchOutcome::StorageUnavailable);
+                let outcome = match dispatch.payload() {
+                    FileTransferDispatchPayload::PullRequest(_) => {
+                        FileTransferDispatchOutcome::SourceUnavailable
+                    }
+                    FileTransferDispatchPayload::Offer(_)
+                    | FileTransferDispatchPayload::Chunk(_)
+                    | FileTransferDispatchPayload::Finish(_)
+                    | FileTransferDispatchPayload::Cancel(_) => {
+                        FileTransferDispatchOutcome::StorageUnavailable
+                    }
+                };
+                let _ = dispatch.reply_tx.send(outcome);
             }
 
             if pending_teacher_interaction
