@@ -30,12 +30,12 @@ Phase 5 tracking issue #32 and Phase 11 Issue #298 are complete. Active product 
 
 ## Current priority
 
-1. **Phase 12C4b Teacher UI implementation merged in PR #371, Portable + Windows CI #1491 green.** The exact Session 1 Windows runtime/visual and accessibility check remains open and is not replaced by hosted CI.
-2. **Phase 12D1 COMPLETE in PR #373 (CI #1503 green) and Phase 12D2a COMPLETE in PR #376 (CI #1511 green); Phase 12D2b CURRENT under Issue #328.**
-3. **12D2b — bounded portable streaming receiver:** one active authenticated principal/control-session/transfer binding, sequential chunks, streaming SHA-256, re-offer/status resume, cancellation and an injectable ClassMesh-owned inbox sink. Hosted tests use only recording/in-memory sinks.
-4. Keep production `FileTransfer` capability advertisement OFF until 12D2c Service delivery is actually serviceable. No raw paths, shell fragments, executable paths or Windows/filesystem side effects in 12D2b.
-5. Follow with **12D2c bounded Service delivery**, then 12D3 ReceiveFile pull/recovery and 12D4 Windows storage + Teacher UI/qualification.
-6. Keep Phase 4, 6F, 7D/7H, 8D, 9F, 10G, 12B4b and 12C4 runtime/visual gates open; hosted CI is not physical evidence. Preserve Phase 13 installer/update/recovery and Phase 14 hardening in roadmap order.
+1. **Phase 12D push + pull portable orchestration is complete through D3b3.** D2b merged in PR #377 (CI #1517), D2c1 in #380 (CI #1528), D2c2 in #381 (CI #1532), D3a in #383 (CI #1538), D3b1 in #386 (CI #1550), D3b2 in #387 (CI #1557) and D3b3 in #388 (CI #1567).
+2. **Phase 12D4 Windows storage/source integration is current under Issue #328.** D4a1 Windows inbox storage merged in PR #390 (CI #1578); D4a2 Windows outbox source merged in PR #391 (CI #1589).
+3. **D4a3 is current in PR #392:** wire authenticated push Offer/Chunk/Finish/Cancel through the existing portable receiver into the fixed app-owned Windows inbox. Rebuilt cleanly on current `main`; production `FileTransfer` capability remains OFF.
+4. **D4a4 is prepared in stacked PR #393:** route authenticated v0.8 receiver `FileTransferStatus` through the existing bounded Service seam and permit typed outbound Offer/Chunk/Finish/Cancel responses without enabling outbox execution yet.
+5. After D4a3/D4a4, wire the app-owned Windows outbox source state machine, then enable `FileTransfer` capability only when push + pull are truthful end to end. Capability-aware Teacher UI and exact Windows runtime/visual qualification follow.
+6. Keep Phase 4, 6F, 7D/7H, 8D, 9F, 10G, 12B4b and 12C4 physical/runtime gates open; hosted CI is not physical evidence. Then continue Phase 12E clipboard integration, 12F configuration/roles, 12G administrative closeout, Phase 13 installer/update/recovery and Phase 14 hardening.
 
 ## Rules while Phase 4 hardware is unavailable
 
