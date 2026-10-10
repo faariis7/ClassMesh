@@ -117,6 +117,12 @@ impl TeacherEguiShell {
     }
 
     pub fn set_file_pull_context(&mut self, context: TeacherFilePullContext) {
+        if self.file_pull_context.as_ref().is_some_and(|current| {
+            (current.source_id, current.control_session_id)
+                != (context.source_id, context.control_session_id)
+        }) {
+            self.staged_file_candidate = None;
+        }
         self.file_pull_context = Some(context);
     }
 
@@ -611,6 +617,34 @@ mod tests {
             app.take_pending_action(),
             Some(TeacherUiAction::FilePull(_))
         ));
+    }
+
+    #[test]
+    fn reconnect_discards_staged_candidate_and_never_reactivates_it() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let context = TeacherFilePullContext {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            version: classmesh_protocol::PROTOCOL_VERSION,
+            capabilities: BTreeSet::from([Capability::FileTransfer]),
+        };
+        let candidate = TeacherStagedFileCandidate {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            transfer_id: [1; 16],
+            opaque_source_id: [2; 16],
+        };
+        app.set_file_pull_context(context.clone());
+        app.set_staged_file_candidate(candidate);
+        assert_eq!(app.staged_file_candidate, Some(candidate));
+        app.set_file_pull_context(TeacherFilePullContext {
+            control_session_id: 78,
+            ..context.clone()
+        });
+        assert_eq!(app.staged_file_candidate, None);
+        app.set_file_pull_context(context);
+        assert_eq!(app.staged_file_candidate, None);
     }
 
     #[test]
