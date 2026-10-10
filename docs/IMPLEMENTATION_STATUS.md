@@ -158,6 +158,7 @@ Encoder/runtime hardening still needs bounded async Media Foundation watchdogs, 
 2. **Phase 12D4a1–D4a3 are complete:** Windows app-owned inbox storage #390 (CI #1578), app-owned outbox source #391 (CI #1589), and Service inbox wiring #392 (CI #1591; merge `1357226`).
 3. **D4a4 + D4a5 CURRENT — PR #395:** combine authenticated v0.8 receiver-status routing and typed outbound responses with the first real Windows outbox source-session constructor, exact principal/session/request/transfer correlation and receiver-driven resume. Production `FileTransfer` capability remains OFF.
 4. **D4a6 PREPARED — PR #396:** release the exact pull-session owner on control disconnect/terminal state and close the active source before another pull can claim it.
-5. Next, add a trusted local staged-source registration boundary; only then may production `FileTransfer` capability and capability-aware Teacher UI be enabled. Exact Windows runtime/visual qualification remains required.
-6. **12C4b UI code is merged (#371, CI #1491 green)** but its exact Session 1 Windows runtime/visual acceptance remains open. Keep unrelated Phase 4/6F/7D/7H/8D/9F/10G/12B4b gates open; hosted CI must not close them.
+5. **D4a7 PREPARED — PR #397:** lazily stage only deterministic opaque ClassMesh-owned outbox files; no remote raw path/catalog surface.
+6. **D4a8 PREPARED — PR #398:** prepare fixed inbox/outbox roots before control startup and advertise `FileTransfer` only when storage/source readiness is true. Capability-aware Teacher UI and exact Windows runtime/visual qualification follow after the stack is merged.
+7. **12C4b UI code is merged (#371, CI #1491 green)** but its exact Session 1 Windows runtime/visual acceptance remains open. Keep unrelated Phase 4/6F/7D/7H/8D/9F/10G/12B4b gates open; hosted CI must not close them.
 
