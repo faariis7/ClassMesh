@@ -1271,6 +1271,7 @@ pub(crate) struct ControlRuntimeDispatch {
     presentation_dispatch: PresentationDispatchChannels,
     presentation_feedback: PresentationFeedbackBus,
     worker_capabilities: Arc<WorkerCapabilityState>,
+    file_transfer_ready: bool,
 }
 
 impl ControlRuntimeDispatch {
@@ -1281,6 +1282,7 @@ impl ControlRuntimeDispatch {
         presentation_dispatch: PresentationDispatchChannels,
         presentation_feedback: PresentationFeedbackBus,
         worker_capabilities: Arc<WorkerCapabilityState>,
+        file_transfer_ready: bool,
     ) -> Self {
         Self {
             input,
@@ -1289,6 +1291,7 @@ impl ControlRuntimeDispatch {
             presentation_dispatch,
             presentation_feedback,
             worker_capabilities,
+            file_transfer_ready,
         }
     }
 }
@@ -1394,6 +1397,7 @@ async fn run_listener(
         presentation_dispatch,
         presentation_feedback,
         worker_capabilities,
+        file_transfer_ready,
     } = dispatch;
     let udp_multicast_available = local_udp_multicast_capability(config.multicast_interface);
     let multicast_interface = if udp_multicast_available {
@@ -1471,6 +1475,7 @@ async fn run_listener(
                         local_capabilities: service_hello_capabilities(
                             &worker_capabilities,
                             udp_multicast_available,
+                            file_transfer_ready,
                         ),
                         control_session_id: session_id,
                     };
@@ -3037,6 +3042,7 @@ fn zeroize_presentation_key_envelope(envelope: &mut ControlEnvelope) {
 fn service_hello_capabilities(
     worker_capabilities: &WorkerCapabilityState,
     udp_multicast_available: bool,
+    file_transfer_ready: bool,
 ) -> BTreeSet<Capability> {
     let mut capabilities = worker_capabilities.hello_capabilities();
     capabilities.insert(Capability::TeacherPresentation);
@@ -3045,6 +3051,9 @@ fn service_hello_capabilities(
     if worker_capabilities.has_live_worker() {
         capabilities.insert(Capability::TeacherMessage);
         capabilities.insert(Capability::OpenTarget);
+    }
+    if file_transfer_ready {
+        capabilities.insert(Capability::FileTransfer);
     }
     if udp_multicast_available {
         capabilities.insert(Capability::UdpMulticast);
@@ -3404,12 +3413,12 @@ mod tests {
     fn teacher_interaction_capabilities_require_an_exact_live_worker() {
         let worker = WorkerCapabilityState::default();
 
-        let unavailable = service_hello_capabilities(&worker, false);
+        let unavailable = service_hello_capabilities(&worker, false, false);
         assert!(!unavailable.contains(&Capability::TeacherMessage));
         assert!(!unavailable.contains(&Capability::OpenTarget));
 
         worker.activate(3, 42, 7);
-        let available = service_hello_capabilities(&worker, false);
+        let available = service_hello_capabilities(&worker, false, false);
         assert!(available.contains(&Capability::TeacherMessage));
         assert!(available.contains(&Capability::OpenTarget));
 
@@ -3417,7 +3426,7 @@ mod tests {
         assert!(worker.is_current(3, 42, 7));
         worker.clear();
 
-        let cleared = service_hello_capabilities(&worker, false);
+        let cleared = service_hello_capabilities(&worker, false, false);
         assert!(!cleared.contains(&Capability::TeacherMessage));
         assert!(!cleared.contains(&Capability::OpenTarget));
     }
@@ -3587,21 +3596,28 @@ mod tests {
     }
 
     #[test]
-    fn file_transfer_capability_stays_off_until_storage_is_serviceable() {
+    fn file_transfer_capability_requires_storage_and_source_readiness() {
         let worker = WorkerCapabilityState::default();
-        let capabilities = service_hello_capabilities(&worker, false);
-        assert!(!capabilities.contains(&Capability::FileTransfer));
+        let unavailable = service_hello_capabilities(&worker, false, false);
+        assert!(!unavailable.contains(&Capability::FileTransfer));
+        assert!(!file_transfer_available(PROTOCOL_VERSION, &unavailable));
+
+        let ready = service_hello_capabilities(&worker, false, true);
+        assert!(ready.contains(&Capability::FileTransfer));
+        assert!(file_transfer_available(PROTOCOL_VERSION, &ready));
+        assert!(file_transfer_pull_available(PROTOCOL_VERSION, &ready));
 
         worker.activate(3, 42, 7);
-        let with_worker = service_hello_capabilities(&worker, false);
-        assert!(!with_worker.contains(&Capability::FileTransfer));
-        assert!(!file_transfer_available(PROTOCOL_VERSION, &with_worker));
+        let with_worker = service_hello_capabilities(&worker, false, true);
+        assert!(with_worker.contains(&Capability::FileTransfer));
+        assert!(with_worker.contains(&Capability::TeacherMessage));
+        assert!(with_worker.contains(&Capability::OpenTarget));
     }
 
     #[test]
     fn presentation_runtime_capability_is_explicit_and_probe_gated() {
         let worker = WorkerCapabilityState::default();
-        let capabilities = service_hello_capabilities(&worker, false);
+        let capabilities = service_hello_capabilities(&worker, false, false);
         assert!(capabilities.contains(&Capability::TeacherPresentation));
         assert!(capabilities.contains(&Capability::SframeGroupMedia));
         assert!(capabilities.contains(&Capability::ServiceSessionWorker));
@@ -3612,7 +3628,7 @@ mod tests {
         assert!(!capabilities.contains(&Capability::QuicDatagram));
         assert!(!capabilities.contains(&Capability::UdpMulticast));
 
-        let probed = service_hello_capabilities(&worker, true);
+        let probed = service_hello_capabilities(&worker, true, false);
         assert!(probed.contains(&Capability::TeacherPresentation));
         assert!(probed.contains(&Capability::SframeGroupMedia));
         assert!(probed.contains(&Capability::UdpMulticast));
