@@ -102,10 +102,6 @@ impl<S: FileTransferOutboxSource> FileTransferSourceSession<S> {
         &self.source
     }
 
-    pub const fn source_mut(&mut self) -> &mut S {
-        &mut self.source
-    }
-
     pub fn offer(
         &mut self,
         peer: FileTransferPeer,
