@@ -1,6 +1,8 @@
 #[cfg(windows)]
 mod control_runtime;
 #[cfg(windows)]
+pub mod file_transfer_storage;
+#[cfg(windows)]
 pub mod monitoring;
 #[cfg(windows)]
 mod system_action_power;
