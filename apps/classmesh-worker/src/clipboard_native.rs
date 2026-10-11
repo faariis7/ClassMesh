@@ -8,6 +8,7 @@ use classmesh_control::clipboard_utf16::{
 };
 use classmesh_windows_runtime::ipc_sensitive::{
     ClipboardReadSuccessBinding, ClipboardReadSuccessError, SensitiveClipboardReadSuccess,
+    encode_sensitive_clipboard_read_frame,
 };
 
 /// Accept only a previously size-checked local UTF-16 source buffer. The
@@ -34,6 +35,29 @@ pub fn convert_units_to_sensitive_read_success(
         .map_err(WorkerClipboardReadConversionError::InvalidPayload)
 }
 
+/// Strictly isolated future-v12 sender. The caller must supply a binding
+/// taken from the current authenticated pending Worker request, and must only
+/// provide a trusted sensitive-pipe writer once v12 is negotiated. This helper
+/// does not open a pipe or activate Worker clipboard events.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WorkerClipboardFrameSendError<E> {
+    BindingMismatch,
+    WriteFailed(E),
+}
+
+pub fn send_sensitive_read_frame<E>(
+    message: SensitiveClipboardReadSuccess,
+    expected: ClipboardReadSuccessBinding,
+    write_all: impl FnOnce(&[u8]) -> Result<(), E>,
+) -> Result<(), WorkerClipboardFrameSendError<E>> {
+    if !expected.is_valid() || message.binding() != expected {
+        return Err(WorkerClipboardFrameSendError::BindingMismatch);
+    }
+    // Both the source message and the wire allocation wipe themselves on drop.
+    let wire = encode_sensitive_clipboard_read_frame(&message);
+    write_all(&wire).map_err(WorkerClipboardFrameSendError::WriteFailed)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerClipboardReadError {
     NativeUnavailable,
@@ -57,6 +81,64 @@ pub fn read_windows_clipboard_text() -> Result<Option<ClipboardUtf8Text>, Worker
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sensitive_sender_encodes_exact_bound_unicode_and_no_plaintext_debug() {
+        use classmesh_windows_runtime::ipc_sensitive::SensitiveClipboardReadStream;
+        let secret = "مرحبا 🌙";
+        let mut units = secret.encode_utf16().chain([0]).collect::<Vec<_>>();
+        let result = convert_units_to_sensitive_read_success(&mut units, binding())
+            .expect("authorized result");
+        let mut sent = Vec::new();
+        assert_eq!(
+            send_sensitive_read_frame(result, binding(), |wire| {
+                sent.extend_from_slice(wire);
+                Ok::<(), &'static str>(())
+            }),
+            Ok(())
+        );
+        assert!(units.iter().all(|value| *value == 0));
+        let mut stream = SensitiveClipboardReadStream::default();
+        let decoded = stream
+            .push_bytes(&mut sent)
+            .expect("future versioned frame")
+            .expect("exact sensitive response");
+        assert!(sent.iter().all(|value| *value == 0));
+        assert_eq!(decoded.binding(), binding());
+        assert_eq!(decoded.text(), secret);
+        assert!(!format!("{decoded:?}").contains(secret));
+    }
+
+    #[test]
+    fn replaced_worker_generation_never_invokes_sensitive_writer() {
+        let mut units = [65_u16, 0];
+        let result =
+            convert_units_to_sensitive_read_success(&mut units, binding()).expect("bounded text");
+        let stale = ClipboardReadSuccessBinding {
+            worker_generation: binding().worker_generation + 1,
+            ..binding()
+        };
+        let mut called = false;
+        assert_eq!(
+            send_sensitive_read_frame(result, stale, |_wire| {
+                called = true;
+                Ok::<(), &'static str>(())
+            }),
+            Err(WorkerClipboardFrameSendError::BindingMismatch)
+        );
+        assert!(!called);
+    }
+
+    #[test]
+    fn writer_failure_is_reported_without_duplicating_secret() {
+        let mut units = [65_u16, 0];
+        let result =
+            convert_units_to_sensitive_read_success(&mut units, binding()).expect("bounded text");
+        assert_eq!(
+            send_sensitive_read_frame(result, binding(), |_wire| Err("pipe closed")),
+            Err(WorkerClipboardFrameSendError::WriteFailed("pipe closed"))
+        );
+    }
+
     fn binding() -> classmesh_windows_runtime::ipc_sensitive::ClipboardReadSuccessBinding {
         classmesh_windows_runtime::ipc_sensitive::ClipboardReadSuccessBinding {
             worker_process_id: 42,
