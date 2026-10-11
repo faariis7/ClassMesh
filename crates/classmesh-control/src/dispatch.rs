@@ -51,7 +51,7 @@ impl AuthorizedSystemAction {
 }
 
 /// Opaque proof of an authorized, non-zero-correlated text clipboard read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct AuthorizedClipboardRead {
     request_id: u64,
 }
@@ -64,9 +64,15 @@ impl AuthorizedClipboardRead {
 }
 
 /// Validated clipboard write payload; callers cannot mint this token directly.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(PartialEq)]
 pub struct AuthorizedClipboardWrite {
     text_utf8: String,
+}
+
+impl std::fmt::Debug for AuthorizedClipboardWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AuthorizedClipboardWrite([redacted])")
+    }
 }
 
 impl AuthorizedClipboardWrite {
@@ -76,7 +82,7 @@ impl AuthorizedClipboardWrite {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum PrivilegedControlCommand {
     InputEvent(InputEvent),
     ClipboardReadRequest(AuthorizedClipboardRead),
@@ -1320,6 +1326,45 @@ mod tests {
             Err(ClipboardExecutionError::Failed)
         );
         assert_eq!(backend.writes, vec!["hello", ""]);
+    }
+
+    #[test]
+    fn clipboard_write_authorized_debug_never_contains_secret_text() {
+        let authorization = store(BTreeSet::from([Permission::WriteClipboard]));
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+        let secret = "sensitive-user-clipboard-write-123";
+        let command = dispatch_privileged_command(
+            &mut guard,
+            &authorization,
+            &clipboard_write_envelope(2, secret.to_owned()),
+            150,
+        )
+        .expect("authorized");
+        assert!(!format!("{command:?}").contains(secret));
+    }
+
+    #[test]
+    fn clipboard_read_execution_debug_never_contains_secret_text() {
+        use crate::clipboard_execution::{ClipboardBackendError, execute_clipboard_read};
+        let authorization = store(BTreeSet::from([Permission::ReadClipboard]));
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+        let PrivilegedControlCommand::ClipboardReadRequest(token) = dispatch_privileged_command(
+            &mut guard,
+            &authorization,
+            &clipboard_read_envelope(2),
+            150,
+        )
+        .expect("authorized") else {
+            panic!("wrong command");
+        };
+        let secret = "sensitive-user-clipboard-read-456";
+        let mut backend = RecordingClipboardBackend {
+            read: Ok(Some(secret.to_owned())),
+            write: Err(ClipboardBackendError::Unavailable),
+            writes: Vec::new(),
+        };
+        let result = execute_clipboard_read(&mut backend, token);
+        assert!(!format!("{result:?}").contains(secret));
     }
 
     #[test]
