@@ -1,5 +1,16 @@
 # ClassMesh Agent Handoff
 
+> **Latest handoff — 2026-10-11 16:56 UTC, overrides historical status lines below. GitHub Live remains authoritative.**
+>
+> **Completed:** #410 Phase 12E3a merged into main (`19df0f0`); #412 VM1 Teacher empty-state and documentation evidence merged into main (`f32039f`). VMPal 0.69 agent CLI controls two Windows 11 ARM64 VMs via the Mac; VM1 (`DF60038E-4C4D-4DCB-B310-1D2ACAAD798A`) currently locked, VM2 (`B20645A3-347F-4622-89DF-28283E936612`) confirmed usable for real interactive-window qualification. This is **Mac VMPal CLI/MCP bridge**, not direct native ChatGPT VMPal MCP connectivity.
+>
+> **Open and CI-green, not merged:** PR #413 12E3b clipboard injection, head `3b1d01e`, CI #1659 Portable Rust/Windows green, local `classmesh-control` 199 tests, fmt/Clippy green; security review tests enforce redacted Debug and non-Clone opaque authorized commands. PR #414 opt-in `-RequireResponsiveWindow` smoke, head `e67f49b`, CI #1661 Portable Rust/Windows green. Require review and user approval before merges into main.
+>
+> **Windows VM2 real smoke (PR #414):** CI #1661 artifact ID `11707807431` zip SHA `bb1fe7441518214b0b5ccf9c848df088e3a3504b060d9207fba465d076c883f3`; indexed Teacher EXE SHA `20eb252aa902398f9a488f3760d6e4cb57eaf0a5eaa186288fea6b8fb197f298`. `ValidateBundle` passed. Strict `-RequireResponsiveWindow` failed exit 1 when VC++ x64 runtime was absent; after saving snapshot `Before-VC-Redist-PR414-20261011` and installing official Microsoft-signed `vc_redist.x64.exe` (SHA `843068991daaa1f73ad9f6239bce4d0f6a07a51f18c37ea2a867e9beca71295c`, install exit 0), exact same artifact passed strict smoke with `main_window_observed=true`, `session_id=1`, `visual_accessibility_reviewed=null`, `physical_media_transport_qualified=null`. Default smoke passed separately and recorded `main_window_observed=null`. VM2 evidence: `C:\Users\ahmed\ClassMeshTeacherSmokePR414\evidence-strict\launch-smoke-evidence.json`. Detailed durable notes: [PR #414](https://github.com/faariis7/ClassMesh/pull/414), [Issue #411](https://github.com/faariis7/ClassMesh/issues/411).
+>
+> **Next:** (1) review #413/#414 against current main and seek user merge approval; (2) implement test-led authenticated Service↔Worker clipboard command execution/read-response routing, with capability/permission/sequence/correlation and cancellation cases; (3) resume 12D4b actual staged-file trusted candidate and transport/results; (4) keep all physical issues #3/#108/#153/#276/#281/#288 and 12B4b/12C4 open. Do **not** infer real network/Teacher↔Student integration or accessibility qualification from VM GUI smoke.
+
+
 > Evidence snapshot: 2026-10-11. **GitHub Live is always authoritative.** Recheck current main, open PRs, Issues, jobs and instructions before work. This file is a checkpoint, not automatic proof that no later change exists.
 
 ## Current

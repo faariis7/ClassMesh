@@ -10,6 +10,7 @@ param(
     [ValidateRange(1, 30)]
     [int]$StartupSeconds = 5,
 
+    [switch]$RequireResponsiveWindow,
     [switch]$LeaveRunning
 )
 
@@ -77,7 +78,7 @@ CI usage:
 
 Interactive Windows usage from the extracted artifact:
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-smoke.ps1 -Mode ValidateBundle -BundleDir .
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-smoke.ps1 -Mode Smoke -BundleDir . -EvidenceDir .\evidence -StartupSeconds 5 -LeaveRunning
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-smoke.ps1 -Mode Smoke -BundleDir . -EvidenceDir .\evidence -StartupSeconds 5 -RequireResponsiveWindow -LeaveRunning
 
 The Bypass flag applies only to the launched PowerShell process; it does not change machine/user execution policy.
 
@@ -85,7 +86,8 @@ Smoke mode:
   - requires an interactive Windows user session (Session 0 is rejected);
   - verifies the exact artifact SHA-256 before launch;
   - starts classmesh-teacher-ui.exe and requires it to remain alive for StartupSeconds;
-  - writes launch-smoke-evidence.json;
+  - optional -RequireResponsiveWindow checks the process owns a responsive ClassMesh Teacher window in the same interactive session;
+  - writes launch-smoke-evidence.json; a null main_window_observed means the window check was not requested;
   - does NOT mark visual/accessibility review complete;
   - does NOT qualify any Phase 4/6/7/8/9/10 physical media or transport gate.
 "@ | Write-Host
@@ -208,6 +210,16 @@ switch ($Mode) {
                 throw "Teacher UI exited during bounded startup smoke with exit code $($process.ExitCode)"
             }
 
+            if ($RequireResponsiveWindow) {
+                if ($process.SessionId -ne $sessionId) {
+                    throw "Teacher UI window smoke rejected: process session does not match the interactive caller"
+                }
+                $windowTitle = [string]$process.MainWindowTitle
+                if ($process.MainWindowHandle -eq [IntPtr]::Zero -or -not $process.Responding -or $windowTitle -cne "ClassMesh Teacher") {
+                    throw "Teacher UI window smoke failed: no responsive ClassMesh Teacher window; inspect Windows loader errors and runtime prerequisites"
+                }
+            }
+
             [ordered]@{
                 schema_version = $SchemaVersion
                 observed_utc = (Get-Date).ToUniversalTime().ToString("o")
@@ -217,6 +229,7 @@ switch ($Mode) {
                 startup_seconds = $StartupSeconds
                 process_id = $process.Id
                 process_alive_after_startup = $true
+                main_window_observed = if ($RequireResponsiveWindow) { $true } else { $null }
                 session_id = $sessionId
                 user = [System.Environment]::UserName
                 left_running = [bool]$LeaveRunning
@@ -228,6 +241,7 @@ switch ($Mode) {
             Write-Host "launch_smoke_passed=true"
             Write-Host "process_id=$($process.Id)"
             Write-Host "session_id=$sessionId"
+            Write-Host "main_window_observed=$(if ($RequireResponsiveWindow) { 'true' } else { 'not_checked' })"
             Write-Host "evidence=$evidencePath"
             Write-Host "visual_accessibility_reviewed=undetermined"
         }
