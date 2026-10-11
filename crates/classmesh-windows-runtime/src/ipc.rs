@@ -584,6 +584,23 @@ pub struct WorkerClipboardReadFailure {
 }
 
 impl WorkerClipboardReadFailure {
+    /// Called only after IPC peer authentication, before any pending read
+    /// correlation. Process, interactive session AND incarnation must match.
+    #[must_use]
+    pub const fn matches_active_worker(
+        &self,
+        expected_process_id: u32,
+        expected_session_id: u32,
+        expected_generation: u64,
+    ) -> bool {
+        expected_process_id != 0
+            && expected_session_id != 0
+            && expected_generation != 0
+            && self.process_id == expected_process_id
+            && self.session_id == expected_session_id
+            && self.worker_generation == expected_generation
+    }
+
     fn validate(self) -> Result<(), IpcMessageError> {
         if self.process_id == 0
             || self.session_id == 0
@@ -3444,5 +3461,25 @@ mod tests {
         let mut legacy = IpcFrame::service_ready();
         legacy.header.version_minor = CLIPBOARD_IPC_MIN_MINOR - 1;
         assert_eq!(legacy.message(), Ok(IpcMessage::ServiceReady));
+    }
+
+    #[test]
+    fn clipboard_failure_requires_exact_active_worker_identity() {
+        let reply = WorkerClipboardReadFailure {
+            process_id: 42,
+            session_id: 7,
+            control_session_id: 77,
+            control_sequence: 101,
+            request_id: 19,
+            worker_generation: 4,
+            reason: ClipboardReadFailureReason::Unavailable,
+        };
+        assert!(reply.matches_active_worker(42, 7, 4));
+        assert!(!reply.matches_active_worker(43, 7, 4));
+        assert!(!reply.matches_active_worker(42, 8, 4));
+        assert!(!reply.matches_active_worker(42, 7, 5));
+        assert!(!reply.matches_active_worker(0, 7, 4));
+        assert!(!reply.matches_active_worker(42, 0, 4));
+        assert!(!reply.matches_active_worker(42, 7, 0));
     }
 }
