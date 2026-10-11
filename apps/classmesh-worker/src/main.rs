@@ -280,6 +280,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 continue;
             }
+            Ok(WorkerEvent::ClipboardReadRequest(request)) => {
+                // Deliberately no clipboard access until a bounded, zeroizing
+                // result contract and authorized Service routing are integrated.
+                let reply = classmesh_worker::clipboard_read_fallback::unavailable_clipboard_read(
+                    request,
+                    std::process::id(),
+                    actual_session,
+                )
+                .map_err(ipc_message_error)?;
+                let frame =
+                    classmesh_windows_runtime::ipc::IpcFrame::worker_clipboard_read_failure(reply)
+                        .map_err(ipc_message_error)?;
+                pipe.write_all(&frame.encode().map_err(ipc_frame_error)?)?;
+                continue;
+            }
             Ok(WorkerEvent::TeacherInteraction(interaction)) => {
                 let result = match execute_teacher_interaction(
                     actual_session,
@@ -969,6 +984,7 @@ enum WorkerEvent {
         classmesh_windows_runtime::ipc::ServicePresentationSenderUnicastAction,
     ),
     TeacherInteraction(classmesh_windows_runtime::ipc::ServiceTeacherInteractionRequest),
+    ClipboardReadRequest(classmesh_windows_runtime::ipc::ServiceClipboardReadRequest),
     IpcFailure(String),
 }
 
@@ -1530,6 +1546,9 @@ fn worker_event_from_decoded_frame(
             Ok(IpcMessage::ServiceEncoderCacheResult(result)) => {
                 Ok(WorkerEvent::EncoderCacheResult(result))
             }
+            Ok(IpcMessage::ServiceClipboardReadRequest(request)) => {
+                Ok(WorkerEvent::ClipboardReadRequest(request))
+            }
             Ok(IpcMessage::ServiceTeacherInteractionRequest(request)) => {
                 Ok(WorkerEvent::TeacherInteraction(request))
             }
@@ -2027,6 +2046,26 @@ mod focused_profile_tests {
             .expect("interaction routes");
         let WorkerEvent::TeacherInteraction(received) = event else {
             panic!("expected teacher interaction event");
+        };
+        assert_eq!(received, request);
+    }
+
+    #[test]
+    fn clipboard_read_request_routes_to_fail_closed_worker_event() {
+        use classmesh_windows_runtime::ipc::{IpcFrame, ServiceClipboardReadRequest};
+        use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
+        let request = ServiceClipboardReadRequest {
+            control_session_id: 77,
+            control_sequence: 101,
+            request_id: 19,
+            worker_generation: 4,
+        };
+        let frame =
+            IpcFrame::service_clipboard_read_request(request).expect("valid metadata request");
+        let event = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
+            .expect("valid clipboard metadata routes");
+        let WorkerEvent::ClipboardReadRequest(received) = event else {
+            panic!("expected clipboard-read request");
         };
         assert_eq!(received, request);
     }
