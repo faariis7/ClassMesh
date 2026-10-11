@@ -279,6 +279,12 @@ mod windows_service_app {
     }
 
     #[derive(Debug)]
+    struct WorkerInteractionResultChannels {
+        teacher_interaction_result_tx: mpsc::SyncSender<WorkerTeacherInteractionResult>,
+        clipboard_read_result_tx: mpsc::SyncSender<WorkerClipboardReadFailure>,
+    }
+
+    #[derive(Debug)]
     struct WorkerManager {
         executable: Option<PathBuf>,
         process: Option<SessionProcess>,
@@ -306,8 +312,7 @@ mod windows_service_app {
                 WorkerPresentationMulticastStartResult,
             >,
             presentation_unicast_result_tx: mpsc::SyncSender<WorkerPresentationUnicastStartResult>,
-            teacher_interaction_result_tx: mpsc::SyncSender<WorkerTeacherInteractionResult>,
-            clipboard_read_result_tx: mpsc::SyncSender<WorkerClipboardReadFailure>,
+            interaction_results: WorkerInteractionResultChannels,
             presentation_feedback: PresentationFeedbackBus,
         ) -> Self {
             let executable = std::env::current_exe().ok().map(|service| {
@@ -325,8 +330,8 @@ mod windows_service_app {
                 presentation_key_result_tx,
                 presentation_multicast_result_tx,
                 presentation_unicast_result_tx,
-                teacher_interaction_result_tx,
-                clipboard_read_result_tx,
+                teacher_interaction_result_tx: interaction_results.teacher_interaction_result_tx,
+                clipboard_read_result_tx: interaction_results.clipboard_read_result_tx,
                 presentation_feedback,
                 watchdog: WorkerWatchdog::new(WorkerRestartPolicy::default()),
                 pending_restart: None,
@@ -1922,8 +1927,10 @@ mod windows_service_app {
             worker_presentation_key_result_tx,
             worker_presentation_multicast_result_tx,
             worker_presentation_unicast_result_tx,
-            worker_teacher_interaction_result_tx,
-            worker_clipboard_read_result_tx,
+            WorkerInteractionResultChannels {
+                teacher_interaction_result_tx: worker_teacher_interaction_result_tx,
+                clipboard_read_result_tx: worker_clipboard_read_result_tx,
+            },
             presentation_feedback,
         );
         let mut power_executor = ServicePowerSystemActionExecutor::new(Win32SystemPowerController);
