@@ -1321,7 +1321,13 @@ mod windows_service_app {
                             );
                         }
                         Ok(IpcMessage::WorkerClipboardReadFailure(_)) => {
-                            // Wrong process/session/generation: fail closed.
+                            // Wrong process/session/generation: invalidate the
+                            // active Worker capability report and fail closed.
+                            let _ = capabilities.clear_report_if_current(
+                                generation,
+                                expected_process_id,
+                                expected_session_id,
+                            );
                             eprintln!("ClassMesh Worker clipboard read failure identity mismatch");
                             return;
                         }
