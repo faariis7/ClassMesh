@@ -33,6 +33,14 @@ impl ClipboardUtf8Text {
     pub fn as_str(&self) -> &str {
         self.text.as_str()
     }
+
+    /// Transfer ownership of the already-validated clipboard bytes without
+    /// allocating a second plaintext buffer. The returned owner wipes the
+    /// same allocation when its lifetime ends.
+    #[must_use]
+    pub fn into_zeroizing_bytes(mut self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(std::mem::take(&mut *self.text).into_bytes())
+    }
 }
 
 /// Caller must first bound its operating-system clipboard buffer allocation.
@@ -79,6 +87,15 @@ fn decode_utf16_bounded(input: &[u16]) -> Result<ClipboardUtf8Text, ClipboardUtf
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn move_decoded_text_into_zeroizing_bytes_without_plaintext_copy() {
+        let secret = "مرحبا 🌙";
+        let mut utf16 = secret.encode_utf16().chain([0]).collect::<Vec<_>>();
+        let decoded = decode_clipboard_utf16_zeroizing(&mut utf16).expect("valid");
+        assert!(utf16.iter().all(|v| *v == 0));
+        let bytes: zeroize::Zeroizing<Vec<u8>> = decoded.into_zeroizing_bytes();
+        assert_eq!(bytes.as_slice(), secret.as_bytes());
+    }
 
     #[test]
     fn empty_clipboard_text_is_valid_and_source_zeroized() {
