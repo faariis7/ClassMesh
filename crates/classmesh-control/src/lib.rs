@@ -5,6 +5,7 @@ pub mod authorization;
 pub mod bootstrap;
 pub mod client_session;
 pub mod clipboard_execution;
+pub mod clipboard_read_correlation;
 pub mod csr;
 pub mod diagnostics;
 pub mod dispatch;
