@@ -19,9 +19,9 @@ pub const IPC_MAGIC: u32 = 0x434D_4950; // "CMIP"
 pub const IPC_HEADER_LEN: usize = 12;
 pub const MAX_IPC_MESSAGE: usize = 1_048_576;
 pub const IPC_VERSION_MAJOR: u8 = 0;
-/// IPC minor 10 adds the typed Service -> Worker teacher-interaction request/result contract.
-/// Older minors must reject those messages instead of treating them as legacy IPC.
-pub const IPC_VERSION_MINOR: u8 = 10;
+/// IPC minor 11 adds text-free Service -> Worker clipboard read request and
+/// Worker -> Service failure metadata. Old minor peers must reject the new IDs.
+pub const IPC_VERSION_MINOR: u8 = 11;
 
 const MESSAGE_WORKER_HELLO: u16 = 1;
 const MESSAGE_SERVICE_READY: u16 = 2;
@@ -46,6 +46,8 @@ const MESSAGE_SERVICE_PRESENTATION_KEYFRAME_REQUEST: u16 = 27;
 const MESSAGE_SERVICE_PRESENTATION_SENDER_UNICAST_ACTION: u16 = 28;
 const MESSAGE_SERVICE_TEACHER_INTERACTION_REQUEST: u16 = 29;
 const MESSAGE_WORKER_TEACHER_INTERACTION_RESULT: u16 = 30;
+const MESSAGE_SERVICE_CLIPBOARD_READ_REQUEST: u16 = 31;
+const MESSAGE_WORKER_CLIPBOARD_READ_FAILURE: u16 = 32;
 const SERVICE_UDP_STREAM_START_LEN: usize = 32;
 const SERVICE_PRESENTATION_MULTICAST_START_LEN: usize = 56;
 const WORKER_PRESENTATION_MULTICAST_START_RESULT_LEN: usize = 40;
@@ -62,6 +64,9 @@ const PRESENTATION_KEYFRAME_REQUEST_MIN_MINOR: u8 = 7;
 const PRESENTATION_SENDER_UNICAST_ACTION_MIN_MINOR: u8 = 8;
 const WORKSTATION_LOCK_MIN_MINOR: u8 = 9;
 const TEACHER_INTERACTION_IPC_MIN_MINOR: u8 = 10;
+const CLIPBOARD_IPC_MIN_MINOR: u8 = 11;
+const SERVICE_CLIPBOARD_READ_REQUEST_LEN: usize = 32;
+const WORKER_CLIPBOARD_READ_FAILURE_LEN: usize = 48;
 const SERVICE_TEACHER_INTERACTION_BINDING_LEN: usize = 16;
 const WORKER_TEACHER_INTERACTION_BINDING_LEN: usize = 24;
 
@@ -517,6 +522,82 @@ impl WorkerTeacherInteractionResult {
     }
 }
 
+/// Metadata only. Authorization, capability, sequence and replay checks must
+/// already have passed before Service sends this to the authenticated Worker.
+/// Carries no clipboard text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceClipboardReadRequest {
+    pub control_session_id: u64,
+    pub control_sequence: u64,
+    pub request_id: u64,
+    pub worker_generation: u64,
+}
+
+impl ServiceClipboardReadRequest {
+    fn validate(self) -> Result<(), IpcMessageError> {
+        if self.control_session_id == 0
+            || self.control_sequence == 0
+            || self.request_id == 0
+            || self.worker_generation == 0
+        {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        Ok(())
+    }
+}
+
+/// A failed read contains no clipboard text; successful reads require a
+/// separate sensitive IPC contract, not a fake success status here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardReadFailureReason {
+    Unavailable,
+    BackendFailed,
+}
+
+impl ClipboardReadFailureReason {
+    const fn as_byte(self) -> u8 {
+        match self {
+            Self::Unavailable => 1,
+            Self::BackendFailed => 2,
+        }
+    }
+    const fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Unavailable),
+            2 => Some(Self::BackendFailed),
+            _ => None,
+        }
+    }
+}
+
+/// Worker identity + request binding needed for exact active-Worker correlation.
+/// Callers must still match the current IPC pipe and Worker incarnation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerClipboardReadFailure {
+    pub process_id: u32,
+    pub session_id: u32,
+    pub control_session_id: u64,
+    pub control_sequence: u64,
+    pub request_id: u64,
+    pub worker_generation: u64,
+    pub reason: ClipboardReadFailureReason,
+}
+
+impl WorkerClipboardReadFailure {
+    fn validate(self) -> Result<(), IpcMessageError> {
+        if self.process_id == 0
+            || self.session_id == 0
+            || self.control_session_id == 0
+            || self.control_sequence == 0
+            || self.request_id == 0
+            || self.worker_generation == 0
+        {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        Ok(())
+    }
+}
+
 fn valid_multicast_interface(address: Ipv4Addr) -> bool {
     !address.is_unspecified()
         && !address.is_loopback()
@@ -761,6 +842,8 @@ pub enum IpcMessage {
     WorkerPresentationFeedback(WorkerPresentationFeedback),
     ServiceTeacherInteractionRequest(ServiceTeacherInteractionRequest),
     WorkerTeacherInteractionResult(WorkerTeacherInteractionResult),
+    ServiceClipboardReadRequest(ServiceClipboardReadRequest),
+    WorkerClipboardReadFailure(WorkerClipboardReadFailure),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1100,6 +1183,34 @@ impl IpcFrame {
             MESSAGE_WORKER_TEACHER_INTERACTION_RESULT,
             payload,
         ))
+    }
+
+    pub fn service_clipboard_read_request(
+        request: ServiceClipboardReadRequest,
+    ) -> Result<Self, IpcMessageError> {
+        request.validate()?;
+        let mut payload = Vec::with_capacity(SERVICE_CLIPBOARD_READ_REQUEST_LEN);
+        payload.extend_from_slice(&request.control_session_id.to_be_bytes());
+        payload.extend_from_slice(&request.control_sequence.to_be_bytes());
+        payload.extend_from_slice(&request.request_id.to_be_bytes());
+        payload.extend_from_slice(&request.worker_generation.to_be_bytes());
+        Ok(Self::new(MESSAGE_SERVICE_CLIPBOARD_READ_REQUEST, payload))
+    }
+
+    pub fn worker_clipboard_read_failure(
+        result: WorkerClipboardReadFailure,
+    ) -> Result<Self, IpcMessageError> {
+        result.validate()?;
+        let mut payload = Vec::with_capacity(WORKER_CLIPBOARD_READ_FAILURE_LEN);
+        payload.extend_from_slice(&result.process_id.to_be_bytes());
+        payload.extend_from_slice(&result.session_id.to_be_bytes());
+        payload.extend_from_slice(&result.control_session_id.to_be_bytes());
+        payload.extend_from_slice(&result.control_sequence.to_be_bytes());
+        payload.extend_from_slice(&result.request_id.to_be_bytes());
+        payload.extend_from_slice(&result.worker_generation.to_be_bytes());
+        payload.push(result.reason.as_byte());
+        payload.extend_from_slice(&[0_u8; 7]);
+        Ok(Self::new(MESSAGE_WORKER_CLIPBOARD_READ_FAILURE, payload))
     }
 
     pub fn service_media_feedback(feedback: &FeedbackMessage) -> Result<Self, IpcMessageError> {
@@ -1869,6 +1980,60 @@ impl IpcFrame {
                 };
                 result.validate()?;
                 Ok(IpcMessage::WorkerPresentationKeyInstallResult(result))
+            }
+            MESSAGE_SERVICE_CLIPBOARD_READ_REQUEST => {
+                if self.header.version_minor < CLIPBOARD_IPC_MIN_MINOR {
+                    return Err(IpcMessageError::UnsupportedVersion);
+                }
+                if self.payload.len() != SERVICE_CLIPBOARD_READ_REQUEST_LEN {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let request = ServiceClipboardReadRequest {
+                    control_session_id: u64::from_be_bytes(
+                        self.payload[0..8].try_into().expect("8 bytes"),
+                    ),
+                    control_sequence: u64::from_be_bytes(
+                        self.payload[8..16].try_into().expect("8 bytes"),
+                    ),
+                    request_id: u64::from_be_bytes(
+                        self.payload[16..24].try_into().expect("8 bytes"),
+                    ),
+                    worker_generation: u64::from_be_bytes(
+                        self.payload[24..32].try_into().expect("8 bytes"),
+                    ),
+                };
+                request.validate()?;
+                Ok(IpcMessage::ServiceClipboardReadRequest(request))
+            }
+            MESSAGE_WORKER_CLIPBOARD_READ_FAILURE => {
+                if self.header.version_minor < CLIPBOARD_IPC_MIN_MINOR {
+                    return Err(IpcMessageError::UnsupportedVersion);
+                }
+                if self.payload.len() != WORKER_CLIPBOARD_READ_FAILURE_LEN
+                    || self.payload[41..48].iter().any(|byte| *byte != 0)
+                {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let result = WorkerClipboardReadFailure {
+                    process_id: u32::from_be_bytes(self.payload[0..4].try_into().expect("4 bytes")),
+                    session_id: u32::from_be_bytes(self.payload[4..8].try_into().expect("4 bytes")),
+                    control_session_id: u64::from_be_bytes(
+                        self.payload[8..16].try_into().expect("8 bytes"),
+                    ),
+                    control_sequence: u64::from_be_bytes(
+                        self.payload[16..24].try_into().expect("8 bytes"),
+                    ),
+                    request_id: u64::from_be_bytes(
+                        self.payload[24..32].try_into().expect("8 bytes"),
+                    ),
+                    worker_generation: u64::from_be_bytes(
+                        self.payload[32..40].try_into().expect("8 bytes"),
+                    ),
+                    reason: ClipboardReadFailureReason::from_byte(self.payload[40])
+                        .ok_or(IpcMessageError::InvalidPayload)?,
+                };
+                result.validate()?;
+                Ok(IpcMessage::WorkerClipboardReadFailure(result))
             }
             _ => Err(IpcMessageError::UnknownMessageType),
         }
@@ -3116,5 +3281,168 @@ mod tests {
                 session_id: 7
             }
         );
+    }
+
+    #[test]
+    fn clipboard_ipc_metadata_round_trips_without_text() {
+        let req = ServiceClipboardReadRequest {
+            control_session_id: 77,
+            control_sequence: 101,
+            request_id: 19,
+            worker_generation: 4,
+        };
+        let req_frame = IpcFrame::service_clipboard_read_request(req).expect("valid");
+        assert_eq!(req_frame.payload.len(), 32);
+        assert_eq!(
+            req_frame.message(),
+            Ok(IpcMessage::ServiceClipboardReadRequest(req))
+        );
+
+        for reason in [
+            ClipboardReadFailureReason::Unavailable,
+            ClipboardReadFailureReason::BackendFailed,
+        ] {
+            let reply = WorkerClipboardReadFailure {
+                process_id: 42,
+                session_id: 7,
+                control_session_id: 77,
+                control_sequence: 101,
+                request_id: 19,
+                worker_generation: 4,
+                reason,
+            };
+            let reply_frame = IpcFrame::worker_clipboard_read_failure(reply).expect("valid");
+            assert_eq!(reply_frame.payload.len(), 48);
+            assert_eq!(
+                reply_frame.message(),
+                Ok(IpcMessage::WorkerClipboardReadFailure(reply))
+            );
+            let encoded = reply_frame.encode().expect("bounded IPC");
+            let frames = IpcFrameDecoder::default()
+                .push_bytes(&encoded)
+                .expect("valid frame");
+            assert_eq!(
+                frames[0].message(),
+                Ok(IpcMessage::WorkerClipboardReadFailure(reply))
+            );
+        }
+    }
+
+    #[test]
+    fn clipboard_ipc_refuses_zero_binding_and_worker_ids() {
+        let req = ServiceClipboardReadRequest {
+            control_session_id: 77,
+            control_sequence: 101,
+            request_id: 19,
+            worker_generation: 4,
+        };
+        for invalid in [
+            ServiceClipboardReadRequest {
+                control_session_id: 0,
+                ..req
+            },
+            ServiceClipboardReadRequest {
+                control_sequence: 0,
+                ..req
+            },
+            ServiceClipboardReadRequest {
+                request_id: 0,
+                ..req
+            },
+            ServiceClipboardReadRequest {
+                worker_generation: 0,
+                ..req
+            },
+        ] {
+            assert_eq!(
+                IpcFrame::service_clipboard_read_request(invalid),
+                Err(IpcMessageError::InvalidPayload)
+            );
+        }
+        let reply = WorkerClipboardReadFailure {
+            process_id: 42,
+            session_id: 7,
+            control_session_id: 77,
+            control_sequence: 101,
+            request_id: 19,
+            worker_generation: 4,
+            reason: ClipboardReadFailureReason::Unavailable,
+        };
+        for invalid in [
+            WorkerClipboardReadFailure {
+                process_id: 0,
+                ..reply
+            },
+            WorkerClipboardReadFailure {
+                session_id: 0,
+                ..reply
+            },
+            WorkerClipboardReadFailure {
+                control_session_id: 0,
+                ..reply
+            },
+            WorkerClipboardReadFailure {
+                control_sequence: 0,
+                ..reply
+            },
+            WorkerClipboardReadFailure {
+                request_id: 0,
+                ..reply
+            },
+            WorkerClipboardReadFailure {
+                worker_generation: 0,
+                ..reply
+            },
+        ] {
+            assert_eq!(
+                IpcFrame::worker_clipboard_read_failure(invalid),
+                Err(IpcMessageError::InvalidPayload)
+            );
+        }
+    }
+
+    #[test]
+    fn clipboard_ipc_rejects_old_minor_wrong_sizes_and_invalid_failure_codes() {
+        let req = ServiceClipboardReadRequest {
+            control_session_id: 77,
+            control_sequence: 101,
+            request_id: 19,
+            worker_generation: 4,
+        };
+        let mut frame = IpcFrame::service_clipboard_read_request(req).expect("valid");
+        frame.header.version_minor = CLIPBOARD_IPC_MIN_MINOR - 1;
+        assert_eq!(frame.message(), Err(IpcMessageError::UnsupportedVersion));
+        frame.header.version_minor = IPC_VERSION_MINOR;
+        frame.payload.pop();
+        assert_eq!(frame.message(), Err(IpcMessageError::InvalidPayload));
+
+        let reply = WorkerClipboardReadFailure {
+            process_id: 42,
+            session_id: 7,
+            control_session_id: 77,
+            control_sequence: 101,
+            request_id: 19,
+            worker_generation: 4,
+            reason: ClipboardReadFailureReason::BackendFailed,
+        };
+        let mut result = IpcFrame::worker_clipboard_read_failure(reply).expect("valid");
+        result.header.version_minor = CLIPBOARD_IPC_MIN_MINOR - 1;
+        assert_eq!(result.message(), Err(IpcMessageError::UnsupportedVersion));
+        result.header.version_minor = IPC_VERSION_MINOR;
+        result.payload[40] = 99;
+        assert_eq!(result.message(), Err(IpcMessageError::InvalidPayload));
+        result.payload[40] = 2;
+        result.payload[47] = 1;
+        assert_eq!(result.message(), Err(IpcMessageError::InvalidPayload));
+        result.payload[47] = 0;
+        result.payload[8..16].fill(0);
+        assert_eq!(result.message(), Err(IpcMessageError::InvalidPayload));
+    }
+
+    #[test]
+    fn clipboard_new_ipc_does_not_break_previous_minor_control() {
+        let mut legacy = IpcFrame::service_ready();
+        legacy.header.version_minor = CLIPBOARD_IPC_MIN_MINOR - 1;
+        assert_eq!(legacy.message(), Ok(IpcMessage::ServiceReady));
     }
 }
