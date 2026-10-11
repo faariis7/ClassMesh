@@ -1298,6 +1298,39 @@ mod windows_service_app {
                             );
                             return;
                         }
+                        Ok(IpcMessage::WorkerClipboardReadFailure(reply))
+                            if reply.matches_active_worker(
+                                expected_process_id,
+                                expected_session_id,
+                                generation,
+                            ) =>
+                        {
+                            if !capabilities.is_current(
+                                generation,
+                                reply.process_id,
+                                reply.session_id,
+                            ) {
+                                // Do not acknowledge old Worker generations.
+                                return;
+                            }
+                            // No Service-authorized pending read dispatcher exists yet.
+                            // Ignore the typed failure rather than claiming an
+                            // accepted read or dropping unrelated Worker liveness.
+                            eprintln!(
+                                "ClassMesh ignored unsolicited Worker clipboard read failure"
+                            );
+                        }
+                        Ok(IpcMessage::WorkerClipboardReadFailure(_)) => {
+                            // Wrong process/session/generation: invalidate the
+                            // active Worker capability report and fail closed.
+                            let _ = capabilities.clear_report_if_current(
+                                generation,
+                                expected_process_id,
+                                expected_session_id,
+                            );
+                            eprintln!("ClassMesh Worker clipboard read failure identity mismatch");
+                            return;
+                        }
                         Ok(unexpected) => {
                             let _ = capabilities.clear_report_if_current(
                                 generation,
