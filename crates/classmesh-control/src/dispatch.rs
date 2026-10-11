@@ -1164,6 +1164,164 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct RecordingClipboardBackend {
+        read: Result<Option<String>, crate::clipboard_execution::ClipboardBackendError>,
+        write: Result<(), crate::clipboard_execution::ClipboardBackendError>,
+        writes: Vec<String>,
+    }
+
+    impl crate::clipboard_execution::ClipboardBackend for RecordingClipboardBackend {
+        fn read_text(
+            &mut self,
+        ) -> Result<Option<String>, crate::clipboard_execution::ClipboardBackendError> {
+            self.read.clone()
+        }
+
+        fn write_text(
+            &mut self,
+            text: &str,
+        ) -> Result<(), crate::clipboard_execution::ClipboardBackendError> {
+            self.writes.push(text.to_owned());
+            self.write
+        }
+    }
+
+    #[test]
+    fn clipboard_read_execution_keeps_exact_request_id_and_available_text() {
+        use crate::clipboard_execution::{ClipboardBackendError, execute_clipboard_read};
+        let authorization = store(BTreeSet::from([Permission::ReadClipboard]));
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+        let envelope = clipboard_read_envelope(2);
+        let PrivilegedControlCommand::ClipboardReadRequest(token) =
+            dispatch_privileged_command(&mut guard, &authorization, &envelope, 150)
+                .expect("authorized read")
+        else {
+            panic!("wrong command");
+        };
+        let mut backend = RecordingClipboardBackend {
+            read: Ok(Some("hello clipboard".to_owned())),
+            write: Err(ClipboardBackendError::Unavailable),
+            writes: Vec::new(),
+        };
+        let result = execute_clipboard_read(&mut backend, token);
+        assert_eq!(result.request_id, envelope.request_id);
+        let response = result.response.expect("available response");
+        assert!(response.available);
+        assert_eq!(response.text_utf8, "hello clipboard");
+        assert_eq!(guard.last_sequence(), envelope.sequence);
+    }
+
+    #[test]
+    fn clipboard_read_execution_distinguishes_empty_from_unavailable() {
+        use crate::clipboard_execution::{ClipboardBackendError, execute_clipboard_read};
+        let authorization = store(BTreeSet::from([Permission::ReadClipboard]));
+        let mut backend = RecordingClipboardBackend {
+            read: Ok(Some(String::new())),
+            write: Err(ClipboardBackendError::Unavailable),
+            writes: Vec::new(),
+        };
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+        let PrivilegedControlCommand::ClipboardReadRequest(token) = dispatch_privileged_command(
+            &mut guard,
+            &authorization,
+            &clipboard_read_envelope(2),
+            150,
+        )
+        .expect("authorized") else {
+            panic!("wrong command");
+        };
+        let result = execute_clipboard_read(&mut backend, token);
+        let response = result.response.expect("empty is available");
+        assert!(response.available);
+        assert!(response.text_utf8.is_empty());
+        backend.read = Ok(None);
+        let PrivilegedControlCommand::ClipboardReadRequest(token) = dispatch_privileged_command(
+            &mut guard,
+            &authorization,
+            &clipboard_read_envelope(3),
+            150,
+        )
+        .expect("authorized") else {
+            panic!("wrong command");
+        };
+        let result = execute_clipboard_read(&mut backend, token);
+        let response = result.response.expect("no clipboard value");
+        assert!(!response.available);
+        assert!(response.text_utf8.is_empty());
+    }
+
+    #[test]
+    fn clipboard_backend_oversized_read_fails_closed_without_echoing_text() {
+        use crate::clipboard_execution::{
+            ClipboardBackendError, ClipboardExecutionError, execute_clipboard_read,
+        };
+        let authorization = store(BTreeSet::from([Permission::ReadClipboard]));
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+        let envelope = clipboard_read_envelope(2);
+        let PrivilegedControlCommand::ClipboardReadRequest(token) =
+            dispatch_privileged_command(&mut guard, &authorization, &envelope, 150)
+                .expect("authorized")
+        else {
+            panic!("wrong command");
+        };
+        let mut backend = RecordingClipboardBackend {
+            read: Ok(Some("x".repeat(MAX_CLIPBOARD_TEXT_BYTES + 1))),
+            write: Err(ClipboardBackendError::Unavailable),
+            writes: Vec::new(),
+        };
+        let result = execute_clipboard_read(&mut backend, token);
+        assert_eq!(result.request_id, envelope.request_id);
+        assert_eq!(
+            result.response,
+            Err(ClipboardExecutionError::InvalidBackendText)
+        );
+        assert_eq!(
+            ClipboardExecutionError::InvalidBackendText.diagnostic_code(),
+            "clipboard.backend_text_invalid"
+        );
+    }
+
+    #[test]
+    fn clipboard_authorized_write_uses_injected_backend_once() {
+        use crate::clipboard_execution::{
+            ClipboardBackendError, ClipboardExecutionError, execute_clipboard_write,
+        };
+        let authorization = store(BTreeSet::from([Permission::WriteClipboard]));
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+        let PrivilegedControlCommand::ClipboardWrite(token) = dispatch_privileged_command(
+            &mut guard,
+            &authorization,
+            &clipboard_write_envelope(2, "hello".to_owned()),
+            150,
+        )
+        .expect("authorized") else {
+            panic!("wrong command");
+        };
+        let mut backend = RecordingClipboardBackend {
+            read: Err(ClipboardBackendError::Unavailable),
+            write: Ok(()),
+            writes: Vec::new(),
+        };
+        assert_eq!(execute_clipboard_write(&mut backend, token), Ok(()));
+        assert_eq!(backend.writes, vec!["hello"]);
+        backend.write = Err(ClipboardBackendError::Failed);
+        let PrivilegedControlCommand::ClipboardWrite(token) = dispatch_privileged_command(
+            &mut guard,
+            &authorization,
+            &clipboard_write_envelope(3, String::new()),
+            150,
+        )
+        .expect("authorized clear") else {
+            panic!("wrong command");
+        };
+        assert_eq!(
+            execute_clipboard_write(&mut backend, token),
+            Err(ClipboardExecutionError::Failed)
+        );
+        assert_eq!(backend.writes, vec!["hello", ""]);
+    }
+
     #[test]
     fn presentation_lifecycle_requires_explicit_start_permission() {
         let allowed = store(BTreeSet::from([Permission::StartPresentation]));
