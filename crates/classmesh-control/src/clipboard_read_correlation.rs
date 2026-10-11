@@ -18,9 +18,12 @@ pub struct ClipboardWorkerBinding {
 }
 
 /// A non-sensitive correlation record. This is not a permission/dispatch token.
+/// The sequence must come from the authenticated, strictly-increasing control
+/// envelope and be echoed by the Worker so re-used request IDs cannot replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClipboardReadBinding {
     pub control_session_id: u64,
+    pub control_sequence: u64,
     pub request_id: u64,
     pub worker: ClipboardWorkerBinding,
 }
@@ -28,6 +31,7 @@ pub struct ClipboardReadBinding {
 impl ClipboardReadBinding {
     fn is_valid(self) -> bool {
         self.control_session_id != 0
+            && self.control_sequence != 0
             && self.request_id != 0
             && self.worker.process_id != 0
             && self.worker.session_id != 0
@@ -163,6 +167,7 @@ mod tests {
     fn binding() -> ClipboardReadBinding {
         ClipboardReadBinding {
             control_session_id: 77,
+            control_sequence: 24,
             request_id: 12,
             worker: worker(),
         }
@@ -209,6 +214,10 @@ mod tests {
                 ..binding()
             },
             ClipboardReadBinding {
+                control_sequence: 0,
+                ..binding()
+            },
+            ClipboardReadBinding {
                 worker: ClipboardWorkerBinding {
                     process_id: 0,
                     ..worker()
@@ -251,6 +260,10 @@ mod tests {
             },
             ClipboardReadBinding {
                 request_id: 13,
+                ..binding()
+            },
+            ClipboardReadBinding {
+                control_sequence: 25,
                 ..binding()
             },
             ClipboardReadBinding {
@@ -371,5 +384,22 @@ mod tests {
         assert!(pending.is_pending());
         assert!(pending.expire(5_123));
         assert!(!pending.expire(5_123));
+    }
+    #[test]
+    fn reused_request_id_cannot_accept_prior_authenticated_sequence_result() {
+        let mut pending = ClipboardReadCorrelation::default();
+        let old = binding();
+        pending.register(old, 0).expect("first");
+        assert_eq!(pending.complete(old, 1), Ok(()));
+        let next = ClipboardReadBinding {
+            control_sequence: 25,
+            ..old
+        };
+        pending.register(next, 2).expect("later sequence");
+        assert_eq!(
+            pending.complete(old, 3),
+            Err(ClipboardCorrelationError::Mismatch)
+        );
+        assert_eq!(pending.complete(next, 3), Ok(()));
     }
 }
