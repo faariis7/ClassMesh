@@ -24,6 +24,7 @@ use classmesh_protocol::teacher_interaction::{
     validate_request as validate_teacher_interaction_request,
 };
 use classmesh_security::{AuthorizationStore, Permission};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::authorization::{AuthenticatedControlGuard, CommandAuthorizationError};
 
@@ -81,6 +82,17 @@ impl AuthorizedClipboardWrite {
         &self.text_utf8
     }
 }
+
+// Clipboard text must not linger in the allocated String when an authorized
+// command is cancelled, denied by a downstream Worker, or dropped normally.
+// No Clone implementation exists: this token owns its sensitive payload.
+impl Drop for AuthorizedClipboardWrite {
+    fn drop(&mut self) {
+        self.text_utf8.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for AuthorizedClipboardWrite {}
 
 #[derive(Debug, PartialEq)]
 pub enum PrivilegedControlCommand {
@@ -1329,6 +1341,25 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_write_rejects_embedded_nul_before_minting_authorized_token() {
+        use classmesh_protocol::clipboard::ClipboardTextError;
+        let authorization = store(BTreeSet::from([Permission::WriteClipboard]));
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+        let bad = clipboard_write_envelope(2, "before\0after".to_owned());
+        assert!(matches!(
+            dispatch_privileged_command(&mut guard, &authorization, &bad, 150),
+            Err(PrivilegedDispatchError::InvalidClipboardText(
+                ClipboardTextError::InteriorNul
+            ))
+        ));
+        let valid = clipboard_write_envelope(2, String::new());
+        assert!(matches!(
+            dispatch_privileged_command(&mut guard, &authorization, &valid, 150),
+            Ok(PrivilegedControlCommand::ClipboardWrite(_))
+        ));
+    }
+
+    #[test]
     fn clipboard_write_authorized_debug_never_contains_secret_text() {
         let authorization = store(BTreeSet::from([Permission::WriteClipboard]));
         let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
@@ -1467,5 +1498,11 @@ mod tests {
             ))
         );
         assert_eq!(guard.last_sequence(), 2);
+    }
+
+    #[test]
+    fn authorized_clipboard_write_guarantees_zeroizing_drop() {
+        fn has_secure_drop<T: zeroize::ZeroizeOnDrop>() {}
+        has_secure_drop::<super::AuthorizedClipboardWrite>();
     }
 }
