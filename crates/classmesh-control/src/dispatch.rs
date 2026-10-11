@@ -1,9 +1,8 @@
 use classmesh_protocol::clipboard::{ClipboardTextError, validate_write};
 use classmesh_protocol::control_wire::{
-    ClipboardReadRequest, ClipboardWrite, ControlEnvelope, FileTransferCancel, FileTransferChunk,
-    FileTransferFinish, FileTransferOffer, FileTransferPullRequest, InputEvent, PresentationStart,
-    PresentationStop, SystemAction, TeacherInteractionKind, TeacherInteractionRequest,
-    control_envelope,
+    ControlEnvelope, FileTransferCancel, FileTransferChunk, FileTransferFinish, FileTransferOffer,
+    FileTransferPullRequest, InputEvent, PresentationStart, PresentationStop, SystemAction,
+    TeacherInteractionKind, TeacherInteractionRequest, control_envelope,
 };
 use classmesh_protocol::file_transfer::{
     FILE_TRANSFER_MIN_VERSION, FILE_TRANSFER_PULL_MIN_VERSION, FileTransferError,
@@ -51,11 +50,37 @@ impl AuthorizedSystemAction {
     }
 }
 
+/// Opaque proof of an authorized, non-zero-correlated text clipboard read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorizedClipboardRead {
+    request_id: u64,
+}
+
+impl AuthorizedClipboardRead {
+    #[must_use]
+    pub const fn request_id(self) -> u64 {
+        self.request_id
+    }
+}
+
+/// Validated clipboard write payload; callers cannot mint this token directly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuthorizedClipboardWrite {
+    text_utf8: String,
+}
+
+impl AuthorizedClipboardWrite {
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text_utf8
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrivilegedControlCommand {
     InputEvent(InputEvent),
-    ClipboardReadRequest(ClipboardReadRequest),
-    ClipboardWrite(ClipboardWrite),
+    ClipboardReadRequest(AuthorizedClipboardRead),
+    ClipboardWrite(AuthorizedClipboardWrite),
     PresentationStart(PresentationStart),
     PresentationStop(PresentationStop),
     SystemAction(AuthorizedSystemAction),
@@ -137,7 +162,7 @@ pub fn dispatch_privileged_command(
             )?;
             Ok(PrivilegedControlCommand::InputEvent(*input))
         }
-        control_envelope::Payload::ClipboardReadRequest(request) => {
+        control_envelope::Payload::ClipboardReadRequest(_) => {
             if envelope.request_id == 0 {
                 return Err(PrivilegedDispatchError::ClipboardReadRequestMissingId);
             }
@@ -147,7 +172,11 @@ pub fn dispatch_privileged_command(
                 Permission::ReadClipboard,
                 now_unix_ms,
             )?;
-            Ok(PrivilegedControlCommand::ClipboardReadRequest(*request))
+            Ok(PrivilegedControlCommand::ClipboardReadRequest(
+                AuthorizedClipboardRead {
+                    request_id: envelope.request_id,
+                },
+            ))
         }
         control_envelope::Payload::ClipboardWrite(write) => {
             validate_write(write).map_err(PrivilegedDispatchError::InvalidClipboardText)?;
@@ -157,7 +186,11 @@ pub fn dispatch_privileged_command(
                 Permission::WriteClipboard,
                 now_unix_ms,
             )?;
-            Ok(PrivilegedControlCommand::ClipboardWrite(write.clone()))
+            Ok(PrivilegedControlCommand::ClipboardWrite(
+                AuthorizedClipboardWrite {
+                    text_utf8: write.text_utf8.clone(),
+                },
+            ))
         }
         control_envelope::Payload::PresentationStart(start) => {
             if guard.protocol_version().major == 0 && guard.protocol_version().minor < 3 {
@@ -1097,6 +1130,38 @@ mod tests {
             Ok(PrivilegedControlCommand::ClipboardWrite(_))
         ));
         assert_eq!(guard.last_sequence(), 2);
+    }
+
+    #[test]
+    fn authorized_clipboard_read_preserves_correlated_request_id() {
+        let authorization = store(BTreeSet::from([Permission::ReadClipboard]));
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+        let envelope = clipboard_read_envelope(2);
+
+        let command = dispatch_privileged_command(&mut guard, &authorization, &envelope, 150)
+            .expect("authorized clipboard read");
+        match command {
+            PrivilegedControlCommand::ClipboardReadRequest(token) => {
+                assert_eq!(token.request_id(), envelope.request_id);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn authorized_clipboard_write_preserves_validated_utf8() {
+        let authorization = store(BTreeSet::from([Permission::WriteClipboard]));
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+        let envelope = clipboard_write_envelope(2, "safe bounded text".to_owned());
+
+        let command = dispatch_privileged_command(&mut guard, &authorization, &envelope, 150)
+            .expect("authorized clipboard write");
+        match command {
+            PrivilegedControlCommand::ClipboardWrite(token) => {
+                assert_eq!(token.text(), "safe bounded text");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
