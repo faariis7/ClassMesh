@@ -1,5 +1,6 @@
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 
+pub mod clipboard_native;
 pub mod clipboard_read_fallback;
 #[cfg(windows)]
 pub mod encoder_benchmark;
