@@ -42,11 +42,11 @@ use classmesh_core::{NetworkMetrics, StreamKind};
 use classmesh_identity_win::{CngMachineKey, MachineIdentityBundle, cng_server_cert_resolver};
 use classmesh_network::runtime_multicast_probe::probe_local_multicast_interface;
 use classmesh_protocol::control_wire::{
-    ControlEnvelope, FileTransferCancel, FileTransferChunk, FileTransferFinish, FileTransferOffer,
-    FileTransferPullRequest, FileTransferState, FileTransferStatus, HeartbeatAck, InputEvent,
-    KeyframeRequest, MediaTransport as WireMediaTransport, Nack,
-    PresentationState as WirePresentationState, PresentationStatus,
-    ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamAnswer,
+    ClipboardReadResponse, ControlEnvelope, FileTransferCancel, FileTransferChunk,
+    FileTransferFinish, FileTransferOffer, FileTransferPullRequest, FileTransferState,
+    FileTransferStatus, HeartbeatAck, InputEvent, KeyframeRequest,
+    MediaTransport as WireMediaTransport, Nack, PresentationState as WirePresentationState,
+    PresentationStatus, ProtocolVersion as WireProtocolVersion, ReceiverFeedback, StreamAnswer,
     StreamKind as WireStreamKind, StreamReconfigure, SystemAction, SystemActionResult,
     SystemActionState, TeacherInteractionKind, TeacherInteractionRequest, TeacherInteractionResult,
     TeacherInteractionState, control_envelope,
@@ -83,6 +83,7 @@ const PRESENTATION_KEY_INSTALL_TIMEOUT: Duration = Duration::from_secs(1);
 const PRESENTATION_START_TIMEOUT: Duration = Duration::from_secs(1);
 const SYSTEM_ACTION_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const TEACHER_INTERACTION_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
+const CLIPBOARD_READ_REPLY_TIMEOUT: Duration = Duration::from_secs(3);
 const FILE_TRANSFER_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const PRESENTATION_FEEDBACK_BUS_CAPACITY: usize = 64;
 const CONTROL_INBOUND_QUEUE_CAPACITY: usize = 32;
@@ -207,10 +208,51 @@ pub(crate) struct TeacherInteractionDispatchChannels {
     pub(crate) tx: mpsc::SyncSender<TeacherInteractionDispatch>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClipboardReadDispatchOutcome {
+    Unavailable,
+    WorkerUnavailable,
+    Backpressure,
+    ServiceUnavailable,
+    TimedOut,
+    Cancelled,
+    ReplyDropped,
+}
+
+#[derive(Debug)]
+pub(crate) struct ClipboardReadDispatch {
+    pub(crate) control_session_id: u64,
+    pub(crate) control_sequence: u64,
+    pub(crate) request_id: u64,
+    pub(crate) commit: SystemActionCommit,
+    pub(crate) reply_tx: oneshot::Sender<ClipboardReadDispatchOutcome>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ClipboardReadDispatchChannels {
+    pub(crate) tx: mpsc::SyncSender<ClipboardReadDispatch>,
+}
+
+async fn await_clipboard_read_dispatch(
+    commit: SystemActionCommit,
+    rx: &mut oneshot::Receiver<ClipboardReadDispatchOutcome>,
+) -> ClipboardReadDispatchOutcome {
+    match tokio::time::timeout(CLIPBOARD_READ_REPLY_TIMEOUT, &mut *rx).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(_)) => ClipboardReadDispatchOutcome::ReplyDropped,
+        Err(_) if commit.cancel() => ClipboardReadDispatchOutcome::TimedOut,
+        Err(_) if commit.is_committed() => rx
+            .await
+            .unwrap_or(ClipboardReadDispatchOutcome::ReplyDropped),
+        Err(_) => ClipboardReadDispatchOutcome::Cancelled,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct AdministrativeDispatchChannels {
     pub(crate) system_actions: SystemActionDispatchChannels,
     pub(crate) teacher_interactions: TeacherInteractionDispatchChannels,
+    pub(crate) clipboard_reads: ClipboardReadDispatchChannels,
     pub(crate) file_transfers: FileTransferDispatchChannels,
 }
 
@@ -1450,6 +1492,7 @@ async fn run_listener(
                 let input = input.clone();
                 let system_actions = administrative.system_actions.clone();
                 let teacher_interactions = administrative.teacher_interactions.clone();
+                let clipboard_reads = administrative.clipboard_reads.clone();
                 let file_transfers = administrative.file_transfers.clone();
                 let media = media.clone();
                 let presentation_dispatch = presentation_dispatch.clone();
@@ -1511,6 +1554,7 @@ async fn run_listener(
                                     input: &input,
                                     system_actions: &system_actions,
                                     teacher_interactions: &teacher_interactions,
+                                    clipboard_reads: &clipboard_reads,
                                     file_transfers: &file_transfers,
                                     media: &media,
                                     presentation_dispatch: &presentation_dispatch,
@@ -1554,6 +1598,7 @@ struct EstablishedSessionRuntime<'a> {
     input: &'a InputDispatchState,
     system_actions: &'a SystemActionDispatchChannels,
     teacher_interactions: &'a TeacherInteractionDispatchChannels,
+    clipboard_reads: &'a ClipboardReadDispatchChannels,
     file_transfers: &'a FileTransferDispatchChannels,
     media: &'a FocusedMediaDispatchChannels,
     presentation_dispatch: &'a PresentationDispatchChannels,
@@ -1606,6 +1651,7 @@ async fn run_established_session(
         input,
         system_actions,
         teacher_interactions,
+        clipboard_reads,
         file_transfers,
         media,
         presentation_dispatch,
@@ -2917,10 +2963,85 @@ async fn run_established_session(
                     return;
                 }
             }
-            Some(control_envelope::Payload::ClipboardReadRequest(_))
-            | Some(control_envelope::Payload::ClipboardWrite(_)) => {
+            Some(control_envelope::Payload::ClipboardReadRequest(_)) => {
                 if !clipboard_capability_negotiated(&session.negotiated.capabilities) {
-                    eprintln!("ClassMesh clipboard command rejected: clipboard.capability_missing");
+                    connection.close(0_u32.into(), b"clipboard capability missing");
+                    return;
+                }
+                let now_unix_ms = match unix_time_ms() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"invalid service clock");
+                        return;
+                    }
+                };
+                let token = match dispatch_privileged_command(
+                    &mut guard,
+                    authorization,
+                    &envelope,
+                    now_unix_ms,
+                ) {
+                    Ok(PrivilegedControlCommand::ClipboardReadRequest(token)) => token,
+                    Ok(_) => {
+                        connection.close(0_u32.into(), b"privileged payload mismatch");
+                        return;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "ClassMesh clipboard read authorization rejected: {}",
+                            privileged_dispatch_diagnostic_code(&error)
+                        );
+                        connection.close(0_u32.into(), b"privileged command rejected");
+                        return;
+                    }
+                };
+                let request_id = token.request_id();
+                let commit = SystemActionCommit::pending();
+                let (reply_tx, mut reply_rx) = oneshot::channel();
+                let dispatch = ClipboardReadDispatch {
+                    control_session_id: session.control_session_id,
+                    control_sequence: envelope.sequence,
+                    request_id,
+                    commit: commit.clone(),
+                    reply_tx,
+                };
+                let outcome = match clipboard_reads.tx.try_send(dispatch) {
+                    Ok(()) => await_clipboard_read_dispatch(commit, &mut reply_rx).await,
+                    Err(mpsc::TrySendError::Full(_)) => ClipboardReadDispatchOutcome::Backpressure,
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        ClipboardReadDispatchOutcome::ServiceUnavailable
+                    }
+                };
+                // The only implemented Worker response is failure-only.
+                // Never synthesize available=true or move text over this path.
+                eprintln!("ClassMesh clipboard read finished unavailable: {outcome:?}");
+                let Some(sequence) = outbound_sequence.checked_add(1) else {
+                    connection.close(0_u32.into(), b"control sequence exhausted");
+                    return;
+                };
+                outbound_sequence = sequence;
+                let response = ControlEnvelope {
+                    control_session_id: session.control_session_id,
+                    sequence,
+                    protocol_version: Some(WireProtocolVersion {
+                        major: u32::from(session.negotiated.version.major),
+                        minor: u32::from(session.negotiated.version.minor),
+                    }),
+                    request_id,
+                    payload: Some(control_envelope::Payload::ClipboardReadResponse(
+                        ClipboardReadResponse {
+                            available: false,
+                            text_utf8: String::new(),
+                        },
+                    )),
+                };
+                if send.send(&response).await.is_err() {
+                    connection.close(0_u32.into(), b"clipboard read response failed");
+                    return;
+                }
+            }
+            Some(control_envelope::Payload::ClipboardWrite(_)) => {
+                if !clipboard_capability_negotiated(&session.negotiated.capabilities) {
                     connection.close(0_u32.into(), b"clipboard capability missing");
                     return;
                 }
@@ -2933,16 +3054,9 @@ async fn run_established_session(
                 };
                 match dispatch_privileged_command(&mut guard, authorization, &envelope, now_unix_ms)
                 {
-                    Ok(
-                        PrivilegedControlCommand::ClipboardReadRequest(_)
-                        | PrivilegedControlCommand::ClipboardWrite(_),
-                    ) => {
-                        // Permission, replay, request ID and bounded write-text checks
-                        // have passed, but no authenticated Worker executor is yet wired.
-                        // Reject without claiming successful clipboard execution.
-                        eprintln!(
-                            "ClassMesh clipboard command rejected: clipboard.executor_unavailable"
-                        );
+                    Ok(PrivilegedControlCommand::ClipboardWrite(_)) => {
+                        // Sensitive clipboard writes remain disabled until an
+                        // authenticated zeroizing Worker transport exists.
                         connection.close(0_u32.into(), b"clipboard executor unavailable");
                         return;
                     }
@@ -2952,7 +3066,7 @@ async fn run_established_session(
                     }
                     Err(error) => {
                         eprintln!(
-                            "ClassMesh clipboard command rejected: {}",
+                            "ClassMesh clipboard write authorization rejected: {}",
                             privileged_dispatch_diagnostic_code(&error)
                         );
                         connection.close(0_u32.into(), b"privileged command rejected");
