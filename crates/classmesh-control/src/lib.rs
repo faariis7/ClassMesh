@@ -4,6 +4,7 @@ pub mod adaptive_media_recovery;
 pub mod authorization;
 pub mod bootstrap;
 pub mod client_session;
+pub mod clipboard_execution;
 pub mod csr;
 pub mod diagnostics;
 pub mod dispatch;
