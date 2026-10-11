@@ -534,6 +534,14 @@ pub struct ServiceClipboardReadRequest {
 }
 
 impl ServiceClipboardReadRequest {
+    /// A metadata request targets exactly one active Worker incarnation.
+    #[must_use]
+    pub const fn targets_active_worker_generation(self, active_generation: u64) -> bool {
+        active_generation != 0
+            && self.worker_generation != 0
+            && self.worker_generation == active_generation
+    }
+
     fn validate(self) -> Result<(), IpcMessageError> {
         if self.control_session_id == 0
             || self.control_sequence == 0
@@ -3481,5 +3489,24 @@ mod tests {
         assert!(!reply.matches_active_worker(0, 7, 4));
         assert!(!reply.matches_active_worker(42, 0, 4));
         assert!(!reply.matches_active_worker(42, 7, 0));
+    }
+
+    #[test]
+    fn clipboard_read_send_rejects_stale_worker_generation() {
+        let req = ServiceClipboardReadRequest {
+            control_session_id: 77,
+            control_sequence: 101,
+            request_id: 19,
+            worker_generation: 4,
+        };
+        assert!(req.targets_active_worker_generation(4));
+        assert!(!req.targets_active_worker_generation(0));
+        assert!(!req.targets_active_worker_generation(3));
+        assert!(!req.targets_active_worker_generation(5));
+        let invalid = ServiceClipboardReadRequest {
+            worker_generation: 0,
+            ..req
+        };
+        assert!(!invalid.targets_active_worker_generation(4));
     }
 }
