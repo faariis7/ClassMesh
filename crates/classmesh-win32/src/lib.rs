@@ -1,5 +1,8 @@
 #![cfg_attr(not(windows), forbid(unsafe_code))]
+pub mod clipboard_bounds;
 
+#[cfg(windows)]
+mod clipboard;
 #[cfg(windows)]
 mod input;
 #[cfg(windows)]
@@ -15,6 +18,8 @@ mod teacher_interaction;
 #[cfg(windows)]
 mod workstation;
 
+#[cfg(windows)]
+pub use clipboard::read_clipboard_unicode;
 #[cfg(windows)]
 pub use input::{
     ABSOLUTE_COORDINATE_MAX, InputAction, InputDesktopUnavailable, InputError, InputInjector,
