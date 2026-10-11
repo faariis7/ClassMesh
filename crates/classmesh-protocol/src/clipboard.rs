@@ -8,11 +8,16 @@ pub const MAX_CLIPBOARD_TEXT_BYTES: usize = 64 * 1024;
 pub enum ClipboardTextError {
     TooLarge { bytes: usize, maximum: usize },
     UnavailableContainsText,
+    InteriorNul,
 }
 
 impl Display for ClipboardTextError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InteriorNul => write!(
+                formatter,
+                "clipboard write must not contain embedded NUL text terminators"
+            ),
             Self::UnavailableContainsText => write!(
                 formatter,
                 "unavailable clipboard response must not contain text"
@@ -42,7 +47,11 @@ pub fn validate_text(text: &str) -> Result<(), ClipboardTextError> {
 
 /// Reuse the text-only 64 KiB policy on the existing control-wire write.
 pub fn validate_write(write: &ClipboardWrite) -> Result<(), ClipboardTextError> {
-    validate_text(&write.text_utf8)
+    validate_text(&write.text_utf8)?;
+    if write.text_utf8.contains('\0') {
+        return Err(ClipboardTextError::InteriorNul);
+    }
+    Ok(())
 }
 
 /// Fail closed when an unavailable read response also carries hidden text.
@@ -119,6 +128,28 @@ mod tests {
             validate_text(&oversized),
             Err(ClipboardTextError::TooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn clipboard_write_rejects_embedded_nul_before_windows_encoding() {
+        assert_eq!(
+            validate_write(&ClipboardWrite {
+                text_utf8: "before\0after".to_owned(),
+            }),
+            Err(ClipboardTextError::InteriorNul),
+        );
+        assert!(
+            validate_write(&ClipboardWrite {
+                text_utf8: String::new(),
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_write(&ClipboardWrite {
+                text_utf8: "é😀".to_owned(),
+            })
+            .is_ok()
+        );
     }
 
     #[test]
