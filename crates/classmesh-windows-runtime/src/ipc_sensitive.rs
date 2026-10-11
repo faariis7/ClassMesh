@@ -1,5 +1,6 @@
 mod clipboard_read_frame;
 mod clipboard_read_gate;
+mod clipboard_read_inbound;
 mod clipboard_read_stream;
 mod clipboard_read_success;
 mod contract;
@@ -14,6 +15,7 @@ pub use clipboard_read_gate::{
     SENSITIVE_CLIPBOARD_READ_DEADLINE_MS, SensitiveClipboardReadAcceptanceGate,
     SensitiveReadAcceptError,
 };
+pub use clipboard_read_inbound::{SensitiveClipboardReadInbox, SensitiveInboxError};
 pub use clipboard_read_stream::{
     ClipboardStreamError, ClipboardStreamState, SensitiveClipboardReadStream,
 };
