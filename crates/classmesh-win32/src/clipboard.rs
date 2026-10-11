@@ -9,8 +9,12 @@ use crate::clipboard_bounds::{
     copy_bounded_clipboard_unicode,
 };
 use windows_sys::Win32::System::DataExchange::{
-    CF_UNICODETEXT, CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
 };
+
+// Win32 predefined clipboard-format identifier: CF_UNICODETEXT is fixed at 13.
+// windows-sys 0.61 does not re-export this SDK constant from DataExchange.
+const CF_UNICODETEXT: u32 = 13;
 use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 
 struct OpenClipboardGuard;
