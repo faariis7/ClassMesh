@@ -19,6 +19,9 @@ mod windows_service_app {
 
     use classmesh_codec_win::capability_cache::DurableEncoderCapabilityCache;
     use classmesh_codec_win::{EncoderBenchmarkResult, EncoderCapabilityCacheKey};
+    use classmesh_control::clipboard_read_correlation::{
+        ClipboardReadBinding, ClipboardReadCorrelation, ClipboardWorkerBinding,
+    };
     use classmesh_control::file_transfer_receiver::{
         FileTransferPeer, FileTransferReceiver, ReceiveError,
     };
@@ -43,10 +46,11 @@ mod windows_service_app {
         NamedPipeServer, SessionProcess, Win32SystemPowerController, launch_worker_in_session,
         session_user_sid, worker_pipe_name,
     };
+    use classmesh_windows_runtime::clipboard_read_send::send_read_metadata;
     use classmesh_windows_runtime::ipc::{
-        IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage,
+        IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage, ServiceClipboardReadRequest,
         ServicePresentationMulticastStart, ServicePresentationUnicastStart,
-        ServiceTeacherInteractionRequest, ServiceUdpStreamStart,
+        ServiceTeacherInteractionRequest, ServiceUdpStreamStart, WorkerClipboardReadFailure,
         WorkerPresentationKeyInstallResult, WorkerPresentationKeyInstallStatus,
         WorkerPresentationMulticastStartResult, WorkerPresentationMulticastStartStatus,
         WorkerPresentationUnicastStartResult, WorkerPresentationUnicastStartStatus,
@@ -83,6 +87,9 @@ mod windows_service_app {
     const SYSTEM_ACTION_DISPATCH_QUEUE_CAPACITY: usize = 1;
     const MAX_SYSTEM_ACTIONS_PER_TICK: usize = 1;
     const TEACHER_INTERACTION_DISPATCH_QUEUE_CAPACITY: usize = 1;
+    const CLIPBOARD_READ_DISPATCH_QUEUE_CAPACITY: usize = 1;
+    const WORKER_CLIPBOARD_READ_RESULT_QUEUE_CAPACITY: usize = 4;
+    const CLIPBOARD_READ_PENDING_TIMEOUT: Duration = Duration::from_millis(2_500);
     const WORKER_TEACHER_INTERACTION_RESULT_QUEUE_CAPACITY: usize = 4;
     const MAX_TEACHER_INTERACTIONS_PER_TICK: usize = 1;
     const FILE_TRANSFER_DISPATCH_QUEUE_CAPACITY: usize = 1;
@@ -101,15 +108,15 @@ mod windows_service_app {
     const MAX_MEDIA_RECONFIGURE_ATTEMPTS: u8 = 4;
 
     use crate::control_runtime::{
-        AdministrativeDispatchChannels, ControlRuntime, ControlRuntimeConfig,
-        ControlRuntimeDispatch, ControlRuntimeState, FileTransferDispatch,
-        FileTransferDispatchChannels, FileTransferDispatchOutcome, FileTransferDispatchPayload,
-        FileTransferOutboundPayload, FileTransferPullOwner, FocusedMediaDispatchChannels,
-        FocusedMediaFeedback, FocusedMediaReconfigure, FocusedMediaStart, InputAvailability,
-        InputDispatchChannels, PresentationDispatchChannels, PresentationFeedbackBus,
-        PresentationKeyInstallDispatch, PresentationMulticastStartDispatch,
-        PresentationUnicastStartDispatch, SystemActionDispatch, SystemActionDispatchChannels,
-        SystemActionDispatchOutcome, TeacherInteractionDispatch,
+        AdministrativeDispatchChannels, ClipboardReadDispatch, ClipboardReadDispatchChannels,
+        ClipboardReadDispatchOutcome, ControlRuntime, ControlRuntimeConfig, ControlRuntimeDispatch,
+        ControlRuntimeState, FileTransferDispatch, FileTransferDispatchChannels,
+        FileTransferDispatchOutcome, FileTransferDispatchPayload, FileTransferOutboundPayload,
+        FileTransferPullOwner, FocusedMediaDispatchChannels, FocusedMediaFeedback,
+        FocusedMediaReconfigure, FocusedMediaStart, InputAvailability, InputDispatchChannels,
+        PresentationDispatchChannels, PresentationFeedbackBus, PresentationKeyInstallDispatch,
+        PresentationMulticastStartDispatch, PresentationUnicastStartDispatch, SystemActionDispatch,
+        SystemActionDispatchChannels, SystemActionDispatchOutcome, TeacherInteractionDispatch,
         TeacherInteractionDispatchChannels, TeacherInteractionDispatchOutcome,
         WorkerCapabilityState,
     };
@@ -138,6 +145,24 @@ mod windows_service_app {
     enum WorkerControlSendError {
         Unavailable,
         WriteFailed,
+    }
+
+    #[derive(Debug)]
+    struct PendingClipboardRead {
+        binding: ClipboardReadBinding,
+        started: Instant,
+        reply_tx: tokio::sync::oneshot::Sender<ClipboardReadDispatchOutcome>,
+    }
+
+    impl PendingClipboardRead {
+        fn matches(&self, reply: &WorkerClipboardReadFailure) -> bool {
+            self.binding.control_session_id == reply.control_session_id
+                && self.binding.control_sequence == reply.control_sequence
+                && self.binding.request_id == reply.request_id
+                && self.binding.worker.process_id == reply.process_id
+                && self.binding.worker.session_id == reply.session_id
+                && self.binding.worker.generation == reply.worker_generation
+        }
     }
 
     #[derive(Debug)]
@@ -264,6 +289,7 @@ mod windows_service_app {
         presentation_multicast_result_tx: mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
         presentation_unicast_result_tx: mpsc::SyncSender<WorkerPresentationUnicastStartResult>,
         teacher_interaction_result_tx: mpsc::SyncSender<WorkerTeacherInteractionResult>,
+        clipboard_read_result_tx: mpsc::SyncSender<WorkerClipboardReadFailure>,
         presentation_feedback: PresentationFeedbackBus,
         watchdog: WorkerWatchdog,
         pending_restart: Option<(SessionId, Instant)>,
@@ -281,6 +307,7 @@ mod windows_service_app {
             >,
             presentation_unicast_result_tx: mpsc::SyncSender<WorkerPresentationUnicastStartResult>,
             teacher_interaction_result_tx: mpsc::SyncSender<WorkerTeacherInteractionResult>,
+            clipboard_read_result_tx: mpsc::SyncSender<WorkerClipboardReadFailure>,
             presentation_feedback: PresentationFeedbackBus,
         ) -> Self {
             let executable = std::env::current_exe().ok().map(|service| {
@@ -299,6 +326,7 @@ mod windows_service_app {
                 presentation_multicast_result_tx,
                 presentation_unicast_result_tx,
                 teacher_interaction_result_tx,
+                clipboard_read_result_tx,
                 presentation_feedback,
                 watchdog: WorkerWatchdog::new(WorkerRestartPolicy::default()),
                 pending_restart: None,
@@ -388,6 +416,7 @@ mod windows_service_app {
                                     teacher_interaction_result_tx: self
                                         .teacher_interaction_result_tx
                                         .clone(),
+                                    clipboard_read_result_tx: self.clipboard_read_result_tx.clone(),
                                     presentation_feedback: self.presentation_feedback.clone(),
                                 },
                                 WorkerCapabilityReaderIdentity {
@@ -651,6 +680,33 @@ mod windows_service_app {
             Ok((process.process_id(), process.session_id()))
         }
 
+        fn send_clipboard_read(
+            &self,
+            request: ServiceClipboardReadRequest,
+        ) -> Result<ClipboardWorkerBinding, WorkerControlSendError> {
+            if request.worker_generation != self.generation || self.generation == 0 {
+                return Err(WorkerControlSendError::Unavailable);
+            }
+            let process = self
+                .process
+                .as_ref()
+                .ok_or(WorkerControlSendError::Unavailable)?;
+            if !process.is_running().unwrap_or(false) {
+                return Err(WorkerControlSendError::Unavailable);
+            }
+            let pipe = self
+                .pipe
+                .as_ref()
+                .ok_or(WorkerControlSendError::Unavailable)?;
+            send_read_metadata(request, self.generation, |frame| pipe.write_all(frame))
+                .map_err(|_| WorkerControlSendError::WriteFailed)?;
+            Ok(ClipboardWorkerBinding {
+                process_id: process.process_id(),
+                session_id: process.session_id(),
+                generation: self.generation,
+            })
+        }
+
         fn send_teacher_interaction(
             &self,
             request: ServiceTeacherInteractionRequest,
@@ -848,6 +904,7 @@ mod windows_service_app {
         presentation_multicast_result_tx: mpsc::SyncSender<WorkerPresentationMulticastStartResult>,
         presentation_unicast_result_tx: mpsc::SyncSender<WorkerPresentationUnicastStartResult>,
         teacher_interaction_result_tx: mpsc::SyncSender<WorkerTeacherInteractionResult>,
+        clipboard_read_result_tx: mpsc::SyncSender<WorkerClipboardReadFailure>,
         presentation_feedback: PresentationFeedbackBus,
     }
 
@@ -870,6 +927,7 @@ mod windows_service_app {
             presentation_multicast_result_tx,
             presentation_unicast_result_tx,
             teacher_interaction_result_tx,
+            clipboard_read_result_tx,
             presentation_feedback,
         } = runtime;
         let WorkerCapabilityReaderIdentity {
@@ -1310,15 +1368,15 @@ mod windows_service_app {
                                 reply.process_id,
                                 reply.session_id,
                             ) {
-                                // Do not acknowledge old Worker generations.
                                 return;
                             }
-                            // No Service-authorized pending read dispatcher exists yet.
-                            // Ignore the typed failure rather than claiming an
-                            // accepted read or dropping unrelated Worker liveness.
-                            eprintln!(
-                                "ClassMesh ignored unsolicited Worker clipboard read failure"
-                            );
+                            // Metadata-only failure, over the authenticated Worker pipe.
+                            // The coordinator still must match the pending command exactly.
+                            if clipboard_read_result_tx.try_send(reply).is_err() {
+                                eprintln!(
+                                    "ClassMesh dropped Worker clipboard result due to bounded queue"
+                                );
+                            }
                         }
                         Ok(IpcMessage::WorkerClipboardReadFailure(_)) => {
                             // Wrong process/session/generation: invalidate the
@@ -1721,6 +1779,11 @@ mod windows_service_app {
         let teacher_interaction_channels = TeacherInteractionDispatchChannels {
             tx: teacher_interaction_tx,
         };
+        let (clipboard_read_tx, clipboard_read_rx) =
+            mpsc::sync_channel::<ClipboardReadDispatch>(CLIPBOARD_READ_DISPATCH_QUEUE_CAPACITY);
+        let clipboard_read_channels = ClipboardReadDispatchChannels {
+            tx: clipboard_read_tx,
+        };
         let (file_transfer_tx, file_transfer_rx) =
             mpsc::sync_channel::<FileTransferDispatch>(FILE_TRANSFER_DISPATCH_QUEUE_CAPACITY);
         let file_pull_owner = FileTransferPullOwner::default();
@@ -1731,6 +1794,7 @@ mod windows_service_app {
         let administrative_channels = AdministrativeDispatchChannels {
             system_actions: system_action_channels,
             teacher_interactions: teacher_interaction_channels,
+            clipboard_reads: clipboard_read_channels,
             file_transfers: file_transfer_channels,
         };
         let (media_start_tx, media_start_rx) =
@@ -1776,6 +1840,10 @@ mod windows_service_app {
         let (worker_teacher_interaction_result_tx, worker_teacher_interaction_result_rx) =
             mpsc::sync_channel::<WorkerTeacherInteractionResult>(
                 WORKER_TEACHER_INTERACTION_RESULT_QUEUE_CAPACITY,
+            );
+        let (worker_clipboard_read_result_tx, worker_clipboard_read_result_rx) =
+            mpsc::sync_channel::<WorkerClipboardReadFailure>(
+                WORKER_CLIPBOARD_READ_RESULT_QUEUE_CAPACITY,
             );
         let released_media_session_floor = Arc::new(AtomicU64::new(0));
         let media_owner = Arc::new(AtomicU64::new(0));
@@ -1855,6 +1923,7 @@ mod windows_service_app {
             worker_presentation_multicast_result_tx,
             worker_presentation_unicast_result_tx,
             worker_teacher_interaction_result_tx,
+            worker_clipboard_read_result_tx,
             presentation_feedback,
         );
         let mut power_executor = ServicePowerSystemActionExecutor::new(Win32SystemPowerController);
@@ -1872,6 +1941,9 @@ mod windows_service_app {
         let mut next_media_reconfigure_attempt = Instant::now();
         let mut next_worker_poll = Instant::now();
         let mut pending_teacher_interaction: Option<PendingTeacherInteraction> = None;
+        let mut pending_clipboard_read: Option<PendingClipboardRead> = None;
+        let mut clipboard_correlation = ClipboardReadCorrelation::default();
+        let clipboard_clock = Instant::now();
         let mut pending_file_pull: Option<PendingFilePull> = None;
         let mut pending_presentation_key_install: Option<PendingPresentationKeyInstall> = None;
         let mut pending_presentation_multicast_start: Option<PendingPresentationMulticastStart> =
@@ -2079,6 +2151,125 @@ mod windows_service_app {
                     }
                 };
                 let _ = dispatch.reply_tx.send(outcome);
+            }
+
+            if let Some(pending) = pending_clipboard_read.as_ref() {
+                let obsolete = pending.reply_tx.is_closed()
+                    || pending.started.elapsed() >= CLIPBOARD_READ_PENDING_TIMEOUT
+                    || pending.binding.worker.generation != workers.generation
+                    || !workers.process.as_ref().is_some_and(|process| {
+                        process.process_id() == pending.binding.worker.process_id
+                            && process.session_id() == pending.binding.worker.session_id
+                            && process.is_running().unwrap_or(false)
+                    });
+                if obsolete {
+                    let pending = pending_clipboard_read.take().expect("pending checked");
+                    clipboard_correlation.cancel_session(pending.binding.control_session_id);
+                    let _ = pending
+                        .reply_tx
+                        .send(ClipboardReadDispatchOutcome::WorkerUnavailable);
+                }
+            }
+
+            while let Ok(reply) = worker_clipboard_read_result_rx.try_recv() {
+                let Some(pending) = pending_clipboard_read.as_ref() else {
+                    continue;
+                };
+                let binding = ClipboardReadBinding {
+                    control_session_id: reply.control_session_id,
+                    control_sequence: reply.control_sequence,
+                    request_id: reply.request_id,
+                    worker: ClipboardWorkerBinding {
+                        process_id: reply.process_id,
+                        session_id: reply.session_id,
+                        generation: reply.worker_generation,
+                    },
+                };
+                if !pending.matches(&reply)
+                    || clipboard_correlation
+                        .complete(
+                            binding,
+                            u64::try_from(clipboard_clock.elapsed().as_millis())
+                                .unwrap_or(u64::MAX),
+                        )
+                        .is_err()
+                {
+                    // Mismatch leaves the outstanding operation pending.
+                    continue;
+                }
+                let pending = pending_clipboard_read.take().expect("exact read matched");
+                let _ = pending
+                    .reply_tx
+                    .send(ClipboardReadDispatchOutcome::Unavailable);
+            }
+
+            while let Ok(dispatch) = clipboard_read_rx.try_recv() {
+                if dispatch.control_session_id == 0
+                    || dispatch.control_sequence == 0
+                    || dispatch.request_id == 0
+                    || !dispatch.commit.try_commit()
+                {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(ClipboardReadDispatchOutcome::Cancelled);
+                    continue;
+                }
+                if pending_clipboard_read.is_some() {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(ClipboardReadDispatchOutcome::Backpressure);
+                    continue;
+                }
+                let Some(process) = workers.process.as_ref() else {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(ClipboardReadDispatchOutcome::WorkerUnavailable);
+                    continue;
+                };
+                let worker = ClipboardWorkerBinding {
+                    process_id: process.process_id(),
+                    session_id: process.session_id(),
+                    generation: workers.generation,
+                };
+                let binding = ClipboardReadBinding {
+                    control_session_id: dispatch.control_session_id,
+                    control_sequence: dispatch.control_sequence,
+                    request_id: dispatch.request_id,
+                    worker,
+                };
+                if clipboard_correlation
+                    .register(
+                        binding,
+                        u64::try_from(clipboard_clock.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    )
+                    .is_err()
+                {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(ClipboardReadDispatchOutcome::Backpressure);
+                    continue;
+                }
+                let request = ServiceClipboardReadRequest {
+                    control_session_id: binding.control_session_id,
+                    control_sequence: binding.control_sequence,
+                    request_id: binding.request_id,
+                    worker_generation: binding.worker.generation,
+                };
+                match workers.send_clipboard_read(request) {
+                    Ok(actual) if actual == worker => {
+                        pending_clipboard_read = Some(PendingClipboardRead {
+                            binding,
+                            started: Instant::now(),
+                            reply_tx: dispatch.reply_tx,
+                        });
+                    }
+                    _ => {
+                        clipboard_correlation.cancel_session(binding.control_session_id);
+                        let _ = dispatch
+                            .reply_tx
+                            .send(ClipboardReadDispatchOutcome::WorkerUnavailable);
+                    }
+                }
             }
 
             if pending_teacher_interaction
@@ -2992,6 +3183,64 @@ mod windows_service_app {
             assert!(!pending.matches(PrincipalId([7; 32]), 78, 44, &[9; 16]));
             assert!(!pending.matches(PrincipalId([7; 32]), 77, 45, &[9; 16]));
             assert!(!pending.matches(PrincipalId([7; 32]), 77, 44, &[8; 16]));
+        }
+
+        #[test]
+        fn pending_clipboard_read_requires_exact_worker_sequence_and_session() {
+            use classmesh_windows_runtime::ipc::ClipboardReadFailureReason;
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let pending = PendingClipboardRead {
+                binding: ClipboardReadBinding {
+                    control_session_id: 77,
+                    control_sequence: 101,
+                    request_id: 19,
+                    worker: ClipboardWorkerBinding {
+                        process_id: 42,
+                        session_id: 7,
+                        generation: 4,
+                    },
+                },
+                started: Instant::now(),
+                reply_tx: tx,
+            };
+            let valid = WorkerClipboardReadFailure {
+                process_id: 42,
+                session_id: 7,
+                control_session_id: 77,
+                control_sequence: 101,
+                request_id: 19,
+                worker_generation: 4,
+                reason: ClipboardReadFailureReason::Unavailable,
+            };
+            assert!(pending.matches(&valid));
+            for malformed in [
+                WorkerClipboardReadFailure {
+                    process_id: 43,
+                    ..valid
+                },
+                WorkerClipboardReadFailure {
+                    session_id: 8,
+                    ..valid
+                },
+                WorkerClipboardReadFailure {
+                    control_session_id: 78,
+                    ..valid
+                },
+                WorkerClipboardReadFailure {
+                    control_sequence: 102,
+                    ..valid
+                },
+                WorkerClipboardReadFailure {
+                    request_id: 20,
+                    ..valid
+                },
+                WorkerClipboardReadFailure {
+                    worker_generation: 5,
+                    ..valid
+                },
+            ] {
+                assert!(!pending.matches(&malformed));
+            }
         }
 
         #[test]
