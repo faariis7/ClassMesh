@@ -1341,6 +1341,25 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_write_rejects_embedded_nul_before_minting_authorized_token() {
+        use classmesh_protocol::clipboard::ClipboardTextError;
+        let authorization = store(BTreeSet::from([Permission::WriteClipboard]));
+        let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
+        let bad = clipboard_write_envelope(2, "before\0after".to_owned());
+        assert!(matches!(
+            dispatch_privileged_command(&mut guard, &authorization, &bad, 150),
+            Err(PrivilegedDispatchError::InvalidClipboardText(
+                ClipboardTextError::InteriorNul
+            ))
+        ));
+        let valid = clipboard_write_envelope(2, String::new());
+        assert!(matches!(
+            dispatch_privileged_command(&mut guard, &authorization, &valid, 150),
+            Ok(PrivilegedControlCommand::ClipboardWrite(_))
+        ));
+    }
+
+    #[test]
     fn clipboard_write_authorized_debug_never_contains_secret_text() {
         let authorization = store(BTreeSet::from([Permission::WriteClipboard]));
         let mut guard = AuthenticatedControlGuard::new(identity(), 77, VERSION, 1);
