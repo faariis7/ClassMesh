@@ -7,6 +7,7 @@ pub mod client_session;
 pub mod clipboard_execution;
 pub mod clipboard_read_correlation;
 pub mod clipboard_utf16;
+pub mod clipboard_utf16_write;
 pub mod csr;
 pub mod diagnostics;
 pub mod dispatch;
