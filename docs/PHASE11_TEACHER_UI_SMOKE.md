@@ -39,6 +39,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-s
 
 The helper requires the process to remain alive for the bounded startup interval and writes `evidence\launch-smoke-evidence.json`. A successful launch smoke does **not** set visual/accessibility acceptance.
 
+On Windows machines where runtime prerequisites have been installed, add `-RequireResponsiveWindow` to require a live **ClassMesh Teacher** top-level window (same interactive session, non-zero window handle, responsive process) before reporting launch success. This optional gate rejects common loader-error dialogs such as a missing `VCRUNTIME140.dll`. When the switch is not supplied, `main_window_observed` is `null`, not a passing visual result. Even when the switch succeeds, **visual/accessibility acceptance remains separate** and must be reviewed manually.
+
 ## Visual and accessibility review
 
 While the process remains open, review the UI-specific surfaces:
