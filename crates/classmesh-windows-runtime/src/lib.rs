@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod clipboard_read_send;
 pub mod ipc;
 pub mod ipc_sensitive;
 pub mod worker;
