@@ -47,10 +47,25 @@ pub trait ClipboardBackend {
 }
 
 /// The caller must bind request_id into the authenticated response envelope.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(PartialEq)]
 pub struct CorrelatedClipboardRead {
     pub request_id: u64,
     pub response: Result<ClipboardReadResponse, ClipboardExecutionError>,
+}
+
+impl std::fmt::Debug for CorrelatedClipboardRead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = match &self.response {
+            Ok(reply) if reply.available => "available",
+            Ok(_) => "unavailable",
+            Err(_) => "error",
+        };
+        formatter
+            .debug_struct("CorrelatedClipboardRead")
+            .field("request_id", &self.request_id)
+            .field("state", &state)
+            .finish()
+    }
 }
 
 #[must_use]
