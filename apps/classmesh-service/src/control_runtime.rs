@@ -2917,6 +2917,49 @@ async fn run_established_session(
                     return;
                 }
             }
+            Some(control_envelope::Payload::ClipboardReadRequest(_))
+            | Some(control_envelope::Payload::ClipboardWrite(_)) => {
+                if !clipboard_capability_negotiated(&session.negotiated.capabilities) {
+                    eprintln!("ClassMesh clipboard command rejected: clipboard.capability_missing");
+                    connection.close(0_u32.into(), b"clipboard capability missing");
+                    return;
+                }
+                let now_unix_ms = match unix_time_ms() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"invalid service clock");
+                        return;
+                    }
+                };
+                match dispatch_privileged_command(&mut guard, authorization, &envelope, now_unix_ms)
+                {
+                    Ok(
+                        PrivilegedControlCommand::ClipboardReadRequest(_)
+                        | PrivilegedControlCommand::ClipboardWrite(_),
+                    ) => {
+                        // Permission, replay, request ID and bounded write-text checks
+                        // have passed, but no authenticated Worker executor is yet wired.
+                        // Reject without claiming successful clipboard execution.
+                        eprintln!(
+                            "ClassMesh clipboard command rejected: clipboard.executor_unavailable"
+                        );
+                        connection.close(0_u32.into(), b"clipboard executor unavailable");
+                        return;
+                    }
+                    Ok(_) => {
+                        connection.close(0_u32.into(), b"privileged payload mismatch");
+                        return;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "ClassMesh clipboard command rejected: {}",
+                            privileged_dispatch_diagnostic_code(&error)
+                        );
+                        connection.close(0_u32.into(), b"privileged command rejected");
+                        return;
+                    }
+                }
+            }
             Some(control_envelope::Payload::InputEvent(_)) => {
                 let now_unix_ms = match unix_time_ms() {
                     Ok(value) => value,
@@ -3091,6 +3134,10 @@ fn presentation_capability_negotiated(capabilities: &BTreeSet<Capability>) -> bo
     capabilities.contains(&Capability::TeacherPresentation)
 }
 
+fn clipboard_capability_negotiated(capabilities: &BTreeSet<Capability>) -> bool {
+    capabilities.contains(&Capability::ClipboardText)
+}
+
 fn system_action_capability_negotiated(capabilities: &BTreeSet<Capability>) -> bool {
     capabilities.contains(&Capability::SystemActions)
 }
@@ -3262,6 +3309,18 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+
+    #[test]
+    fn clipboard_commands_require_negotiated_text_capability() {
+        let mut negotiated = BTreeSet::new();
+        assert!(!clipboard_capability_negotiated(&negotiated));
+        negotiated.insert(Capability::SystemActions);
+        assert!(!clipboard_capability_negotiated(&negotiated));
+        negotiated.insert(Capability::ClipboardText);
+        assert!(clipboard_capability_negotiated(&negotiated));
+        negotiated.remove(&Capability::ClipboardText);
+        assert!(!clipboard_capability_negotiated(&negotiated));
+    }
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(1);
 
