@@ -131,6 +131,97 @@ mod tests {
     }
 
     #[test]
+    fn missing_capability_or_permission_cannot_create_sensitive_ingress() {
+        for denied in [
+            SensitiveReadGrants {
+                clipboard_capability: false,
+                read_permission: true,
+            },
+            SensitiveReadGrants {
+                clipboard_capability: true,
+                read_permission: false,
+            },
+        ] {
+            assert_eq!(
+                SensitiveClipboardTransportGate::new(
+                    &authenticated(),
+                    (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
+                    binding(),
+                    binding(),
+                    100,
+                    denied,
+                )
+                .err(),
+                Some(SensitiveTransportError::NotAuthorized)
+            );
+        }
+    }
+
+    #[test]
+    fn revoked_grant_mid_secret_frame_zeroizes_and_poison_closes_ingress() {
+        let authorized = SensitiveReadGrants {
+            clipboard_capability: true,
+            read_permission: true,
+        };
+        let mut guard = SensitiveClipboardTransportGate::new(
+            &authenticated(),
+            (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
+            binding(),
+            binding(),
+            100,
+            authorized,
+        )
+        .expect("authorized v12 ingress");
+        let mut wire = bytes(binding());
+        assert!(
+            guard
+                .push_chunk(
+                    &authenticated(),
+                    (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
+                    binding(),
+                    &mut wire[..20],
+                    101,
+                    authorized,
+                )
+                .expect("accepted bounded header")
+                .is_none()
+        );
+        let denied = SensitiveReadGrants {
+            clipboard_capability: true,
+            read_permission: false,
+        };
+        assert_eq!(
+            guard
+                .push_chunk(
+                    &authenticated(),
+                    (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
+                    binding(),
+                    &mut wire[20..],
+                    102,
+                    denied,
+                )
+                .err(),
+            Some(SensitiveTransportError::NotAuthorized)
+        );
+        assert!(wire.iter().all(|byte| *byte == 0));
+        let mut late = [0x5a; 8];
+        assert_eq!(
+            guard
+                .push_chunk(
+                    &authenticated(),
+                    (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
+                    binding(),
+                    &mut late,
+                    103,
+                    authorized,
+                )
+                .err(),
+            Some(SensitiveTransportError::Inbox(SensitiveInboxError::Finished))
+        );
+        assert_eq!(late, [0; 8]);
+    }
+
+    #[test]
     fn active_v11_and_untrusted_handshakes_cannot_open_sensitive_ingress() {
         let auth = authenticated();
         for minor in [IPC_VERSION_MINOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR + 1] {
