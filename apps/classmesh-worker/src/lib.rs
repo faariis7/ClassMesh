@@ -2,6 +2,7 @@
 
 pub mod clipboard_native;
 pub mod clipboard_read_fallback;
+pub mod clipboard_read_guarded;
 #[cfg(windows)]
 pub mod encoder_benchmark;
 pub mod group_media_receive;
