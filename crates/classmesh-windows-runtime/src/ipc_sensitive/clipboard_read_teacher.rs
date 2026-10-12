@@ -236,6 +236,27 @@ mod tests {
     }
 
     #[test]
+    fn rejects_pre_clipboard_control_wire_minor_without_generating_secret_response() {
+        let auth = auth();
+        for older_minor in [0, 2] {
+            let mut downgraded = context(&auth);
+            downgraded.control_wire_version = (0, older_minor);
+            assert!(matches!(
+                encode_sensitive_teacher_read_response(downgraded, message("private")),
+                Err(SensitiveTeacherClipboardError::InvalidControlVersion)
+            ));
+        }
+
+        let mut first_clipboard_minor = context(&auth);
+        first_clipboard_minor.control_wire_version = (0, 3);
+        let response =
+            encode_sensitive_teacher_read_response(first_clipboard_minor, message("مرحبا"))
+                .expect("clipboard contract available since v0.3");
+        let parsed = ControlEnvelope::decode(response.as_bytes()).expect("valid control wire");
+        assert_eq!(parsed.protocol_version.expect("version").minor, 3);
+    }
+
+    #[test]
     fn rejects_changed_worker_control_binding_and_invalid_outbound_sequence() {
         let auth = auth();
         let mut stale = context(&auth);
