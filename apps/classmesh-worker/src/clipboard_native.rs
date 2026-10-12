@@ -82,6 +82,118 @@ pub fn read_windows_clipboard_text() -> Result<Option<ClipboardUtf8Text>, Worker
 mod tests {
     use super::*;
     #[test]
+    fn isolated_worker_sender_to_service_inbox_roundtrips_unicode_and_wipes_every_chunk() {
+        use classmesh_windows_runtime::ipc_sensitive::SensitiveClipboardReadInbox;
+        let secret = "حافظة آمنة 🌙 é😀";
+        let mut units = secret.encode_utf16().chain([0]).collect::<Vec<_>>();
+        let message = convert_units_to_sensitive_read_success(&mut units, binding())
+            .expect("worker-bound zeroizing Unicode");
+        let mut wire = Vec::new();
+        send_sensitive_read_frame(message, binding(), |bytes| {
+            wire.extend_from_slice(bytes);
+            Ok::<(), ()>(())
+        })
+        .expect("injected future sensitive writer");
+        assert!(units.iter().all(|unit| *unit == 0));
+        let mut inbox = SensitiveClipboardReadInbox::new(binding(), 100)
+            .expect("future Service pending exact Worker");
+        assert!(
+            inbox
+                .push_chunk(&mut wire[..5], 101)
+                .expect("part one")
+                .is_none()
+        );
+        assert!(
+            inbox
+                .push_chunk(&mut wire[5..12], 102)
+                .expect("header")
+                .is_none()
+        );
+        let decoded = inbox
+            .push_chunk(&mut wire[12..], 103)
+            .expect("current Worker read result")
+            .expect("complete");
+        assert_eq!(decoded.binding(), binding());
+        assert_eq!(decoded.text(), secret);
+        assert!(wire.iter().all(|byte| *byte == 0));
+        assert!(!format!("{decoded:?}").contains(secret));
+    }
+
+    #[test]
+    fn isolated_worker_sender_to_service_inbox_rejects_replaced_worker_and_replay() {
+        use classmesh_windows_runtime::ipc_sensitive::{
+            SensitiveClipboardReadInbox, SensitiveInboxError, SensitiveReadAcceptError,
+        };
+        let replaced_worker =
+            classmesh_windows_runtime::ipc_sensitive::ClipboardReadSuccessBinding {
+                worker_generation: binding().worker_generation + 1,
+                ..binding()
+            };
+        let mut units = [65_u16, 0_u16];
+        let message = convert_units_to_sensitive_read_success(&mut units, replaced_worker)
+            .expect("valid but outdated Worker");
+        let mut wire = Vec::new();
+        send_sensitive_read_frame(message, replaced_worker, |bytes| {
+            wire.extend_from_slice(bytes);
+            Ok::<(), ()>(())
+        })
+        .expect("injected test writer");
+        let mut inbox = SensitiveClipboardReadInbox::new(binding(), 100).expect("current Worker");
+        assert_eq!(
+            inbox.push_chunk(&mut wire, 101).err(),
+            Some(SensitiveInboxError::Acceptance(
+                SensitiveReadAcceptError::Mismatch
+            )),
+        );
+        assert!(wire.iter().all(|byte| *byte == 0));
+        let mut new_attempt = [1_u8; 12];
+        assert_eq!(
+            inbox.push_chunk(&mut new_attempt, 102).err(),
+            Some(SensitiveInboxError::Finished),
+        );
+        assert_eq!(new_attempt, [0; 12]);
+    }
+
+    #[test]
+    fn isolated_worker_sender_to_service_inbox_honors_idle_deadline_and_cancel() {
+        use classmesh_windows_runtime::ipc_sensitive::{
+            SENSITIVE_CLIPBOARD_READ_DEADLINE_MS, SensitiveClipboardReadInbox, SensitiveInboxError,
+        };
+        let mut units = [0_u16];
+        let message = convert_units_to_sensitive_read_success(&mut units, binding())
+            .expect("empty valid UTF-16");
+        let mut wire = Vec::new();
+        send_sensitive_read_frame(message, binding(), |bytes| {
+            wire.extend_from_slice(bytes);
+            Ok::<(), ()>(())
+        })
+        .expect("injected test writer");
+        let mut inbox = SensitiveClipboardReadInbox::new(binding(), 100).expect("pending");
+        assert!(
+            inbox
+                .push_chunk(&mut wire[..8], 101)
+                .expect("partial")
+                .is_none()
+        );
+        let deadline = 100 + SENSITIVE_CLIPBOARD_READ_DEADLINE_MS;
+        assert!(inbox.expire(deadline));
+        assert_eq!(
+            inbox.push_chunk(&mut wire[8..], deadline + 1).err(),
+            Some(SensitiveInboxError::Finished)
+        );
+        assert!(wire.iter().all(|byte| *byte == 0));
+
+        let mut fresh = SensitiveClipboardReadInbox::new(binding(), 100).expect("fresh");
+        assert!(fresh.cancel());
+        let mut late = [7_u8; 12];
+        assert_eq!(
+            fresh.push_chunk(&mut late, 101).err(),
+            Some(SensitiveInboxError::Finished)
+        );
+        assert_eq!(late, [0; 12]);
+    }
+
+    #[test]
     fn sensitive_sender_encodes_exact_bound_unicode_and_no_plaintext_debug() {
         use classmesh_windows_runtime::ipc_sensitive::SensitiveClipboardReadStream;
         let secret = "مرحبا 🌙";
