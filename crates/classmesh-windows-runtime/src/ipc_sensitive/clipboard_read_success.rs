@@ -46,14 +46,18 @@ pub enum ClipboardReadSuccessError {
 /// Worker and control command, with a redacted Debug and zeroizing storage.
 pub struct SensitiveClipboardReadSuccess {
     binding: ClipboardReadSuccessBinding,
+    // Outbound values own only UTF-8 text (offset 0). Decoded values retain
+    // their *original* Zeroizing payload, including the fixed metadata prefix,
+    // so no second plaintext heap buffer is allocated during decoding.
     text: Zeroizing<Vec<u8>>,
+    text_start: usize,
 }
 
 impl fmt::Debug for SensitiveClipboardReadSuccess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SensitiveClipboardReadSuccess")
             .field("binding", &self.binding)
-            .field("text_bytes", &self.text.len())
+            .field("text_bytes", &(self.text.len() - self.text_start))
             .finish_non_exhaustive()
     }
 }
@@ -66,14 +70,23 @@ impl SensitiveClipboardReadSuccess {
         if !binding.is_valid() {
             return Err(ClipboardReadSuccessError::InvalidBinding);
         }
+        Self::validate_text(&text)?;
+        Ok(Self {
+            binding,
+            text,
+            text_start: 0,
+        })
+    }
+
+    fn validate_text(text: &[u8]) -> Result<(), ClipboardReadSuccessError> {
         if text.len() > MAX_CLIPBOARD_TEXT_BYTES {
             return Err(ClipboardReadSuccessError::TooLarge);
         }
         if text.contains(&0) {
             return Err(ClipboardReadSuccessError::InteriorNul);
         }
-        std::str::from_utf8(&text).map_err(|_| ClipboardReadSuccessError::InvalidUtf8)?;
-        Ok(Self { binding, text })
+        std::str::from_utf8(text).map_err(|_| ClipboardReadSuccessError::InvalidUtf8)?;
+        Ok(())
     }
 
     #[must_use]
@@ -84,15 +97,16 @@ impl SensitiveClipboardReadSuccess {
     #[must_use]
     pub fn text(&self) -> &str {
         // This payload is validated exactly once at construction/decode.
-        std::str::from_utf8(&self.text).expect("validated clipboard UTF-8")
+        std::str::from_utf8(&self.text[self.text_start..]).expect("validated clipboard UTF-8")
     }
 
     /// Only the future sensitive IPC encoder may call this. The active generic
     /// IpcFrame decoder MUST NOT handle this text-bearing payload.
     #[must_use]
     pub fn encode_payload(&self) -> Zeroizing<Vec<u8>> {
+        let text = &self.text[self.text_start..];
         let mut out = Zeroizing::new(Vec::with_capacity(
-            CLIPBOARD_READ_SUCCESS_FIXED_LEN + self.text.len(),
+            CLIPBOARD_READ_SUCCESS_FIXED_LEN + text.len(),
         ));
         out.extend_from_slice(&self.binding.worker_process_id.to_be_bytes());
         out.extend_from_slice(&self.binding.worker_session_id.to_be_bytes());
@@ -100,14 +114,11 @@ impl SensitiveClipboardReadSuccess {
         out.extend_from_slice(&self.binding.control_sequence.to_be_bytes());
         out.extend_from_slice(&self.binding.request_id.to_be_bytes());
         out.extend_from_slice(&self.binding.worker_generation.to_be_bytes());
-        let length = u32::try_from(self.text.len()).expect("<=64KiB text");
+        let length = u32::try_from(text.len()).expect("<=64KiB text");
         out.extend_from_slice(&length.to_be_bytes());
         out.extend_from_slice(&[0_u8; 4]); // Reserved: must remain zero.
-        out.extend_from_slice(&self.text);
-        debug_assert_eq!(
-            out.len(),
-            CLIPBOARD_READ_SUCCESS_FIXED_LEN + self.text.len()
-        );
+        out.extend_from_slice(text);
+        debug_assert_eq!(out.len(), CLIPBOARD_READ_SUCCESS_FIXED_LEN + text.len());
         out
     }
 
@@ -131,10 +142,18 @@ impl SensitiveClipboardReadSuccess {
         {
             return Err(ClipboardReadSuccessError::InvalidPayload);
         }
-        Self::new(
+        if !binding.is_valid() {
+            return Err(ClipboardReadSuccessError::InvalidBinding);
+        }
+        Self::validate_text(&payload[CLIPBOARD_READ_SUCCESS_FIXED_LEN..])?;
+        // Transfer the *same* zeroizing allocation into the decoded value.
+        // This keeps both metadata and clipboard bytes wiped on drop and
+        // avoids a temporary plaintext copy during frame reception.
+        Ok(Self {
             binding,
-            Zeroizing::new(payload[CLIPBOARD_READ_SUCCESS_FIXED_LEN..].to_vec()),
-        )
+            text: payload,
+            text_start: CLIPBOARD_READ_SUCCESS_FIXED_LEN,
+        })
     }
 }
 #[cfg(test)]
@@ -172,6 +191,39 @@ mod tests {
         let decoded = SensitiveClipboardReadSuccess::decode_payload(encoded).expect("roundtrip");
         assert_eq!(decoded.binding(), binding());
         assert_eq!(decoded.text(), secret);
+    }
+
+    #[test]
+    fn decoding_owns_original_zeroizing_payload_without_new_plaintext_copy() {
+        let secret = "حافظة خاصة 🌙 é😀";
+        let original = SensitiveClipboardReadSuccess::new(
+            binding(),
+            Zeroizing::new(secret.as_bytes().to_vec()),
+        )
+        .expect("valid secret");
+        let incoming = original.encode_payload();
+        let original_payload_base = incoming.as_ptr();
+        let original_text_address = incoming[CLIPBOARD_READ_SUCCESS_FIXED_LEN..].as_ptr();
+        let decoded = SensitiveClipboardReadSuccess::decode_payload(incoming)
+            .expect("valid existing payload");
+        assert_eq!(decoded.binding(), binding());
+        assert_eq!(decoded.text(), secret);
+        assert_eq!(
+            decoded.text.as_ptr(),
+            original_payload_base,
+            "must own original zeroizing payload"
+        );
+        assert_eq!(
+            decoded.text().as_ptr(),
+            original_text_address,
+            "must not copy secret text"
+        );
+        assert!(!format!("{decoded:?}").contains(secret));
+        let encoded_again = decoded.encode_payload();
+        assert_eq!(
+            &encoded_again[CLIPBOARD_READ_SUCCESS_FIXED_LEN..],
+            secret.as_bytes()
+        );
     }
 
     #[test]
