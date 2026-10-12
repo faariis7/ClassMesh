@@ -3,6 +3,7 @@ mod clipboard_read_gate;
 mod clipboard_read_inbound;
 mod clipboard_read_stream;
 mod clipboard_read_success;
+mod clipboard_read_teacher;
 mod clipboard_read_transport_gate;
 mod contract;
 mod decoder;
@@ -23,6 +24,10 @@ pub use clipboard_read_stream::{
 pub use clipboard_read_success::{
     CLIPBOARD_READ_SUCCESS_FIXED_LEN, ClipboardReadSuccessBinding, ClipboardReadSuccessError,
     SensitiveClipboardReadSuccess,
+};
+pub use clipboard_read_teacher::{
+    SensitiveTeacherClipboardError, SensitiveTeacherClipboardWire, TeacherClipboardReadContext,
+    encode_sensitive_teacher_read_response,
 };
 pub use clipboard_read_transport_gate::{SensitiveClipboardTransportGate, SensitiveTransportError};
 pub use contract::{
