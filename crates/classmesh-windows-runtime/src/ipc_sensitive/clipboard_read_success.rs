@@ -123,36 +123,53 @@ impl SensitiveClipboardReadSuccess {
     }
 
     pub fn decode_payload(payload: Zeroizing<Vec<u8>>) -> Result<Self, ClipboardReadSuccessError> {
-        if payload.len() < CLIPBOARD_READ_SUCCESS_FIXED_LEN {
+        Self::decode_payload_with_prefix(payload, 0)
+    }
+
+    /// The dedicated v12 frame decoder has already validated its 12-byte
+    /// header. Retain that entire zeroizing allocation instead of copying
+    /// the text-bearing payload into a second plaintext heap buffer.
+    /// Not available to the active generic v11 IPC decoder.
+    pub(super) fn decode_payload_with_prefix(
+        payload: Zeroizing<Vec<u8>>,
+        prefix_len: usize,
+    ) -> Result<Self, ClipboardReadSuccessError> {
+        let Some(text_start) = prefix_len.checked_add(CLIPBOARD_READ_SUCCESS_FIXED_LEN) else {
+            return Err(ClipboardReadSuccessError::InvalidPayload);
+        };
+        if payload.len() < text_start {
             return Err(ClipboardReadSuccessError::InvalidPayload);
         }
-        if payload.len() > CLIPBOARD_READ_SUCCESS_FIXED_LEN + MAX_CLIPBOARD_TEXT_BYTES {
+        if payload.len() - prefix_len > CLIPBOARD_READ_SUCCESS_FIXED_LEN + MAX_CLIPBOARD_TEXT_BYTES
+        {
             return Err(ClipboardReadSuccessError::TooLarge);
         }
+        let prefix = &payload[prefix_len..];
         let binding = ClipboardReadSuccessBinding {
-            worker_process_id: u32::from_be_bytes(payload[0..4].try_into().expect("fixed size")),
-            worker_session_id: u32::from_be_bytes(payload[4..8].try_into().expect("fixed size")),
-            control_session_id: u64::from_be_bytes(payload[8..16].try_into().expect("fixed size")),
-            control_sequence: u64::from_be_bytes(payload[16..24].try_into().expect("fixed size")),
-            request_id: u64::from_be_bytes(payload[24..32].try_into().expect("fixed size")),
-            worker_generation: u64::from_be_bytes(payload[32..40].try_into().expect("fixed size")),
+            worker_process_id: u32::from_be_bytes(prefix[0..4].try_into().expect("fixed size")),
+            worker_session_id: u32::from_be_bytes(prefix[4..8].try_into().expect("fixed size")),
+            control_session_id: u64::from_be_bytes(prefix[8..16].try_into().expect("fixed size")),
+            control_sequence: u64::from_be_bytes(prefix[16..24].try_into().expect("fixed size")),
+            request_id: u64::from_be_bytes(prefix[24..32].try_into().expect("fixed size")),
+            worker_generation: u64::from_be_bytes(prefix[32..40].try_into().expect("fixed size")),
         };
-        let text_len = u32::from_be_bytes(payload[40..44].try_into().expect("fixed size")) as usize;
-        if payload[44..48] != [0; 4] || payload.len() != CLIPBOARD_READ_SUCCESS_FIXED_LEN + text_len
+        let text_len = u32::from_be_bytes(prefix[40..44].try_into().expect("fixed size")) as usize;
+        if prefix[44..48] != [0; 4]
+            || payload.len() - prefix_len != CLIPBOARD_READ_SUCCESS_FIXED_LEN + text_len
         {
             return Err(ClipboardReadSuccessError::InvalidPayload);
         }
         if !binding.is_valid() {
             return Err(ClipboardReadSuccessError::InvalidBinding);
         }
-        Self::validate_text(&payload[CLIPBOARD_READ_SUCCESS_FIXED_LEN..])?;
+        Self::validate_text(&payload[text_start..])?;
         // Transfer the *same* zeroizing allocation into the decoded value.
         // This keeps both metadata and clipboard bytes wiped on drop and
         // avoids a temporary plaintext copy during frame reception.
         Ok(Self {
             binding,
             text: payload,
-            text_start: CLIPBOARD_READ_SUCCESS_FIXED_LEN,
+            text_start,
         })
     }
 }
@@ -218,6 +235,39 @@ mod tests {
             original_text_address,
             "must not copy secret text"
         );
+        assert!(!format!("{decoded:?}").contains(secret));
+        let encoded_again = decoded.encode_payload();
+        assert_eq!(
+            &encoded_again[CLIPBOARD_READ_SUCCESS_FIXED_LEN..],
+            secret.as_bytes()
+        );
+    }
+
+    #[test]
+    fn sensitive_frame_decode_retains_original_zeroizing_frame_allocation() {
+        use crate::ipc::IPC_HEADER_LEN;
+        use crate::ipc_sensitive::{
+            decode_sensitive_clipboard_read_frame, encode_sensitive_clipboard_read_frame,
+        };
+        let secret = "حافظة المحادثة 🌙 é😀";
+        let original = SensitiveClipboardReadSuccess::new(
+            binding(),
+            Zeroizing::new(secret.as_bytes().to_vec()),
+        )
+        .expect("secret");
+        let frame = encode_sensitive_clipboard_read_frame(&original);
+        let expected_buffer_addr = frame.as_ptr();
+        let expected_text_addr =
+            frame[IPC_HEADER_LEN + CLIPBOARD_READ_SUCCESS_FIXED_LEN..].as_ptr();
+        let decoded = decode_sensitive_clipboard_read_frame(frame).expect("valid frame");
+        assert_eq!(decoded.binding(), binding());
+        assert_eq!(decoded.text(), secret);
+        assert_eq!(
+            decoded.text.as_ptr(),
+            expected_buffer_addr,
+            "sensitive frame decoding must not allocate a second plaintext buffer"
+        );
+        assert_eq!(decoded.text().as_ptr(), expected_text_addr);
         assert!(!format!("{decoded:?}").contains(secret));
         let encoded_again = decoded.encode_payload();
         assert_eq!(
