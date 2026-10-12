@@ -30,6 +30,99 @@ pub struct AuthorizedWorkerReadContext<'a> {
     pub worker_generation: u64,
 }
 
+/// Construct once from the already-authenticated live Worker/control session.
+/// Never recreate this from a repeated or untrusted request's metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerReadScope {
+    pub worker_pid: u32,
+    pub worker_session: u32,
+    pub worker_generation: u64,
+    pub control_session_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerReadReplayError {
+    InvalidScope,
+    BindingMismatch,
+    NonMonotonic,
+}
+
+/// Retains the most recently consumed control sequence, including failures.
+/// Scope rotation requires the trusted lifecycle owner to construct a new
+/// guard only after a separately authenticated session/Worker transition.
+#[derive(Debug)]
+pub struct WorkerReadSequenceGuard {
+    scope: WorkerReadScope,
+    last_sequence: u64,
+}
+
+impl WorkerReadSequenceGuard {
+    pub fn new(scope: WorkerReadScope) -> Result<Self, WorkerReadReplayError> {
+        if scope.worker_pid == 0
+            || scope.worker_session == 0
+            || scope.worker_generation == 0
+            || scope.control_session_id == 0
+        {
+            return Err(WorkerReadReplayError::InvalidScope);
+        }
+        Ok(Self {
+            scope,
+            last_sequence: 0,
+        })
+    }
+
+    #[must_use]
+    pub const fn last_sequence(&self) -> u64 {
+        self.last_sequence
+    }
+
+    fn reserve(
+        &mut self,
+        context: &AuthorizedWorkerReadContext<'_>,
+    ) -> Result<(), WorkerReadReplayError> {
+        let request = context.request;
+        if context.worker_pid != self.scope.worker_pid
+            || context.worker_session != self.scope.worker_session
+            || context.worker_generation != self.scope.worker_generation
+            || request.worker_generation != self.scope.worker_generation
+            || request.control_session_id != self.scope.control_session_id
+            || request.request_id == 0
+            || request.control_sequence == 0
+        {
+            return Err(WorkerReadReplayError::BindingMismatch);
+        }
+        if request.control_sequence <= self.last_sequence {
+            return Err(WorkerReadReplayError::NonMonotonic);
+        }
+        self.last_sequence = request.control_sequence;
+        Ok(())
+    }
+}
+
+/// The intended future-v12 entry point: reject unauthenticated commands
+/// without consuming the sequence. Once authorized, consume sequence before
+/// native clipboard read; failures and disconnects must not allow re-reading.
+pub fn run_guarded_worker_clipboard_read_once<E>(
+    guard: &mut WorkerReadSequenceGuard,
+    context: AuthorizedWorkerReadContext<'_>,
+    read_clipboard: impl FnOnce() -> Result<Option<ClipboardUtf8Text>, WorkerClipboardReadError>,
+    write_all: impl FnOnce(&[u8]) -> Result<(), E>,
+) -> Result<GuardedWorkerReadOutcome, GuardedWorkerReadError<E>> {
+    if context.handshake.state() != HandshakeState::Authenticated {
+        return Err(GuardedWorkerReadError::NotAuthenticated);
+    }
+    if context.ipc_version != (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR) {
+        return Err(GuardedWorkerReadError::WrongVersion);
+    }
+    if !context.clipboard_capability || !context.read_permission {
+        return Err(GuardedWorkerReadError::NotAuthorized);
+    }
+    guard
+        .reserve(&context)
+        .map_err(GuardedWorkerReadError::Replay)?;
+    run_guarded_worker_clipboard_read(context, read_clipboard, write_all)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardedWorkerReadOutcome {
     SensitiveSent,
@@ -42,6 +135,7 @@ pub enum GuardedWorkerReadError<E> {
     WrongVersion,
     NotAuthorized,
     InvalidBinding,
+    Replay(WorkerReadReplayError),
     Native(WorkerClipboardReadError),
     InvalidPayload(ClipboardReadSuccessError),
     Send(WorkerClipboardFrameSendError<E>),
@@ -50,7 +144,7 @@ pub enum GuardedWorkerReadError<E> {
 /// Never invoke either callback on untrusted, v11, revoked or stale request.
 /// Unlike the production v11 path, the *future* versioned route may return a
 /// success frame, but only through the existing zeroizing v12 sender.
-pub fn run_guarded_worker_clipboard_read<E>(
+fn run_guarded_worker_clipboard_read<E>(
     context: AuthorizedWorkerReadContext<'_>,
     read_clipboard: impl FnOnce() -> Result<Option<ClipboardUtf8Text>, WorkerClipboardReadError>,
     write_all: impl FnOnce(&[u8]) -> Result<(), E>,
@@ -299,5 +393,223 @@ mod tests {
             Err(GuardedWorkerReadError::InvalidBinding)
         ));
         assert!(!read);
+    }
+
+    fn scope() -> WorkerReadScope {
+        WorkerReadScope {
+            worker_pid: 42,
+            worker_session: 7,
+            worker_generation: 4,
+            control_session_id: 77,
+        }
+    }
+
+    #[test]
+    fn replayed_worker_read_never_rereads_clipboard() {
+        let trusted = auth();
+        let mut replay = WorkerReadSequenceGuard::new(scope()).expect("trusted scope");
+        let mut reads = 0;
+        let first = run_guarded_worker_clipboard_read_once(
+            &mut replay,
+            context(&trusted),
+            || {
+                reads += 1;
+                Err(WorkerClipboardReadError::NativeUnavailable)
+            },
+            |_frame| Ok::<(), ()>(()),
+        );
+        assert_eq!(
+            first,
+            Err(GuardedWorkerReadError::Native(
+                WorkerClipboardReadError::NativeUnavailable
+            ))
+        );
+        assert_eq!(reads, 1);
+        let duplicate = run_guarded_worker_clipboard_read_once(
+            &mut replay,
+            context(&trusted),
+            || {
+                reads += 1;
+                Ok(Some(clipboard("must not be read")))
+            },
+            |_frame| Ok::<(), ()>(()),
+        );
+        assert_eq!(
+            duplicate,
+            Err(GuardedWorkerReadError::Replay(
+                WorkerReadReplayError::NonMonotonic
+            ))
+        );
+        assert_eq!(reads, 1);
+        let stale = AuthorizedWorkerReadContext {
+            request: ServiceClipboardReadRequest {
+                control_sequence: 100,
+                ..request()
+            },
+            ..context(&trusted)
+        };
+        assert_eq!(
+            run_guarded_worker_clipboard_read_once(
+                &mut replay,
+                stale,
+                || {
+                    reads += 1;
+                    Ok(Some(clipboard("no")))
+                },
+                |_frame| Ok::<(), ()>(()),
+            ),
+            Err(GuardedWorkerReadError::Replay(
+                WorkerReadReplayError::NonMonotonic
+            ))
+        );
+        assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn rejected_v11_grant_does_not_consume_future_authorized_sequence() {
+        let trusted = auth();
+        let mut replay = WorkerReadSequenceGuard::new(scope()).unwrap();
+        let unauthorized = AuthorizedWorkerReadContext {
+            clipboard_capability: false,
+            ..context(&trusted)
+        };
+        let mut reads = 0;
+        assert_eq!(
+            run_guarded_worker_clipboard_read_once(
+                &mut replay,
+                unauthorized,
+                || {
+                    reads += 1;
+                    Ok(Some(clipboard("no")))
+                },
+                |_frame| Ok::<(), ()>(()),
+            ),
+            Err(GuardedWorkerReadError::NotAuthorized)
+        );
+        assert_eq!(reads, 0);
+        let v11 = AuthorizedWorkerReadContext {
+            ipc_version: (0, IPC_VERSION_MINOR),
+            ..context(&trusted)
+        };
+        assert_eq!(
+            run_guarded_worker_clipboard_read_once(
+                &mut replay,
+                v11,
+                || {
+                    reads += 1;
+                    Ok(Some(clipboard("no")))
+                },
+                |_frame| Ok::<(), ()>(()),
+            ),
+            Err(GuardedWorkerReadError::WrongVersion)
+        );
+        let accepted = run_guarded_worker_clipboard_read_once(
+            &mut replay,
+            context(&trusted),
+            || {
+                reads += 1;
+                Ok(None)
+            },
+            |_frame| Ok::<(), ()>(()),
+        );
+        assert_eq!(accepted, Ok(GuardedWorkerReadOutcome::Unavailable));
+        assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn stale_generation_session_and_worker_are_not_replay_guard_resets() {
+        let trusted = auth();
+        let mut replay = WorkerReadSequenceGuard::new(scope()).unwrap();
+        for ctx in [
+            AuthorizedWorkerReadContext {
+                worker_pid: 43,
+                ..context(&trusted)
+            },
+            AuthorizedWorkerReadContext {
+                worker_session: 8,
+                ..context(&trusted)
+            },
+            AuthorizedWorkerReadContext {
+                worker_generation: 5,
+                ..context(&trusted)
+            },
+            AuthorizedWorkerReadContext {
+                request: ServiceClipboardReadRequest {
+                    control_session_id: 78,
+                    ..request()
+                },
+                ..context(&trusted)
+            },
+        ] {
+            let mut invoked = false;
+            assert_eq!(
+                run_guarded_worker_clipboard_read_once(
+                    &mut replay,
+                    ctx,
+                    || {
+                        invoked = true;
+                        Ok(Some(clipboard("no")))
+                    },
+                    |_frame| Ok::<(), ()>(()),
+                ),
+                Err(GuardedWorkerReadError::Replay(
+                    WorkerReadReplayError::BindingMismatch
+                ))
+            );
+            assert!(!invoked);
+        }
+        assert_eq!(replay.last_sequence(), 0);
+        assert!(
+            WorkerReadSequenceGuard::new(WorkerReadScope {
+                worker_pid: 0,
+                ..scope()
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn increasing_sequences_send_unicode_once_even_after_writer_failure() {
+        let trusted = auth();
+        let mut replay = WorkerReadSequenceGuard::new(scope()).unwrap();
+        assert_eq!(
+            run_guarded_worker_clipboard_read_once(
+                &mut replay,
+                context(&trusted),
+                || Ok(Some(clipboard("private"))),
+                |_frame| Err("disconnected")
+            ),
+            Err(GuardedWorkerReadError::Send(
+                WorkerClipboardFrameSendError::WriteFailed("disconnected")
+            ))
+        );
+        assert_eq!(replay.last_sequence(), 101);
+        let later = AuthorizedWorkerReadContext {
+            request: ServiceClipboardReadRequest {
+                control_sequence: 102,
+                request_id: 20,
+                ..request()
+            },
+            ..context(&trusted)
+        };
+        let mut wire = Vec::new();
+        assert_eq!(
+            run_guarded_worker_clipboard_read_once(
+                &mut replay,
+                later,
+                || Ok(Some(clipboard("مرحبا 🌙"))),
+                |frame| {
+                    wire.extend_from_slice(frame);
+                    Ok::<(), ()>(())
+                },
+            ),
+            Ok(GuardedWorkerReadOutcome::SensitiveSent)
+        );
+        assert_eq!(replay.last_sequence(), 102);
+        let mut stream = SensitiveClipboardReadStream::default();
+        let result = stream.push_bytes(&mut wire).unwrap().unwrap();
+        assert_eq!(result.text(), "مرحبا 🌙");
+        assert_eq!(result.binding().control_sequence, 102);
+        assert!(wire.iter().all(|b| *b == 0));
     }
 }
