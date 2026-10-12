@@ -1,5 +1,7 @@
 # ClassMesh Living Work Plan
 
+> **Phase 12E9c — explicit fail-closed v12 sensitive ingress grants (test-first, inactive):** Current isolated `SensitiveClipboardTransportGate` authenticates IPC state/minor and checks the exact Worker/control binding but does not itself enforce the separately authorized ClipboardText capability and ReadClipboard permission. Require both trusted, explicit grants on creation and **each fragment** (re-validated after revocation), reject before any payload consumption, zeroize incoming bytes and cancel the pending zeroizing inbox on revoked/absent grants. Tests first for missing grants at registration, revoked capability/permission mid-frame, poisoned late fragments, and unaffected authorized Unicode/one-shot behavior. Preserve production IPC v11 failure-only; grants must come from Service authenticated policy, never request metadata. This does NOT negotiate v12, authenticate the named pipe, wire native Worker OS read or deliver to Teacher. Full fmt/Clippy/workspace + exact-head Portable Rust/Windows CI and security review before merge; all VM/physical/GPU/classroom/E2E gates OPEN.
+
 ## Active execution checkpoint — 2026-10-13 (GitHub Live)
 
 **Source of truth:** `main` at `64168439483846ad44d16b4152c23d026fc3bd21` at verification. Recheck live main/PR/CI before making changes; this snapshot is a handoff, not a frozen source of truth. Old dated sections below are historical only.
