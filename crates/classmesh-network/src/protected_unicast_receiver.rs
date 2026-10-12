@@ -225,7 +225,7 @@ impl ProtectedUnicastFrameReceiver {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6, UdpSocket};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
     use classmesh_protocol::media::{MEDIA_PROTOCOL_VERSION, MediaFlags};
 
@@ -342,14 +342,24 @@ mod tests {
 
     #[test]
     fn loopback_runtime_reassembles_ciphertext_without_exposing_plaintext() {
-        let reservation =
-            UdpSocket::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
-                .expect("reserve test port");
-        let port = reservation.local_addr().expect("reserved address").port();
-        drop(reservation);
-
-        let mut receiver =
-            ProtectedUnicastFrameReceiver::bind(ipv4_config(port)).expect("receiver binds");
+        // Keep the OS-assigned ephemeral port bound for the entire test.
+        // Releasing a "reserved" port before rebinding races other CI tests,
+        // particularly on Windows where an intervening bind returns WSAEADDRINUSE.
+        let socket = UdpMediaSocket::bind(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::LOCALHOST,
+            0,
+        )))
+        .expect("receiver socket binds");
+        let port = socket.local_addr().expect("receiver address").port();
+        socket
+            .set_read_timeout(Some(DEFAULT_UNICAST_READ_TIMEOUT))
+            .expect("receiver timeout");
+        let mut receiver = ProtectedUnicastFrameReceiver {
+            socket,
+            state: ProtectedUnicastReceiveState::new(ipv4_config(port))
+                .expect("receiver state"),
+        };
+        assert_eq!(receiver.local_addr().expect("bound receiver").port(), port);
         let sender =
             UdpMediaSocket::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
                 .expect("sender binds");
