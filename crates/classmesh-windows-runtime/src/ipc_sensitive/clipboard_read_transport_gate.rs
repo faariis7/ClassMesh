@@ -16,10 +16,27 @@ use crate::ipc::{HandshakeState, IPC_VERSION_MAJOR, IpcHandshake};
 pub enum SensitiveTransportError {
     NotAuthenticated,
     WrongVersion,
+    NotAuthorized,
     BindingMismatch,
     InvalidPending(SensitiveReadAcceptError),
     WorkerChanged,
     Inbox(SensitiveInboxError),
+}
+
+/// Trusted current Service authorization and capability for a sensitive read.
+/// The caller must source these from a verified session/policy (never metadata
+/// from the Worker or untrusted clipboard request). Recheck each fragment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SensitiveReadGrants {
+    pub clipboard_capability: bool,
+    pub read_permission: bool,
+}
+
+impl SensitiveReadGrants {
+    #[must_use]
+    pub const fn allows_read(self) -> bool {
+        self.clipboard_capability && self.read_permission
+    }
 }
 
 /// An authenticated, version-bound, one-shot *testable ingress seam*.
@@ -37,12 +54,16 @@ impl SensitiveClipboardTransportGate {
         expected: ClipboardReadSuccessBinding,
         active: ClipboardReadSuccessBinding,
         now_ms: u64,
+        grants: SensitiveReadGrants,
     ) -> Result<Self, SensitiveTransportError> {
         if handshake.state() != HandshakeState::Authenticated {
             return Err(SensitiveTransportError::NotAuthenticated);
         }
         if version != (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR) {
             return Err(SensitiveTransportError::WrongVersion);
+        }
+        if !grants.allows_read() {
+            return Err(SensitiveTransportError::NotAuthorized);
         }
         if !expected.is_valid() || !active.is_valid() || expected != active {
             return Err(SensitiveTransportError::BindingMismatch);
@@ -62,6 +83,7 @@ impl SensitiveClipboardTransportGate {
         current: ClipboardReadSuccessBinding,
         incoming: &mut [u8],
         now_ms: u64,
+        grants: SensitiveReadGrants,
     ) -> Result<Option<SensitiveClipboardReadSuccess>, SensitiveTransportError> {
         if handshake.state() != HandshakeState::Authenticated {
             incoming.zeroize();
@@ -72,6 +94,11 @@ impl SensitiveClipboardTransportGate {
             incoming.zeroize();
             self.inbox.cancel();
             return Err(SensitiveTransportError::WrongVersion);
+        }
+        if !grants.allows_read() {
+            incoming.zeroize();
+            self.inbox.cancel();
+            return Err(SensitiveTransportError::NotAuthorized);
         }
         if current != self.expected || !current.is_valid() {
             incoming.zeroize();
@@ -119,6 +146,13 @@ mod tests {
         handshake.on_event(HandshakeEvent::PeerHelloValid);
         handshake.on_event(HandshakeEvent::ChallengeResponseValid);
         handshake
+    }
+
+    fn grants() -> SensitiveReadGrants {
+        SensitiveReadGrants {
+            clipboard_capability: true,
+            read_permission: true,
+        }
     }
 
     fn bytes(identity: ClipboardReadSuccessBinding) -> Zeroizing<Vec<u8>> {
@@ -231,7 +265,8 @@ mod tests {
                     (IPC_VERSION_MAJOR, minor),
                     binding(),
                     binding(),
-                    100
+                    100,
+                    grants(),
                 )
                 .err(),
                 Some(SensitiveTransportError::WrongVersion)
@@ -244,7 +279,8 @@ mod tests {
                 (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
                 binding(),
                 binding(),
-                100
+                100,
+                grants(),
             )
             .err(),
             Some(SensitiveTransportError::NotAuthenticated)
@@ -257,7 +293,8 @@ mod tests {
                 (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
                 binding(),
                 binding(),
-                100
+                100,
+                grants(),
             )
             .err(),
             Some(SensitiveTransportError::NotAuthenticated)
@@ -295,7 +332,8 @@ mod tests {
                     (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
                     binding(),
                     active,
-                    100
+                    100,
+                    grants(),
                 )
                 .err(),
                 Some(SensitiveTransportError::BindingMismatch)
@@ -311,6 +349,7 @@ mod tests {
             binding(),
             binding(),
             100,
+            grants(),
         )
         .expect("version and authenticated identity");
         let mut wire = bytes(binding());
@@ -321,7 +360,8 @@ mod tests {
                     (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
                     binding(),
                     &mut wire[..7],
-                    101
+                    101,
+                    grants(),
                 )
                 .expect("partial header")
                 .is_none()
@@ -333,7 +373,8 @@ mod tests {
                     (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
                     binding(),
                     &mut wire[7..12],
-                    102
+                    102,
+                    grants(),
                 )
                 .expect("header")
                 .is_none()
@@ -345,6 +386,7 @@ mod tests {
                 binding(),
                 &mut wire[12..],
                 103,
+                grants(),
             )
             .expect("correlated response")
             .expect("completed");
@@ -360,7 +402,8 @@ mod tests {
                     (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
                     binding(),
                     &mut replay,
-                    104
+                    104,
+                    grants(),
                 )
                 .err(),
             Some(SensitiveTransportError::Inbox(
@@ -378,6 +421,7 @@ mod tests {
             binding(),
             binding(),
             100,
+            grants(),
         )
         .expect("safe start");
         let mut wire = bytes(binding());
@@ -388,7 +432,8 @@ mod tests {
                     (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
                     binding(),
                     &mut wire[..16],
-                    101
+                    101,
+                    grants(),
                 )
                 .expect("fragment")
                 .is_none()
@@ -404,7 +449,8 @@ mod tests {
                     (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
                     stale,
                     &mut wire[16..],
-                    102
+                    102,
+                    grants(),
                 )
                 .err(),
             Some(SensitiveTransportError::WorkerChanged)
@@ -418,7 +464,8 @@ mod tests {
                     (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
                     binding(),
                     &mut late,
-                    103
+                    103,
+                    grants(),
                 )
                 .err(),
             Some(SensitiveTransportError::Inbox(
@@ -436,6 +483,7 @@ mod tests {
             binding(),
             binding(),
             100,
+            grants(),
         )
         .expect("authorized session");
         let mut frame = bytes(binding());
@@ -446,7 +494,8 @@ mod tests {
                     (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
                     binding(),
                     &mut frame[..9],
-                    101
+                    101,
+                    grants(),
                 )
                 .expect("first fragment")
                 .is_none()
@@ -459,7 +508,8 @@ mod tests {
                     (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
                     binding(),
                     &mut frame[9..],
-                    102
+                    102,
+                    grants(),
                 )
                 .err(),
             Some(SensitiveTransportError::NotAuthenticated)
@@ -472,6 +522,7 @@ mod tests {
             binding(),
             binding(),
             100,
+            grants(),
         )
         .expect("versioned session");
         let mut secret = bytes(binding());
@@ -482,7 +533,8 @@ mod tests {
                     (IPC_VERSION_MAJOR, IPC_VERSION_MINOR),
                     binding(),
                     &mut secret,
-                    101
+                    101,
+                    grants(),
                 )
                 .err(),
             Some(SensitiveTransportError::WrongVersion)
@@ -496,7 +548,8 @@ mod tests {
                     (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
                     binding(),
                     &mut late,
-                    102
+                    102,
+                    grants(),
                 )
                 .err(),
             Some(SensitiveTransportError::Inbox(
@@ -514,6 +567,7 @@ mod tests {
             binding(),
             binding(),
             100,
+            grants(),
         )
         .expect("safe start");
         let mut wire = bytes(binding());
@@ -524,7 +578,8 @@ mod tests {
                     (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
                     binding(),
                     &mut wire[..9],
-                    101
+                    101,
+                    grants(),
                 )
                 .expect("partial")
                 .is_none()
@@ -537,7 +592,8 @@ mod tests {
                     (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
                     binding(),
                     &mut wire[9..],
-                    9999
+                    9999,
+                    grants(),
                 )
                 .err(),
             Some(SensitiveTransportError::Inbox(
@@ -551,6 +607,7 @@ mod tests {
             binding(),
             binding(),
             100,
+            grants(),
         )
         .expect("start");
         assert!(other.cancel());
@@ -563,7 +620,8 @@ mod tests {
                     (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
                     binding(),
                     &mut chunk,
-                    101
+                    101,
+                    grants(),
                 )
                 .err(),
             Some(SensitiveTransportError::Inbox(

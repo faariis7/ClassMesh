@@ -29,7 +29,9 @@ pub use clipboard_read_teacher::{
     SensitiveTeacherClipboardError, SensitiveTeacherClipboardWire, TeacherClipboardReadContext,
     encode_sensitive_teacher_read_response,
 };
-pub use clipboard_read_transport_gate::{SensitiveClipboardTransportGate, SensitiveTransportError};
+pub use clipboard_read_transport_gate::{
+    SensitiveClipboardTransportGate, SensitiveReadGrants, SensitiveTransportError,
+};
 pub use contract::{
     PRESENTATION_KEY_INSTALL_PAYLOAD_LEN, PresentationKeyInstallBinding,
     SensitivePresentationKeyInstall,
