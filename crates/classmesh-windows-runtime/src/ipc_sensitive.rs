@@ -3,6 +3,7 @@ mod clipboard_read_gate;
 mod clipboard_read_inbound;
 mod clipboard_read_stream;
 mod clipboard_read_success;
+mod clipboard_read_transport_gate;
 mod contract;
 mod decoder;
 
@@ -23,6 +24,7 @@ pub use clipboard_read_success::{
     CLIPBOARD_READ_SUCCESS_FIXED_LEN, ClipboardReadSuccessBinding, ClipboardReadSuccessError,
     SensitiveClipboardReadSuccess,
 };
+pub use clipboard_read_transport_gate::{SensitiveClipboardTransportGate, SensitiveTransportError};
 pub use contract::{
     PRESENTATION_KEY_INSTALL_PAYLOAD_LEN, PresentationKeyInstallBinding,
     SensitivePresentationKeyInstall,
