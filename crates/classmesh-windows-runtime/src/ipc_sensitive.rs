@@ -8,10 +8,6 @@ mod clipboard_read_transport_gate;
 mod contract;
 mod decoder;
 
-pub use clipboard_read_teacher::{
-    SensitiveTeacherClipboardError, SensitiveTeacherClipboardWire, TeacherClipboardReadContext,
-    encode_sensitive_teacher_read_response,
-};
 pub use clipboard_read_frame::{
     CLIPBOARD_READ_SUCCESS_FUTURE_MINOR, CLIPBOARD_READ_SUCCESS_RESERVED_TYPE,
     ClipboardReadFrameError, decode_sensitive_clipboard_read_frame,
@@ -28,6 +24,10 @@ pub use clipboard_read_stream::{
 pub use clipboard_read_success::{
     CLIPBOARD_READ_SUCCESS_FIXED_LEN, ClipboardReadSuccessBinding, ClipboardReadSuccessError,
     SensitiveClipboardReadSuccess,
+};
+pub use clipboard_read_teacher::{
+    SensitiveTeacherClipboardError, SensitiveTeacherClipboardWire, TeacherClipboardReadContext,
+    encode_sensitive_teacher_read_response,
 };
 pub use clipboard_read_transport_gate::{SensitiveClipboardTransportGate, SensitiveTransportError};
 pub use contract::{
