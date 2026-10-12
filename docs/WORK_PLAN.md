@@ -1,6 +1,31 @@
 # ClassMesh Living Work Plan
 
-> **Phase 12E8i — direct bounded zeroizing clipboard read-success frame assembly (future v12, inactive):** The reserved v12 sender currently allocates a second secret-bearing intermediate `encode_payload()` buffer before copying into the zeroizing frame. Expose a narrowly scoped append-to-existing-zeroizing-buffer operation on the validated `SensitiveClipboardReadSuccess` and build the final 12-byte-header + 48-byte-binding + bounded UTF-8 directly into one preallocated `Zeroizing<Vec<u8>>`. Prove unchanged wire bytes/Unicode and no reallocation while appending when capacity is reserved, plus roundtrip and oversize protection. Do not register message type 33 in live v11, change IPC version or enable Worker/Service/Teacher clipboard success. Test first, full workspace/Clippy and exact-head hosted Windows CI; all physical gates OPEN. Depends on #445.
+## Active execution checkpoint — 2026-10-13 (GitHub Live)
+
+**Source of truth:** `main` at `bc5974a604b1d7d7e5aa7def2a7d93298b6e8390` at verification. Recheck live main/PR/CI before making changes; this snapshot is a handoff, not a frozen source of truth. Old dated sections below are historical only.
+
+| Status | Evidence and scope |
+| --- | --- |
+| **Completed / merged** | Clipboard Phase 12E PRs **#413–#446** merged into `main`; #445 zero-copy zeroizing secret frame decode, #446 direct single-allocation future-v12 secret frame assembly. No merged active v12 text route. |
+| **In progress / review** | PR **#448**: *isolated*, redacted/zeroizing, authenticated/version/permission/binding-gated Service→Teacher clipboard-read response encoder. Head `15f0efcc4db5ae73236941b63ac3ade88f28a2d0`; hosted CI **#1783** (`38308003397`) Portable Rust **success**, Windows Build **success**; **open/unmerged** at verification. Review diff/security and confirm head before any merge. |
+| **Documentation** | PR **#447**: living-plan / implementation-status / agent handoff refresh, **open** while this checkpoint is revised. Its prior CI #1785 was green on the earlier head; recheck CI on the new head before merging. |
+| **Blocked / deliberately inactive** | Production Worker↔Service IPC remains **minor 11, read failure-only**. Future minor-12 zeroizing codec, decode/ingress, Worker read adapter, replay guard, Service one-shot inbox and Teacher encoder exist as **separately tested building blocks**, **not** wired into production. No actual authorized clipboard text has been transferred end-to-end. |
+| **Physical gates OPEN** | Phase 4 two-PC #3, Phase 6F #108, Phase 7D/7H #153, 8D #276, 9F #281, 10G #288, and 12B4b/12C4/12D/12E physical, GPU/media, classroom, accessibility and clipboard acceptance. CI/VM smoke is not a physical acceptance substitute. |
+
+### Next executable sequence — not already finished
+
+1. Review PR #448 against current `main`; check exact-head Portable Rust + Windows Build and security properties before merge. Do not claim production Teacher clipboard delivery from a serializer alone.
+2. **Design and test authenticated, explicitly negotiated future-v12 sensitive Worker→Service transport integration** without exposing secrets to generic v11 `IpcFrameDecoder` or logs. Start with exact Worker PID/session/generation, control session/monotonic sequence/request, one-shot ownership, cancellation/timeout/worker-replacement and zeroizing fragmented-stream tests; version-negotiation remains closed until exercised.
+3. Connect the already-isolated native Win32 read adapter to a **separately authorized** Worker event only once v12 end-to-end security checks hold; ensure all failures, stale IDs, replay, unauthorized/degraded handshakes fail **before OS read** and do not leak content.
+4. Deliver exactly one validated `ClipboardReadResponse` over an authorized Teacher control session, with explicit capability/ReadClipboard permission and redacted diagnostics. Then exercise Windows VMPal VM2 integration and actual multi-PC physical qualification **separately**, leaving gates open until evidence.
+5. Resume other unfinished Phase 12D file-transfer work and previously tracked physical gates only after prioritization; do not redo completed PRs or silently change finance/product/UI-adjacent code.
+
+### Cross-chat continuity protocol
+
+Every new ClassMesh chat should read **this section**, `docs/IMPLEMENTATION_STATUS.md`, `docs/AGENT_HANDOFF.md`, `.agents/skills/classmesh-engineering/SKILL.md`, and Issue [#328](https://github.com/faariis7/ClassMesh/issues/328), then query current `main`, recent commits, open PRs, exact-head CI, and blocked gates. State **Completed / In progress / Next / Blocked / Physical gates**, update docs before coding, write small TDD PRs, and merge only if exact-head Windows and portable checks/review pass. User has already authorized routine coding and green PR merges; do not ask for repeated approvals. Never treat older chat narration, stale worktrees or archival sections as GitHub Live.
+
+
+---
 
 > **Phase 12E8h — zero-copy reserved-v12 sensitive frame decode (stacked on #444; inactive):** The dedicated `decode_sensitive_clipboard_read_frame` still allocates and copies a second plaintext payload from its already-owned `Zeroizing<Vec<u8>>` frame. Validate the complete header, reserved-v12 minor, message type, strict checked length and 64KiB boundary first, then transfer the same zeroizing frame allocation to the typed secret owner with a safely validated fixed-offset UTF-8 view. Test pointer ownership from input frame through typed result, Unicode/bounds, bad header/padding and no text-bearing generic decoder. No active IPC v11 changes, native clipboard reads, Teacher success or hardware-gate closures. Require workspace/Clippy/Windows CI before merge.
 
