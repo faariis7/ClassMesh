@@ -75,9 +75,7 @@ pub fn decode_sensitive_clipboard_read_frame(
     {
         return Err(ClipboardReadFrameError::LengthMismatch);
     }
-    let mut sensitive_payload = Zeroizing::new(Vec::with_capacity(payload_len));
-    sensitive_payload.extend_from_slice(&frame[IPC_HEADER_LEN..]);
-    SensitiveClipboardReadSuccess::decode_payload(sensitive_payload)
+    SensitiveClipboardReadSuccess::decode_payload_with_prefix(frame, IPC_HEADER_LEN)
         .map_err(ClipboardReadFrameError::InvalidPayload)
 }
 #[cfg(test)]
