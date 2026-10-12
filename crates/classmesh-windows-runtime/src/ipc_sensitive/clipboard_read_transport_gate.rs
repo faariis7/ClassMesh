@@ -250,7 +250,9 @@ mod tests {
                     authorized,
                 )
                 .err(),
-            Some(SensitiveTransportError::Inbox(SensitiveInboxError::Finished))
+            Some(SensitiveTransportError::Inbox(
+                SensitiveInboxError::Finished
+            ))
         );
         assert_eq!(late, [0; 8]);
     }
