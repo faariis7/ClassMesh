@@ -8,7 +8,7 @@
 | --- | --- |
 | **Completed / merged** | Clipboard Phase 12E PRs **#413–#446** merged into `main`; #445 zero-copy zeroizing secret frame decode, #446 direct single-allocation future-v12 secret frame assembly. No merged active v12 text route. |
 | **In progress / review** | PR **#448**: *isolated*, redacted/zeroizing, authenticated/version/permission/binding-gated Service→Teacher clipboard-read response encoder. Head `15f0efcc4db5ae73236941b63ac3ade88f28a2d0`; hosted CI **#1783** (`38308003397`) Portable Rust **success**, Windows Build **success**; **open/unmerged** at verification. Review diff/security and confirm head before any merge. |
-| **Documentation** | PR **#447**: living-plan / implementation-status / agent handoff refresh, **open** while this checkpoint is revised. Its prior CI #1785 was green on the earlier head; recheck CI on the new head before merging. |
+| **Documentation** | PR **#449** (supersedes #447) contains this canonical living-plan, implementation-status and agent handoff refresh. **Open at this checkpoint; require exact-head Portable Rust + Windows Build CI before merging.** |
 | **Blocked / deliberately inactive** | Production Worker↔Service IPC remains **minor 11, read failure-only**. Future minor-12 zeroizing codec, decode/ingress, Worker read adapter, replay guard, Service one-shot inbox and Teacher encoder exist as **separately tested building blocks**, **not** wired into production. No actual authorized clipboard text has been transferred end-to-end. |
 | **Physical gates OPEN** | Phase 4 two-PC #3, Phase 6F #108, Phase 7D/7H #153, 8D #276, 9F #281, 10G #288, and 12B4b/12C4/12D/12E physical, GPU/media, classroom, accessibility and clipboard acceptance. CI/VM smoke is not a physical acceptance substitute. |
 
