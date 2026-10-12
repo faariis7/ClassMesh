@@ -30,8 +30,8 @@ pub enum ClipboardReadFrameError {
 pub fn encode_sensitive_clipboard_read_frame(
     message: &SensitiveClipboardReadSuccess,
 ) -> Zeroizing<Vec<u8>> {
-    let payload = message.encode_payload();
-    let length = u32::try_from(payload.len()).expect("bounded 64KiB text + fixed metadata");
+    let payload_len = CLIPBOARD_READ_SUCCESS_FIXED_LEN + message.text().len();
+    let length = u32::try_from(payload_len).expect("bounded 64KiB text + fixed metadata");
     let header = IpcHeader {
         version_major: IPC_VERSION_MAJOR,
         version_minor: CLIPBOARD_READ_SUCCESS_FUTURE_MINOR,
@@ -40,9 +40,10 @@ pub fn encode_sensitive_clipboard_read_frame(
     }
     .encode()
     .expect("bounded v12 sensitive frame");
-    let mut frame = Zeroizing::new(Vec::with_capacity(IPC_HEADER_LEN + payload.len()));
+    let mut frame = Zeroizing::new(Vec::with_capacity(IPC_HEADER_LEN + payload_len));
     frame.extend_from_slice(&header);
-    frame.extend_from_slice(&payload);
+    message.append_encoded_payload(&mut frame);
+    debug_assert_eq!(frame.len(), IPC_HEADER_LEN + payload_len);
     frame
 }
 
