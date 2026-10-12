@@ -1,5 +1,7 @@
 # ClassMesh Living Work Plan
 
+> **CI reliability checkpoint — Phase 12E follow-up (2026-10-13):** Windows Build on docs PR #449 run #1789 failed the existing protected-unicast loopback test with WSAEADDRINUSE (10048), because the test reserves an ephemeral UDP port, closes that socket, then tries to bind the released port while parallel tests can race. Repair ONLY the test setup by retaining an already-bound ephemeral UDP media socket throughout loopback transfer; construct the private test receiver from that socket and the exact assigned nonzero port. Keep runtime/public receiver validation unchanged. Verify full workspace tests, rustfmt, Clippy -D warnings and new exact-head Portable Rust + Windows Build CI before merging. This is test infrastructure work, NOT GPU, classroom, Teacher clipboard, or physical acceptance.
+
 ## Active execution checkpoint — 2026-10-13 (GitHub Live)
 
 **Source of truth:** `main` at `64168439483846ad44d16b4152c23d026fc3bd21` at verification. Recheck live main/PR/CI before making changes; this snapshot is a handoff, not a frozen source of truth. Old dated sections below are historical only.
