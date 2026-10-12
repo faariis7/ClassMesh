@@ -2113,7 +2113,13 @@ impl IpcFrameDecoder {
                     return Err(error);
                 }
             };
-            if header.message_type == MESSAGE_SERVICE_PRESENTATION_KEY_INSTALL {
+            if header.message_type == MESSAGE_SERVICE_PRESENTATION_KEY_INSTALL
+                || header.message_type == crate::ipc_sensitive::CLIPBOARD_READ_SUCCESS_RESERVED_TYPE
+            {
+                // Never materialize a secret-bearing payload in an ordinary
+                // IpcFrame (which has a non-redacted Debug and Vec<u8>).
+                // Reject a reserved future-v12 clipboard success message from
+                // its header alone, even if a peer forges the active v11 minor.
                 self.zeroize_buffer();
                 return Err(IpcFrameError::SensitiveMessageRequiresZeroizingDecoder);
             }
@@ -2164,6 +2170,83 @@ mod tests {
             },
             payload: payload.to_vec(),
         }
+    }
+
+    #[test]
+    fn generic_decoder_rejects_future_sensitive_clipboard_before_payload_delivery() {
+        use crate::ipc_sensitive::{
+            ClipboardReadSuccessBinding, SensitiveClipboardReadSuccess,
+            encode_sensitive_clipboard_read_frame,
+        };
+        use zeroize::Zeroizing;
+
+        let secret = "حافظة حساسة 😀";
+        let typed = SensitiveClipboardReadSuccess::new(
+            ClipboardReadSuccessBinding {
+                worker_process_id: 42,
+                worker_session_id: 7,
+                worker_generation: 4,
+                control_session_id: 77,
+                control_sequence: 101,
+                request_id: 19,
+            },
+            Zeroizing::new(secret.as_bytes().to_vec()),
+        )
+        .expect("valid bound text");
+        let wire = encode_sensitive_clipboard_read_frame(&typed);
+        let mut decoder = IpcFrameDecoder::default();
+        assert_eq!(
+            decoder.push_bytes(&wire),
+            Err(IpcFrameError::SensitiveMessageRequiresZeroizingDecoder),
+        );
+        // Error clears partial buffers rather than poisoning subsequent v11 IPC.
+        let ordinary = frame(&[1, 2, 3]);
+        let normal_wire = ordinary.encode().expect("v11 frame");
+        assert_eq!(
+            decoder.push_bytes(&normal_wire).expect("recovered decoder"),
+            vec![ordinary]
+        );
+    }
+
+    #[test]
+    fn generic_decoder_denies_reserved_clipboard_from_header_only_and_fragmented_input() {
+        use crate::ipc_sensitive::{
+            CLIPBOARD_READ_SUCCESS_FUTURE_MINOR, CLIPBOARD_READ_SUCCESS_RESERVED_TYPE,
+        };
+        let mut header = IpcHeader {
+            version_major: IPC_VERSION_MAJOR,
+            version_minor: CLIPBOARD_READ_SUCCESS_FUTURE_MINOR,
+            message_type: CLIPBOARD_READ_SUCCESS_RESERVED_TYPE,
+            payload_len: 64,
+        }
+        .encode()
+        .expect("bounded header");
+        for cut in [0, 5, 11] {
+            let mut decoder = IpcFrameDecoder::default();
+            if cut > 0 {
+                assert!(
+                    decoder
+                        .push_bytes(&header[..cut])
+                        .expect("header partial")
+                        .is_empty()
+                );
+            }
+            assert_eq!(
+                decoder.push_bytes(&header[cut..]),
+                Err(IpcFrameError::SensitiveMessageRequiresZeroizingDecoder),
+            );
+            let ordinary = frame(&[9, 8]);
+            assert_eq!(
+                decoder.push_bytes(&ordinary.encode().expect("ordinary")),
+                Ok(vec![ordinary]),
+            );
+        }
+        // Reject regardless of forged v11 version header, even without data.
+        header[5] = IPC_VERSION_MINOR;
+        assert_eq!(
+            IpcFrameDecoder::default().push_bytes(&header),
+            Err(IpcFrameError::SensitiveMessageRequiresZeroizingDecoder),
+        );
     }
 
     #[test]
