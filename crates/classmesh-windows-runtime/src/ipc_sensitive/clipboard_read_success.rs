@@ -104,10 +104,20 @@ impl SensitiveClipboardReadSuccess {
     /// IpcFrame decoder MUST NOT handle this text-bearing payload.
     #[must_use]
     pub fn encode_payload(&self) -> Zeroizing<Vec<u8>> {
-        let text = &self.text[self.text_start..];
         let mut out = Zeroizing::new(Vec::with_capacity(
-            CLIPBOARD_READ_SUCCESS_FIXED_LEN + text.len(),
+            CLIPBOARD_READ_SUCCESS_FIXED_LEN + self.text().len(),
         ));
+        self.append_encoded_payload(&mut out);
+        out
+    }
+
+    /// Appends a fixed-size authenticated Worker/control binding and the
+    /// already validated UTF-8 view to an owned zeroizing buffer. The dedicated
+    /// v12 frame writer reserves the whole bounded allocation *once*, avoiding
+    /// an intermediate secret-bearing serialized payload allocation.
+    pub(super) fn append_encoded_payload(&self, out: &mut Zeroizing<Vec<u8>>) {
+        let text = &self.text[self.text_start..];
+        let previous_len = out.len();
         out.extend_from_slice(&self.binding.worker_process_id.to_be_bytes());
         out.extend_from_slice(&self.binding.worker_session_id.to_be_bytes());
         out.extend_from_slice(&self.binding.control_session_id.to_be_bytes());
@@ -118,8 +128,10 @@ impl SensitiveClipboardReadSuccess {
         out.extend_from_slice(&length.to_be_bytes());
         out.extend_from_slice(&[0_u8; 4]); // Reserved: must remain zero.
         out.extend_from_slice(text);
-        debug_assert_eq!(out.len(), CLIPBOARD_READ_SUCCESS_FIXED_LEN + text.len());
-        out
+        debug_assert_eq!(
+            out.len() - previous_len,
+            CLIPBOARD_READ_SUCCESS_FIXED_LEN + text.len()
+        );
     }
 
     pub fn decode_payload(payload: Zeroizing<Vec<u8>>) -> Result<Self, ClipboardReadSuccessError> {
@@ -274,6 +286,27 @@ mod tests {
             &encoded_again[CLIPBOARD_READ_SUCCESS_FIXED_LEN..],
             secret.as_bytes()
         );
+    }
+
+    #[test]
+    fn appending_payload_to_preallocated_zeroizing_frame_does_not_reallocate() {
+        use crate::ipc::IPC_HEADER_LEN;
+        let sample = SensitiveClipboardReadSuccess::new(
+            binding(),
+            Zeroizing::new("مرحبا 🌙 إختبار".as_bytes().to_vec()),
+        )
+        .expect("valid bounded clipboard");
+        let expected_payload = sample.encode_payload();
+        let mut wire = Zeroizing::new(Vec::with_capacity(IPC_HEADER_LEN + expected_payload.len()));
+        wire.extend_from_slice(&[0_u8; IPC_HEADER_LEN]);
+        let original_allocation = wire.as_ptr();
+        sample.append_encoded_payload(&mut wire);
+        assert_eq!(
+            wire.as_ptr(),
+            original_allocation,
+            "direct frame assembly must use its sole preallocated output buffer"
+        );
+        assert_eq!(&wire[IPC_HEADER_LEN..], expected_payload.as_slice());
     }
 
     #[test]
