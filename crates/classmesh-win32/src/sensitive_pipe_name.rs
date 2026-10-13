@@ -63,6 +63,83 @@ mod tests {
         }
     }
 
+    fn admission() -> SensitivePipeAdmission {
+        SensitivePipeAdmission::register(binding(), binding(), 77, 0x1234)
+            .expect("exact service and Worker incarnation")
+    }
+
+    #[test]
+    fn sensitive_admission_accepts_only_exact_os_worker_peer() {
+        let gate = admission();
+        assert_eq!(
+            gate.pipe_name(),
+            sensitive_worker_pipe_name(binding()).expect("valid name"),
+        );
+        assert_eq!(gate.validate_os_peer(binding(), 0x1234, 77, 7), Ok(()));
+        assert_eq!(
+            gate.validate_os_peer(binding(), 0x1234, 78, 7),
+            Err(SensitivePipeAdmissionError::UnexpectedWorkerPeer),
+        );
+        assert_eq!(
+            gate.validate_os_peer(binding(), 0x1234, 77, 8),
+            Err(SensitivePipeAdmissionError::UnexpectedWorkerPeer),
+        );
+    }
+
+    #[test]
+    fn sensitive_admission_refuses_missing_expected_or_current_identity() {
+        for expected in [
+            SensitivePipeNameBinding { service_process_id: 0, ..binding() },
+            SensitivePipeNameBinding { worker_generation: 0, ..binding() },
+            SensitivePipeNameBinding { control_session_id: 0, ..binding() },
+            SensitivePipeNameBinding { control_sequence: 0, ..binding() },
+            SensitivePipeNameBinding { request_id: 0, ..binding() },
+        ] {
+            assert_eq!(
+                SensitivePipeAdmission::register(expected, expected, 77, 0x1234).err(),
+                Some(SensitivePipeAdmissionError::InvalidIdentity),
+            );
+        }
+        assert_eq!(
+            SensitivePipeAdmission::register(binding(), binding(), 0, 0x1234).err(),
+            Some(SensitivePipeAdmissionError::InvalidIdentity),
+        );
+        assert_eq!(
+            SensitivePipeAdmission::register(binding(), binding(), 77, 0).err(),
+            Some(SensitivePipeAdmissionError::ServiceProcessChanged),
+        );
+        assert_eq!(
+            SensitivePipeAdmission::register(binding(), binding(), 77, 0x1235).err(),
+            Some(SensitivePipeAdmissionError::ServiceProcessChanged),
+        );
+    }
+
+    #[test]
+    fn sensitive_admission_denies_replaced_worker_or_control_request() {
+        let gate = admission();
+        for changed in [
+            SensitivePipeNameBinding { service_process_id: 9, ..binding() },
+            SensitivePipeNameBinding { worker_session_id: 9, ..binding() },
+            SensitivePipeNameBinding { worker_generation: 10, ..binding() },
+            SensitivePipeNameBinding { control_session_id: 10 + 1, ..binding() },
+            SensitivePipeNameBinding { control_sequence: 11 + 1, ..binding() },
+            SensitivePipeNameBinding { request_id: 12 + 1, ..binding() },
+        ] {
+            assert_eq!(
+                gate.validate_os_peer(changed, 0x1234, 77, 7),
+                Err(SensitivePipeAdmissionError::BindingChanged),
+            );
+            assert_eq!(
+                SensitivePipeAdmission::register(binding(), changed, 77, 0x1234).err(),
+                Some(SensitivePipeAdmissionError::BindingChanged),
+            );
+        }
+        assert_eq!(
+            gate.validate_os_peer(binding(), 0x1235, 77, 7),
+            Err(SensitivePipeAdmissionError::ServiceProcessChanged),
+        );
+    }
+
     #[test]
     fn sensitive_pipe_has_independent_bounded_namespace_and_stable_identity() {
         let name = sensitive_worker_pipe_name(binding()).expect("valid identity");
