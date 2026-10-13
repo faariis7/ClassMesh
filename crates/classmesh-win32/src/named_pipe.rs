@@ -11,8 +11,9 @@ use crate::sensitive_pipe_name::{
 };
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
-    ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING,
+    ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE,
+    INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CreateWellKnownSid, GetLengthSid,
@@ -23,12 +24,13 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE,
     OPEN_EXISTING, PIPE_ACCESS_DUPLEX, PIPE_ACCESS_INBOUND, ReadFile, WriteFile,
 };
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
     GetNamedPipeClientSessionId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
     PIPE_WAIT,
 };
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentProcess, WaitForSingleObject};
 
 const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
@@ -117,6 +119,7 @@ impl SensitivePipeAdmission {
 #[derive(Debug)]
 pub struct NamedPipeServer {
     handle: HANDLE,
+    overlapped: bool,
 }
 
 // The HANDLE is uniquely owned by this wrapper and Windows permits pipe I/O from another thread.
@@ -284,7 +287,10 @@ impl NamedPipeServer {
         if handle == INVALID_HANDLE_VALUE {
             return Err(last_error("CreateNamedPipeW"));
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            overlapped: open_mode & FILE_FLAG_OVERLAPPED != 0,
+        })
     }
 
     /// Waits for the exact Worker process launched by the Service. Unexpected local clients are
@@ -309,7 +315,10 @@ impl NamedPipeServer {
     }
 
     pub fn try_clone(&self) -> Result<Self, PipeError> {
-        duplicate_pipe_handle(self.handle).map(|handle| Self { handle })
+        duplicate_pipe_handle(self.handle).map(|handle| Self {
+            handle,
+            overlapped: self.overlapped,
+        })
     }
 
     pub fn read(&self, buffer: &mut [u8]) -> Result<usize, PipeError> {
@@ -343,6 +352,89 @@ impl NamedPipeServer {
             }
         }
         Ok(())
+    }
+
+    /// Only used by the separately allocated v12 inbound-overlapped listener.
+    /// A pending kernel operation must be drained even after CancelIoEx, before
+    /// its stack OVERLAPPED and manual-reset event are allowed to go away.
+    pub(crate) fn wait_for_overlapped_peer(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<PipePeer, PipeError> {
+        if !self.overlapped {
+            return Err(PipeError {
+                stage: "SensitivePipeRequiresOverlappedHandle",
+                win32_error: 87,
+            });
+        }
+        // Validate BEFORE launching any OS request. An early ? while pending
+        // would drop the OVERLAPPED while the kernel still owns its pointer.
+        let millis = u32::try_from(timeout.as_millis()).map_err(|_| PipeError {
+            stage: "SensitivePipeConnectDeadline",
+            win32_error: 87,
+        })?;
+        let event = unsafe { CreateEventW(null(), 1, 0, null()) };
+        if event.is_null() {
+            return Err(last_error("SensitivePipeCreateEvent"));
+        }
+
+        // SAFETY: initialized OVERLAPPED and owned event stay alive until the
+        // OS has returned a final completion status (including cancellation).
+        let mut request: OVERLAPPED = unsafe { zeroed() };
+        request.hEvent = event;
+        let result = (|| {
+            // SAFETY: this pipe was created with FILE_FLAG_OVERLAPPED; the
+            // request/event remain owned and alive throughout this function.
+            if unsafe { ConnectNamedPipe(self.handle, &mut request) } != 0 {
+                return self.peer();
+            }
+            let initial = unsafe { GetLastError() };
+            if initial == ERROR_PIPE_CONNECTED {
+                return self.peer();
+            }
+            if initial != ERROR_IO_PENDING {
+                return Err(PipeError {
+                    stage: "SensitivePipeConnectNamedPipe",
+                    win32_error: initial,
+                });
+            }
+
+            // SAFETY: event belongs to this operation and is not freed early.
+            let wait = unsafe { WaitForSingleObject(event, millis) };
+            if wait == WAIT_OBJECT_0 {
+                let mut ignored = 0_u32;
+                // SAFETY: this pending operation completed; query its status.
+                if unsafe { GetOverlappedResult(self.handle, &request, &mut ignored, 1) } == 0 {
+                    return Err(last_error("SensitivePipeConnectCompletion"));
+                }
+                return self.peer();
+            }
+
+            let failure = if wait == WAIT_TIMEOUT {
+                PipeError {
+                    stage: "SensitivePipeConnectTimeout",
+                    win32_error: WAIT_TIMEOUT,
+                }
+            } else {
+                last_error("SensitivePipeWaitForConnection")
+            };
+
+            // SAFETY: cancellation targets exactly this OVERLAPPED, not any
+            // unrelated pipe I/O. Cancellation may race with normal success.
+            unsafe { CancelIoEx(self.handle, &request) };
+            let mut ignored = 0_u32;
+            // SAFETY: even if cancellation fails or the connection won the
+            // race, wait for the OS to finish using OVERLAPPED and its event.
+            // This drain can outlive the logical deadline under a faulty
+            // driver; it is preferable to freeing a still-referenced buffer.
+            unsafe { GetOverlappedResult(self.handle, &request, &mut ignored, 1) };
+            Err(failure) // never accept a late client after the deadline
+        })();
+
+        // SAFETY: all branches above have either completed synchronously or
+        // drained pending I/O. Only now may this event handle be closed.
+        unsafe { CloseHandle(event) };
+        result
     }
 
     fn connect_one(&self) -> Result<(), PipeError> {
