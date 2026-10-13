@@ -91,13 +91,17 @@ mod tests {
     }
 
     fn admission() -> SensitivePipeAdmission {
+        // Windows runs unit tests concurrently. Every test listener must
+        // reserve its own first-instance pipe name, even in one process.
+        static NEXT_REQUEST: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(6);
         let identity = SensitivePipeNameBinding {
             service_process_id: std::process::id(),
             worker_session_id: 42,
             worker_generation: 7,
             control_session_id: 4,
             control_sequence: 5,
-            request_id: 6,
+            request_id: NEXT_REQUEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         };
         SensitivePipeAdmission::register(identity, identity, 77, std::process::id())
             .expect("current exact identity")
