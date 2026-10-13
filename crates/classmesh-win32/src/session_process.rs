@@ -57,6 +57,18 @@ impl SessionProcess {
         self.session_id
     }
 
+    /// Accept an OS-reported pipe peer only while the exact launched Worker
+    /// process HANDLE is still active. The handle is not reconstructed from PID.
+    pub fn matches_live_pipe_peer(
+        &self,
+        peer: &crate::named_pipe::PipePeer,
+    ) -> Result<bool, LaunchError> {
+        if self.process_id != peer.process_id() || self.session_id != peer.session_id() {
+            return Ok(false);
+        }
+        self.is_running()
+    }
+
     pub fn is_running(&self) -> Result<bool, LaunchError> {
         // SAFETY: `self.process` is an owned, live process handle until Drop.
         match unsafe { WaitForSingleObject(self.process, 0) } {
@@ -270,6 +282,73 @@ mod tests {
     use std::os::windows::ffi::OsStringExt;
 
     use super::*;
+
+    #[test]
+    fn alive_session_process_accepts_only_exact_os_pipe_peer_identity() {
+        use crate::named_pipe::PipePeer;
+        use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        let current = unsafe { GetCurrentProcess() };
+        let mut owned = null_mut();
+        // SAFETY: DuplicateHandle creates an owned process handle for this test,
+        // so SessionProcess may safely CloseHandle it on drop.
+        assert_ne!(
+            unsafe {
+                DuplicateHandle(
+                    current,
+                    current,
+                    current,
+                    &mut owned,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            },
+            0
+        );
+        let process = SessionProcess {
+            process: owned,
+            process_id: std::process::id(),
+            session_id: 37,
+        };
+        assert!(
+            process
+                .matches_live_pipe_peer(&PipePeer::synthetic_for_test(std::process::id(), 37))
+                .expect("valid current process handle")
+        );
+        assert!(
+            !process
+                .matches_live_pipe_peer(&PipePeer::synthetic_for_test(std::process::id() + 1, 37))
+                .expect("wrong PID is rejected")
+        );
+        assert!(
+            !process
+                .matches_live_pipe_peer(&PipePeer::synthetic_for_test(std::process::id(), 38))
+                .expect("wrong session is rejected")
+        );
+    }
+
+    #[test]
+    fn signaled_worker_wait_handle_is_not_an_admissible_live_process() {
+        use crate::named_pipe::PipePeer;
+        use windows_sys::Win32::System::Threading::CreateEventW;
+
+        // Only in a unit test, a signaled event acts as a deterministic exited
+        // waitable HANDLE; in production this field is from CreateProcessAsUserW.
+        let signaled = unsafe { CreateEventW(null(), 1, 1, null()) };
+        assert!(!signaled.is_null());
+        let process = SessionProcess {
+            process: signaled,
+            process_id: std::process::id(),
+            session_id: 37,
+        };
+        assert!(
+            !process
+                .matches_live_pipe_peer(&PipePeer::synthetic_for_test(std::process::id(), 37))
+                .expect("signaled waitable handle must fail closed")
+        );
+    }
 
     #[test]
     fn worker_command_line_contains_session_and_quotes_path() {
