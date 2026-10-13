@@ -49,10 +49,30 @@ impl fmt::Display for PipeError {
 
 impl std::error::Error for PipeError {}
 
+/// OS-observed connected named-pipe client. This is not a claim of an
+/// authenticated ClassMesh control session, only the Windows-reported peer.
+/// Other crates must not fabricate this value from untrusted request fields.
+///
+/// ```compile_fail
+/// use classmesh_win32::PipePeer;
+/// let forged = PipePeer { process_id: 42, session_id: 7 };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipePeer {
-    pub process_id: u32,
-    pub session_id: u32,
+    process_id: u32,
+    session_id: u32,
+}
+
+impl PipePeer {
+    #[must_use]
+    pub const fn process_id(&self) -> u32 {
+        self.process_id
+    }
+
+    #[must_use]
+    pub const fn session_id(&self) -> u32 {
+        self.session_id
+    }
 }
 
 /// Blocking local named-pipe endpoint used only for Service <-> Session Worker IPC.
@@ -464,6 +484,16 @@ fn last_error(stage: &'static str) -> PipeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reported_pipe_peer_identity_is_read_only() {
+        let peer = PipePeer {
+            process_id: 42,
+            session_id: 7,
+        };
+        assert_eq!(peer.process_id(), 42);
+        assert_eq!(peer.session_id(), 7);
+    }
 
     #[test]
     fn duplicate_pipe_handle_creates_independently_owned_handle() {
