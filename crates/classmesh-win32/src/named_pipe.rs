@@ -569,6 +569,26 @@ mod tests {
             ),
             Err(SensitivePipeAdmissionError::BindingChanged)
         );
+        assert_eq!(
+            gate.validate_attested_pipe_peer(
+                SensitivePipeNameBinding {
+                    control_sequence: 15,
+                    ..current
+                },
+                &valid,
+            ),
+            Err(SensitivePipeAdmissionError::BindingChanged)
+        );
+        assert_eq!(
+            gate.validate_attested_pipe_peer(
+                SensitivePipeNameBinding {
+                    request_id: 16,
+                    ..current
+                },
+                &valid,
+            ),
+            Err(SensitivePipeAdmissionError::BindingChanged)
+        );
     }
 
     #[test]
