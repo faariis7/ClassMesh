@@ -158,6 +158,22 @@ mod tests {
     }
 
     #[test]
+    fn listener_cannot_be_rebound_to_a_different_current_control_admission() {
+        let original = admission();
+        let unrelated_request = admission();
+        let listener = SensitivePipeListener::create(&original, &system_sid())
+            .expect("allocate an isolated listener for one current control request");
+        assert!(listener.validate_listener_binding(&original).is_ok());
+        assert_eq!(
+            listener
+                .validate_listener_binding(&unrelated_request)
+                .expect_err("a different current control must not reuse this pipe")
+                .stage,
+            "SensitivePipeListenerBinding"
+        );
+    }
+
+    #[test]
     fn rejects_untrusted_or_missing_user_sid_before_sensitive_allocation() {
         let expected = admission();
         let err =
