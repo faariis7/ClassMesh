@@ -1,4 +1,41 @@
 //! Future-v12 dedicated sensitive channel allocation only. No secret I/O APIs.
+//!
+//! Creating this pipe does NOT authorize a Worker or negotiate v12. The caller
+//! must separately verify the connected OS peer, launched Worker HANDLE,
+//! trusted Service policy, current grant, replay binding and cancellation-safe
+//! overlapped I/O before ever accepting a clipboard byte.
+
+use crate::named_pipe::{NamedPipeServer, PipeError};
+use crate::sensitive_pipe_name::SensitivePipeAdmission;
+
+/// Owns an ACL-restricted, local-only, inbound-only, overlapped named-pipe
+/// instance. Intentionally exposes NO connection, read or write methods.
+#[derive(Debug)]
+pub struct SensitivePipeListener {
+    name: String,
+    _owned_pipe: NamedPipeServer,
+}
+
+impl SensitivePipeListener {
+    /// Only allocation is supported; authentication and I/O are future gates.
+    pub fn create(
+        admission: &SensitivePipeAdmission,
+        user_sid: &[u8],
+    ) -> Result<Self, PipeError> {
+        let name = admission.pipe_name();
+        let pipe = NamedPipeServer::create_sensitive_overlapped_for_user(&name, user_sid)?;
+        Ok(Self {
+            name,
+            _owned_pipe: pipe,
+        })
+    }
+
+    /// Address only, not a bearer secret or proof of peer identity.
+    #[must_use]
+    pub fn pipe_name(&self) -> &str {
+        &self.name
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -42,6 +79,11 @@ mod tests {
         assert_eq!(err.stage, "NamedPipeUserSidValidation");
         let err = SensitivePipeListener::create(&expected, &[1, 2, 3])
             .expect_err("invalid SID must fail closed");
+        assert_eq!(err.stage, "NamedPipeUserSidValidation");
+        // SID header is present, but its declared subauthority array is not:
+        // never hand this truncated buffer to an unchecked Win32 SID parser.
+        let err = SensitivePipeListener::create(&expected, &[1, 15, 0, 0, 0, 0, 0, 0])
+            .expect_err("truncated SID must fail before IsValidSid");
         assert_eq!(err.stage, "NamedPipeUserSidValidation");
     }
 

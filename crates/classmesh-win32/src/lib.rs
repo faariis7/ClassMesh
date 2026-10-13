@@ -45,6 +45,8 @@ pub use session::current_session_id;
 pub use session_process::{
     LaunchError, SessionProcess, launch_worker_in_session, session_user_sid,
 };
+#[cfg(windows)]
+pub use sensitive_pipe_listener::SensitivePipeListener;
 
 #[cfg(windows)]
 pub use teacher_interaction::{
