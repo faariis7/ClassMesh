@@ -71,7 +71,8 @@ impl SensitivePipeAdmission {
 
     /// Recheck Service identity and current control binding after the OS
     /// reports the connected pipe's client process and session IDs.
-    pub fn validate_os_peer(
+    #[cfg(any(windows, test))]
+    pub(crate) fn validate_os_peer(
         &self,
         current: SensitivePipeNameBinding,
         actual_service_process_id: u32,

@@ -6,6 +6,10 @@ use std::ptr::{null, null_mut};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::sensitive_pipe_name::{
+    SensitivePipeAdmission, SensitivePipeAdmissionError, SensitivePipeNameBinding,
+};
+
 use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
     ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
@@ -72,6 +76,25 @@ impl PipePeer {
     #[must_use]
     pub const fn session_id(&self) -> u32 {
         self.session_id
+    }
+}
+
+/// Windows-only bridge: the caller must pass an opaque peer object that
+/// originated from the existing named-pipe OS attestation path. The current
+/// Service process ID is read locally; neither ID may come from request data.
+/// This is an additional check, not v12 negotiation/authorization or transport.
+impl SensitivePipeAdmission {
+    pub fn validate_attested_pipe_peer(
+        &self,
+        current: SensitivePipeNameBinding,
+        observed: &PipePeer,
+    ) -> Result<(), SensitivePipeAdmissionError> {
+        self.validate_os_peer(
+            current,
+            std::process::id(),
+            observed.process_id(),
+            observed.session_id(),
+        )
     }
 }
 
