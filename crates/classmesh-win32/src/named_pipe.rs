@@ -68,7 +68,10 @@ impl PipePeer {
     /// solely inside the named-pipe OS verification implementation.
     #[cfg(test)]
     pub(crate) const fn synthetic_for_test(process_id: u32, session_id: u32) -> Self {
-        Self { process_id, session_id }
+        Self {
+            process_id,
+            session_id,
+        }
     }
 
     #[must_use]

@@ -294,7 +294,17 @@ mod tests {
         // SAFETY: DuplicateHandle creates an owned process handle for this test,
         // so SessionProcess may safely CloseHandle it on drop.
         assert_ne!(
-            unsafe { DuplicateHandle(current, current, current, &mut owned, 0, 0, DUPLICATE_SAME_ACCESS) },
+            unsafe {
+                DuplicateHandle(
+                    current,
+                    current,
+                    current,
+                    &mut owned,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            },
             0
         );
         let process = SessionProcess {
@@ -302,15 +312,21 @@ mod tests {
             process_id: std::process::id(),
             session_id: 37,
         };
-        assert!(process
-            .matches_live_pipe_peer(&PipePeer::synthetic_for_test(std::process::id(), 37))
-            .expect("valid current process handle"));
-        assert!(!process
-            .matches_live_pipe_peer(&PipePeer::synthetic_for_test(std::process::id() + 1, 37))
-            .expect("wrong PID is rejected"));
-        assert!(!process
-            .matches_live_pipe_peer(&PipePeer::synthetic_for_test(std::process::id(), 38))
-            .expect("wrong session is rejected"));
+        assert!(
+            process
+                .matches_live_pipe_peer(&PipePeer::synthetic_for_test(std::process::id(), 37))
+                .expect("valid current process handle")
+        );
+        assert!(
+            !process
+                .matches_live_pipe_peer(&PipePeer::synthetic_for_test(std::process::id() + 1, 37))
+                .expect("wrong PID is rejected")
+        );
+        assert!(
+            !process
+                .matches_live_pipe_peer(&PipePeer::synthetic_for_test(std::process::id(), 38))
+                .expect("wrong session is rejected")
+        );
     }
 
     #[test]
@@ -327,9 +343,11 @@ mod tests {
             process_id: std::process::id(),
             session_id: 37,
         };
-        assert!(!process
-            .matches_live_pipe_peer(&PipePeer::synthetic_for_test(std::process::id(), 37))
-            .expect("signaled waitable handle must fail closed"));
+        assert!(
+            !process
+                .matches_live_pipe_peer(&PipePeer::synthetic_for_test(std::process::id(), 37))
+                .expect("signaled waitable handle must fail closed")
+        );
     }
 
     #[test]
