@@ -351,6 +351,80 @@ mod tests {
     }
 
     #[test]
+    fn sensitive_peer_requires_live_process_and_exact_current_control() {
+        use crate::named_pipe::PipePeer;
+        use crate::sensitive_pipe_listener::SensitivePipeListener;
+        use crate::sensitive_pipe_name::{
+            SensitivePipeAdmission, SensitivePipeNameBinding,
+        };
+        use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
+        use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentProcess};
+
+        let handle = unsafe { GetCurrentProcess() };
+        let mut duplicate = null_mut();
+        assert_ne!(unsafe {
+            DuplicateHandle(handle, handle, handle, &mut duplicate,
+                0, 0, DUPLICATE_SAME_ACCESS)
+        }, 0);
+        let worker = SessionProcess {
+            process: duplicate,
+            process_id: std::process::id(),
+            session_id: 37,
+        };
+        let current = SensitivePipeNameBinding {
+            service_process_id: std::process::id(),
+            worker_session_id: 37,
+            worker_generation: 7,
+            control_session_id: 11,
+            control_sequence: 12,
+            request_id: 13,
+        };
+        let admission = SensitivePipeAdmission::register(
+            current, current, std::process::id(), std::process::id(),
+        ).expect("valid Service-controlled admission");
+        let peer = PipePeer::synthetic_for_test(std::process::id(), 37);
+        assert!(SensitivePipeListener::verify_bound_worker(
+            &admission, current, &worker, &peer,
+        ).is_ok());
+        let changed = SensitivePipeNameBinding {
+            request_id: current.request_id + 1,
+            ..current
+        };
+        assert_eq!(
+            SensitivePipeListener::verify_bound_worker(&admission, changed, &worker, &peer)
+                .expect_err("stale control request must be denied").stage,
+            "SensitivePipePeerBinding"
+        );
+        let other = PipePeer::synthetic_for_test(std::process::id() + 1, 37);
+        assert_eq!(
+            SensitivePipeListener::verify_bound_worker(&admission, current, &worker, &other)
+                .expect_err("wrong OS process must be denied").stage,
+            "SensitivePipePeerBinding"
+        );
+        let other_session = PipePeer::synthetic_for_test(std::process::id(), 38);
+        assert_eq!(
+            SensitivePipeListener::verify_bound_worker(
+                &admission, current, &worker, &other_session,
+            ).expect_err("wrong Windows session must be denied").stage,
+            "SensitivePipePeerBinding"
+        );
+
+        let signaled = unsafe { CreateEventW(null(), 1, 1, null()) };
+        assert!(!signaled.is_null());
+        let exited_worker = SessionProcess {
+            process: signaled,
+            process_id: std::process::id(),
+            session_id: 37,
+        };
+        assert_eq!(
+            SensitivePipeListener::verify_bound_worker(
+                &admission, current, &exited_worker, &peer,
+            ).expect_err("exited Worker is never admitted").stage,
+            "SensitiveWorkerNotRunning"
+        );
+    }
+
+    #[test]
     fn worker_command_line_contains_session_and_quotes_path() {
         let path = Path::new(r"C:\Program Files\ClassMesh\classmesh-worker.exe");
         let command = quoted_command_line(path, 17, &[OsString::from("pipe name")]);
