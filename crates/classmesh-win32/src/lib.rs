@@ -1,5 +1,6 @@
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 pub mod clipboard_bounds;
+pub mod sensitive_pipe_name;
 
 #[cfg(windows)]
 mod clipboard;
