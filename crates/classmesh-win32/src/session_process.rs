@@ -471,8 +471,13 @@ mod tests {
         assert_ne!(
             unsafe {
                 DuplicateHandle(
-                    native_process, native_process, native_process,
-                    &mut owned, 0, 0, DUPLICATE_SAME_ACCESS,
+                    native_process,
+                    native_process,
+                    native_process,
+                    &mut owned,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
                 )
             },
             0
@@ -482,8 +487,7 @@ mod tests {
             process_id: std::process::id(),
             session_id: session,
         };
-        static NEXT_ID: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(1000);
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1000);
         let binding = SensitivePipeNameBinding {
             service_process_id: std::process::id(),
             worker_session_id: session,
@@ -493,7 +497,10 @@ mod tests {
             request_id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         };
         let admission = SensitivePipeAdmission::register(
-            binding, binding, launched.process_id(), std::process::id(),
+            binding,
+            binding,
+            launched.process_id(),
+            std::process::id(),
         )
         .expect("trusted current control request");
 
@@ -502,15 +509,17 @@ mod tests {
         assert_ne!(
             unsafe {
                 CreateWellKnownSid(
-                    WinAuthenticatedUserSid, null_mut(),
-                    sid.as_mut_ptr().cast(), &mut len,
+                    WinAuthenticatedUserSid,
+                    null_mut(),
+                    sid.as_mut_ptr().cast(),
+                    &mut len,
                 )
             },
             0
         );
         sid.truncate(len as usize);
-        let mut listener = SensitivePipeListener::create(&admission, &sid)
-            .expect("temporary local-only pipe");
+        let mut listener =
+            SensitivePipeListener::create(&admission, &sid).expect("temporary local-only pipe");
         let path = format!(r"\\.\pipe\{}", listener.pipe_name());
 
         let client = std::thread::spawn(move || {
@@ -518,8 +527,13 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
             let handle = unsafe {
                 CreateFileW(
-                    wide.as_ptr(), GENERIC_WRITE, FILE_SHARE_NONE,
-                    null(), OPEN_EXISTING, 0, null_mut(),
+                    wide.as_ptr(),
+                    GENERIC_WRITE,
+                    FILE_SHARE_NONE,
+                    null(),
+                    OPEN_EXISTING,
+                    0,
+                    null_mut(),
                 )
             };
             assert_ne!(handle, INVALID_HANDLE_VALUE, "native client connects");
