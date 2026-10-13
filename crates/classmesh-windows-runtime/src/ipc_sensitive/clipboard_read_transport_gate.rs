@@ -165,6 +165,62 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_legacy_handshake_needs_sealed_dedicated_v12_proof() {
+        let proof = DedicatedSensitiveChannelProof::for_test(
+            binding(),
+            (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
+        );
+        assert!(SensitiveClipboardTransportGate::new(
+            proof,
+            &authenticated(),
+            (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
+            binding(),
+            binding(),
+            100,
+            grants(),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn sealed_proof_cannot_be_rebound_to_a_new_worker_or_downgraded() {
+        let mut other = binding();
+        other.request_id += 1;
+        let wrong_request = DedicatedSensitiveChannelProof::for_test(
+            other,
+            (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
+        );
+        assert_eq!(
+            SensitiveClipboardTransportGate::new(
+                wrong_request,
+                &authenticated(),
+                (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
+                binding(),
+                binding(),
+                100,
+                grants(),
+            ).err(),
+            Some(SensitiveTransportError::BindingMismatch)
+        );
+        let downgraded = DedicatedSensitiveChannelProof::for_test(
+            binding(),
+            (IPC_VERSION_MAJOR, IPC_VERSION_MINOR),
+        );
+        assert_eq!(
+            SensitiveClipboardTransportGate::new(
+                downgraded,
+                &authenticated(),
+                (IPC_VERSION_MAJOR, CLIPBOARD_READ_SUCCESS_FUTURE_MINOR),
+                binding(),
+                binding(),
+                100,
+                grants(),
+            ).err(),
+            Some(SensitiveTransportError::WrongVersion)
+        );
+    }
+
+    #[test]
     fn missing_capability_or_permission_cannot_create_sensitive_ingress() {
         for denied in [
             SensitiveReadGrants {
