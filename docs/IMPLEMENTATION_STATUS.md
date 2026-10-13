@@ -1,5 +1,14 @@
 # ClassMesh Implementation Status
 
+## VERIFIED CURRENT STATE — 2026-10-13 (supersedes historical snapshots)
+
+- **main** `32948d2cacebce43cd4e8e3a72ba785e81c28f79` with #455 and #456 merged. #455 dormant future-v12 exact Worker/Service/control admission. #456 makes Win32 OS-observed `PipePeer` opaque (private numeric fields/read-only accessors), tests Windows and forbidden safe external construction. Both exact-head hosted Windows Build and Portable Rust green; #456 run #38463123344 fully SUCCESS.
+- **Open PR #457:** head `b79c0814cb6a54d5609cef14ce1e586bfb3d669b`, Windows-only opaque peer bridge, raw numeric API crate-private and Service PID from current process. Local Synology fmt/Clippy/workspace green; exact-head CI #38465284537 pending at this checkpoint. No merge claim until hosted CI both green.
+- **Live IPC:** v11 minor 11, authorized ClipboardRead still returns unavailable/empty. No production v12 secret path, real authenticated native sensitive pipe, bounded/cancelled OS reads, live Worker content transfer, Teacher result or Windows VM/physical E2E. All physical/performance/visual-accessibility/2-PC/GPU/classroom gates OPEN; see Issue #328.
+- **Next:** enforce launched `SessionProcess` HANDLE liveness before/after exact OS peer checks, create dedicated ACL local overlapped sensitive pipe, authenticated explicit v12 version and per-fragment grants, zeroizing pending/late/cancelled reads and authenticated one-shot Teacher response. Never use PID-only as authentication or legacy generic v11 decoder for secrets.
+
+---
+
 ## VERIFIED STATUS — 2026-10-13 (newer authoritative GitHub Live checkpoint)
 
 - **Main:** `75e0e7aec332bad95e44028c5c80908699cb5863`; PRs **#448–#453 merged**. #449 handoff reconciliation; #450 fixes the Windows UDP loopback test-only port bind race; #451 rejects pre-clipboard control wire (<0.3) in inactive v12 Teacher response; #452 enforces current ClipboardText capability and ReadClipboard permission at Service sensitive ingress registration and each fragment, canceling/zeroizing on revocation; #453 reserves an independent, six-field exact-bound v12-sensitive **pipe address only**. #450–#453 passed full exact-head hosted Portable Rust and Windows Build CI and reviews. #452 Synology: 110 Windows-runtime lib unit tests, fmt, workspace Clippy and tests passed. #453 Synology: 8 win32 lib tests, fmt, workspace Clippy and tests passed.
