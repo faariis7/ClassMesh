@@ -19,6 +19,8 @@ mod session;
 #[cfg(windows)]
 mod session_process;
 #[cfg(windows)]
+mod sensitive_pipe_listener;
+#[cfg(windows)]
 mod teacher_interaction;
 #[cfg(windows)]
 mod workstation;
