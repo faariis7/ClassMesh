@@ -79,12 +79,30 @@ mod tests {
     fn every_worker_and_control_binding_dimension_gets_a_distinct_path() {
         let baseline = sensitive_worker_pipe_name(binding()).expect("baseline");
         for changed in [
-            SensitivePipeNameBinding { service_process_id: 8, ..binding() },
-            SensitivePipeNameBinding { worker_session_id: 8, ..binding() },
-            SensitivePipeNameBinding { worker_generation: 8, ..binding() },
-            SensitivePipeNameBinding { control_session_id: 8, ..binding() },
-            SensitivePipeNameBinding { control_sequence: 8, ..binding() },
-            SensitivePipeNameBinding { request_id: 8, ..binding() },
+            SensitivePipeNameBinding {
+                service_process_id: 8,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                worker_session_id: 8,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                worker_generation: 8,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                control_session_id: 8,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                control_sequence: 8,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                request_id: 8,
+                ..binding()
+            },
         ] {
             assert_ne!(
                 sensitive_worker_pipe_name(changed).expect("valid"),
@@ -96,12 +114,30 @@ mod tests {
     #[test]
     fn zero_or_unbound_component_is_denied_without_a_pipe_name() {
         for invalid in [
-            SensitivePipeNameBinding { service_process_id: 0, ..binding() },
-            SensitivePipeNameBinding { worker_session_id: 0, ..binding() },
-            SensitivePipeNameBinding { worker_generation: 0, ..binding() },
-            SensitivePipeNameBinding { control_session_id: 0, ..binding() },
-            SensitivePipeNameBinding { control_sequence: 0, ..binding() },
-            SensitivePipeNameBinding { request_id: 0, ..binding() },
+            SensitivePipeNameBinding {
+                service_process_id: 0,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                worker_session_id: 0,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                worker_generation: 0,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                control_session_id: 0,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                control_sequence: 0,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                request_id: 0,
+                ..binding()
+            },
         ] {
             assert_eq!(sensitive_worker_pipe_name(invalid), None);
         }
