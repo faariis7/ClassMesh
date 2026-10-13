@@ -1,5 +1,52 @@
-//! Pure, platform-independent tests for an inactive future-v12 sensitive pipe namespace.
-//! Names are discoverable addresses, NEVER authentication tokens.
+//! Inactive future-v12 sensitive Worker→Service Named Pipe address only.
+//!
+//! The address MUST NOT be treated as proof of peer identity, authentication,
+//! authorization, or a bearer secret. A future Windows caller must create a
+//! separate ACL-restricted LOCAL pipe and independently attest the OS peer
+//! process/session, Worker incarnation, authenticated control and read grants.
+
+/// Non-secret identity fields that make the sensitive pipe name disjoint for
+/// each Worker incarnation and for each authorized control request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SensitivePipeNameBinding {
+    pub service_process_id: u32,
+    pub worker_session_id: u32,
+    pub worker_generation: u64,
+    pub control_session_id: u64,
+    pub control_sequence: u64,
+    pub request_id: u64,
+}
+
+impl SensitivePipeNameBinding {
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.service_process_id != 0
+            && self.worker_session_id != 0
+            && self.worker_generation != 0
+            && self.control_session_id != 0
+            && self.control_sequence != 0
+            && self.request_id != 0
+    }
+}
+
+/// Returns a bounded, deterministic pipe *address*, never an authorization
+/// token. An unbound request cannot be used to allocate a sensitive pipe.
+/// Does not open, listen on or connect to a Windows pipe.
+#[must_use]
+pub fn sensitive_worker_pipe_name(identity: SensitivePipeNameBinding) -> Option<String> {
+    if !identity.is_valid() {
+        return None;
+    }
+    Some(format!(
+        "ClassMesh-Sensitive-v12-{service:08x}-{session:08x}-{generation:016x}-{control:016x}-{sequence:016x}-{request:016x}",
+        service = identity.service_process_id,
+        session = identity.worker_session_id,
+        generation = identity.worker_generation,
+        control = identity.control_session_id,
+        sequence = identity.control_sequence,
+        request = identity.request_id,
+    ))
+}
 
 #[cfg(test)]
 mod tests {
