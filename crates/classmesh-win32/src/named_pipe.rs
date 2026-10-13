@@ -20,8 +20,8 @@ use windows_sys::Win32::Security::{
     SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE, SetSecurityDescriptorDacl, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
-    ReadFile, WriteFile,
+    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE,
+    OPEN_EXISTING, PIPE_ACCESS_DUPLEX, PIPE_ACCESS_INBOUND, ReadFile, WriteFile,
 };
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
@@ -124,10 +124,42 @@ unsafe impl Send for NamedPipeServer {}
 
 impl NamedPipeServer {
     pub fn create_for_user(name: &str, user_sid: &[u8]) -> Result<Self, PipeError> {
+        Self::create_for_user_mode(
+            name,
+            user_sid,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        )
+    }
+
+    /// Allocate a future-v12 *inbound only* overlapped pipe. There are no
+    /// sensitive connection or I/O APIs here; the owner must implement
+    /// separate OS peer verification and cancellation-safe reads later.
+    pub(crate) fn create_sensitive_overlapped_for_user(
+        name: &str,
+        user_sid: &[u8],
+    ) -> Result<Self, PipeError> {
+        Self::create_for_user_mode(
+            name,
+            user_sid,
+            PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+        )
+    }
+
+    fn create_for_user_mode(
+        name: &str,
+        user_sid: &[u8],
+        open_mode: u32,
+    ) -> Result<Self, PipeError> {
         let full_name = normalize_pipe_name(name);
         let wide_name = wide_null(OsStr::new(&full_name));
 
-        if user_sid.is_empty() || unsafe { IsValidSid(user_sid.as_ptr().cast_mut().cast()) } == 0 {
+        // Win32 IsValidSid sees only a pointer, not the slice length. Ensure
+        // its fixed eight-byte header and every declared four-byte subauthority
+        // exist in this buffer before passing an untrusted SID to Win32.
+        let complete_sid = user_sid.len() >= 8
+            && usize::from(user_sid[1]) <= 15
+            && user_sid.len() >= 8 + usize::from(user_sid[1]) * 4;
+        if !complete_sid || unsafe { IsValidSid(user_sid.as_ptr().cast_mut().cast()) } == 0 {
             return Err(PipeError {
                 stage: "NamedPipeUserSidValidation",
                 win32_error: 87, // ERROR_INVALID_PARAMETER
@@ -233,7 +265,6 @@ impl NamedPipeServer {
             bInheritHandle: 0,
         };
 
-        let open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE;
         let pipe_mode =
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
         // SAFETY: the UTF-16 name is NUL-terminated, security attributes and ACL live through the
