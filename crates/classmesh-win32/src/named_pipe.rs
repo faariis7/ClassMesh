@@ -68,6 +68,16 @@ pub struct PipePeer {
 }
 
 impl PipePeer {
+    /// Only available to crate unit tests. Production peers can be created
+    /// solely inside the named-pipe OS verification implementation.
+    #[cfg(test)]
+    pub(crate) const fn synthetic_for_test(process_id: u32, session_id: u32) -> Self {
+        Self {
+            process_id,
+            session_id,
+        }
+    }
+
     #[must_use]
     pub const fn process_id(&self) -> u32 {
         self.process_id
