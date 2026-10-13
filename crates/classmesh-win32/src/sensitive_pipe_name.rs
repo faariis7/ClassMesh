@@ -44,6 +44,7 @@ pub enum SensitivePipeAdmissionError {
 #[derive(Debug)]
 pub struct SensitivePipeAdmission {
     expected: SensitivePipeNameBinding,
+    #[cfg(any(windows, test))]
     expected_worker_process_id: u32,
 }
 
@@ -65,6 +66,7 @@ impl SensitivePipeAdmission {
         }
         Ok(Self {
             expected,
+            #[cfg(any(windows, test))]
             expected_worker_process_id,
         })
     }
