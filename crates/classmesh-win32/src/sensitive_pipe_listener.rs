@@ -56,6 +56,22 @@ impl SensitivePipeListener {
         self._owned_pipe.wait_for_overlapped_peer(timeout)
     }
 
+    /// The admission used during allocation must be the exact same current
+    /// request that is later used to admit the connected OS peer. Pipe names
+    /// are addresses, not bearer credentials, and cannot be rebound.
+    fn validate_listener_binding(
+        &self,
+        admission: &SensitivePipeAdmission,
+    ) -> Result<(), PipeError> {
+        if self.name != admission.pipe_name() {
+            return Err(PipeError {
+                stage: "SensitivePipeListenerBinding",
+                win32_error: 5,
+            });
+        }
+        Ok(())
+    }
+
     /// Only the Service's true launched process HANDLE and the current
     /// authenticated control request are admissible inputs here. This is an
     /// OS-peer + live-process binding, NOT v12 negotiation or read permission.
@@ -66,6 +82,7 @@ impl SensitivePipeListener {
         current: SensitivePipeNameBinding,
         worker: &SessionProcess,
     ) -> Result<crate::PipePeer, PipeError> {
+        self.validate_listener_binding(admission)?;
         if !worker.is_running().map_err(|e| PipeError {
             stage: "SensitiveWorkerHandleCheck",
             win32_error: e.win32_error,
