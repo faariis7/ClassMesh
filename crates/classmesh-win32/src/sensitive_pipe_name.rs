@@ -29,6 +29,73 @@ impl SensitivePipeNameBinding {
     }
 }
 
+/// Fail-closed preflight for the future dedicated v12 pipe. The caller must
+/// obtain peer PID/session from Windows pipe APIs, never untrusted Worker data.
+/// This is not authentication, IPC negotiation or a byte transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensitivePipeAdmissionError {
+    InvalidIdentity,
+    ServiceProcessChanged,
+    BindingChanged,
+    UnexpectedWorkerPeer,
+}
+
+/// Pins the Service-launched Worker identity and current control request.
+#[derive(Debug)]
+pub struct SensitivePipeAdmission {
+    expected: SensitivePipeNameBinding,
+    expected_worker_process_id: u32,
+}
+
+impl SensitivePipeAdmission {
+    pub fn register(
+        expected: SensitivePipeNameBinding,
+        current: SensitivePipeNameBinding,
+        expected_worker_process_id: u32,
+        actual_service_process_id: u32,
+    ) -> Result<Self, SensitivePipeAdmissionError> {
+        if !expected.is_valid() || !current.is_valid() || expected_worker_process_id == 0 {
+            return Err(SensitivePipeAdmissionError::InvalidIdentity);
+        }
+        if actual_service_process_id != expected.service_process_id {
+            return Err(SensitivePipeAdmissionError::ServiceProcessChanged);
+        }
+        if current != expected {
+            return Err(SensitivePipeAdmissionError::BindingChanged);
+        }
+        Ok(Self { expected, expected_worker_process_id })
+    }
+
+    /// Recheck Service identity and current control binding after the OS
+    /// reports the connected pipe's client process and session IDs.
+    pub fn validate_os_peer(
+        &self,
+        current: SensitivePipeNameBinding,
+        actual_service_process_id: u32,
+        observed_worker_process_id: u32,
+        observed_worker_session_id: u32,
+    ) -> Result<(), SensitivePipeAdmissionError> {
+        if actual_service_process_id != self.expected.service_process_id {
+            return Err(SensitivePipeAdmissionError::ServiceProcessChanged);
+        }
+        if !current.is_valid() || current != self.expected {
+            return Err(SensitivePipeAdmissionError::BindingChanged);
+        }
+        if observed_worker_process_id != self.expected_worker_process_id
+            || observed_worker_session_id != self.expected.worker_session_id
+        {
+            return Err(SensitivePipeAdmissionError::UnexpectedWorkerPeer);
+        }
+        Ok(())
+    }
+
+    /// Deterministic address only, never an authentication token.
+    #[must_use]
+    pub fn pipe_name(&self) -> String {
+        sensitive_worker_pipe_name(self.expected).expect("validated full identity")
+    }
+}
+
 /// Returns a bounded, deterministic pipe *address*, never an authorization
 /// token. An unbound request cannot be used to allocate a sensitive pipe.
 /// Does not open, listen on or connect to a Windows pipe.
