@@ -6,7 +6,8 @@
 //! overlapped I/O before ever accepting a clipboard byte.
 
 use crate::named_pipe::{NamedPipeServer, PipeError};
-use crate::sensitive_pipe_name::SensitivePipeAdmission;
+use crate::sensitive_pipe_name::{SensitivePipeAdmission, SensitivePipeNameBinding};
+use crate::session_process::SessionProcess;
 
 /// Owns an ACL-restricted, local-only, inbound-only, overlapped named-pipe
 /// instance. Intentionally exposes NO connection, read or write methods.
@@ -34,7 +35,7 @@ impl SensitivePipeListener {
     /// Returning a PipePeer is *not* an authorization, v12 negotiation, or
     /// permission to read clipboard bytes. On timeout this listener is poisoned
     /// and must be discarded; no retry can reuse the same incarnation.
-    pub fn wait_for_os_peer(
+    pub(crate) fn wait_for_os_peer(
         &mut self,
         timeout: std::time::Duration,
     ) -> Result<crate::PipePeer, PipeError> {
@@ -53,6 +54,56 @@ impl SensitivePipeListener {
         }
         self.attempt_started = true;
         self._owned_pipe.wait_for_overlapped_peer(timeout)
+    }
+
+    /// Only the Service's true launched process HANDLE and the current
+    /// authenticated control request are admissible inputs here. This is an
+    /// OS-peer + live-process binding, NOT v12 negotiation or read permission.
+    pub fn wait_for_bound_worker(
+        &mut self,
+        timeout: std::time::Duration,
+        admission: &SensitivePipeAdmission,
+        current: SensitivePipeNameBinding,
+        worker: &SessionProcess,
+    ) -> Result<crate::PipePeer, PipeError> {
+        if !worker.is_running().map_err(|e| PipeError {
+            stage: "SensitiveWorkerHandleCheck",
+            win32_error: e.win32_error,
+        })? {
+            return Err(PipeError {
+                stage: "SensitiveWorkerNotRunning",
+                win32_error: 5,
+            });
+        }
+        let peer = self.wait_for_os_peer(timeout)?;
+        Self::verify_bound_worker(admission, current, worker, &peer)?;
+        Ok(peer)
+    }
+
+    /// Recheck the exact current Service/Worker/control request and the
+    /// original, uniquely owned, launched process HANDLE after OS admission.
+    pub(crate) fn verify_bound_worker(
+        admission: &SensitivePipeAdmission,
+        current: SensitivePipeNameBinding,
+        worker: &SessionProcess,
+        peer: &crate::PipePeer,
+    ) -> Result<(), PipeError> {
+        admission
+            .validate_attested_pipe_peer(current, peer)
+            .map_err(|_| PipeError {
+                stage: "SensitivePipePeerBinding",
+                win32_error: 5,
+            })?;
+        if !worker.matches_live_pipe_peer(peer).map_err(|e| PipeError {
+            stage: "SensitiveWorkerHandleCheck",
+            win32_error: e.win32_error,
+        })? {
+            return Err(PipeError {
+                stage: "SensitiveWorkerNotRunning",
+                win32_error: 5,
+            });
+        }
+        Ok(())
     }
 
     /// Address only, not a bearer secret or proof of peer identity.
