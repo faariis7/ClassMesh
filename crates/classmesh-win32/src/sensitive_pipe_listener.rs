@@ -93,8 +93,7 @@ mod tests {
     fn admission() -> SensitivePipeAdmission {
         // Windows runs unit tests concurrently. Every test listener must
         // reserve its own first-instance pipe name, even in one process.
-        static NEXT_REQUEST: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(6);
+        static NEXT_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(6);
         let identity = SensitivePipeNameBinding {
             service_process_id: std::process::id(),
             worker_session_id: 42,
@@ -125,13 +124,15 @@ mod tests {
 
     #[test]
     fn sensitive_accept_rejects_invalid_deadlines_without_starting_io() {
-        let listener = SensitivePipeListener::create(&admission(), &system_sid())
-            .expect("test listener");
+        let listener =
+            SensitivePipeListener::create(&admission(), &system_sid()).expect("test listener");
         let mut listener = listener;
-        let err = listener.wait_for_os_peer(std::time::Duration::from_millis(2_501))
+        let err = listener
+            .wait_for_os_peer(std::time::Duration::from_millis(2_501))
             .expect_err("deadline over 2500ms must fail closed");
         assert_eq!(err.stage, "SensitivePipeConnectDeadline");
-        let err = listener.wait_for_os_peer(std::time::Duration::ZERO)
+        let err = listener
+            .wait_for_os_peer(std::time::Duration::ZERO)
             .expect_err("zero duration is not a valid deadline");
         assert_eq!(err.stage, "SensitivePipeConnectDeadline");
     }
@@ -141,12 +142,16 @@ mod tests {
         let mut listener = SensitivePipeListener::create(&admission(), &system_sid())
             .expect("local sensitive pipe");
         let start = std::time::Instant::now();
-        let err = listener.wait_for_os_peer(std::time::Duration::from_millis(75))
+        let err = listener
+            .wait_for_os_peer(std::time::Duration::from_millis(75))
             .expect_err("no client must result in a cancelled operation");
         assert_eq!(err.stage, "SensitivePipeConnectTimeout");
-        assert!(start.elapsed() < std::time::Duration::from_secs(3),
-            "cancellation must drain promptly under healthy Windows");
-        let late = listener.wait_for_os_peer(std::time::Duration::from_millis(50))
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "cancellation must drain promptly under healthy Windows"
+        );
+        let late = listener
+            .wait_for_os_peer(std::time::Duration::from_millis(50))
             .expect_err("cancelled listener is permanently single-use");
         assert_eq!(late.stage, "SensitivePipeConnectAlreadyAttempted");
         drop(listener); // no kernel operation may still borrow OVERLAPPED here
@@ -154,21 +159,27 @@ mod tests {
 
     #[test]
     fn overlapped_sensitive_connect_returns_os_reported_local_client() {
+        use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::Security::WinAuthenticatedUserSid;
         use windows_sys::Win32::Storage::FileSystem::{
             CreateFileW, FILE_SHARE_NONE, OPEN_EXISTING,
         };
-        use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
 
         // A group SID is used only in this throwaway localhost unit test so
         // the current unprivileged test process may also connect as client.
         let mut test_sid = vec![0; SECURITY_MAX_SID_SIZE as usize];
         let mut size = test_sid.len() as u32;
-        assert_ne!(unsafe {
-            CreateWellKnownSid(
-                WinAuthenticatedUserSid, null_mut(), test_sid.as_mut_ptr().cast(), &mut size,
-            )
-        }, 0);
+        assert_ne!(
+            unsafe {
+                CreateWellKnownSid(
+                    WinAuthenticatedUserSid,
+                    null_mut(),
+                    test_sid.as_mut_ptr().cast(),
+                    &mut size,
+                )
+            },
+            0
+        );
         test_sid.truncate(size as usize);
 
         let mut listener = SensitivePipeListener::create(&admission(), &test_sid)
@@ -177,20 +188,33 @@ mod tests {
         let client = std::thread::spawn(move || {
             use std::os::windows::ffi::OsStrExt;
             let name: Vec<u16> = std::ffi::OsStr::new(&full)
-                .encode_wide().chain(std::iter::once(0)).collect();
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
             std::thread::sleep(std::time::Duration::from_millis(20));
             let handle = unsafe {
-                CreateFileW(name.as_ptr(), GENERIC_WRITE, FILE_SHARE_NONE,
-                            std::ptr::null(), OPEN_EXISTING, 0, std::ptr::null_mut())
+                CreateFileW(
+                    name.as_ptr(),
+                    GENERIC_WRITE,
+                    FILE_SHARE_NONE,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null_mut(),
+                )
             };
             assert_ne!(handle, INVALID_HANDLE_VALUE, "test client must connect");
             std::thread::sleep(std::time::Duration::from_millis(60));
             assert_ne!(unsafe { CloseHandle(handle) }, 0);
         });
-        let peer = listener.wait_for_os_peer(std::time::Duration::from_secs(2))
+        let peer = listener
+            .wait_for_os_peer(std::time::Duration::from_secs(2))
             .expect("client connected before deadline");
         assert_eq!(peer.process_id(), std::process::id());
-        assert_eq!(peer.session_id(), crate::current_session_id().expect("Windows session"));
+        assert_eq!(
+            peer.session_id(),
+            crate::current_session_id().expect("Windows session")
+        );
         client.join().expect("test client");
     }
 
