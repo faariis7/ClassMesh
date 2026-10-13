@@ -59,8 +59,20 @@ impl std::error::Error for PipeError {}
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipePeer {
-    pub process_id: u32,
-    pub session_id: u32,
+    process_id: u32,
+    session_id: u32,
+}
+
+impl PipePeer {
+    #[must_use]
+    pub const fn process_id(&self) -> u32 {
+        self.process_id
+    }
+
+    #[must_use]
+    pub const fn session_id(&self) -> u32 {
+        self.session_id
+    }
 }
 
 /// Blocking local named-pipe endpoint used only for Service <-> Session Worker IPC.
