@@ -57,6 +57,18 @@ impl SessionProcess {
         self.session_id
     }
 
+    /// Accept an OS-reported pipe peer only while the exact launched Worker
+    /// process HANDLE is still active. The handle is not reconstructed from PID.
+    pub fn matches_live_pipe_peer(
+        &self,
+        peer: &crate::named_pipe::PipePeer,
+    ) -> Result<bool, LaunchError> {
+        if self.process_id != peer.process_id() || self.session_id != peer.session_id() {
+            return Ok(false);
+        }
+        self.is_running()
+    }
+
     pub fn is_running(&self) -> Result<bool, LaunchError> {
         // SAFETY: `self.process` is an owned, live process handle until Drop.
         match unsafe { WaitForSingleObject(self.process, 0) } {
@@ -274,8 +286,8 @@ mod tests {
     #[test]
     fn alive_session_process_accepts_only_exact_os_pipe_peer_identity() {
         use crate::named_pipe::PipePeer;
-        use windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS;
-        use windows_sys::Win32::System::Threading::{DuplicateHandle, GetCurrentProcess};
+        use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
         let current = unsafe { GetCurrentProcess() };
         let mut owned = null_mut();
