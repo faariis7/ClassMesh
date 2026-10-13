@@ -63,7 +63,10 @@ impl SensitivePipeAdmission {
         if current != expected {
             return Err(SensitivePipeAdmissionError::BindingChanged);
         }
-        Ok(Self { expected, expected_worker_process_id })
+        Ok(Self {
+            expected,
+            expected_worker_process_id,
+        })
     }
 
     /// Recheck Service identity and current control binding after the OS
@@ -156,11 +159,26 @@ mod tests {
     #[test]
     fn sensitive_admission_refuses_missing_expected_or_current_identity() {
         for expected in [
-            SensitivePipeNameBinding { service_process_id: 0, ..binding() },
-            SensitivePipeNameBinding { worker_generation: 0, ..binding() },
-            SensitivePipeNameBinding { control_session_id: 0, ..binding() },
-            SensitivePipeNameBinding { control_sequence: 0, ..binding() },
-            SensitivePipeNameBinding { request_id: 0, ..binding() },
+            SensitivePipeNameBinding {
+                service_process_id: 0,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                worker_generation: 0,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                control_session_id: 0,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                control_sequence: 0,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                request_id: 0,
+                ..binding()
+            },
         ] {
             assert_eq!(
                 SensitivePipeAdmission::register(expected, expected, 77, 0x1234).err(),
@@ -185,12 +203,30 @@ mod tests {
     fn sensitive_admission_denies_replaced_worker_or_control_request() {
         let gate = admission();
         for changed in [
-            SensitivePipeNameBinding { service_process_id: 9, ..binding() },
-            SensitivePipeNameBinding { worker_session_id: 9, ..binding() },
-            SensitivePipeNameBinding { worker_generation: 10, ..binding() },
-            SensitivePipeNameBinding { control_session_id: 10 + 1, ..binding() },
-            SensitivePipeNameBinding { control_sequence: 11 + 1, ..binding() },
-            SensitivePipeNameBinding { request_id: 12 + 1, ..binding() },
+            SensitivePipeNameBinding {
+                service_process_id: 9,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                worker_session_id: 9,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                worker_generation: 10,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                control_session_id: 10 + 1,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                control_sequence: 11 + 1,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                request_id: 12 + 1,
+                ..binding()
+            },
         ] {
             assert_eq!(
                 gate.validate_os_peer(changed, 0x1234, 77, 7),
