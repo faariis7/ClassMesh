@@ -29,6 +29,76 @@ impl SensitivePipeNameBinding {
     }
 }
 
+/// Fail-closed preflight for the future dedicated v12 pipe. The caller must
+/// obtain peer PID/session from Windows pipe APIs, never untrusted Worker data.
+/// This is not authentication, IPC negotiation or a byte transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensitivePipeAdmissionError {
+    InvalidIdentity,
+    ServiceProcessChanged,
+    BindingChanged,
+    UnexpectedWorkerPeer,
+}
+
+/// Pins the Service-launched Worker identity and current control request.
+#[derive(Debug)]
+pub struct SensitivePipeAdmission {
+    expected: SensitivePipeNameBinding,
+    expected_worker_process_id: u32,
+}
+
+impl SensitivePipeAdmission {
+    pub fn register(
+        expected: SensitivePipeNameBinding,
+        current: SensitivePipeNameBinding,
+        expected_worker_process_id: u32,
+        actual_service_process_id: u32,
+    ) -> Result<Self, SensitivePipeAdmissionError> {
+        if !expected.is_valid() || !current.is_valid() || expected_worker_process_id == 0 {
+            return Err(SensitivePipeAdmissionError::InvalidIdentity);
+        }
+        if actual_service_process_id != expected.service_process_id {
+            return Err(SensitivePipeAdmissionError::ServiceProcessChanged);
+        }
+        if current != expected {
+            return Err(SensitivePipeAdmissionError::BindingChanged);
+        }
+        Ok(Self {
+            expected,
+            expected_worker_process_id,
+        })
+    }
+
+    /// Recheck Service identity and current control binding after the OS
+    /// reports the connected pipe's client process and session IDs.
+    pub fn validate_os_peer(
+        &self,
+        current: SensitivePipeNameBinding,
+        actual_service_process_id: u32,
+        observed_worker_process_id: u32,
+        observed_worker_session_id: u32,
+    ) -> Result<(), SensitivePipeAdmissionError> {
+        if actual_service_process_id != self.expected.service_process_id {
+            return Err(SensitivePipeAdmissionError::ServiceProcessChanged);
+        }
+        if !current.is_valid() || current != self.expected {
+            return Err(SensitivePipeAdmissionError::BindingChanged);
+        }
+        if observed_worker_process_id != self.expected_worker_process_id
+            || observed_worker_session_id != self.expected.worker_session_id
+        {
+            return Err(SensitivePipeAdmissionError::UnexpectedWorkerPeer);
+        }
+        Ok(())
+    }
+
+    /// Deterministic address only, never an authentication token.
+    #[must_use]
+    pub fn pipe_name(&self) -> String {
+        sensitive_worker_pipe_name(self.expected).expect("validated full identity")
+    }
+}
+
 /// Returns a bounded, deterministic pipe *address*, never an authorization
 /// token. An unbound request cannot be used to allocate a sensitive pipe.
 /// Does not open, listen on or connect to a Windows pipe.
@@ -61,6 +131,116 @@ mod tests {
             control_sequence: 11,
             request_id: 12,
         }
+    }
+
+    fn admission() -> SensitivePipeAdmission {
+        SensitivePipeAdmission::register(binding(), binding(), 77, 0x1234)
+            .expect("exact service and Worker incarnation")
+    }
+
+    #[test]
+    fn sensitive_admission_accepts_only_exact_os_worker_peer() {
+        let gate = admission();
+        assert_eq!(
+            gate.pipe_name(),
+            sensitive_worker_pipe_name(binding()).expect("valid name"),
+        );
+        assert_eq!(gate.validate_os_peer(binding(), 0x1234, 77, 7), Ok(()));
+        assert_eq!(
+            gate.validate_os_peer(binding(), 0x1234, 78, 7),
+            Err(SensitivePipeAdmissionError::UnexpectedWorkerPeer),
+        );
+        assert_eq!(
+            gate.validate_os_peer(binding(), 0x1234, 77, 8),
+            Err(SensitivePipeAdmissionError::UnexpectedWorkerPeer),
+        );
+    }
+
+    #[test]
+    fn sensitive_admission_refuses_missing_expected_or_current_identity() {
+        for expected in [
+            SensitivePipeNameBinding {
+                service_process_id: 0,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                worker_generation: 0,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                control_session_id: 0,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                control_sequence: 0,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                request_id: 0,
+                ..binding()
+            },
+        ] {
+            assert_eq!(
+                SensitivePipeAdmission::register(expected, expected, 77, 0x1234).err(),
+                Some(SensitivePipeAdmissionError::InvalidIdentity),
+            );
+        }
+        assert_eq!(
+            SensitivePipeAdmission::register(binding(), binding(), 0, 0x1234).err(),
+            Some(SensitivePipeAdmissionError::InvalidIdentity),
+        );
+        assert_eq!(
+            SensitivePipeAdmission::register(binding(), binding(), 77, 0).err(),
+            Some(SensitivePipeAdmissionError::ServiceProcessChanged),
+        );
+        assert_eq!(
+            SensitivePipeAdmission::register(binding(), binding(), 77, 0x1235).err(),
+            Some(SensitivePipeAdmissionError::ServiceProcessChanged),
+        );
+    }
+
+    #[test]
+    fn sensitive_admission_denies_replaced_worker_or_control_request() {
+        let gate = admission();
+        for changed in [
+            SensitivePipeNameBinding {
+                service_process_id: 9,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                worker_session_id: 9,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                worker_generation: 10,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                control_session_id: 10 + 1,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                control_sequence: 11 + 1,
+                ..binding()
+            },
+            SensitivePipeNameBinding {
+                request_id: 12 + 1,
+                ..binding()
+            },
+        ] {
+            assert_eq!(
+                gate.validate_os_peer(changed, 0x1234, 77, 7),
+                Err(SensitivePipeAdmissionError::BindingChanged),
+            );
+            assert_eq!(
+                SensitivePipeAdmission::register(binding(), changed, 77, 0x1234).err(),
+                Some(SensitivePipeAdmissionError::BindingChanged),
+            );
+        }
+        assert_eq!(
+            gate.validate_os_peer(binding(), 0x1235, 77, 7),
+            Err(SensitivePipeAdmissionError::ServiceProcessChanged),
+        );
     }
 
     #[test]
