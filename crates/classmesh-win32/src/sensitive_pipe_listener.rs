@@ -14,6 +14,7 @@ use crate::sensitive_pipe_name::SensitivePipeAdmission;
 pub struct SensitivePipeListener {
     name: String,
     _owned_pipe: NamedPipeServer,
+    attempt_started: bool,
 }
 
 impl SensitivePipeListener {
@@ -24,7 +25,34 @@ impl SensitivePipeListener {
         Ok(Self {
             name,
             _owned_pipe: pipe,
+            attempt_started: false,
         })
+    }
+
+    /// Wait for exactly one native OS client on the isolated future-v12 pipe.
+    ///
+    /// Returning a PipePeer is *not* an authorization, v12 negotiation, or
+    /// permission to read clipboard bytes. On timeout this listener is poisoned
+    /// and must be discarded; no retry can reuse the same incarnation.
+    pub fn wait_for_os_peer(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<crate::PipePeer, PipeError> {
+        let millis = timeout.as_millis();
+        if millis == 0 || millis > 2_500 {
+            return Err(PipeError {
+                stage: "SensitivePipeConnectDeadline",
+                win32_error: 87,
+            });
+        }
+        if self.attempt_started {
+            return Err(PipeError {
+                stage: "SensitivePipeConnectAlreadyAttempted",
+                win32_error: 5,
+            });
+        }
+        self.attempt_started = true;
+        self._owned_pipe.wait_for_overlapped_peer(timeout)
     }
 
     /// Address only, not a bearer secret or proof of peer identity.
@@ -114,6 +142,9 @@ mod tests {
         assert_eq!(err.stage, "SensitivePipeConnectTimeout");
         assert!(start.elapsed() < std::time::Duration::from_secs(3),
             "cancellation must drain promptly under healthy Windows");
+        let late = listener.wait_for_os_peer(std::time::Duration::from_millis(50))
+            .expect_err("cancelled listener is permanently single-use");
+        assert_eq!(late.stage, "SensitivePipeConnectAlreadyAttempted");
         drop(listener); // no kernel operation may still borrow OVERLAPPED here
     }
 
