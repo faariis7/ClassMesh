@@ -18,10 +18,7 @@ pub struct SensitivePipeListener {
 
 impl SensitivePipeListener {
     /// Only allocation is supported; authentication and I/O are future gates.
-    pub fn create(
-        admission: &SensitivePipeAdmission,
-        user_sid: &[u8],
-    ) -> Result<Self, PipeError> {
+    pub fn create(admission: &SensitivePipeAdmission, user_sid: &[u8]) -> Result<Self, PipeError> {
         let name = admission.pipe_name();
         let pipe = NamedPipeServer::create_sensitive_overlapped_for_user(&name, user_sid)?;
         Ok(Self {
@@ -41,17 +38,24 @@ impl SensitivePipeListener {
 mod tests {
     use super::*;
     use crate::sensitive_pipe_name::SensitivePipeNameBinding;
+    use std::ptr::null_mut;
     use windows_sys::Win32::Security::{
         CreateWellKnownSid, SECURITY_MAX_SID_SIZE, WinLocalSystemSid,
     };
-    use std::ptr::null_mut;
 
     fn system_sid() -> Vec<u8> {
         let mut sid = vec![0; SECURITY_MAX_SID_SIZE as usize];
         let mut size = u32::try_from(sid.len()).expect("known SID size");
         // SAFETY: buffer and length are valid; this returns a Windows-defined SID.
         assert_ne!(
-            unsafe { CreateWellKnownSid(WinLocalSystemSid, null_mut(), sid.as_mut_ptr().cast(), &mut size) },
+            unsafe {
+                CreateWellKnownSid(
+                    WinLocalSystemSid,
+                    null_mut(),
+                    sid.as_mut_ptr().cast(),
+                    &mut size,
+                )
+            },
             0,
         );
         sid.truncate(size as usize);
@@ -74,8 +78,8 @@ mod tests {
     #[test]
     fn rejects_untrusted_or_missing_user_sid_before_sensitive_allocation() {
         let expected = admission();
-        let err = SensitivePipeListener::create(&expected, &[])
-            .expect_err("empty SID must fail closed");
+        let err =
+            SensitivePipeListener::create(&expected, &[]).expect_err("empty SID must fail closed");
         assert_eq!(err.stage, "NamedPipeUserSidValidation");
         let err = SensitivePipeListener::create(&expected, &[1, 2, 3])
             .expect_err("invalid SID must fail closed");
@@ -96,6 +100,9 @@ mod tests {
         assert_eq!(first.pipe_name(), expected.pipe_name());
         assert!(first.pipe_name().starts_with("ClassMesh-Sensitive-v12-"));
         let duplicate = SensitivePipeListener::create(&expected, &sid);
-        assert!(duplicate.is_err(), "first-instance restriction must reject second creation");
+        assert!(
+            duplicate.is_err(),
+            "first-instance restriction must reject second creation"
+        );
     }
 }

@@ -15,11 +15,11 @@ mod named_pipe;
 #[cfg(windows)]
 mod power;
 #[cfg(windows)]
+mod sensitive_pipe_listener;
+#[cfg(windows)]
 mod session;
 #[cfg(windows)]
 mod session_process;
-#[cfg(windows)]
-mod sensitive_pipe_listener;
 #[cfg(windows)]
 mod teacher_interaction;
 #[cfg(windows)]
@@ -40,13 +40,13 @@ pub use power::{
     Win32SystemPowerController,
 };
 #[cfg(windows)]
+pub use sensitive_pipe_listener::SensitivePipeListener;
+#[cfg(windows)]
 pub use session::current_session_id;
 #[cfg(windows)]
 pub use session_process::{
     LaunchError, SessionProcess, launch_worker_in_session, session_user_sid,
 };
-#[cfg(windows)]
-pub use sensitive_pipe_listener::SensitivePipeListener;
 
 #[cfg(windows)]
 pub use teacher_interaction::{
