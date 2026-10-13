@@ -18,6 +18,10 @@ use super::clipboard_read_frame::CLIPBOARD_READ_SUCCESS_FUTURE_MINOR;
 use super::clipboard_read_success::{ClipboardReadSuccessBinding, SensitiveClipboardReadSuccess};
 use crate::ipc::{HandshakeState, IPC_VERSION_MAJOR, IpcHandshake};
 
+// ClipboardText and its read-response contract first appeared in control v0.3.
+// A valid major with an older negotiated minor does not authorize this payload.
+const CLIPBOARD_CONTROL_MIN_MINOR: u16 = 3;
+
 pub struct TeacherClipboardReadContext<'a> {
     pub handshake: &'a IpcHandshake,
     /// Trusted IPC version from the authenticated Worker/Service peer.
@@ -101,6 +105,7 @@ pub fn encode_sensitive_teacher_read_response(
         return Err(SensitiveTeacherClipboardError::InvalidSequence);
     }
     if context.control_wire_version.0 != PROTOCOL_VERSION.major
+        || context.control_wire_version.1 < CLIPBOARD_CONTROL_MIN_MINOR
         || context.control_wire_version.1 > PROTOCOL_VERSION.minor
     {
         return Err(SensitiveTeacherClipboardError::InvalidControlVersion);
@@ -233,6 +238,27 @@ mod tests {
             encode_sensitive_teacher_read_response(absent, message("private")),
             Err(SensitiveTeacherClipboardError::NotAuthorized)
         ));
+    }
+
+    #[test]
+    fn rejects_pre_clipboard_control_wire_minor_without_generating_secret_response() {
+        let auth = auth();
+        for older_minor in [0, 2] {
+            let mut downgraded = context(&auth);
+            downgraded.control_wire_version = (0, older_minor);
+            assert!(matches!(
+                encode_sensitive_teacher_read_response(downgraded, message("private")),
+                Err(SensitiveTeacherClipboardError::InvalidControlVersion)
+            ));
+        }
+
+        let mut first_clipboard_minor = context(&auth);
+        first_clipboard_minor.control_wire_version = (0, 3);
+        let response =
+            encode_sensitive_teacher_read_response(first_clipboard_minor, message("مرحبا"))
+                .expect("clipboard contract available since v0.3");
+        let parsed = ControlEnvelope::decode(response.as_bytes()).expect("valid control wire");
+        assert_eq!(parsed.protocol_version.expect("version").minor, 3);
     }
 
     #[test]
