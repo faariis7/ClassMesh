@@ -1,6 +1,15 @@
 # ClassMesh Implementation Status
 
-## VERIFIED STATUS — 2026-10-13 (current GitHub snapshot)
+## VERIFIED STATUS — 2026-10-13 (newer authoritative GitHub Live checkpoint)
+
+- **Main:** `fd09de697705a5c20e3729f32dcecefa87f8a82a`, after PRs **#448–#452 merged**. #449 reconciles docs, #450 fixes Windows-only protected UDP loopback test port reservation (no production network behavior change), #451 tightens **dormant future-v12** Teacher response control-wire minimum 0.3, #452 checks Service sensitive ingress ClipboardText capability and ReadClipboard permission per incoming fragment and zeroizes/cancels on revocation. All three code PRs passed full exact-head Windows + Portable Rust CI. #452 verified locally via Synology Rustfmt, 110 Windows-runtime unit tests, full workspace Clippy -D warnings and workspace tests; recorded security review.
+- **Open at this snapshot:** PR **#453** adds only a distinct exact-identity-bound future-v12 sensitive pipe *name*, not a pipe or authorization. Reconciled head `d44f24b26ffcf80c8acbe539d011e72121ebb4fe`, CI `38355474252` **PENDING** at the time of drafting; do not merge without both exact-head Portable+Windows green and review. Local Synology fmt, 8 win32 unit tests, workspace Clippy/workspace tests all green.
+- **Runtime:** production IPC still **v11 minor 11**, Worker clipboard-read yields `available=false`/empty text; no live sensitive path, authenticated named pipe or actual ClipboardText success. Next: OS-attested dedicated v12 sensitive named-pipe creation+identity, explicit authenticated negotiation, bounded cancellable Windows read, authorization/zeroization/sequence/replay integration, real Worker read and Teacher response, then VM2 and physical qualification. **An inbox deadline does not cancel blocked synchronous Win32 I/O.**
+- **Physical and UX gates OPEN:** 2-PC #3, 6F #108, 7D/H #153, 8D #276, 9F #281, 10G #288, Phase12B4b/12C4/12D/12E, accessibility and actual clipboard E2E. Hosted CI is not proof of those gates; see Issue #328.
+
+---
+
+## PRIOR VERIFIED STATUS — 2026-10-13 (archival snapshot)
 
 - **Main:** `64168439483846ad44d16b4152c23d026fc3bd21`. **Merged:** PRs **#413–#446** plus **#448** (isolated Teacher serializer, exact-head CI #1783 both jobs green, security review recorded) (Phase 12E clipboard). #445/#446 improve reserved-v12 zeroizing encode/decode to avoid secondary secret plaintext allocations; this remains a dormant wire path.
 - **Documentation:** PR **#449** supersedes prior docs PR #447 (the branch carrying this verified snapshot); **feature PR #448 has now merged** for an isolated future-v12 authenticated and redacted/zeroizing **Service→Teacher ClipboardReadResponse serializer**, exact HEAD `15f0efcc4db5ae73236941b63ac3ade88f28a2d0`, CI **#1783 Portable Rust+Windows Build SUCCESS**. No production clipboard text path is activated. PR #449 needs fresh green exact-head CI; earlier run #1789 Windows Test failed an unrelated protected-unicast loopback socket bind (WSAEADDRINUSE 10048).
