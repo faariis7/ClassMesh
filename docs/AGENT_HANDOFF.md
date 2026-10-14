@@ -9,7 +9,7 @@
 **Next:** independent security-review of a **different** bootstrap approach, especially an independently authenticated outbound v12 channel with strict Service identity and exact launched Worker HANDLE, SID/session, generation, current control/grants and challenge/replay proof. Before ANY HMAC key transfer demand actual privileged Session 0/LocalSystem→interactive Worker inert positive + negative/teardown tests. Existing v12 named pipe remains inbound-only and has NO authenticated Service→Worker key delivery. **Production generic IPC v11 ClipboardRead still failure-only**; no actual payload, Teacher result, VM2, 2-PC, GPU/classroom/UX/accessibility gates are closed. Mac unavailable and VM2 recorded over its disk quota: do not resume/resize VM2 without resource investigation. Older blocks below archival.
 
 ---
- 
+
 ## QUICK RESUME — GitHub Live 2026-10-14, after PR #474
 
 **Authoritative main:** `bdcc88b1f01f836d9c6e1d2a3f02de1c0d63e8eb`. **No open PRs**. All #463/#464/#466/#468/#470/#471/#472/#473/#474 merged; do not repeat them. #473 exact-head hosted run `38556156734` **Portable Rust and Windows Build SUCCESS**, #474 run `38557805601` **both SUCCESS**. #473 established only same-session read-only inert section mapping in a spawned child; #474 tested a decoy unable to use the target-only HANDLE number. Neither qualifies LocalSystem Session-0 to interactive launched Worker, real key secrecy, native authorization or payload transfer.
