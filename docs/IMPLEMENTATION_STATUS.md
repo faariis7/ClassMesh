@@ -1,5 +1,13 @@
 # ClassMesh Implementation Status
 
+## SECURITY BLOCKER — verified 2026-10-14
+
+- GitHub `main=507518d057b4e2a6ec4ff1c5429dd311ef2ecffe`. **PR #477 OPEN, Windows Build RED** at run `38594235925` (Portable Rust SUCCESS): actual same-session native Windows child could re-duplicate its read-only HANDLE to a `PAGE_READWRITE` section asking for `FILE_MAP_WRITE` and successfully create a writable mapping. The direct read-only handle mapping check in #473 was insufficient. Hard gate **failed**; do not weaken tests, merge the red PR, or claim cross-user privilege escalation. Track [#479](https://github.com/faariis7/ClassMesh/issues/479).
+- **No approved per-request key bootstrap:** section HANDLE-only integrity assumption is blocked. Compare OS-identity-attested, independently authenticated outbound v12 channel and safe object protection only after strict native negative/positive evidence and independent review. Production IPC v11 ClipboardRead remains failure-only; no live v12 payload or Teacher text response.
+- **Next:** threat-model review and inert-only Windows experiments; privileged Session 0→Worker, revocation, key lifecycle, VM2 disk, physical two-PC/GPU/classroom/accessibility gates remain OPEN.
+
+---
+
 ## LIVE VERIFIED — 2026-10-14 after #474 (authoritative checkpoint)
 
 - **GitHub Live:** `main=bdcc88b1f01f836d9c6e1d2a3f02de1c0d63e8eb`, **no open PRs**. #473 (read-only inert pagefile mapping in an actually launched *same-session* child; exact-head CI `38556156734`) and #474 (wrong-target decoy-child mapping fails; exact-head CI `38557805601`) are **merged** with both hosted Portable Rust and Windows Build SUCCESS. Previously merged #463/#464/#466/#468/#470/#471/#472 are not pending tasks.
