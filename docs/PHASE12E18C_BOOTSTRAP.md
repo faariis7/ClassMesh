@@ -1,5 +1,11 @@
 # Phase 12E18c — Service-to-Worker v12 key bootstrap qualification
 
+## Privileged SCM/OS evidence — Phase 12E18c4a/c4b (15 October 2026)
+
+Real disposable Windows ServiceBase created through SCM as LocalSystem in Session 0 was independently executed on VM1 and VM2 ARM64 under elevated Administrator test observations. c4a #491 merged with exact-head full Portable Rust and Windows CI success. c4b extends the test only with a unique first-instance OUTBOUND named pipe, protected DACL explicitly for SYSTEM full + exact target interactive SID read, remote-client rejection flag, and no payload. Actual pipe client HANDLE reported real server PID and SessionId=0, matched pinned live SCM process HANDLE TokenUser System SID, creation time, and re-queried SCM; 25 positive and negative checks passed on each VM. Colliding first-instance returns ERROR_ACCESS_DENIED; stale pipe after stop refuses new opens.
+
+These are **inert privileged Windows API tests, NOT authenticated v12 clipboard**. The client observer was elevated non-SYSTEM in an interactive session, NOT a normal Service-launched Worker. DACL wrong-user and real remote-client refusal still untested, PID→OpenProcess race remains, independent Worker process control/grants and secure per-request HMAC key delivery remain unsolved. Future payload read must be OVERLAPPED with CancelIoEx completion drain before zeroization. The original #477 native WRITE escalation remains intentionally RED and #479 blocks section-HANDLE key bootstrap; production generic v11 ClipboardRead stays failure-only.
+
 ## Experimental findings consolidated — 2026-10-14 (no approved bootstrap)
 
 - #477 **hard security FAIL (still open/red)**: read-only requested HANDLE into actual child did NOT guarantee section object integrity because the child could duplicate the HANDLE with `FILE_MAP_WRITE` and map a writable view of the original `PAGE_READWRITE` object. Never loosen this assertion. [#479](https://github.com/faariis7/ClassMesh/issues/479).

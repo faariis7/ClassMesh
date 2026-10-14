@@ -1,6 +1,15 @@
 # ClassMesh Agent Handoff
 
 
+## QUICK RESUME — 2026-10-15 Phase 12E18c4b real SCM outbound pipe
+
+GitHub main after #491 is 7d3063a5948f0c97c10df6aec04cac462df608d2. #491 Squash merged after fully green Portable Rust + Windows Build CI 38643093596; real SCM LocalSystem Session0 15/15 on VM1 AND VM2; no production changes. The **active** c4b branch feat/phase12e18c4b-scm-native-pipe-acl was plan-committed first as 4f58d16. Extends only scripts/phase12e18c4a-scm-probe.ps1 with Mode Pipe: real Service-created first-instance OUTBOUND pipe, explicit protected SYSTEM+exact-user read DACL, reject remote clients, no payload. Actual Windows VM1 and VM2 ARM64 each passed 25/25 tests: OS pipe server PID/Session0 matches pinned live SCM process+token SID/birth stamp, duplicate first-instance ERROR_ACCESS_DENIED, mismatched interactive server decoy and stale pipe after Service death denied. Native initial RED invalid path (GetLastError 161) was corrected, no assertion relaxation. Mode Run original regression still 15/15 VM1; elevated-only harness and all temp/SCM cleanup enforced.
+
+**Security hold:** This is not a Service-launched ordinary non-admin Worker process, actual wrong-user restricted-token ACL attempt, authenticated v12, active grants/replay/revocation, or secret delivery. An actual SCM PID lookup is not automatically atomic with OpenProcess. Next separately verify OS-trusted launched Worker HANDLE, target user SID in a second nonadmin account, wrong-account/remote attempt, lifecycle/grant/replay, choose independent v12 auth/key provisioning, implement payload OVERLAPPED CancelIoEx completion-drain zeroization. #477 intentionally Windows RED/#479 section-key route BLOCKED; generic v11 ClipboardRead failure-only. Physical 2 Windows PCs/GPU/classroom/performance/accessibility/clipboard E2E OPEN. c4b PR still needs exact-head hosted CI+review before Squash. Mac free ~135 GiB; both VMs available after user-approved cleanup.
+
+---
+
+
 ## QUICK RESUME — 2026-10-15, Phase 12E18c4a native SCM probe WIP
 
 GitHub Live main 7d2c33428c331b4c9c5f45f60d3eddf4d44b8b08 (#490 already merged). New separate feature feat/phase12e18c4a-scm-native after plan-first commit d0491e1. Disposable test-only Windows ServiceBase/SCM LocalSystem Session0 qualification under scripts/phase12e18c4a-scm-probe.ps1; Mode Help inert for CI, Mode Run compiles unique SCM own-process service in protected ProgramData directory, pins OS process HANDLE, checks Session0/native SYSTEM SID and interactive Worker token/SID/session difference, deliberate mismatch and stop/dead-handle negative. Local VM1 Windows ARM64 Run returned 15 PASS with exit 0. This is **native topology evidence only**: no pipe, Service-launched Worker, authenticated v12 or secrets. VM2 independent native and hosted Portable+Windows CI must pass before Squash. Both VMs/test resources now serviceable after user-authorized disk cleanup; 141GiB free Mac, VM2 limit 85 GB, snapshots zero.
