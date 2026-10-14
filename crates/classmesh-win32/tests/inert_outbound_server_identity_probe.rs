@@ -90,7 +90,7 @@ fn child_observes_true_outbound_named_pipe_server_identity() {
     );
 
     let mut session_by_pid = 0_u32;
-    // SAFETY: compare independently OS-returned PIDâsession to the pipe
+    // SAFETY: compare independently OS-returned PID-to-session to the pipe
     // session, never to a ClientHello-asserted identity.
     assert_ne!(
         unsafe { ProcessIdToSessionId(server_pid, &mut session_by_pid) },
