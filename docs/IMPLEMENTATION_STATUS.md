@@ -1,5 +1,15 @@
 # ClassMesh Implementation Status
 
+## VERIFIED CURRENT — 2026-10-14 after #485 (v12 not production)
+
+- **GitHub main:** `61f02365cf70baddc9e367f1b25b89a43d8c99a7`; PR #484 Squash merged `1f4c534` after exact-head full hosted CI `38617974874` SUCCESS for Portable Rust and Windows Build; PR #485 Squash merged `61f0236` after exact-head `38619466224` both SUCCESS. Real separate same-session Windows child probes OS-reported outbound server PID/session and requires wrong-PID denial (#484), then native bounded TokenUser SID retrieval and wrong-SID denial without logging SID bytes (#485). Local Synology Windows ARM64 cross-target compilation, fmt, Clippy -D warnings, full workspace tests PASS.
+- **Not authenticated v12:** These inert same-user tests do not prove System/Session0 cross-session Service identity or launched Worker ownership; TokenUser SID and OS PID alone are insufficient against PID reuse/replacement without a stable handle and current trust binding. No key, secret, clipboard bytes or generic IPC v11 changes; Service→Worker bootstrap, v12 negotiation and cancel-safe OVERLAPPED payload read remain UNIMPLEMENTED.
+- **Security block:** #477 remains OPEN/Windows RED due to actual FILE_MAP_READ handle escalating to writable for a PAGE_READWRITE section; never lower test expectations or use this section-key route (#479). VM2 56.7/56GB guest disk limit suspended, Mac ~16GiB available; no new VM native privileged cross-session proof. Two physical Windows PCs, GPU/media, classroom/network, accessibility and actual clipboard E2E OPEN. Active v11 ClipboardRead failure-only.
+
+---
+
+
+
 ## CURRENT VERIFIED — 2026-10-14, Phase 12E18c2g completed, key bootstrap BLOCKED
 
 - **GitHub main** `6d6b71a0c596eecd010121b36d6ca526813dd2d6`; #480, #481, #482 merged with exact-head Portable Rust + full Windows Build successes (runs `38601169040`, `38602651786`, `38603907410`). Native Windows evidence: `PAGE_READONLY` at **section creation** denies writable mapped views even after HANDLE promotion in one same-session child (#481); restricting only an existing mapped view via `VirtualProtect` does **not** restrict the original `PAGE_READWRITE` object's new writable views (#482). All used public inert/zero bytes.
