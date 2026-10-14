@@ -18,7 +18,7 @@ use windows_sys::Win32::System::Pipes::{
     CreateNamedPipeW, GetNamedPipeServerProcessId, GetNamedPipeServerSessionId, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
-use windows_sys::Win32::System::Threading::ProcessIdToSessionId;
+use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 
 static NEXT_PIPE: AtomicU64 = AtomicU64::new(1);
 
