@@ -47,7 +47,10 @@ fn inert_target_process_waits_only_when_spawned_for_probe() {
 fn source_event_can_be_duplicated_into_exact_child_then_reclaimed() {
     let exe = std::env::current_exe().expect("current native test binary");
     let child = Command::new(exe)
-        .args(["--exact", "inert_target_process_waits_only_when_spawned_for_probe"])
+        .args([
+            "--exact",
+            "inert_target_process_waits_only_when_spawned_for_probe",
+        ])
         .env("CLASSMESH_INERT_HANDLE_PROBE_CHILD", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -64,8 +67,13 @@ fn source_event_can_be_duplicated_into_exact_child_then_reclaimed() {
     let mut denied: HANDLE = null_mut();
     let invalid = unsafe {
         DuplicateHandle(
-            GetCurrentProcess(), source.0, null_mut(), &mut denied,
-            0, 0, DUPLICATE_SAME_ACCESS,
+            GetCurrentProcess(),
+            source.0,
+            null_mut(),
+            &mut denied,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
         )
     };
     assert_eq!(invalid, 0, "null target process may never receive a handle");
@@ -77,8 +85,13 @@ fn source_event_can_be_duplicated_into_exact_child_then_reclaimed() {
     assert_ne!(
         unsafe {
             DuplicateHandle(
-                GetCurrentProcess(), source.0, target_process, &mut remote,
-                0, 0, DUPLICATE_SAME_ACCESS,
+                GetCurrentProcess(),
+                source.0,
+                target_process,
+                &mut remote,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
             )
         },
         0,
@@ -93,8 +106,13 @@ fn source_event_can_be_duplicated_into_exact_child_then_reclaimed() {
     assert_ne!(
         unsafe {
             DuplicateHandle(
-                target_process, remote, GetCurrentProcess(), &mut reclaimed,
-                0, 0, DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE,
+                target_process,
+                remote,
+                GetCurrentProcess(),
+                &mut reclaimed,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE,
             )
         },
         0,
@@ -104,5 +122,8 @@ fn source_event_can_be_duplicated_into_exact_child_then_reclaimed() {
     assert!(!reclaimed.0.is_null());
     assert_eq!(unsafe { WaitForSingleObject(reclaimed.0, 0) }, WAIT_TIMEOUT);
     assert_ne!(unsafe { SetEvent(source.0) }, 0);
-    assert_eq!(unsafe { WaitForSingleObject(reclaimed.0, 0) }, WAIT_OBJECT_0);
+    assert_eq!(
+        unsafe { WaitForSingleObject(reclaimed.0, 0) },
+        WAIT_OBJECT_0
+    );
 }
