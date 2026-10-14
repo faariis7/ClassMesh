@@ -66,10 +66,14 @@ impl SensitiveV12Challenge {
     /// `key` MUST be a fresh CSPRNG-generated 256-bit per-request secret
     /// provisioned only through a future trusted Worker bootstrap; this module
     /// intentionally does not supply such a bootstrap or any production I/O.
+    /// The accessor must sample live, authenticated Service control authority
+    /// and both read grants at issuance; callers cannot supply a historical
+    /// by-value authorization snapshot. Verification samples them again.
     pub fn issue(
         key: Zeroizing<[u8; 32]>,
         expected: ClipboardReadSuccessBinding,
         now_ms: u64,
+        current_authority: impl FnOnce() -> Option<V12LiveAuthority>,
     ) -> Result<Self, SensitiveV12ChallengeError> {
         if !expected.is_valid() {
             return Err(SensitiveV12ChallengeError::InvalidBinding);
@@ -80,6 +84,14 @@ impl SensitiveV12Challenge {
         let expires_at_ms = now_ms
             .checked_add(DEADLINE_MS)
             .ok_or(SensitiveV12ChallengeError::ClockOverflow)?;
+        let current =
+            current_authority().ok_or(SensitiveV12ChallengeError::CurrentAuthorityUnavailable)?;
+        if !current.grants.allows_read() {
+            return Err(SensitiveV12ChallengeError::NotAuthorized);
+        }
+        if !current.binding.is_valid() || current.binding != expected {
+            return Err(SensitiveV12ChallengeError::BindingChanged);
+        }
         let mut nonce = [0_u8; 32];
         SystemRandom::new()
             .fill(&mut nonce)

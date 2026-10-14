@@ -31,7 +31,7 @@ fn key() -> Zeroizing<[u8; 32]> {
     Zeroizing::new([0xA5; 32])
 }
 fn pending() -> SensitiveV12Challenge {
-    SensitiveV12Challenge::issue(key(), binding(), START).expect("trusted request")
+    SensitiveV12Challenge::issue(key(), binding(), START, || live(binding(), grants())).expect("trusted request")
 }
 fn proof(
     p: &SensitiveV12Challenge,
@@ -202,15 +202,15 @@ fn invalid_binding_or_zero_secret_is_rejected_and_debug_never_exposes_secrets() 
     let mut bad = binding();
     bad.request_id = 0;
     assert_eq!(
-        SensitiveV12Challenge::issue(key(), bad, START).err(),
+        SensitiveV12Challenge::issue(key(), bad, START, || live(binding(), grants())).err(),
         Some(SensitiveV12ChallengeError::InvalidBinding)
     );
     assert_eq!(
-        SensitiveV12Challenge::issue(Zeroizing::new([0; 32]), binding(), START).err(),
+        SensitiveV12Challenge::issue(Zeroizing::new([0; 32]), binding(), START, || live(binding(), grants())).err(),
         Some(SensitiveV12ChallengeError::InvalidKey)
     );
     assert_eq!(
-        SensitiveV12Challenge::issue(key(), binding(), u64::MAX).err(),
+        SensitiveV12Challenge::issue(key(), binding(), u64::MAX, || live(binding(), grants())).err(),
         Some(SensitiveV12ChallengeError::ClockOverflow)
     );
     let p = pending();
