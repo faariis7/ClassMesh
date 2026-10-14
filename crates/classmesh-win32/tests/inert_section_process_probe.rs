@@ -78,9 +78,8 @@ fn child_consumes_only_inert_mapped_section_in_test_mode() {
     assert_eq!(received, INERT_PUBLIC_MARKER);
     // The target received only FILE_MAP_READ, NOT the parent's write rights.
     // SAFETY: a write-access request must fail on this read-only mapping handle.
-    let writable = unsafe {
-        MapViewOfFile(section.0, FILE_MAP_WRITE, 0, 0, INERT_PUBLIC_MARKER.len())
-    };
+    let writable =
+        unsafe { MapViewOfFile(section.0, FILE_MAP_WRITE, 0, 0, INERT_PUBLIC_MARKER.len()) };
     let was_writable = !writable.Value.is_null();
     if was_writable {
         // SAFETY: on unexpected success, close the real view before failing.
