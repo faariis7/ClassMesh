@@ -84,6 +84,75 @@ fn child_consumes_only_inert_mapped_section_in_test_mode() {
         unsafe { UnmapViewOfFile(writable) };
     }
     assert!(!was_writable, "target may not map a writable view");
+
+    // The source HANDLE in the target has FILE_MAP_READ only. It must not
+    // be able to create a different HANDLE with FILE_MAP_WRITE privileges.
+    assert_readonly_duplicate_cannot_escalate(section.0);
+}
+
+/// Probe both desired-access and SAME_ACCESS duplication in the *target*
+/// process. This is an INERT test of Windows section handle semantics; never
+/// construe a failed privilege-escalation attempt as production key isolation.
+fn assert_readonly_duplicate_cannot_escalate(readonly: HANDLE) {
+    use windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS;
+
+    let self_process = unsafe { GetCurrentProcess() };
+    let mut promoted: HANDLE = null_mut();
+    // SAFETY: the source is the read-only remote-duplicated section handle in
+    // this child, and both process pseudo handles represent this test child.
+    let did_promote = unsafe {
+        DuplicateHandle(
+            self_process,
+            readonly,
+            self_process,
+            &mut promoted,
+            FILE_MAP_WRITE,
+            0,
+            0,
+        )
+    } != 0;
+    if did_promote {
+        let promoted = OwnedHandle(promoted);
+        let write = OwnedView(unsafe {
+            MapViewOfFile(promoted.0, FILE_MAP_WRITE, 0, 0, INERT_PUBLIC_MARKER.len())
+        });
+        assert!(
+            write.0.Value.is_null(),
+            "security gate: read-only duplicated section HANDLE permitted a writable mapping"
+        );
+    }
+
+    let mut same_access: HANDLE = null_mut();
+    // SAFETY: requests exactly the read-only rights of the source handle.
+    assert_ne!(
+        unsafe {
+            DuplicateHandle(
+                self_process,
+                readonly,
+                self_process,
+                &mut same_access,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        },
+        0,
+        "read-only section handle should support same-access duplication"
+    );
+    let same_access = OwnedHandle(same_access);
+    let write = OwnedView(unsafe {
+        MapViewOfFile(
+            same_access.0,
+            FILE_MAP_WRITE,
+            0,
+            0,
+            INERT_PUBLIC_MARKER.len(),
+        )
+    });
+    assert!(
+        write.0.Value.is_null(),
+        "same-access duplication must never add writable mapping rights"
+    );
 }
 
 #[test]
@@ -96,8 +165,8 @@ fn pagefile_section_is_readable_in_exact_separate_child_after_targeted_duplicati
         ])
         .env("CLASSMESH_INERT_SECTION_TEST_CHILD", "1")
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn inert child test process");
     let mut child = ChildGuard(child);
@@ -164,7 +233,24 @@ fn pagefile_section_is_readable_in_exact_separate_child_after_targeted_duplicati
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(status) = child.0.try_wait().expect("poll child") {
-            assert!(status.success(), "target child failed to map the section");
+            if !status.success() {
+                let mut reason = String::new();
+                if let Some(mut stream) = child.0.stderr.take() {
+                    use std::io::Read;
+                    stream
+                        .read_to_string(&mut reason)
+                        .expect("read exited test process diagnostics");
+                }
+                if let Some(mut output_pipe) = child.0.stdout.take() {
+                    use std::io::Read;
+                    let mut captured = String::new();
+                    output_pipe
+                        .read_to_string(&mut captured)
+                        .expect("read exited test child output");
+                    reason.push_str(&captured);
+                }
+                assert!(status.success(), "native test child failure: {reason}");
+            }
             break;
         }
         assert!(Instant::now() < deadline, "inert child exceeded time limit");
