@@ -1,5 +1,14 @@
 # ClassMesh Implementation Status
 
+## LATEST VERIFIED LIVE CHECKPOINT — 2026-10-14
+
+- **main** `92991ac120c79b58f04c121e2b671bb984bbcc6b`; Phase12E13–12E17 prerequisites merged through #464 after exact-head hosted Portable+Windows CI: opaque OS peer, real launched Worker HANDLE, dedicated ACL-restricted inbound-only overlapped local pipe, cancellation-safe OS connect with completion drained, real peer+six-field control binding. #463 merged `7132795ba619328496dc11d1d3ae318a0d8839b4`; #464 merged `92991ac120c79b58f04c121e2b671bb984bbcc6b`.
+- **Open PR #466**, head `df30fa1a346e699b3db8701261b30f46f8933bdb`: Phase12E18a rechecks current Service control immediately before and after native connect, disconnecting revoked peers. TDD RED, native VM1 44/44, native VM2 44/44, exact-head Synology fmt/Clippy/full workspace GREEN, security review recorded. Hosted CI run #38518184041 Portable Rust SUCCESS, **Windows Build PENDING**; do not merge on partial CI.
+- **Active IPC:** v11 minor 11 remains ClipboardRead failure-only. No deployed authenticated v12 challenge/version negotiation, true Service-controlled live grants/revocation, cancellation-safe plaintext-overlapped read and completion/zeroization, authorized Teacher success, or two-machine clipboard E2E. Native VM tests do not close physical acceptance.
+- **Next gate #465:** one-shot authenticated negotiated v12 with current ClipboardText and ReadClipboard grants and anti-replay; owned overlapped payload read with cancel+drain before zeroization; Worker read/Teacher response only after Windows VM E2E. Physical two-PC #3, GPU/media, classroom, accessibility and performance gates remain OPEN. GitHub Live overrides older entries below.
+
+---
+
 ## VERIFIED CURRENT STATE — 2026-10-13 (supersedes historical snapshots)
 
 - **main** `32948d2cacebce43cd4e8e3a72ba785e81c28f79` with #455 and #456 merged. #455 dormant future-v12 exact Worker/Service/control admission. #456 makes Win32 OS-observed `PipePeer` opaque (private numeric fields/read-only accessors), tests Windows and forbidden safe external construction. Both exact-head hosted Windows Build and Portable Rust green; #456 run #38463123344 fully SUCCESS.
