@@ -141,6 +141,16 @@ fn local_system_sid() -> Vec<u8> {
 // does not grant SYNCHRONIZE). No rights to write or terminate a process.
 const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
 
+/// A currently alive, *already pinned* native Windows process HANDLE.
+/// Any signaled/invalid/wait-failed result is a denial. The caller still
+/// owns the process HANDLE and must keep it alive for the entire decision.
+fn native_process_still_running(process_handle: HANDLE) -> bool {
+    !process_handle.is_null()
+        && process_handle != INVALID_HANDLE_VALUE
+        // SAFETY: read-only zero-time wait on a caller-owned process HANDLE.
+        && unsafe { WaitForSingleObject(process_handle, 0) } == WAIT_TIMEOUT
+}
+
 /// Test-only process lifetime checkpoint. A returned OS PID alone is not a
 /// stable identity: pin the actual process object, verify it is still alive,
 /// and bind the kernel-reported creation FILETIME to the test parent.
@@ -164,9 +174,8 @@ fn pinned_native_process_creation_time(process_id: u32) -> u64 {
         process_id,
         "pinned OS server process PID mismatch must fail closed",
     );
-    assert_eq!(
-        unsafe { WaitForSingleObject(process.0, 0) },
-        WAIT_TIMEOUT,
+    assert!(
+        native_process_still_running(process.0),
         "native server process must still be alive",
     );
     let empty_time = || FILETIME {
