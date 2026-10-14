@@ -166,7 +166,7 @@ fn pagefile_section_is_readable_in_exact_separate_child_after_targeted_duplicati
         .env("CLASSMESH_INERT_SECTION_TEST_CHILD", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn inert child test process");
     let mut child = ChildGuard(child);
@@ -233,7 +233,15 @@ fn pagefile_section_is_readable_in_exact_separate_child_after_targeted_duplicati
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(status) = child.0.try_wait().expect("poll child") {
-            assert!(status.success(), "target child failed to map the section");
+            if !status.success() {
+                let mut reason = String::new();
+                if let Some(mut stream) = child.0.stderr.take() {
+                    use std::io::Read;
+                    stream.read_to_string(&mut reason)
+                        .expect("read exited test process diagnostics");
+                }
+                assert!(status.success(), "native test child failure: {reason}");
+            }
             break;
         }
         assert!(Instant::now() < deadline, "inert child exceeded time limit");
