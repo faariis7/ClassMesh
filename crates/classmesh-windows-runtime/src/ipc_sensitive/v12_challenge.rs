@@ -117,14 +117,25 @@ impl SensitiveV12Challenge {
             return Err(SensitiveV12ChallengeError::AlreadyUsed);
         }
         self.pending = false;
-        let result = self.verify_once(response_mac, negotiated_version, now_ms, current_authority);
-        self.key.zeroize();
-        self.nonce.zeroize();
-        result
+        // Move the key into an unwind-safe zeroizing owner before calling
+        // potentially panicking Service policy. The pending object no longer
+        // retains any secret even if the callback unwinds.
+        let key = std::mem::replace(&mut self.key, Zeroizing::new([0; 32]));
+        let nonce = Zeroizing::new(std::mem::take(&mut self.nonce));
+        self.verify_once(
+            &key,
+            &nonce,
+            response_mac,
+            negotiated_version,
+            now_ms,
+            current_authority,
+        )
     }
 
     fn verify_once(
         &self,
+        key: &[u8; 32],
+        nonce: &[u8; 32],
         response_mac: &[u8; 32],
         version: (u8, u8),
         now_ms: u64,
@@ -139,6 +150,16 @@ impl SensitiveV12Challenge {
         if now_ms >= self.expires_at_ms {
             return Err(SensitiveV12ChallengeError::Expired);
         }
+        // Authenticate the proof BEFORE asking the trusted accessor for live
+        // policy, so an unauthenticated sender cannot use this API as a
+        // capability/permission state oracle.
+        let mac_key = hmac::Key::new(hmac::HMAC_SHA256, key);
+        hmac::verify(
+            &mac_key,
+            &transcript(nonce, version, self.expected),
+            response_mac,
+        )
+        .map_err(|_| SensitiveV12ChallengeError::InvalidProof)?;
         let current =
             current_authority().ok_or(SensitiveV12ChallengeError::CurrentAuthorityUnavailable)?;
         if !current.grants.allows_read() {
@@ -147,10 +168,17 @@ impl SensitiveV12Challenge {
         if !current.binding.is_valid() || current.binding != self.expected {
             return Err(SensitiveV12ChallengeError::BindingChanged);
         }
-        let key = hmac::Key::new(hmac::HMAC_SHA256, &self.key[..]);
-        let transcript = transcript(&self.nonce, version, self.expected);
-        hmac::verify(&key, &transcript, response_mac)
-            .map_err(|_| SensitiveV12ChallengeError::InvalidProof)
+        Ok(())
+    }
+
+    /// Service lifecycle tick: proactively wipe an unanswered challenge when
+    /// its deadline passes or the caller's monotonic time regresses.
+    pub fn expire(&mut self, now_ms: u64) -> bool {
+        if self.pending && (now_ms < self.started_at_ms || now_ms >= self.expires_at_ms) {
+            self.cancel()
+        } else {
+            false
+        }
     }
 
     /// Explicit control/session revocation. Drop also clears owned key bytes.

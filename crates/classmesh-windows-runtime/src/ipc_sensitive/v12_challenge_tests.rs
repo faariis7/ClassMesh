@@ -253,11 +253,54 @@ fn no_response_expiry_clears_pending_nonce_without_waiting_for_a_proof() {
     assert_eq!(p.nonce(), None);
     assert!(!p.expire(START + 2_501));
     assert_eq!(
-        p.verify(&[0; 32], VERSION, START + 2_501, || live(binding(), grants())),
+        p.verify(&[0; 32], VERSION, START + 2_501, || live(
+            binding(),
+            grants()
+        )),
         Err(SensitiveV12ChallengeError::AlreadyUsed)
     );
 
     let mut p = pending();
-    assert!(p.expire(START - 1), "regressed monotonic clock poisons a challenge");
+    assert!(
+        p.expire(START - 1),
+        "regressed monotonic clock poisons a challenge"
+    );
     assert_eq!(p.nonce(), None);
+}
+
+#[test]
+fn unauthenticated_proof_cannot_probe_current_service_grants() {
+    let mut p = pending();
+    let mut looked_up = false;
+    let bad_mac = [0_u8; 32];
+    assert_eq!(
+        p.verify(&bad_mac, VERSION, START + 1, || {
+            looked_up = true;
+            live(binding(), grants())
+        }),
+        Err(SensitiveV12ChallengeError::InvalidProof)
+    );
+    assert!(!looked_up, "verify MAC before exposing live policy lookup");
+}
+
+#[test]
+fn panicking_policy_accessor_cannot_leave_a_reusable_challenge() {
+    let mut p = pending();
+    let valid_mac = proof(&p, &key(), VERSION, binding());
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = p.verify(
+            &valid_mac,
+            VERSION,
+            START + 1,
+            || -> Option<V12LiveAuthority> {
+                panic!("simulated Service policy panic");
+            },
+        );
+    }));
+    assert!(panicked.is_err());
+    assert!(p.nonce().is_none());
+    assert_eq!(
+        p.verify(&valid_mac, VERSION, START + 2, || live(binding(), grants())),
+        Err(SensitiveV12ChallengeError::AlreadyUsed)
+    );
 }
