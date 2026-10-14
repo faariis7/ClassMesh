@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::{
-    GetLengthSid, GetTokenInformation, IsValidSid, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    CreateWellKnownSid, GetLengthSid, GetTokenInformation, IsValidSid, SECURITY_MAX_SID_SIZE,
+    TOKEN_QUERY, TOKEN_USER, TokenUser, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_NONE, OPEN_EXISTING,
@@ -28,6 +29,13 @@ use windows_sys::Win32::System::Threading::{
 };
 
 static NEXT_PIPE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy)]
+enum SidExpectation {
+    CurrentUser,
+    CorruptCurrentUser,
+    LocalSystem,
+}
 
 struct OwnedHandle(HANDLE);
 impl Drop for OwnedHandle {
@@ -104,6 +112,27 @@ fn user_sid_of_native_process(process_id: u32) -> Vec<u8> {
     unsafe { std::slice::from_raw_parts(user.User.Sid.cast::<u8>(), len) }.to_vec()
 }
 
+/// A Windows-generated well-known SID, not a caller-supplied principal claim.
+fn local_system_sid() -> Vec<u8> {
+    let mut sid = vec![0_u8; SECURITY_MAX_SID_SIZE as usize];
+    let mut size = u32::try_from(sid.len()).expect("bounded Win32 SID size");
+    // SAFETY: owned fixed-size buffer, documented well-known SID type.
+    assert_ne!(
+        unsafe {
+            CreateWellKnownSid(
+                WinLocalSystemSid,
+                null_mut(),
+                sid.as_mut_ptr().cast(),
+                &mut size,
+            )
+        },
+        0,
+        "native LocalSystem SID must be available",
+    );
+    sid.truncate(size as usize);
+    sid
+}
+
 #[test]
 fn child_observes_true_outbound_named_pipe_server_identity() {
     if std::env::var_os("CLASSMESH_INERT_OUTBOUND_PEER_CHILD").is_none() {
@@ -158,7 +187,12 @@ fn child_observes_true_outbound_named_pipe_server_identity() {
     assert_eq!(server_session, session_by_pid, "OS session mismatch");
     if std::env::var_os("CLASSMESH_INERT_OUTBOUND_CHECK_TOKEN_SID").is_some() {
         let observed = user_sid_of_native_process(server_pid);
-        let mut expected = user_sid_of_native_process(std::process::id());
+        let mut expected =
+            if std::env::var_os("CLASSMESH_INERT_OUTBOUND_REQUIRE_SYSTEM_SID").is_some() {
+                local_system_sid()
+            } else {
+                user_sid_of_native_process(std::process::id())
+            };
         if std::env::var_os("CLASSMESH_INERT_OUTBOUND_WRONG_TOKEN_SID").is_some() {
             *expected.last_mut().expect("native SID is nonempty") ^= 1;
         }
@@ -172,7 +206,7 @@ fn child_observes_true_outbound_named_pipe_server_identity() {
 
 fn run_inert_server_identity_case(
     wrong_expected_pid: bool,
-    wrong_expected_sid: Option<bool>,
+    sid_expectation: Option<SidExpectation>,
 ) -> (bool, String) {
     let nonce = NEXT_PIPE.fetch_add(1, Ordering::Relaxed);
     let full_name = format!(
@@ -218,11 +252,18 @@ fn run_inert_server_identity_case(
             expected.to_string(),
         )
         .env_remove("CLASSMESH_INERT_OUTBOUND_CHECK_TOKEN_SID")
-        .env_remove("CLASSMESH_INERT_OUTBOUND_WRONG_TOKEN_SID");
-    if let Some(wrong_sid) = wrong_expected_sid {
+        .env_remove("CLASSMESH_INERT_OUTBOUND_WRONG_TOKEN_SID")
+        .env_remove("CLASSMESH_INERT_OUTBOUND_REQUIRE_SYSTEM_SID");
+    if let Some(sid_mode) = sid_expectation {
         child_command.env("CLASSMESH_INERT_OUTBOUND_CHECK_TOKEN_SID", "1");
-        if wrong_sid {
-            child_command.env("CLASSMESH_INERT_OUTBOUND_WRONG_TOKEN_SID", "1");
+        match sid_mode {
+            SidExpectation::CurrentUser => {}
+            SidExpectation::CorruptCurrentUser => {
+                child_command.env("CLASSMESH_INERT_OUTBOUND_WRONG_TOKEN_SID", "1");
+            }
+            SidExpectation::LocalSystem => {
+                child_command.env("CLASSMESH_INERT_OUTBOUND_REQUIRE_SYSTEM_SID", "1");
+            }
         }
     }
     let child = child_command
@@ -287,7 +328,8 @@ fn native_test_client_rejects_wrong_expected_server_process() {
 
 #[test]
 fn native_child_accepts_actual_outbound_server_token_user_sid() {
-    let (success, diagnostics) = run_inert_server_identity_case(false, Some(false));
+    let (success, diagnostics) =
+        run_inert_server_identity_case(false, Some(SidExpectation::CurrentUser));
     assert!(
         success,
         "real native server token user SID should match the same-user test child: {diagnostics}"
@@ -296,10 +338,31 @@ fn native_child_accepts_actual_outbound_server_token_user_sid() {
 
 #[test]
 fn native_child_rejects_deliberately_wrong_expected_server_token_user_sid() {
-    let (success, diagnostics) = run_inert_server_identity_case(false, Some(true));
+    let (success, diagnostics) =
+        run_inert_server_identity_case(false, Some(SidExpectation::CorruptCurrentUser));
     assert!(!success, "wrong expected server token SID must be denied");
     assert!(
         diagnostics.contains("native server token SID mismatch must fail closed"),
         "must fail at SID comparison, not at unrelated pipe error: {diagnostics}"
+    );
+}
+
+#[test]
+fn normal_user_outbound_server_cannot_impersonate_required_local_system_identity() {
+    // Fail explicitly rather than misreport this negative if test process
+    // itself happens to be running as LocalSystem on a different runner.
+    assert!(
+        user_sid_of_native_process(std::process::id()) != local_system_sid(),
+        "negative test requires a real non-LocalSystem Windows user",
+    );
+    let (success, diagnostics) =
+        run_inert_server_identity_case(false, Some(SidExpectation::LocalSystem));
+    assert!(
+        !success,
+        "ordinary hosted test user must not be admitted as LocalSystem Service"
+    );
+    assert!(
+        diagnostics.contains("native server token SID mismatch must fail closed"),
+        "native token identity gate must deny specifically, not unrelated I/O: {diagnostics}"
     );
 }
