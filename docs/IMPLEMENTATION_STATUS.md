@@ -1,5 +1,13 @@
 # ClassMesh Implementation Status
 
+## LATEST VERIFIED LIVE CHECKPOINT — 2026-10-14 after PR #466
+
+- **main `186a592927561775063ecd22ec014e3fddbc537d`**, with #463 bounded/CancelIoEx-drained overlapped future-v12 native **connection**, #464 actual OS-peer + launched Worker HANDLE and six-field control binding, and #466 double-check of **current Service control** with native disconnect on revocation **merged**. Exact-head hosted #466 run #38518184041 **Portable Rust + full Windows Build SUCCESS**; native VM1 44/44, VM2 independent Windows ARM64 44/44; Synology full workspace fmt/Clippy/tests green; security reviewed.
+- **Production is still v11 minor 11**, authorized ClipboardRead returns unavailable/empty. The isolated v12 pipe can be allocated, admit a native OS peer, and reject a stale/revoked Service control but is **NOT** connected to a fully authenticated, negotiated, permissioned sensitive payload read. One cannot infer current Service authorization from a caller-provided constant closure, a pipe name, or OS PID.
+- **Remaining #465:** independent Service-issued v12 challenge and explicit version-negotiation, current authenticated ClipboardText and ReadClipboard grants at each stage, strict replay/cancel/deadline, owned OVERLAPPED **payload** read and CancelIoEx completion drain **before** wiping in-flight memory, zeroizing buffers and Worker→Teacher one-shot result; real VM2 cross-process Unicode/native clipboard E2E and physical two-PC/GPU/classroom/performance/accessibility gates all OPEN. No secret on legacy v11.
+
+---
+
 ## VERIFIED CURRENT STATE — 2026-10-13 (supersedes historical snapshots)
 
 - **main** `32948d2cacebce43cd4e8e3a72ba785e81c28f79` with #455 and #456 merged. #455 dormant future-v12 exact Worker/Service/control admission. #456 makes Win32 OS-observed `PipePeer` opaque (private numeric fields/read-only accessors), tests Windows and forbidden safe external construction. Both exact-head hosted Windows Build and Portable Rust green; #456 run #38463123344 fully SUCCESS.
