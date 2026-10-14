@@ -15,8 +15,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     PIPE_ACCESS_OUTBOUND,
 };
 use windows_sys::Win32::System::Pipes::{
-    CreateNamedPipeW, GetNamedPipeServerProcessId, GetNamedPipeServerSessionId,
-    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    CreateNamedPipeW, GetNamedPipeServerProcessId, GetNamedPipeServerSessionId, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::ProcessIdToSessionId;
 
@@ -50,8 +50,8 @@ fn child_observes_true_outbound_named_pipe_server_identity() {
     if std::env::var_os("CLASSMESH_INERT_OUTBOUND_PEER_CHILD").is_none() {
         return;
     }
-    let full_name = std::env::var("CLASSMESH_INERT_OUTBOUND_TEST_NAME")
-        .expect("test-only public pipe path");
+    let full_name =
+        std::env::var("CLASSMESH_INERT_OUTBOUND_TEST_NAME").expect("test-only public pipe path");
     let expected_pid: u32 = std::env::var("CLASSMESH_INERT_OUTBOUND_EXPECTED_PID")
         .expect("test-only expected parent process id")
         .parse()
@@ -62,8 +62,13 @@ fn child_observes_true_outbound_named_pipe_server_identity() {
     // allowed current-user security descriptor; no secret is read.
     let client = OwnedHandle(unsafe {
         CreateFileW(
-            path.as_ptr(), GENERIC_READ, FILE_SHARE_NONE, null(),
-            OPEN_EXISTING, 0, null_mut(),
+            path.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_NONE,
+            null(),
+            OPEN_EXISTING,
+            0,
+            null_mut(),
         )
     });
     assert_ne!(client.0, INVALID_HANDLE_VALUE, "client opens local pipe");
@@ -71,12 +76,21 @@ fn child_observes_true_outbound_named_pipe_server_identity() {
     let mut server_session = 0_u32;
     // SAFETY: a genuine connected Windows named-pipe client HANDLE and valid
     // single-u32 out pointers.
-    assert_ne!(unsafe { GetNamedPipeServerProcessId(client.0, &mut server_pid) }, 0);
-    assert_ne!(unsafe { GetNamedPipeServerSessionId(client.0, &mut server_session) }, 0);
-    assert_eq!(server_pid, expected_pid, "native server PID mismatch must fail closed");
+    assert_ne!(
+        unsafe { GetNamedPipeServerProcessId(client.0, &mut server_pid) },
+        0
+    );
+    assert_ne!(
+        unsafe { GetNamedPipeServerSessionId(client.0, &mut server_session) },
+        0
+    );
+    assert_eq!(
+        server_pid, expected_pid,
+        "native server PID mismatch must fail closed"
+    );
 
     let mut session_by_pid = 0_u32;
-    // SAFETY: compare independently OS-returned PID→session to the pipe
+    // SAFETY: compare independently OS-returned PIDâsession to the pipe
     // session, never to a ClientHello-asserted identity.
     assert_ne!(
         unsafe { ProcessIdToSessionId(server_pid, &mut session_by_pid) },
@@ -99,10 +113,17 @@ fn run_inert_server_identity_case(wrong_expected_pid: bool) -> (bool, String) {
             wide_name.as_ptr(),
             PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-            1, 64, 64, 1_000, null(),
+            1,
+            64,
+            64,
+            1_000,
+            null(),
         )
     });
-    assert_ne!(server.0, INVALID_HANDLE_VALUE, "create one local inert server");
+    assert_ne!(
+        server.0, INVALID_HANDLE_VALUE,
+        "create one local inert server"
+    );
     let actual_pid = std::process::id();
     let expected = if wrong_expected_pid {
         actual_pid.checked_add(1).unwrap_or(1)
@@ -111,10 +132,16 @@ fn run_inert_server_identity_case(wrong_expected_pid: bool) -> (bool, String) {
     };
     let test_binary = std::env::current_exe().expect("test executable");
     let child = Command::new(test_binary)
-        .args(["--exact", "child_observes_true_outbound_named_pipe_server_identity"])
+        .args([
+            "--exact",
+            "child_observes_true_outbound_named_pipe_server_identity",
+        ])
         .env("CLASSMESH_INERT_OUTBOUND_PEER_CHILD", "1")
         .env("CLASSMESH_INERT_OUTBOUND_TEST_NAME", full_name)
-        .env("CLASSMESH_INERT_OUTBOUND_EXPECTED_PID", expected.to_string())
+        .env(
+            "CLASSMESH_INERT_OUTBOUND_EXPECTED_PID",
+            expected.to_string(),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -126,11 +153,19 @@ fn run_inert_server_identity_case(wrong_expected_pid: bool) -> (bool, String) {
         if let Some(exit) = child.0.try_wait().expect("poll child status") {
             let mut stderr = String::new();
             use std::io::Read;
-            child.0.stderr.take().expect("stderr capture")
-                .read_to_string(&mut stderr).expect("read child diagnostics");
+            child
+                .0
+                .stderr
+                .take()
+                .expect("stderr capture")
+                .read_to_string(&mut stderr)
+                .expect("read child diagnostics");
             return (exit.success(), stderr);
         }
-        assert!(Instant::now() < end, "no-client test must not block indefinitely");
+        assert!(
+            Instant::now() < end,
+            "no-client test must not block indefinitely"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -138,7 +173,10 @@ fn run_inert_server_identity_case(wrong_expected_pid: bool) -> (bool, String) {
 #[test]
 fn native_test_client_reads_actual_server_process_and_session() {
     let (success, stderr) = run_inert_server_identity_case(false);
-    assert!(success, "native OS-reported server identity failed: {stderr}");
+    assert!(
+        success,
+        "native OS-reported server identity failed: {stderr}"
+    );
 }
 
 #[test]
