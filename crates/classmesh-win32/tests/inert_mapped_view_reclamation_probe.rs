@@ -233,6 +233,12 @@ fn inert_mapped_view_survives_parent_closing_child_section_handle() {
     );
     let reclaimed = OwnedHandle(reclaimed);
     assert!(!reclaimed.0.is_null());
+    // Stronger lifetime boundary: close ALL parent-side section handles and
+    // its own view before telling the target to inspect its mapped view.
+    // The target's already-open view must remain a live kernel reference.
+    drop(reclaimed);
+    drop(source_view);
+    drop(section);
 
     writeln!(child.0.stdin.as_mut().expect("child stdin"), "CLOSED")
         .expect("send after-reclamation test signal");
