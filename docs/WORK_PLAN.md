@@ -1,5 +1,7 @@
 # ClassMesh Living Work Plan
 
+> **Phase 12E18c2d — inert mapped-view lifetime after remote HANDLE closure (test first; no product path):** In a native Windows same-session child, demonstrate whether a read-only section view mapped *before* targeted `DuplicateHandle(DUPLICATE_CLOSE_SOURCE)` HANDLE reclamation stays readable after the parent closes the child-side handle; contrast with Phase 12E18c2c pre-use stale-handle rejection. Use only a fixed public marker in a private anonymous section, exact child process HANDLE, bounded acknowledgements/termination, RAII local handles and mappings, and no privileged/secret bootstrap or generic v11 traffic. Record the security consequence: a remote HANDLE can be revoked before mapping, but handle closure alone must never be assumed to unmap an already-created view. Keep cross-session LocalSystem→Worker, revocation, crash/timeout, actual key lifetime, native clipboard and hardware gates OPEN. Require fmt/Clippy/workspace, security review, exact-head full Portable Rust plus Windows Build before merging.
+
 ## CURRENT — 2026-10-14, verified against GitHub Live
 
 **Source of truth:** `main=bdcc88b1f01f836d9c6e1d2a3f02de1c0d63e8eb`; **zero open pull requests** at this checkpoint. This section supersedes all older date-stamped Current/In Progress/Next statements below; those remain historical for audit.
