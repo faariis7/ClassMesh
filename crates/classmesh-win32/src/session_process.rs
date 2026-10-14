@@ -545,12 +545,126 @@ mod tests {
             .wait_for_bound_worker(
                 std::time::Duration::from_secs(2),
                 &admission,
-                binding,
+                || Some(binding),
                 &launched,
             )
             .expect("native OS peer matches live process and exact control");
         assert_eq!(peer.process_id(), launched.process_id());
         assert_eq!(peer.session_id(), launched.session_id());
+        client.join().expect("native pipe client");
+    }
+
+    #[test]
+    fn native_v12_peer_rejects_control_revoked_while_waiting() {
+        use crate::sensitive_pipe_listener::SensitivePipeListener;
+        use crate::sensitive_pipe_name::{SensitivePipeAdmission, SensitivePipeNameBinding};
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GENERIC_WRITE,
+            INVALID_HANDLE_VALUE,
+        };
+        use windows_sys::Win32::Security::{
+            CreateWellKnownSid, SECURITY_MAX_SID_SIZE, WinAuthenticatedUserSid,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_SHARE_NONE, OPEN_EXISTING,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        let session = crate::current_session_id().expect("own Windows session");
+        if session == 0 {
+            // Session 0 is deliberately invalid for a Teacher/Worker request;
+            // the native test is exercised in an interactive VM session.
+            return;
+        }
+        let native_process = unsafe { GetCurrentProcess() };
+        let mut owned = null_mut();
+        assert_ne!(
+            unsafe {
+                DuplicateHandle(
+                    native_process,
+                    native_process,
+                    native_process,
+                    &mut owned,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            },
+            0
+        );
+        let launched = SessionProcess {
+            process: owned,
+            process_id: std::process::id(),
+            session_id: session,
+        };
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1000);
+        let binding = SensitivePipeNameBinding {
+            service_process_id: std::process::id(),
+            worker_session_id: session,
+            worker_generation: 19,
+            control_session_id: 23,
+            control_sequence: 27,
+            request_id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        };
+        let admission = SensitivePipeAdmission::register(
+            binding,
+            binding,
+            launched.process_id(),
+            std::process::id(),
+        )
+        .expect("trusted current control request");
+
+        let mut sid = vec![0_u8; SECURITY_MAX_SID_SIZE as usize];
+        let mut len = sid.len() as u32;
+        assert_ne!(
+            unsafe {
+                CreateWellKnownSid(
+                    WinAuthenticatedUserSid,
+                    null_mut(),
+                    sid.as_mut_ptr().cast(),
+                    &mut len,
+                )
+            },
+            0
+        );
+        sid.truncate(len as usize);
+        let mut listener =
+            SensitivePipeListener::create(&admission, &sid).expect("temporary local-only pipe");
+        let path = format!(r"\\.\pipe\{}", listener.pipe_name());
+
+        let client = std::thread::spawn(move || {
+            let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let handle = unsafe {
+                CreateFileW(
+                    wide.as_ptr(),
+                    GENERIC_WRITE,
+                    FILE_SHARE_NONE,
+                    null(),
+                    OPEN_EXISTING,
+                    0,
+                    null_mut(),
+                )
+            };
+            assert_ne!(handle, INVALID_HANDLE_VALUE, "native client connects");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            assert_ne!(unsafe { CloseHandle(handle) }, 0);
+        });
+
+        let mut reads = 0;
+        let rejected = listener
+            .wait_for_bound_worker(
+                std::time::Duration::from_secs(2),
+                &admission,
+                || {
+                    reads += 1;
+                    (reads == 1).then_some(binding)
+                },
+                &launched,
+            )
+            .expect_err("revoked control must be refused after native connection");
+        assert_eq!(rejected.stage, "SensitiveCurrentControlUnavailable");
+        assert_eq!(reads, 2, "control must be sampled on both sides of connect");
         client.join().expect("native pipe client");
     }
 
