@@ -3,6 +3,7 @@
 #![cfg(windows)]
 
 use std::ffi::OsStr;
+use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::process::{Child, Command, Stdio};
 use std::ptr::{null, null_mut};
@@ -10,6 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Security::{
+    GetLengthSid, GetTokenInformation, IsValidSid, TOKEN_QUERY, TOKEN_USER, TokenUser,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_NONE, OPEN_EXISTING,
     PIPE_ACCESS_OUTBOUND,
@@ -19,6 +23,9 @@ use windows_sys::Win32::System::Pipes::{
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 static NEXT_PIPE: AtomicU64 = AtomicU64::new(1);
 
@@ -43,6 +50,58 @@ impl Drop for ChildGuard {
 
 fn wide_null(text: &OsStr) -> Vec<u16> {
     text.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+/// Test-only OS token identity probe: the SID is never printed or used as a
+/// production trust decision; native cross-session LocalSystem is untested.
+fn user_sid_of_native_process(process_id: u32) -> Vec<u8> {
+    // SAFETY: asks Windows for a process query HANDLE, never creates one
+    // based solely on a caller-asserted authorization principal.
+    let process =
+        OwnedHandle(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) });
+    assert!(
+        !process.0.is_null(),
+        "OS server process query handle unavailable"
+    );
+    let mut token_handle = null_mut();
+    // SAFETY: process is a locally owned kernel HANDLE and output is writable.
+    assert_ne!(
+        unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut token_handle) },
+        0,
+        "query native server process token",
+    );
+    let token = OwnedHandle(token_handle);
+    let mut required = 0_u32;
+    // SAFETY: initial size-only query deliberately has no buffer.
+    unsafe { GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut required) };
+    assert!(
+        (required as usize) >= size_of::<TOKEN_USER>() && required <= 4096,
+        "invalid or unbounded Windows TokenUser size",
+    );
+    let words = (required as usize).div_ceil(size_of::<usize>());
+    let mut buffer = vec![0_usize; words];
+    // SAFETY: aligned word buffer contains at least required bytes; token is owned.
+    assert_ne!(
+        unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                required,
+                &mut required,
+            )
+        },
+        0,
+        "query exact native TokenUser",
+    );
+    // SAFETY: successful TokenUser query returned a TOKEN_USER in aligned storage.
+    let user = unsafe { &*(buffer.as_ptr().cast::<TOKEN_USER>()) };
+    // SAFETY: user SID is a kernel-populated field within live token-info storage.
+    assert_ne!(unsafe { IsValidSid(user.User.Sid) }, 0, "OS SID invalid");
+    let len = unsafe { GetLengthSid(user.User.Sid) } as usize;
+    assert!((8..=4096).contains(&len), "OS SID has invalid bounds");
+    // SAFETY: validated SID lies within the returned TokenUser allocation.
+    unsafe { std::slice::from_raw_parts(user.User.Sid.cast::<u8>(), len) }.to_vec()
 }
 
 #[test]
@@ -97,9 +156,24 @@ fn child_observes_true_outbound_named_pipe_server_identity() {
         0,
     );
     assert_eq!(server_session, session_by_pid, "OS session mismatch");
+    if std::env::var_os("CLASSMESH_INERT_OUTBOUND_CHECK_TOKEN_SID").is_some() {
+        let observed = user_sid_of_native_process(server_pid);
+        let mut expected = user_sid_of_native_process(std::process::id());
+        if std::env::var_os("CLASSMESH_INERT_OUTBOUND_WRONG_TOKEN_SID").is_some() {
+            *expected.last_mut().expect("native SID is nonempty") ^= 1;
+        }
+        // Do not use assert_eq!: it would dump OS account SID bytes in logs.
+        assert!(
+            observed == expected,
+            "native server token SID mismatch must fail closed"
+        );
+    }
 }
 
-fn run_inert_server_identity_case(wrong_expected_pid: bool) -> (bool, String) {
+fn run_inert_server_identity_case(
+    wrong_expected_pid: bool,
+    wrong_expected_sid: Option<bool>,
+) -> (bool, String) {
     let nonce = NEXT_PIPE.fetch_add(1, Ordering::Relaxed);
     let full_name = format!(
         r"\\.\pipe\ClassMesh-Inert-Outbound-ServerPeer-{}-{nonce}",
@@ -131,7 +205,8 @@ fn run_inert_server_identity_case(wrong_expected_pid: bool) -> (bool, String) {
         actual_pid
     };
     let test_binary = std::env::current_exe().expect("test executable");
-    let child = Command::new(test_binary)
+    let mut child_command = Command::new(test_binary);
+    child_command
         .args([
             "--exact",
             "child_observes_true_outbound_named_pipe_server_identity",
@@ -142,6 +217,15 @@ fn run_inert_server_identity_case(wrong_expected_pid: bool) -> (bool, String) {
             "CLASSMESH_INERT_OUTBOUND_EXPECTED_PID",
             expected.to_string(),
         )
+        .env_remove("CLASSMESH_INERT_OUTBOUND_CHECK_TOKEN_SID")
+        .env_remove("CLASSMESH_INERT_OUTBOUND_WRONG_TOKEN_SID");
+    if let Some(wrong_sid) = wrong_expected_sid {
+        child_command.env("CLASSMESH_INERT_OUTBOUND_CHECK_TOKEN_SID", "1");
+        if wrong_sid {
+            child_command.env("CLASSMESH_INERT_OUTBOUND_WRONG_TOKEN_SID", "1");
+        }
+    }
+    let child = child_command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -184,7 +268,7 @@ fn run_inert_server_identity_case(wrong_expected_pid: bool) -> (bool, String) {
 
 #[test]
 fn native_test_client_reads_actual_server_process_and_session() {
-    let (success, stderr) = run_inert_server_identity_case(false);
+    let (success, stderr) = run_inert_server_identity_case(false, None);
     assert!(
         success,
         "native OS-reported server identity failed: {stderr}"
@@ -193,10 +277,29 @@ fn native_test_client_reads_actual_server_process_and_session() {
 
 #[test]
 fn native_test_client_rejects_wrong_expected_server_process() {
-    let (success, stderr) = run_inert_server_identity_case(true);
+    let (success, stderr) = run_inert_server_identity_case(true, None);
     assert!(!success, "wrong expected server PID must not be accepted");
     assert!(
         stderr.contains("native server PID mismatch must fail closed"),
         "failure must be identity mismatch, not unrelated client error: {stderr}"
+    );
+}
+
+#[test]
+fn native_child_accepts_actual_outbound_server_token_user_sid() {
+    let (success, diagnostics) = run_inert_server_identity_case(false, Some(false));
+    assert!(
+        success,
+        "real native server token user SID should match the same-user test child: {diagnostics}"
+    );
+}
+
+#[test]
+fn native_child_rejects_deliberately_wrong_expected_server_token_user_sid() {
+    let (success, diagnostics) = run_inert_server_identity_case(false, Some(true));
+    assert!(!success, "wrong expected server token SID must be denied");
+    assert!(
+        diagnostics.contains("native server token SID mismatch must fail closed"),
+        "must fail at SID comparison, not at unrelated pipe error: {diagnostics}"
     );
 }
