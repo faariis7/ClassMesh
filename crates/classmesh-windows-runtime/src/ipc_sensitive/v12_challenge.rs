@@ -117,12 +117,7 @@ impl SensitiveV12Challenge {
             return Err(SensitiveV12ChallengeError::AlreadyUsed);
         }
         self.pending = false;
-        let result = self.verify_once(
-            response_mac,
-            negotiated_version,
-            now_ms,
-            current_authority,
-        );
+        let result = self.verify_once(response_mac, negotiated_version, now_ms, current_authority);
         self.key.zeroize();
         self.nonce.zeroize();
         result

@@ -38,7 +38,9 @@ pub use contract::{
     SensitivePresentationKeyInstall,
 };
 pub use decoder::{DecodedIpcFrame, SensitiveIpcFrameDecoder};
-pub use v12_challenge::{SensitiveV12Challenge, SensitiveV12ChallengeError, V12LiveAuthority, compute_v12_challenge_mac};
+pub use v12_challenge::{
+    SensitiveV12Challenge, SensitiveV12ChallengeError, V12LiveAuthority, compute_v12_challenge_mac,
+};
 
 #[cfg(test)]
 mod tests;
