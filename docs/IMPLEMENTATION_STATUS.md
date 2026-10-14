@@ -1,5 +1,14 @@
 # ClassMesh Implementation Status
 
+## Phase 12E18b in progress — 2026-10-14 (local verified, hosted CI pending)
+
+- GitHub `main` at branch point `4cb0d5551d0bae866212e654a86e4e1bece20543`: #463, #464, #466 and #467 already merged; no need to repeat Phase12E17. Isolated branch `feat/phase12e18b-v12-hmac-gate` adds future-v12 Service challenge and one-attempt HMAC-SHA256 request proof with OS CSPRNG nonce, explicit major/minor, six-part Worker/control request binding, key/nonce clearing, deadline and trusted current Service-grants accessor. Proof is **NOT** a native channel or a production authorization token.
+- TDD: plan first `8d609ea`, tests RED compile before production implementation `2086543`. Linux/Synology exact local workspace `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` **PASS** after additional tampering and cross-request negative test. Windows hosted exact-HEAD CI and security review gate **PENDING**; no PR merge claimed here.
+- Important threat boundary: 32-byte per-request HMAC key must be securely generated and provisioned by Service to only the launched Worker via a future trusted channel; that producer/transport and actual v12 handshake are **NOT IMPLEMENTED**. `IPC_VERSION_MINOR=11`, ClipboardRead failure-only; no clipboard plaintext is sent, received or displayed. VM2 still suspended at disk quota; VM1 suspended; local VMs are NOT evidence for this branch. Physical two Windows PCs, GPU/media/classroom and accessibility gates remain open.
+
+---
+
+
 ## LATEST VERIFIED LIVE CHECKPOINT — 2026-10-14 after PR #466
 
 - **main `186a592927561775063ecd22ec014e3fddbc537d`**, with #463 bounded/CancelIoEx-drained overlapped future-v12 native **connection**, #464 actual OS-peer + launched Worker HANDLE and six-field control binding, and #466 double-check of **current Service control** with native disconnect on revocation **merged**. Exact-head hosted #466 run #38518184041 **Portable Rust + full Windows Build SUCCESS**; native VM1 44/44, VM2 independent Windows ARM64 44/44; Synology full workspace fmt/Clippy/tests green; security reviewed.
