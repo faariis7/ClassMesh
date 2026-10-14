@@ -366,3 +366,19 @@ fn normal_user_outbound_server_cannot_impersonate_required_local_system_identity
         "native token identity gate must deny specifically, not unrelated I/O: {diagnostics}"
     );
 }
+
+#[test]
+fn native_client_binds_live_server_process_creation_time() {
+    let (success, diagnostics) = run_inert_server_lifetime_case(false);
+    assert!(success, "actual live server process binding failed: {diagnostics}");
+}
+
+#[test]
+fn native_client_rejects_changed_server_process_creation_time() {
+    let (success, diagnostics) = run_inert_server_lifetime_case(true);
+    assert!(!success, "wrong native server process birth time must be denied");
+    assert!(
+        diagnostics.contains("native server process creation time mismatch must fail closed"),
+        "denial must be a process lifetime mismatch, not unrelated I/O: {diagnostics}"
+    );
+}
