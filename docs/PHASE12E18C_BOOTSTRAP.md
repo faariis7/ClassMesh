@@ -1,5 +1,14 @@
 # Phase 12E18c — Service-to-Worker v12 key bootstrap qualification
 
+## Experimental findings consolidated — 2026-10-14 (no approved bootstrap)
+
+- #477 **hard security FAIL (still open/red)**: read-only requested HANDLE into actual child did NOT guarantee section object integrity because the child could duplicate the HANDLE with `FILE_MAP_WRITE` and map a writable view of the original `PAGE_READWRITE` object. Never loosen this assertion. [#479](https://github.com/faariis7/ClassMesh/issues/479).
+- #481 **GREEN comparative evidence:** `PAGE_READONLY` **object at creation** denies write-mapping even when same-session child attempts handle escalation. It contains only zero-filled public bytes; does NOT solve securely populating an unpredictable fresh key in protected memory.
+- #482 **GREEN negative design evidence:** `VirtualProtect(PAGE_READONLY)` changes one mapped view, NOT the underlying original `PAGE_READWRITE` section maximum; another write-capable view remained possible after desired-rights handle duplication. Therefore *post-population view protection alone is not a remedy*.
+- Do **not** infer privileged Session-0→interactive Worker identity, key secrecy, cross-user exploit or transferable signed capabilities from these same-session/inert tests. Section option A remains BLOCKED. Independently evaluate trusted outbound v12 Service→Worker delivery with OS-attested Service identity, current Worker process HANDLE + SID/session, live Service capability/ReadClipboard grants, exact six-field bound request, strictly one-time HMAC key/nonce/expiry and safe cancellation/zeroization. Neither new outbound nor existing inbound-only v12 is authenticated key bootstrap yet. Generic IPC v11 must remain free of secrets.
+
+Microsoft APIs: [DuplicateHandle](https://learn.microsoft.com/windows/win32/api/handleapi/nf-handleapi-duplicatehandle), [MapViewOfFile](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-mapviewoffile), [VirtualProtect](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect).
+
 **Status:** security design and test plan only (no code or production activation).
 **Tracking:** [#465](https://github.com/faariis7/ClassMesh/issues/465),
 [#328](https://github.com/faariis7/ClassMesh/issues/328).

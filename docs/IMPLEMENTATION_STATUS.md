@@ -1,5 +1,14 @@
 # ClassMesh Implementation Status
 
+## CURRENT VERIFIED — 2026-10-14, Phase 12E18c2g completed, key bootstrap BLOCKED
+
+- **GitHub main** `6d6b71a0c596eecd010121b36d6ca526813dd2d6`; #480, #481, #482 merged with exact-head Portable Rust + full Windows Build successes (runs `38601169040`, `38602651786`, `38603907410`). Native Windows evidence: `PAGE_READONLY` at **section creation** denies writable mapped views even after HANDLE promotion in one same-session child (#481); restricting only an existing mapped view via `VirtualProtect` does **not** restrict the original `PAGE_READWRITE` object's new writable views (#482). All used public inert/zero bytes.
+- **BLOCKING SECURITY FAILURE remains RED:** #477, run `38594235925`, Windows Build FAIL because the same-session child re-duplicated its `FILE_MAP_READ` HANDLE with `FILE_MAP_WRITE` and obtained a write-capable mapping to a `PAGE_READWRITE` object. Not merged or weakened. Section-based real key bootstrap NOT authorized; see #479 and `docs/PHASE12E18C_BOOTSTRAP.md`.
+- **Current production:** IPC v11 ClipboardRead unavailable/empty. No Service-to-Worker v12 HMAC key transfer, authenticated native v12 clipboard read, cancellable zeroizing payload/Teacher result; no privileged LocalSystem→interactive Worker or physical two-PC/GPU/classroom/UX/accessibility proof.
+- **Next:** an independently authenticated and narrowly ACL-restricted Service-owned outbound v12 bootstrap *design/probe*, then native privileged cross-session positive/negative evidence, current grants/control anti-replay and independent security review before considering any key. Mac offline, VM2 virtual disk above quota; do not resume/resize VM2 as workaround.
+
+---
+
 ## SECURITY BLOCKER — verified 2026-10-14
 
 - GitHub `main=507518d057b4e2a6ec4ff1c5429dd311ef2ecffe`. **PR #477 OPEN, Windows Build RED** at run `38594235925` (Portable Rust SUCCESS): actual same-session native Windows child could re-duplicate its read-only HANDLE to a `PAGE_READWRITE` section asking for `FILE_MAP_WRITE` and successfully create a writable mapping. The direct read-only handle mapping check in #473 was insufficient. Hard gate **failed**; do not weaken tests, merge the red PR, or claim cross-user privilege escalation. Track [#479](https://github.com/faariis7/ClassMesh/issues/479).
