@@ -7,6 +7,7 @@ mod clipboard_read_teacher;
 mod clipboard_read_transport_gate;
 mod contract;
 mod decoder;
+mod v12_challenge;
 
 pub use clipboard_read_frame::{
     CLIPBOARD_READ_SUCCESS_FUTURE_MINOR, CLIPBOARD_READ_SUCCESS_RESERVED_TYPE,
@@ -37,6 +38,7 @@ pub use contract::{
     SensitivePresentationKeyInstall,
 };
 pub use decoder::{DecodedIpcFrame, SensitiveIpcFrameDecoder};
+pub use v12_challenge::{SensitiveV12Challenge, SensitiveV12ChallengeError, V12LiveAuthority, compute_v12_challenge_mac};
 
 #[cfg(test)]
 mod tests;
