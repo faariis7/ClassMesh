@@ -90,6 +90,65 @@ fn child_consumes_only_inert_mapped_section_in_test_mode() {
     assert_readonly_duplicate_cannot_escalate(section.0);
 }
 
+/// Probe both desired-access and SAME_ACCESS duplication in the *target*
+/// process. This is an INERT test of Windows section handle semantics; never
+/// construe a failed privilege-escalation attempt as production key isolation.
+fn assert_readonly_duplicate_cannot_escalate(readonly: HANDLE) {
+    use windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS;
+
+    let self_process = unsafe { GetCurrentProcess() };
+    let mut promoted: HANDLE = null_mut();
+    // SAFETY: the source is the read-only remote-duplicated section handle in
+    // this child, and both process pseudo handles represent this test child.
+    let did_promote = unsafe {
+        DuplicateHandle(
+            self_process,
+            readonly,
+            self_process,
+            &mut promoted,
+            FILE_MAP_WRITE,
+            0,
+            0,
+        )
+    } != 0;
+    if did_promote {
+        let promoted = OwnedHandle(promoted);
+        let write = OwnedView(unsafe {
+            MapViewOfFile(promoted.0, FILE_MAP_WRITE, 0, 0, INERT_PUBLIC_MARKER.len())
+        });
+        assert!(
+            write.0.Value.is_null(),
+            "security gate: read-only duplicated section HANDLE permitted a writable mapping"
+        );
+    }
+
+    let mut same_access: HANDLE = null_mut();
+    // SAFETY: requests exactly the read-only rights of the source handle.
+    assert_ne!(
+        unsafe {
+            DuplicateHandle(
+                self_process,
+                readonly,
+                self_process,
+                &mut same_access,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        },
+        0,
+        "read-only section handle should support same-access duplication"
+    );
+    let same_access = OwnedHandle(same_access);
+    let write = OwnedView(unsafe {
+        MapViewOfFile(same_access.0, FILE_MAP_WRITE, 0, 0, INERT_PUBLIC_MARKER.len())
+    });
+    assert!(
+        write.0.Value.is_null(),
+        "same-access duplication must never add writable mapping rights"
+    );
+}
+
 #[test]
 fn pagefile_section_is_readable_in_exact_separate_child_after_targeted_duplication() {
     let exe = std::env::current_exe().expect("test executable");
