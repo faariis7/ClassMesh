@@ -143,7 +143,7 @@ fn run_inert_server_identity_case(wrong_expected_pid: bool) -> (bool, String) {
             expected.to_string(),
         )
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn actual same-session test client");
@@ -151,16 +151,28 @@ fn run_inert_server_identity_case(wrong_expected_pid: bool) -> (bool, String) {
     let end = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(exit) = child.0.try_wait().expect("poll child status") {
-            let mut stderr = String::new();
+            // The libtest harness reports a caught assertion failure on
+            // stdout, not necessarily stderr. Capture both streams so the
+            // negative case must fail specifically on OS PID mismatch.
             use std::io::Read;
+            let mut diagnostics = String::new();
+            child
+                .0
+                .stdout
+                .take()
+                .expect("stdout capture")
+                .take(16 * 1024)
+                .read_to_string(&mut diagnostics)
+                .expect("read bounded child stdout");
             child
                 .0
                 .stderr
                 .take()
                 .expect("stderr capture")
-                .read_to_string(&mut stderr)
-                .expect("read child diagnostics");
-            return (exit.success(), stderr);
+                .take(16 * 1024)
+                .read_to_string(&mut diagnostics)
+                .expect("read bounded child stderr");
+            return (exit.success(), diagnostics);
         }
         assert!(
             Instant::now() < end,
