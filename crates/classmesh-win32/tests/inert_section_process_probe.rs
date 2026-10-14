@@ -56,7 +56,10 @@ fn child_consumes_only_inert_mapped_section_in_test_mode() {
         return;
     }
     let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line).expect("test stdin");
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .expect("test stdin");
     let remote_value = usize::from_str_radix(line.trim(), 16).expect("test-only handle number");
     assert_ne!(remote_value, 0);
     let section = OwnedHandle(remote_value as HANDLE);
@@ -65,7 +68,10 @@ fn child_consumes_only_inert_mapped_section_in_test_mode() {
     let view = OwnedView(unsafe {
         MapViewOfFile(section.0, FILE_MAP_READ, 0, 0, INERT_PUBLIC_MARKER.len())
     });
-    assert!(!view.0.Value.is_null(), "child must map the duplicated section");
+    assert!(
+        !view.0.Value.is_null(),
+        "child must map the duplicated section"
+    );
     // SAFETY: successful MapViewOfFile above maps at least 16 readable bytes.
     let received =
         unsafe { std::slice::from_raw_parts(view.0.Value.cast::<u8>(), INERT_PUBLIC_MARKER.len()) };
@@ -76,7 +82,10 @@ fn child_consumes_only_inert_mapped_section_in_test_mode() {
 fn pagefile_section_is_readable_in_exact_separate_child_after_targeted_duplication() {
     let exe = std::env::current_exe().expect("test executable");
     let child = Command::new(exe)
-        .args(["--exact", "child_consumes_only_inert_mapped_section_in_test_mode"])
+        .args([
+            "--exact",
+            "child_consumes_only_inert_mapped_section_in_test_mode",
+        ])
         .env("CLASSMESH_INERT_SECTION_TEST_CHILD", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
