@@ -1,5 +1,15 @@
 # ClassMesh Implementation Status
 
+## LIVE VERIFIED — 2026-10-14 after #474 (authoritative checkpoint)
+
+- **GitHub Live:** `main=bdcc88b1f01f836d9c6e1d2a3f02de1c0d63e8eb`, **no open PRs**. #473 (read-only inert pagefile mapping in an actually launched *same-session* child; exact-head CI `38556156734`) and #474 (wrong-target decoy-child mapping fails; exact-head CI `38557805601`) are **merged** with both hosted Portable Rust and Windows Build SUCCESS. Previously merged #463/#464/#466/#468/#470/#471/#472 are not pending tasks.
+- **Current work:** Phase **12E18c3** cross-session **security qualification**, **not** production key bootstrap. Same-session inert HANDLE/mapping tests do not validate LocalSystem/Session 0 → interactive Worker transfer, SID/privilege isolation, privileged attacks, revocation, key ownership or a real Service process. See `docs/PHASE12E18C_BOOTSTRAP.md`, Issues #465 and #328.
+- **Runtime boundary:** generic Worker→Service IPC v11 minor 11; ClipboardRead returns **unavailable with empty text**. Future v12 named-pipe peer attestation, current controls/grants and HMAC proof are isolated/inactive. No provisioned per-request shared key, authenticated session exchange, cancellable zeroizing overlapped *payload read*, authorized native Worker text read or one-shot Teacher result. Do **not** treat successful connection cancellation or test-only HANDLE duplication as delivery of clipboard text.
+- **Next (strict order):** privileged native cross-session *inert* positive/negative and HANDLE lifecycle evidence; reviewed selection of authenticated per-request Service→Worker key bootstrap; exact-v12 negotiation/HMAC/live grants/replay attachment; bounded cancel/drain/zeroize sensitive payload read; Worker Unicode read and Teacher response; VM E2E and separately physical 2-PC/GPU/classroom/Wi-Fi/monitoring/adaptation/accessibility qualification. Exact-head Windows+Portable CI and security review for each small PR.
+- **Resources/blocked:** Mac Data approximately **13 GiB free / 97% used**; VM2 is **over** VMPal 56 GB disk limit (56.7 GB used), suspended; VM1 suspended. Do not resume/resize VM2 or remove snapshots before non-destructive storage remediation. Privileged cross-session qualification and all physical acceptance gates remain OPEN.
+
+---
+
 ## LIVE VERIFIED — 2026-10-14 (supersedes previous snapshots)
 
 - **main** `8741f88adc1fd9c7b98459dfb07454692016523c`: PR #470 Windows-only inert HANDLE duplication into a separately launched child, same-session round-trip proof (hosted `38548912813` Portable/Windows GREEN), squash `b807d465e980b7207712975b33569dcf36ef5e92`. PR #471 inactive HMAC Service v12 challenge live-authority/grants issuance (reconciled head `97d5df423f3931c04bbdf6ba8db3300e84838cf3`, full hosted `38553728969` green, Synology fmt/Clippy/tests green, security reviewed), squash `8741f88adc1fd9c7b98459dfb07454692016523c`.

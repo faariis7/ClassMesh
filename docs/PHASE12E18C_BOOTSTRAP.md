@@ -7,6 +7,13 @@
 **Release gates:** IPC minor 11 ClipboardRead remains failure-only; physical and
 native clipboard E2E qualification remain OPEN.
 
+## Live qualification evidence — 2026-10-14 (post-#474)
+
+- `main=bdcc88b1f01f836d9c6e1d2a3f02de1c0d63e8eb`, no open PRs. #470 proved a **same-session** inert event HANDLE can be duplicated into a separate child. #473 added a **read-only** anonymous pagefile-backed mapping with an inert public marker, duplicated to the **actual target-child PROCESS HANDLE**; child reads marker but cannot obtain a writable view. #474 added a separate **wrong-target child** that fails to map the target's duplicated HANDLE number. Both #473/#474 passed exact-head hosted Portable Rust AND complete Windows Build CI.
+- This qualifies only the Windows HANDLE mechanics in the **same session with inert data**. It does **NOT** prove service account LocalSystem / Session 0 privilege boundaries, other-user SID/session target denial, remote handle revocation/teardown, Worker reincarnation/PID reuse, key-secret isolation, no leak by privileged processes or successful production v12 bootstrap. No secret has been transported.
+- **Next qualification gate:** on a resource-safe privileged native Windows environment, prove actual Service→interactive launched Worker `CreateProcessAsUserW` target PROCESS HANDLE with harmless marker, cross-session POSITIVE + wrong-process/wrong-session NEGATIVE + owned target/local HANDLE cleanup/kill+wait/timeout/revocation and live Service grants/control. Independently security-review before choosing a production key channel. Do not use inbound-only sensitive pipe or legacy v11 for key delivery.
+- **Resource gate:** Mac Data ~13 GiB available (97% used); VM2 56.7 GB used vs 56 GB disk cap and suspended. Do not resume VM2, expand its disk or delete VMPal snapshots until non-destructive storage remediation. Keep native E2E and physical two-PC/GPU/classroom/accessibility gates OPEN.
+
 ## Requirement and current boundary
 
 A valid OS-attested native named-pipe client, an alive Worker process HANDLE,
