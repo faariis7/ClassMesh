@@ -31,7 +31,8 @@ fn key() -> Zeroizing<[u8; 32]> {
     Zeroizing::new([0xA5; 32])
 }
 fn pending() -> SensitiveV12Challenge {
-    SensitiveV12Challenge::issue(key(), binding(), START).expect("trusted request")
+    SensitiveV12Challenge::issue(key(), binding(), START, || live(binding(), grants()))
+        .expect("trusted request")
 }
 fn proof(
     p: &SensitiveV12Challenge,
@@ -202,15 +203,20 @@ fn invalid_binding_or_zero_secret_is_rejected_and_debug_never_exposes_secrets() 
     let mut bad = binding();
     bad.request_id = 0;
     assert_eq!(
-        SensitiveV12Challenge::issue(key(), bad, START).err(),
+        SensitiveV12Challenge::issue(key(), bad, START, || live(binding(), grants())).err(),
         Some(SensitiveV12ChallengeError::InvalidBinding)
     );
     assert_eq!(
-        SensitiveV12Challenge::issue(Zeroizing::new([0; 32]), binding(), START).err(),
+        SensitiveV12Challenge::issue(Zeroizing::new([0; 32]), binding(), START, || live(
+            binding(),
+            grants()
+        ))
+        .err(),
         Some(SensitiveV12ChallengeError::InvalidKey)
     );
     assert_eq!(
-        SensitiveV12Challenge::issue(key(), binding(), u64::MAX).err(),
+        SensitiveV12Challenge::issue(key(), binding(), u64::MAX, || live(binding(), grants()))
+            .err(),
         Some(SensitiveV12ChallengeError::ClockOverflow)
     );
     let p = pending();
@@ -303,4 +309,87 @@ fn panicking_policy_accessor_cannot_leave_a_reusable_challenge() {
         p.verify(&valid_mac, VERSION, START + 2, || live(binding(), grants())),
         Err(SensitiveV12ChallengeError::AlreadyUsed)
     );
+}
+
+#[test]
+fn issue_rejects_absent_service_authority_and_both_missing_read_grants() {
+    let absent = SensitiveV12Challenge::issue(key(), binding(), START, || None);
+    assert_eq!(
+        absent.err(),
+        Some(SensitiveV12ChallengeError::CurrentAuthorityUnavailable)
+    );
+    let permissions = grants();
+    for denied in [
+        SensitiveReadGrants {
+            clipboard_capability: false,
+            ..permissions
+        },
+        SensitiveReadGrants {
+            read_permission: false,
+            ..permissions
+        },
+    ] {
+        assert_eq!(
+            SensitiveV12Challenge::issue(key(), binding(), START, || live(binding(), denied)).err(),
+            Some(SensitiveV12ChallengeError::NotAuthorized)
+        );
+    }
+}
+
+#[test]
+fn issuance_rejects_every_changed_worker_or_control_identifier() {
+    let bound = binding();
+    let mismatches = [
+        ClipboardReadSuccessBinding {
+            worker_process_id: bound.worker_process_id + 1,
+            ..bound
+        },
+        ClipboardReadSuccessBinding {
+            worker_session_id: bound.worker_session_id + 1,
+            ..bound
+        },
+        ClipboardReadSuccessBinding {
+            worker_generation: bound.worker_generation + 1,
+            ..bound
+        },
+        ClipboardReadSuccessBinding {
+            control_session_id: bound.control_session_id + 1,
+            ..bound
+        },
+        ClipboardReadSuccessBinding {
+            control_sequence: bound.control_sequence + 1,
+            ..bound
+        },
+        ClipboardReadSuccessBinding {
+            request_id: bound.request_id + 1,
+            ..bound
+        },
+    ];
+    for current in mismatches {
+        assert_eq!(
+            SensitiveV12Challenge::issue(key(), bound, START, || live(current, grants())).err(),
+            Some(SensitiveV12ChallengeError::BindingChanged)
+        );
+    }
+}
+
+#[test]
+fn live_grants_allow_issuance_but_later_revocation_rejects_proof() {
+    let mut challenge =
+        SensitiveV12Challenge::issue(key(), binding(), START, || live(binding(), grants()))
+            .expect("issuance must sample current grants");
+    let valid = proof(&challenge, &key(), VERSION, binding());
+    assert_eq!(
+        challenge.verify(&valid, VERSION, START + 1, || {
+            live(
+                binding(),
+                SensitiveReadGrants {
+                    read_permission: false,
+                    ..grants()
+                },
+            )
+        }),
+        Err(SensitiveV12ChallengeError::NotAuthorized)
+    );
+    assert_eq!(challenge.nonce(), None);
 }
