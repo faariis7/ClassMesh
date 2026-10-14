@@ -1,5 +1,15 @@
 # ClassMesh Implementation Status
 
+
+## Active Phase 12E18c4a — real SCM LocalSystem/Session0 probe (2026-10-15)
+
+- **Baseline** GitHub main 7d2c33428c331b4c9c5f45f60d3eddf4d44b8b08 after merged #490. Native disposable Windows SCM test harness in feature branch feat/phase12e18c4a-scm-native, NOT production runtime.
+- **Native VM1 evidence:** a real uniquely named Windows own-process ServiceBase service started via SCM as LocalSystem and was observed from a separately signed-in elevated, non-SYSTEM interactive Windows ARM64 session. Native pinned OS process HANDLE, exact PID and creation FILETIME, real service TokenUser=LocalSystem (S-1-5-18), native process/token Session0, other Worker-side SID and session>0; negative mismatched SID/session/FILETIME and stopped Service HANDLE rejection all passed (15 assertions). Directory containing the temporary executable explicitly ACL restricted to SYSTEM+Administrators before launch; only test service registered/stopped/deleted and temporary files removed.
+- **LIMITS:** no actual outbound pipe, separate *Service-launched* Worker HANDLE, restrictive pipe DACL, current Service control/grants, per-request authenticated key transport, or native clipboard payload; VM1 evidence only proves OS/SCM topology and must not be called v12 authentication. **#477 intentionally RED** and **#479 section-key bootstrap BLOCKED**; IPC v11 ClipboardRead remains failure-only. Later gates include cross-session outbound pipe ACL/Worker linkage, worker reincarnation/replay/revocation, safe v12 secret provisioning, CancelIoEx payload completion-drain zeroization, physical two-PC/GPU/classroom/performance/accessibility E2E.
+- **Resource checkpoint:** after explicit user-approved VMPal cleanup Mac Data ~141 GiB free, VM1/VM2 snapshots removed; VM2 virtual disk limit 85 GB and no longer over quota. Older no-resize/no-snapshots text below is archival. Validate actual VM2 and hosted latest-head checks before merge.
+
+---
+
 ## Verified 2026-10-15 local — merged through Phase 12E18c3e
 
 - **GitHub main:** `968ac652281151413d6dc5fb745d3d1b85a8734e`. #486 docs, #487 `f6bd2ba` non-LocalSystem server test, #488 `31b6cff` pinned server process liveness + OS creation FILETIME and #489 `968ac65` actual already-exited owned process HANDLE rejection are all merged. Hosted exact HEAD Portable Rust AND full Windows Build SUCCESS for #487 (`38636641261`), #488 (`38637534664`), #489 (`38638656877`); Synology Windows ARM64 cross-target check + rustfmt/Clippy -D warnings/full workspace GREEN. VM1 real Windows ARM64 #488 native 8/8 plus 20 serial repeats 160/160 PASS, then VM1 re-suspended. #489 native VM1 not run; Windows hosted x64 test successful.

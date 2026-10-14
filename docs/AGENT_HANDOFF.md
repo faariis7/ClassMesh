@@ -1,5 +1,14 @@
 # ClassMesh Agent Handoff
 
+
+## QUICK RESUME — 2026-10-15, Phase 12E18c4a native SCM probe WIP
+
+GitHub Live main 7d2c33428c331b4c9c5f45f60d3eddf4d44b8b08 (#490 already merged). New separate feature feat/phase12e18c4a-scm-native after plan-first commit d0491e1. Disposable test-only Windows ServiceBase/SCM LocalSystem Session0 qualification under scripts/phase12e18c4a-scm-probe.ps1; Mode Help inert for CI, Mode Run compiles unique SCM own-process service in protected ProgramData directory, pins OS process HANDLE, checks Session0/native SYSTEM SID and interactive Worker token/SID/session difference, deliberate mismatch and stop/dead-handle negative. Local VM1 Windows ARM64 Run returned 15 PASS with exit 0. This is **native topology evidence only**: no pipe, Service-launched Worker, authenticated v12 or secrets. VM2 independent native and hosted Portable+Windows CI must pass before Squash. Both VMs/test resources now serviceable after user-authorized disk cleanup; 141GiB free Mac, VM2 limit 85 GB, snapshots zero.
+
+**NEXT:** real cross-session outbound named-pipe with explicit target user SID DACL, first-instance and remote-client rejection, OS peer process/token/session, Service-launched Worker actual ownership, stale/reincarnation/ACL/replay/revocation negatives, and separately independently authenticated v12 key channel; no production v11 changes or secrets. #477 Windows RED/#479 section bootstrap forbidden; native payload CancelIoEx completion drain, Teacher result, two physical Windows PCs, GPU/media/classroom/UX/accessibility E2E OPEN. See #465.
+
+---
+
 ## QUICK RESUME — 2026-10-15 local, after merged #489
 
 **GitHub Live main=968ac652281151413d6dc5fb745d3d1b85a8734e**. #486 docs, #487 LocalSystem negative native test (run `38636641261` BOTH Portable and Windows green), #488 live OS outbound server HANDLE/creation FILETIME bound (run `38637534664` BOTH green), #489 reject signaled/dead actual `std::process::Child` HANDLE (run `38638656877` BOTH green) **already Squash merged**. Do not repeat. TDD RED before implementation for #488/#489, Windows ARM64 cross-target cargo check + full Synology rustfmt, Clippy -D warnings and workspace tests GREEN. **VM1 native Windows ARM64** #488 8/8 and 160/160 repeats passed; returned to Suspended, no VM1/VM2 snapshot modifications. #489 checked on hosted actual Windows x64; no separate VM1 native c3e execution claimed.
