@@ -82,10 +82,16 @@ fn assert_child_completed(child: &mut ChildGuard, role: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(status) = child.0.try_wait().expect("poll OS-launched child") {
-            assert!(status.success(), "{role} rejected the expected mapping outcome");
+            assert!(
+                status.success(),
+                "{role} rejected the expected mapping outcome"
+            );
             return;
         }
-        assert!(Instant::now() < deadline, "{role} did not exit before deadline");
+        assert!(
+            Instant::now() < deadline,
+            "{role} did not exit before deadline"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -110,20 +116,23 @@ fn inert_section_isolated_to_target_child() {
     match mode.to_str().expect("fixed test mode") {
         "target" => {
             let read_view = OwnedView(read_view);
-            assert!(!read_view.0.Value.is_null(), "target must map its own read-only copy");
+            assert!(
+                !read_view.0.Value.is_null(),
+                "target must map its own read-only copy"
+            );
             // SAFETY: the successful view maps at least PUBLIC_MARKER.len().
             let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    read_view.0.Value.cast::<u8>(),
-                    PUBLIC_MARKER.len(),
-                )
+                std::slice::from_raw_parts(read_view.0.Value.cast::<u8>(), PUBLIC_MARKER.len())
             };
             assert_eq!(bytes, PUBLIC_MARKER);
             // SAFETY: the target was granted FILE_MAP_READ only; WRITE must fail.
             let writable =
                 unsafe { MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, PUBLIC_MARKER.len()) };
             let writable = OwnedView(writable);
-            assert!(writable.0.Value.is_null(), "target may not request write access");
+            assert!(
+                writable.0.Value.is_null(),
+                "target may not request write access"
+            );
             // The target owns this OS-inserted copy of the HANDLE.
             drop(OwnedHandle(section));
         }
@@ -145,10 +154,21 @@ fn read_only_inert_section_handle_cannot_be_used_by_unrelated_process() {
     let mut decoy = child("decoy");
     // SAFETY: anonymous, noninheritable pagefile mapping has no global name.
     let section = OwnedHandle(unsafe {
-        CreateFileMappingW(INVALID_HANDLE_VALUE, null(), PAGE_READWRITE, 0, 4096, null())
+        CreateFileMappingW(
+            INVALID_HANDLE_VALUE,
+            null(),
+            PAGE_READWRITE,
+            0,
+            4096,
+            null(),
+        )
     });
-    assert!(!section.0.is_null(), "create private in-memory inert section");
-    let view = OwnedView(unsafe { MapViewOfFile(section.0, FILE_MAP_WRITE, 0, 0, PUBLIC_MARKER.len()) });
+    assert!(
+        !section.0.is_null(),
+        "create private in-memory inert section"
+    );
+    let view =
+        OwnedView(unsafe { MapViewOfFile(section.0, FILE_MAP_WRITE, 0, 0, PUBLIC_MARKER.len()) });
     assert!(!view.0.Value.is_null(), "map source section writable");
     // SAFETY: exactly PUBLIC_MARKER.len() bytes are committed and mapped.
     unsafe {
