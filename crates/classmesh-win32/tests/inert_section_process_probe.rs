@@ -9,9 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, HANDLE, INVALID_HANDLE_VALUE,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Memory::{
     CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
     PAGE_READWRITE, UnmapViewOfFile,
