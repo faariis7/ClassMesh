@@ -597,7 +597,7 @@ mod tests {
             process_id: std::process::id(),
             session_id: session,
         };
-        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1000);
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(100_000);
         let binding = SensitivePipeNameBinding {
             service_process_id: std::process::id(),
             worker_session_id: session,
