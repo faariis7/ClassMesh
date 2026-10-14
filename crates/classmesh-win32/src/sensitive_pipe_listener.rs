@@ -72,17 +72,33 @@ impl SensitivePipeListener {
         Ok(())
     }
 
-    /// Only the Service's true launched process HANDLE and the current
-    /// authenticated control request are admissible inputs here. This is an
-    /// OS-peer + live-process binding, NOT v12 negotiation or read permission.
+    /// The Service must supply a callable reading its *current* authenticated
+    /// control request, not a binding copied before an OS connect wait.
+    /// Re-read it after connection: a revoked or replaced request must not
+    /// inherit an otherwise valid OS peer. This is NOT v12 negotiation,
+    /// grant checking, or permission to receive secret bytes.
     pub fn wait_for_bound_worker(
         &mut self,
         timeout: std::time::Duration,
         admission: &SensitivePipeAdmission,
-        current: SensitivePipeNameBinding,
+        mut current_control: impl FnMut() -> Option<SensitivePipeNameBinding>,
         worker: &SessionProcess,
     ) -> Result<crate::PipePeer, PipeError> {
         self.validate_listener_binding(admission)?;
+        let before = current_control().ok_or(PipeError {
+            stage: "SensitiveCurrentControlUnavailable",
+            win32_error: 5,
+        })?;
+        // Bind the *live* Service snapshot before starting native connection
+        // I/O, even if its earlier registration was once valid.
+        if crate::sensitive_pipe_name::sensitive_worker_pipe_name(before).as_deref()
+            != Some(self.name.as_str())
+        {
+            return Err(PipeError {
+                stage: "SensitivePipePeerBinding",
+                win32_error: 5,
+            });
+        }
         if !worker.is_running().map_err(|e| PipeError {
             stage: "SensitiveWorkerHandleCheck",
             win32_error: e.win32_error,
@@ -93,7 +109,18 @@ impl SensitivePipeListener {
             });
         }
         let peer = self.wait_for_os_peer(timeout)?;
-        Self::verify_bound_worker(admission, current, worker, &peer)?;
+        let admitted = current_control()
+            .ok_or(PipeError {
+                stage: "SensitiveCurrentControlUnavailable",
+                win32_error: 5,
+            })
+            .and_then(|after| Self::verify_bound_worker(admission, after, worker, &peer));
+        if let Err(error) = admitted {
+            // The pipe is already connected. Close the native connection
+            // immediately instead of leaving a revoked peer attached.
+            let _ = self._owned_pipe.disconnect();
+            return Err(error);
+        }
         Ok(peer)
     }
 
