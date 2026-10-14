@@ -84,6 +84,10 @@ fn child_consumes_only_inert_mapped_section_in_test_mode() {
         unsafe { UnmapViewOfFile(writable) };
     }
     assert!(!was_writable, "target may not map a writable view");
+
+    // The source HANDLE in the target has FILE_MAP_READ only. It must not
+    // be able to create a different HANDLE with FILE_MAP_WRITE privileges.
+    assert_readonly_duplicate_cannot_escalate(section.0);
 }
 
 #[test]
