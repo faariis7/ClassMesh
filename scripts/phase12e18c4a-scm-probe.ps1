@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Help", "Run", "Pipe")]
+    [ValidateSet("Help", "Run", "Pipe", "DenyLocalService")]
     [string]$Mode = "Help"
 )
 
@@ -14,8 +14,9 @@ ClassMesh Phase 12E18c4a/c4b: DISPOSABLE SCM/Session0 native probe
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode Help
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode Run
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode Pipe
+  .\scripts\phase12e18c4a-scm-probe.ps1 -Mode DenyLocalService
 
-Run and Pipe require a disposable Windows test machine, an elevated interactive
+Run, Pipe and DenyLocalService require a disposable Windows test machine, an elevated interactive
 administrator session (>0), and PowerShell 5.1 with .NET Framework.
 It compiles and starts one unique test-only ServiceBase executable under
 the REAL Windows Service Control Manager as LocalSystem. It verifies OS
@@ -24,8 +25,10 @@ stops and deletes only its own service, and deletes its temporary executable.
 
 Pipe opens one inert, one-instance native OUTBOUND pipe with explicit
 SYSTEM + current-user read ACL and rejects remote clients; no payload is sent.
-Neither mode authenticates v12, proves a Service-launched Worker, tests a
-wrong-user SID, grants Worker control, transfers secrets or reads clipboard.
+DenyLocalService additionally starts an SCM LocalService (S-1-5-19)
+service which must get ERROR_ACCESS_DENIED on the pipe before the authorized
+client connects. None of these modes authenticate v12, prove a normal
+Service-launched Worker, grant Worker control, or read clipboard.
 No physical two-PC acceptance is claimed.
 "@ | Write-Output
     return
@@ -51,6 +54,7 @@ if ($workerSession -le 0 -or $identity.User.Value -eq "S-1-5-18") {
 $id = [Guid]::NewGuid().ToString("N")
 $name = "ClassMeshE18c4a" + $id.Substring(0, 12)
 $pipeName = "ClassMeshE18c4b" + $id.Substring(0, 12)
+$deniedName = "ClassMeshE18c4c" + $id.Substring(0, 12)
 $pipePath = "\\.\pipe\$pipeName"
 $workDir = Join-Path $env:ProgramData ("classmesh-e18c4a-" + $id)
 New-Item -ItemType Directory -Path $workDir -ErrorAction Stop | Out-Null
@@ -65,13 +69,16 @@ $serviceExe = Join-Path $workDir "inert-scm-probe.exe"
 $created = $false
 $serviceHandle = [IntPtr]::Zero
 $pipeHandle = [IntPtr]::Zero
+$deniedHandle = [IntPtr]::Zero
+$deniedCreated = $false
+$pipeProbe = $Mode -in @("Pipe", "DenyLocalService")
 
 # Native pipe exists in the real SCM-controlled SYSTEM service only in Pipe
 # mode; Run remains the original inert topology probe.
 $serviceExtras = ""
 $startBody = ""
 $stopBody = ""
-if ($Mode -eq "Pipe") {
+if ($pipeProbe) {
     $serviceExtras = @'
     [StructLayout(LayoutKind.Sequential)]
     struct NativeSecurityAttributes {
@@ -121,6 +128,44 @@ if ($Mode -eq "Pipe") {
 '@
 }
 
+# Additional real SCM identity: LocalService tries to open the existing
+# SYSTEM-owned pipe before the intended interactive SID. It sends zero data.
+$deniedClass = ""
+$mainBody = "ServiceBase.Run(new InertProbeService());"
+if ($Mode -eq "DenyLocalService") {
+    $deniedClass = @'
+public sealed class DeniedClientService : ServiceBase {
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true,
+        EntryPoint="CreateFileW")]
+    static extern IntPtr OpenNativePipe(string path, uint access, uint share,
+        IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    public DeniedClientService() { ServiceName = "__DENIED_NAME__"; CanStop = true; }
+    protected override void OnStart(string[] args) {
+        // Same desired READ access and security SQOS as intended user.
+        IntPtr handle = OpenNativePipe(@"\\.\pipe\__PIPE_NAME__",
+            0x80000000, 0, IntPtr.Zero, 3, 0x00110000, IntPtr.Zero);
+        int error = Marshal.GetLastWin32Error();
+        if (handle != IntPtr.Zero && handle != new IntPtr(-1)) {
+            CloseHandle(handle);
+            throw new InvalidOperationException("security FAIL: wrong user opened pipe");
+        }
+        if (error != 5) {
+            throw new InvalidOperationException(
+                "security FAIL: wrong-user error not ACCESS_DENIED, code " + error);
+        }
+    }
+    protected override void OnStop() { }
+}
+'@
+    $mainBody = @'
+if (args.Length == 1 && args[0] == "--wrong-user")
+    ServiceBase.Run(new DeniedClientService());
+else
+    ServiceBase.Run(new InertProbeService());
+'@
+}
+
 # Compiled executable implements the genuine service entrypoint accepted by
 # StartServiceCtrlDispatcher, not a scheduled task or SC failure fallback.
 $serviceSource = @'
@@ -130,7 +175,9 @@ using System.ServiceProcess;
 public sealed class InertProbeService : ServiceBase {
 __EXTRA_NATIVE__
     public InertProbeService() { ServiceName = "__SERVICE_NAME__"; CanStop = true; }
-    public static void Main() { ServiceBase.Run(new InertProbeService()); }
+    public static void Main(string[] args) {
+__MAIN_BODY__
+    }
     protected override void OnStart(string[] args) {
 __START_BODY__
     }
@@ -138,10 +185,14 @@ __START_BODY__
 __STOP_BODY__
     }
 }
+__DENIED_CLASS__
 '@.Replace("__SERVICE_NAME__", $name).
     Replace("__EXTRA_NATIVE__", $serviceExtras).
+    Replace("__MAIN_BODY__", $mainBody).
     Replace("__START_BODY__", $startBody).
     Replace("__STOP_BODY__", $stopBody).
+    Replace("__DENIED_CLASS__", $deniedClass).
+    Replace("__DENIED_NAME__", $deniedName).
     Replace("__CLIENT_SID__", $identity.User.Value).
     Replace("__PIPE_NAME__", $pipeName)
 
@@ -282,6 +333,12 @@ function Assert-Probe {
 }
 
 try {
+    if ($Mode -eq "DenyLocalService") {
+        # Grant LocalService read/execute on the test binary, NEVER write.
+        # The directory stays non-writable to this adversarial OS identity.
+        $rx = & icacls.exe $workDir "/grant:r" "*S-1-5-19:(OI)(CI)RX" 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "Unable to grant LocalService RX: $rx" }
+    }
     Add-Type -TypeDefinition $serviceSource -OutputAssembly $serviceExe `
         -OutputType ConsoleApplication -ReferencedAssemblies "System.ServiceProcess.dll" -ErrorAction Stop
     Add-Type -TypeDefinition $nativeSource -ErrorAction Stop
@@ -329,7 +386,34 @@ try {
     Assert-Probe ($serviceSession -ne [uint32]$workerSession) "deliberate wrong expected Service session rejected"
     Assert-Probe ($serviceBirth -ne ($serviceBirth + 1)) "deliberate wrong Service birth stamp rejected"
 
-    if ($Mode -eq "Pipe") {
+    if ($pipeProbe) {
+        if ($Mode -eq "DenyLocalService") {
+            # An OS account other than SYSTEM AND the intended target user:
+            # real SCM LocalService, not a forged SID string in our process.
+            $deniedPath = '"' + $serviceExe + '" --wrong-user'
+            $denyCreate = & sc.exe create $deniedName "binPath=" $deniedPath `
+                "start=" "demand" "type=" "own" "obj=" "NT AUTHORITY\LocalService" 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "wrong-user sc create failed: $denyCreate" }
+            $deniedCreated = $true
+            Start-Service -Name $deniedName -ErrorAction Stop
+            $wrong = Get-CimInstance Win32_Service -Filter ("Name='" + $deniedName + "'")
+            Assert-Probe ($null -ne $wrong -and $wrong.State -eq "Running" -and
+                $wrong.ProcessId -gt 0) "wrong-OS-SID SCM Service started only after exact ACCESS_DENIED"
+            Assert-Probe ($wrong.StartName -in @("NT AUTHORITY\LocalService", "LocalService")) "wrong client SCM identity is LocalService"
+            $deniedHandle = [ClassMeshNativeScmProbe]::Pin([int]$wrong.ProcessId)
+            Assert-Probe ([ClassMeshNativeScmProbe]::TokenUserSid($deniedHandle) -eq "S-1-5-19") "actual wrong client TokenUser is LocalService SID"
+            Assert-Probe ([ClassMeshNativeScmProbe]::Session($deniedHandle) -eq 0 -and
+                [ClassMeshNativeScmProbe]::TokenSession($deniedHandle) -eq 0) "real wrong client service runs in Session0"
+            Assert-Probe ([ClassMeshNativeScmProbe]::WaitForSingleObject($deniedHandle, 0) -eq 0x102 -and
+                [ClassMeshNativeScmProbe]::GetProcessId($deniedHandle) -eq [uint32]$wrong.ProcessId) "wrong-identity process HANDLE remains pinned and live"
+            Assert-Probe ([ClassMeshNativeScmProbe]::TokenUserSid($deniedHandle) -ne $serviceSid -and
+                [ClassMeshNativeScmProbe]::TokenUserSid($deniedHandle) -ne $identity.User.Value) "unauthorized OS account is distinct from server and intended user"
+            Stop-Service -Name $deniedName -ErrorAction Stop
+            Assert-Probe ([ClassMeshNativeScmProbe]::WaitForSingleObject($deniedHandle, 12000) -eq 0) "wrong-user service process exited and pinned handle is dead"
+            [void][ClassMeshNativeScmProbe]::CloseHandle($deniedHandle)
+            $deniedHandle = [IntPtr]::Zero
+        }
+
         # Probe the actual, local, non-secret pipe client HANDLE; do not trust
         # the public pipe name as an authentication credential.
         $pipeDeadline = [DateTime]::UtcNow.AddSeconds(8)
@@ -365,17 +449,40 @@ try {
     Stop-Service -Name $name -ErrorAction Stop
     $exitWait = [ClassMeshNativeScmProbe]::WaitForSingleObject($serviceHandle, 12000)
     Assert-Probe ($exitWait -eq 0) "stopped SCM process fails live-HANDLE check"
-    if ($Mode -eq "Pipe") {
+    if ($pipeProbe) {
         $stale = [ClassMeshNativeScmProbe]::OpenReadonlyClient($pipePath)
         $staleDenied = ($stale -eq [IntPtr]::Zero -or $stale -eq [IntPtr](-1))
         if (-not $staleDenied) { [void][ClassMeshNativeScmProbe]::CloseHandle($stale) }
         Assert-Probe $staleDenied "stale outbound pipe refuses new client after SCM Service death"
-        Write-Output "SCM_SESSION0_NATIVE_PIPE_INERT_PASS"
+        if ($Mode -eq "DenyLocalService") {
+            Write-Output "SCM_LOCAL_SERVICE_WRONG_SID_ACL_DENY_PASS"
+        } else {
+            Write-Output "SCM_SESSION0_NATIVE_PIPE_INERT_PASS"
+        }
     } else {
         Write-Output "SCM_SESSION0_NATIVE_INERT_PASS"
     }
     Write-Output "NOT_AUTHENTICATED_V12_NOT_PIPE_NOT_CLIPBOARD"
 } finally {
+    if ($deniedHandle -ne [IntPtr]::Zero) {
+        [void][ClassMeshNativeScmProbe]::CloseHandle($deniedHandle)
+    }
+    if ($deniedCreated) {
+        try {
+            $wrongService = Get-Service -Name $deniedName -ErrorAction SilentlyContinue
+            if ($null -ne $wrongService -and $wrongService.Status -ne "Stopped") {
+                & sc.exe stop $deniedName 2>&1 | Out-Null
+                $wrongService.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(12))
+            }
+        } catch {
+            Write-Warning "Could not confirm bounded wrong-user test service stop: $deniedName"
+        } finally {
+            & sc.exe delete $deniedName 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Wrong-user test service deletion not confirmed: $deniedName"
+            }
+        }
+    }
     if ($pipeHandle -ne [IntPtr]::Zero -and $pipeHandle -ne [IntPtr](-1)) {
         [void][ClassMeshNativeScmProbe]::CloseHandle($pipeHandle)
     }

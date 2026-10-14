@@ -1,6 +1,15 @@
 # ClassMesh Agent Handoff
 
 
+## QUICK RESUME — 2026-10-15 c4c real LocalService wrong-SID ACL negative
+
+Verified main cf21bff170ce713831c94109230d31728b750577 after c4b #492 Squash, CI 38645037954 both Portable+Windows SUCCESS. c4a #491 and c4b #492 already merged, do not redo. Plan-first c4c branch feat/phase12e18c4c-localservice-deny based cleanly on new main, now extends same disposable Windows SCM test-only PowerShell helper with DenyLocalService mode. Before allowed client opens SYSTEM Session0 outbound pipe, a second unique SCM service running **actual LocalService SID S-1-5-19** attempts GENERIC_READ, must observe Win32 ACCESS_DENIED 5; it is an actual separate process/OS token, not caller-supplied spoof metadata. The correct interactive user thereafter opens the same service pipe and matches pinned actual SYSTEM SCM service birth/PID/Session0, first-instance and stale-death negatives. Both VM1 and VM2 Windows ARM64 DenyLocalService **32/32 pass exit0**, original VM1 Run 15/15 and VM2 Pipe 25/25 regressions pass. Test LocalService has ONLY RX permission on protected disposable executable directory; never write, never grant pipe ACL rights. No payload or secrets anywhere.
+
+Next independent gate is real Service-created/launched *non-Administrator interactive Worker* with current user/session/process HANDLE and grant/control lineage; a separate signed-in wrong user's ACL negative and actual remote client attempt not tested yet. This is no authenticated v12/HMAC per-request key/bootstrap, no clipboard plaintext, and no physical multi-PC/GPU/classroom/accessibility proof. Production v11 ClipboardRead failure-only, #477 Windows-RED and #479 section key blocked. c4c PR exact-HEAD full hosted CI/security review pending; update issue #465. Mac storage recovered ~135 GiB, VMPal snapshots 0, VM2 virtual disk limit 85 GB.
+
+---
+
+
 ## QUICK RESUME — 2026-10-15 Phase 12E18c4b real SCM outbound pipe
 
 GitHub main after #491 is 7d3063a5948f0c97c10df6aec04cac462df608d2. #491 Squash merged after fully green Portable Rust + Windows Build CI 38643093596; real SCM LocalSystem Session0 15/15 on VM1 AND VM2; no production changes. The **active** c4b branch feat/phase12e18c4b-scm-native-pipe-acl was plan-committed first as 4f58d16. Extends only scripts/phase12e18c4a-scm-probe.ps1 with Mode Pipe: real Service-created first-instance OUTBOUND pipe, explicit protected SYSTEM+exact-user read DACL, reject remote clients, no payload. Actual Windows VM1 and VM2 ARM64 each passed 25/25 tests: OS pipe server PID/Session0 matches pinned live SCM process+token SID/birth stamp, duplicate first-instance ERROR_ACCESS_DENIED, mismatched interactive server decoy and stale pipe after Service death denied. Native initial RED invalid path (GetLastError 161) was corrected, no assertion relaxation. Mode Run original regression still 15/15 VM1; elevated-only harness and all temp/SCM cleanup enforced.
