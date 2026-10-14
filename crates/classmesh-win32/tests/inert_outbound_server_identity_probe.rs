@@ -187,13 +187,12 @@ fn child_observes_true_outbound_named_pipe_server_identity() {
     assert_eq!(server_session, session_by_pid, "OS session mismatch");
     if std::env::var_os("CLASSMESH_INERT_OUTBOUND_CHECK_TOKEN_SID").is_some() {
         let observed = user_sid_of_native_process(server_pid);
-        let mut expected = if std::env::var_os("CLASSMESH_INERT_OUTBOUND_REQUIRE_SYSTEM_SID")
-            .is_some()
-        {
-            local_system_sid()
-        } else {
-            user_sid_of_native_process(std::process::id())
-        };
+        let mut expected =
+            if std::env::var_os("CLASSMESH_INERT_OUTBOUND_REQUIRE_SYSTEM_SID").is_some() {
+                local_system_sid()
+            } else {
+                user_sid_of_native_process(std::process::id())
+            };
         if std::env::var_os("CLASSMESH_INERT_OUTBOUND_WRONG_TOKEN_SID").is_some() {
             *expected.last_mut().expect("native SID is nonempty") ^= 1;
         }
@@ -329,7 +328,8 @@ fn native_test_client_rejects_wrong_expected_server_process() {
 
 #[test]
 fn native_child_accepts_actual_outbound_server_token_user_sid() {
-    let (success, diagnostics) = run_inert_server_identity_case(false, Some(SidExpectation::CurrentUser));
+    let (success, diagnostics) =
+        run_inert_server_identity_case(false, Some(SidExpectation::CurrentUser));
     assert!(
         success,
         "real native server token user SID should match the same-user test child: {diagnostics}"
@@ -338,7 +338,8 @@ fn native_child_accepts_actual_outbound_server_token_user_sid() {
 
 #[test]
 fn native_child_rejects_deliberately_wrong_expected_server_token_user_sid() {
-    let (success, diagnostics) = run_inert_server_identity_case(false, Some(SidExpectation::CorruptCurrentUser));
+    let (success, diagnostics) =
+        run_inert_server_identity_case(false, Some(SidExpectation::CorruptCurrentUser));
     assert!(!success, "wrong expected server token SID must be denied");
     assert!(
         diagnostics.contains("native server token SID mismatch must fail closed"),
