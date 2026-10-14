@@ -141,7 +141,13 @@ fn assert_readonly_duplicate_cannot_escalate(readonly: HANDLE) {
     );
     let same_access = OwnedHandle(same_access);
     let write = OwnedView(unsafe {
-        MapViewOfFile(same_access.0, FILE_MAP_WRITE, 0, 0, INERT_PUBLIC_MARKER.len())
+        MapViewOfFile(
+            same_access.0,
+            FILE_MAP_WRITE,
+            0,
+            0,
+            INERT_PUBLIC_MARKER.len(),
+        )
     });
     assert!(
         write.0.Value.is_null(),
