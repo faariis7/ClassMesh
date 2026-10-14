@@ -1,5 +1,13 @@
 # Phase 12E18c — Service-to-Worker v12 key bootstrap qualification
 
+
+## 2026-10-15 independent native wrong-identity SID ACL test (c4c)
+
+On each Windows ARM64 test VM, an actual SCM LocalSystem Session0 own-process test service opens one protected DACL, first-instance native outbound pipe for only SYSTEM+intended interactive user SID. A second independently SCM-started service runs **LocalService SID S-1-5-19**, and its native read attempt succeeds **only as a negative security result**: Windows must reject the access with ERROR_ACCESS_DENIED 5 (not BUSY/missing path). Both VMs returned 32/32 assertions with exit0 and pinned native wrong-principal TokenUser/process HANDLE/session. After the rejected wrong-identity attempt, the correct interactive SID can still open the exact same pipe and recheck original SYSTEM SCM process PID/creation/liveness; stale pipe refused after stop. No content/keys/payload transferred.
+
+This is one **real different OS identity**, but it is an SCM LocalService Session0 service, *not a separately signed-in ordinary user*. An actual Service-launched Worker, ordinary wrong-user rejection, physical remote pipe negative, current control/grants/replay, per-request independent v12 authentication and safe HMAC key distribution remain unproved. Section HANDLE scheme forbidden by #477 Windows-RED/#479; generic ClipboardRead v11 failure-only, no native payload read cancellation/drain or Teacher E2E.
+
+
 ## Privileged SCM/OS evidence — Phase 12E18c4a/c4b (15 October 2026)
 
 Real disposable Windows ServiceBase created through SCM as LocalSystem in Session 0 was independently executed on VM1 and VM2 ARM64 under elevated Administrator test observations. c4a #491 merged with exact-head full Portable Rust and Windows CI success. c4b extends the test only with a unique first-instance OUTBOUND named pipe, protected DACL explicitly for SYSTEM full + exact target interactive SID read, remote-client rejection flag, and no payload. Actual pipe client HANDLE reported real server PID and SessionId=0, matched pinned live SCM process HANDLE TokenUser System SID, creation time, and re-queried SCM; 25 positive and negative checks passed on each VM. Colliding first-instance returns ERROR_ACCESS_DENIED; stale pipe after stop refuses new opens.

@@ -1,6 +1,16 @@
 # ClassMesh Implementation Status
 
 
+## Active Phase 12E18c4c — actual denied LocalService OS SID (2026-10-15)
+
+- **GitHub Live main after c4b #492:** cf21bff170ce713831c94109230d31728b750577. #492 both Portable Rust and complete hosted Windows Build GREEN CI run 38645037954, Squash merged. This branch c4c was planned first, then rebased only the planning commit on the new exact main; test-only existing SCM harness further extends Mode DenyLocalService without touching production code or generic IPC.
+- **Independent real Windows 11 ARM64 VM1 and VM2 native proof:** a real disposable SCM own-process LocalSystem service created the unique first-instance outbound pipe with protected explicit SYSTEM+target-interactive-user SID ACL and no payload. A second real SCM service running under **LocalService (S-1-5-19)** tried to OpenPipe with GENERIC_READ and was allowed to start only after exact native Win32 ERROR_ACCESS_DENIED 5. The observer independently pinned the wrong service native OS process HANDLE and queried actual TokenUser SID=S-1-5-19, Session0, live PID, separately from SYSTEM and target user; service teardown signaled the original HANDLE. Both VM1 and VM2 passed **32/32 assertions each, exit 0**. Crucially **AFTER** the denied LocalService attempt, the right interactive SID opened the SAME existing System-owned native pipe, matched its reported server OS PID/session, pinned live SCM HANDLE creation FILETIME, denied second first-instance, and denied the stale pipe after stop. Existing Mode Run VM1 15/15 and Mode Pipe VM2 25/25 also GREEN. LocalService received only directory/binary RX, never write; both services own unique names and cleanup.
+- **Boundaries:** LocalService is a true different Windows OS identity but runs as SCM service in Session0, **NOT another signed-in ordinary non-admin user or Service-launched interactive Worker**. No native remote-client rejection attempt yet, no real managed Worker process grants/control lineage, no fully atomic trusted Worker PID, no live revocation/replay, no authenticated v12 session or safely provisioned per-request HMAC key. No clipboard data transferred. Original #477 intentionally Windows RED and #479 section-HANDLE key bootstrap BLOCKED. Production ClipboardRead generic v11 remains failure-only. The payload ReadFile CancelIoEx completion-drain/zeroization, Teacher result and physical two Windows PCs/GPU/classroom/performance/accessibility E2E are OPEN.
+- **CI merge gate:** Latest-head hosted Portable Rust+full Windows Build AND independent security review required before c4c Squash, Windows hosted executes Help-mode only (native privileged Run/Pipe/DenyLocalService validated on isolated VMs, never in hosted CI).
+
+---
+
+
 ## ACTIVE Phase 12E18c4b — inert cross-session Service-owned OUTBOUND pipe (2026-10-15)
 
 - **Baseline** main 7d3063a5948f0c97c10df6aec04cac462df608d2 after merged #491 (native SCM LocalSystem/Session0). c4a actual VM1+VM2 Windows ARM64 15/15 each, and exact-HEAD hosted Portable Rust + full Windows Build SUCCESS CI run 38643093596.
