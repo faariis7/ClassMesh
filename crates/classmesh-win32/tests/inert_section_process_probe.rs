@@ -10,7 +10,7 @@ use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, DuplicateHandle, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::System::Memory::{
     CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
@@ -76,6 +76,17 @@ fn child_consumes_only_inert_mapped_section_in_test_mode() {
     let received =
         unsafe { std::slice::from_raw_parts(view.0.Value.cast::<u8>(), INERT_PUBLIC_MARKER.len()) };
     assert_eq!(received, INERT_PUBLIC_MARKER);
+    // The target received only FILE_MAP_READ, NOT the parent's write rights.
+    // SAFETY: a write-access request must fail on this read-only mapping handle.
+    let writable = unsafe {
+        MapViewOfFile(section.0, FILE_MAP_WRITE, 0, 0, INERT_PUBLIC_MARKER.len())
+    };
+    let was_writable = !writable.Value.is_null();
+    if was_writable {
+        // SAFETY: on unexpected success, close the real view before failing.
+        unsafe { UnmapViewOfFile(writable) };
+    }
+    assert!(!was_writable, "target may not map a writable view");
 }
 
 #[test]
@@ -134,9 +145,9 @@ fn pagefile_section_is_readable_in_exact_separate_child_after_targeted_duplicati
                 section.0,
                 target_process,
                 &mut remote,
+                FILE_MAP_READ,
                 0,
                 0,
-                DUPLICATE_SAME_ACCESS,
             )
         },
         0,
