@@ -1,6 +1,16 @@
 # ClassMesh Implementation Status
 
 
+## ACTIVE Phase 12E18c4b — inert cross-session Service-owned OUTBOUND pipe (2026-10-15)
+
+- **Baseline** main 7d3063a5948f0c97c10df6aec04cac462df608d2 after merged #491 (native SCM LocalSystem/Session0). c4a actual VM1+VM2 Windows ARM64 15/15 each, and exact-HEAD hosted Portable Rust + full Windows Build SUCCESS CI run 38643093596.
+- **c4b real native evidence before PR CI:** Mode Pipe added to the existing disposable isolated SCM harness, no duplicated service/runtime code and NO PRODUCTION changes. A genuine SCM-controlled SYSTEM service in Session0 creates one first-instance OUTBOUND Windows named pipe with a PROTECTED explicit DACL granting SYSTEM full access and current interactive non-SYSTEM SID read access only, PIPE_REJECT_REMOTE_CLIENTS flag, non-inheritable handle, no payload. In each separate Windows ARM64 VM1 and VM2, elevated interactive client opened the native pipe HANDLE, the kernel reported server PID and Session0, both matched the SCM-owned live original process HANDLE and creation FILETIME; deliberate non-SYSTEM/wrong-session server identity fails, a duplicate first-instance attempt gets expected ERROR_ACCESS_DENIED, and stale pipe opens are denied after service stop. **25/25 native assertions on VM1 and separately 25/25 on VM2**, both exit 0. Original Mode Run regression 15/15 on VM1. A local RED proved path failure (Windows error 161) and was corrected; assertions never lowered, collision now insists on exact error 5. All generated named services/ProgramData directories were removed.
+- **NOT PROVED:** this interactive test observer is an **elevated local Administrator** (different SID/session from SYSTEM), not an independently Service-launched non-admin Worker. No wrong-user cross-account ACL denial, remote-machine connection attempt, mutual v12 authentication, current grants/control/replay/death lineage binding, key bootstrap, payload/cancellation/Teacher response or real clipboard E2E. Existing PID-to-OpenProcess acquisition race remains. Original #477 intentionally remains Windows-RED and #479 forbids the section-HANDLE bootstrap; production v11 ClipboardRead failure-only. Physical two Windows PCs, GPU/media/classroom/performance and accessibility OPEN. Require security review, exact-head hosted Portable+Windows CI before c4b Squash.
+- **Resources:** both VMPal machines operational, Mac Data ~135 GiB free after authorized cleanup, VM2 limit 85GB, zero VMPal snapshots; older historical low-disk notes below superseded.
+
+---
+
+
 ## Active Phase 12E18c4a — real SCM LocalSystem/Session0 probe (2026-10-15)
 
 - **Baseline** GitHub main 7d2c33428c331b4c9c5f45f60d3eddf4d44b8b08 after merged #490. Native disposable Windows SCM test harness in feature branch feat/phase12e18c4a-scm-native, NOT production runtime.

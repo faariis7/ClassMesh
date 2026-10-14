@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Help", "Run")]
+    [ValidateSet("Help", "Run", "Pipe")]
     [string]$Mode = "Help"
 )
 
@@ -9,21 +9,24 @@ $ErrorActionPreference = "Stop"
 
 if ($Mode -eq "Help") {
     @"
-ClassMesh Phase 12E18c4a: DISPOSABLE SCM/LocalSystem Session0 identity probe
+ClassMesh Phase 12E18c4a/c4b: DISPOSABLE SCM/Session0 native probe
 
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode Help
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode Run
+  .\scripts\phase12e18c4a-scm-probe.ps1 -Mode Pipe
 
-Run requires a disposable Windows test machine, an elevated interactive
+Run and Pipe require a disposable Windows test machine, an elevated interactive
 administrator session (>0), and PowerShell 5.1 with .NET Framework.
 It compiles and starts one unique test-only ServiceBase executable under
 the REAL Windows Service Control Manager as LocalSystem. It verifies OS
 process/token/session/lifetime evidence and deliberately failing identities,
 stops and deletes only its own service, and deletes its temporary executable.
 
-It does NOT open a named pipe, grant Worker control, transfer secrets,
-bootstrap future v12, or execute clipboard operations. Do NOT interpret it
-as positive Service-to-Worker authentication or physical two-PC evidence.
+Pipe opens one inert, one-instance native OUTBOUND pipe with explicit
+SYSTEM + current-user read ACL and rejects remote clients; no payload is sent.
+Neither mode authenticates v12, proves a Service-launched Worker, tests a
+wrong-user SID, grants Worker control, transfers secrets or reads clipboard.
+No physical two-PC acceptance is claimed.
 "@ | Write-Output
     return
 }
@@ -43,10 +46,12 @@ if ($workerSession -le 0 -or $identity.User.Value -eq "S-1-5-18") {
     throw "Probe requires a signed-in non-SYSTEM interactive Worker session."
 }
 
-# No existing service is ever modified. The ephemeral name and directory are
-# unpredictable; no pipe, password, bearer credential or IPC channel is used.
+# No existing service is ever modified. Public pipe metadata is unique and
+# non-bearer; no password, privileged grant or sensitive payload is used.
 $id = [Guid]::NewGuid().ToString("N")
 $name = "ClassMeshE18c4a" + $id.Substring(0, 12)
+$pipeName = "ClassMeshE18c4b" + $id.Substring(0, 12)
+$pipePath = "\\.\pipe\$pipeName"
 $workDir = Join-Path $env:ProgramData ("classmesh-e18c4a-" + $id)
 New-Item -ItemType Directory -Path $workDir -ErrorAction Stop | Out-Null
 # LocalSystem must never execute a service binary from a directory writable
@@ -59,19 +64,86 @@ if ($LASTEXITCODE -ne 0) {
 $serviceExe = Join-Path $workDir "inert-scm-probe.exe"
 $created = $false
 $serviceHandle = [IntPtr]::Zero
+$pipeHandle = [IntPtr]::Zero
+
+# Native pipe exists in the real SCM-controlled SYSTEM service only in Pipe
+# mode; Run remains the original inert topology probe.
+$serviceExtras = ""
+$startBody = ""
+$stopBody = ""
+if ($Mode -eq "Pipe") {
+    $serviceExtras = @'
+    [StructLayout(LayoutKind.Sequential)]
+    struct NativeSecurityAttributes {
+        public uint nLength;
+        public IntPtr lpSecurityDescriptor;
+        [MarshalAs(UnmanagedType.Bool)] public bool bInheritHandle;
+    }
+    [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true,
+        EntryPoint="ConvertStringSecurityDescriptorToSecurityDescriptorW")]
+    static extern bool ConvertSddl(string sddl, uint revision, out IntPtr descriptor, out uint size);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true,
+        EntryPoint="CreateNamedPipeW")]
+    static extern IntPtr CreateNativePipe(string path, uint openMode, uint pipeMode,
+        uint instances, uint outBytes, uint inBytes, uint timeout, ref NativeSecurityAttributes attr);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    private IntPtr pipe = IntPtr.Zero;
+'@
+    $startBody = @'
+        // The DACL is PROTECTED, has no Everyone/Anonymous ACE, and grants
+        // full access only to SYSTEM, and read-only access to this exact SID.
+        string sddl = "D:P(A;;GA;;;SY)(A;;GR;;;__CLIENT_SID__)";
+        IntPtr descriptor = IntPtr.Zero;
+        uint descriptorSize;
+        if (!ConvertSddl(sddl, 1, out descriptor, out descriptorSize))
+            throw new InvalidOperationException("explicit native pipe DACL");
+        try {
+            NativeSecurityAttributes attributes = new NativeSecurityAttributes();
+            attributes.nLength = (uint)Marshal.SizeOf(typeof(NativeSecurityAttributes));
+            attributes.lpSecurityDescriptor = descriptor;
+            attributes.bInheritHandle = false;
+            // PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE;
+            // PIPE_REJECT_REMOTE_CLIENTS; one server instance; NO payload.
+            pipe = CreateNativePipe(@"\\.\pipe\__PIPE_NAME__",
+                0x00080002, 0x00000008, 1, 256, 256, 1000, ref attributes);
+            if (pipe == IntPtr.Zero || pipe == new IntPtr(-1))
+                throw new InvalidOperationException("restricted native pipe creation");
+        } finally {
+            if (descriptor != IntPtr.Zero) LocalFree(descriptor);
+        }
+'@
+    $stopBody = @'
+        if (pipe != IntPtr.Zero && pipe != new IntPtr(-1)) {
+            CloseHandle(pipe);
+            pipe = IntPtr.Zero;
+        }
+'@
+}
 
 # Compiled executable implements the genuine service entrypoint accepted by
-# StartServiceCtrlDispatcher, not a scheduled task or an SC failure fallback.
+# StartServiceCtrlDispatcher, not a scheduled task or SC failure fallback.
 $serviceSource = @'
 using System;
+using System.Runtime.InteropServices;
 using System.ServiceProcess;
 public sealed class InertProbeService : ServiceBase {
+__EXTRA_NATIVE__
     public InertProbeService() { ServiceName = "__SERVICE_NAME__"; CanStop = true; }
     public static void Main() { ServiceBase.Run(new InertProbeService()); }
-    protected override void OnStart(string[] args) { }
-    protected override void OnStop() { }
+    protected override void OnStart(string[] args) {
+__START_BODY__
+    }
+    protected override void OnStop() {
+__STOP_BODY__
+    }
 }
-'@.Replace("__SERVICE_NAME__", $name)
+'@.Replace("__SERVICE_NAME__", $name).
+    Replace("__EXTRA_NATIVE__", $serviceExtras).
+    Replace("__START_BODY__", $startBody).
+    Replace("__STOP_BODY__", $stopBody).
+    Replace("__CLIENT_SID__", $identity.User.Value).
+    Replace("__PIPE_NAME__", $pipeName)
 
 # The observer reads the genuine OS process HANDLE and token. It does not
 # authenticate a named pipe or grant a process authority.
@@ -98,6 +170,41 @@ public static class ClassMeshNativeScmProbe {
     [DllImport("advapi32.dll", SetLastError=true)]
     public static extern bool GetTokenInformation(IntPtr token, int infoClass,
         IntPtr buffer, uint length, out uint needed);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true,
+        EntryPoint="CreateFileW")]
+    public static extern IntPtr OpenPipe(string path, uint access, uint share,
+        IntPtr securityAttributes, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool GetNamedPipeServerProcessId(IntPtr pipe, out uint serverPid);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool GetNamedPipeServerSessionId(IntPtr pipe, out uint serverSession);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true,
+        EntryPoint="CreateNamedPipeW")]
+    public static extern IntPtr TryFirstInstance(string name, uint openMode, uint pipeMode,
+        uint instances, uint outBytes, uint inBytes, uint timeout, IntPtr securityAttributes);
+
+    public static int LastPipeOpenError;
+    public static IntPtr OpenReadonlyClient(string name) {
+        // GENERIC_READ, OPEN_EXISTING, SECURITY_SQOS_PRESENT | IDENTIFICATION.
+        IntPtr handle = OpenPipe(name, 0x80000000, 0, IntPtr.Zero, 3,
+            0x00110000, IntPtr.Zero);
+        LastPipeOpenError = (handle == IntPtr.Zero || handle == new IntPtr(-1))
+            ? Marshal.GetLastWin32Error() : 0;
+        return handle;
+    }
+
+    public static bool FirstInstanceCollisionDenied(string name) {
+        IntPtr attempt = TryFirstInstance(name, 0x00080002, 0x00000008,
+            1, 256, 256, 1000, IntPtr.Zero);
+        int error = Marshal.GetLastWin32Error();
+        if (attempt != new IntPtr(-1) && attempt != IntPtr.Zero) {
+            CloseHandle(attempt);
+            return false;
+        }
+        // ERROR_ACCESS_DENIED is the documented first-instance conflict;
+        // do NOT pass an invalid-path or other unexpected native error.
+        return error == 5;
+    }
 
     public static IntPtr Pin(int processId) {
         // PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE
@@ -222,14 +329,56 @@ try {
     Assert-Probe ($serviceSession -ne [uint32]$workerSession) "deliberate wrong expected Service session rejected"
     Assert-Probe ($serviceBirth -ne ($serviceBirth + 1)) "deliberate wrong Service birth stamp rejected"
 
+    if ($Mode -eq "Pipe") {
+        # Probe the actual, local, non-secret pipe client HANDLE; do not trust
+        # the public pipe name as an authentication credential.
+        $pipeDeadline = [DateTime]::UtcNow.AddSeconds(8)
+        do {
+            $pipeHandle = [ClassMeshNativeScmProbe]::OpenReadonlyClient($pipePath)
+            if ($pipeHandle -ne [IntPtr]::Zero -and $pipeHandle -ne [IntPtr](-1)) { break }
+            Start-Sleep -Milliseconds 120
+        } while ([DateTime]::UtcNow -lt $pipeDeadline)
+        if ($pipeHandle -eq [IntPtr]::Zero -or $pipeHandle -eq [IntPtr](-1)) {
+            Write-Output ("NATIVE_PIPE_OPEN_LAST_WIN32_ERROR=" + [ClassMeshNativeScmProbe]::LastPipeOpenError)
+        }
+        Assert-Probe ($pipeHandle -ne [IntPtr]::Zero -and $pipeHandle -ne [IntPtr](-1)) "target SID can open real LocalSystem outbound pipe"
+        [uint32]$reportedPid = 0
+        [uint32]$reportedSession = 4294967295
+        Assert-Probe ([ClassMeshNativeScmProbe]::GetNamedPipeServerProcessId($pipeHandle, [ref]$reportedPid)) "pipe OS reports server process ID"
+        Assert-Probe ([ClassMeshNativeScmProbe]::GetNamedPipeServerSessionId($pipeHandle, [ref]$reportedSession)) "pipe OS reports server Windows session"
+        Assert-Probe ($reportedPid -eq [uint32]$servicePid) "pipe OS server PID matches owned SCM Service process HANDLE"
+        Assert-Probe ($reportedSession -eq 0 -and $reportedSession -eq $serviceSession) "pipe OS server Session0 matches live SCM token"
+        Assert-Probe ([ClassMeshNativeScmProbe]::GetProcessId($serviceHandle) -eq $reportedPid -and
+            [ClassMeshNativeScmProbe]::WaitForSingleObject($serviceHandle, 0) -eq 0x102 -and
+            [ClassMeshNativeScmProbe]::Birth($serviceHandle) -eq $serviceBirth) "pipe server PID still pinned to living original SCM birth stamp"
+        $scmAgain = Get-CimInstance Win32_Service -Filter ("Name='" + $name + "'")
+        Assert-Probe ($null -ne $scmAgain -and $scmAgain.State -eq "Running" -and
+            $scmAgain.ProcessId -eq $reportedPid) "SCM still reports same running Service after peer query"
+        Assert-Probe ([ClassMeshNativeScmProbe]::FirstInstanceCollisionDenied($pipePath)) "second native pipe instance denied (first-instance or restricted ACL)"
+        Assert-Probe ($reportedPid -ne [uint32]$workerPid -and $reportedSession -ne [uint32]$workerSession) "interactive non-SYSTEM decoy cannot satisfy native pipe server identity"
+        [void][ClassMeshNativeScmProbe]::CloseHandle($pipeHandle)
+        $pipeHandle = [IntPtr]::Zero
+    }
+
     # Stop the exact uniquely named test service, then prove the PINNED handle
     # is signaled: a PID that used to be trusted must not remain authorized.
     Stop-Service -Name $name -ErrorAction Stop
     $exitWait = [ClassMeshNativeScmProbe]::WaitForSingleObject($serviceHandle, 12000)
     Assert-Probe ($exitWait -eq 0) "stopped SCM process fails live-HANDLE check"
-    Write-Output "SCM_SESSION0_NATIVE_INERT_PASS"
+    if ($Mode -eq "Pipe") {
+        $stale = [ClassMeshNativeScmProbe]::OpenReadonlyClient($pipePath)
+        $staleDenied = ($stale -eq [IntPtr]::Zero -or $stale -eq [IntPtr](-1))
+        if (-not $staleDenied) { [void][ClassMeshNativeScmProbe]::CloseHandle($stale) }
+        Assert-Probe $staleDenied "stale outbound pipe refuses new client after SCM Service death"
+        Write-Output "SCM_SESSION0_NATIVE_PIPE_INERT_PASS"
+    } else {
+        Write-Output "SCM_SESSION0_NATIVE_INERT_PASS"
+    }
     Write-Output "NOT_AUTHENTICATED_V12_NOT_PIPE_NOT_CLIPBOARD"
 } finally {
+    if ($pipeHandle -ne [IntPtr]::Zero -and $pipeHandle -ne [IntPtr](-1)) {
+        [void][ClassMeshNativeScmProbe]::CloseHandle($pipeHandle)
+    }
     if ($serviceHandle -ne [IntPtr]::Zero) {
         [void][ClassMeshNativeScmProbe]::CloseHandle($serviceHandle)
     }
