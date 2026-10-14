@@ -40,3 +40,6 @@ pub use decoder::{DecodedIpcFrame, SensitiveIpcFrameDecoder};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod v12_challenge_tests;
