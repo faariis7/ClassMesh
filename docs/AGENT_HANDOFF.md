@@ -1,5 +1,15 @@
 # ClassMesh Agent Handoff
 
+## QUICK RESUME — authoritative GitHub Live 2026-10-14 after #482
+
+**Main** `6d6b71a0c596eecd010121b36d6ca526813dd2d6`. **Merged, exact-head Portable + full Windows CI green:** #480 (`8b333b2`, run `38601169040`) documents real native security fail; #481 (`4ce3afe`, run `38602651786`) compares an inert zero-filled anonymous `PAGE_READONLY` section created read-only in a **separate same-session child**; #482 (`6d6b71a`, run `38603907410`) demonstrates `VirtualProtect(PAGE_READONLY)` on one parent's view leaves an original `PAGE_READWRITE` section eligible for a new writable view. Local Synology Rustfmt, workspace Clippy `-D warnings` and full tests were green for the corresponding code heads.
+
+**CRITICAL UNMERGED RED SECURITY GATE:** #477 (head `b0d8b91890c62a0b065b808590ebf055e97a0843`) hosted Windows CI `38594235925` FAILED because child-side `DuplicateHandle(FILE_MAP_WRITE)` from a `FILE_MAP_READ` HANDLE to the original `PAGE_READWRITE` anonymous section **produced an actually writable mapping**. Keep #477 OPEN and RED; do NOT weaken its hard assertion, claim cross-user privilege escalation, or use the proposed short-lived section as a secret bootstrap. The #481/#482 green comparison tests are diagnostic findings, NOT an authorization for keys. Blocker #479; design qualification #465; tracking #328.
+
+**Next:** independent security-review of a **different** bootstrap approach, especially an independently authenticated outbound v12 channel with strict Service identity and exact launched Worker HANDLE, SID/session, generation, current control/grants and challenge/replay proof. Before ANY HMAC key transfer demand actual privileged Session 0/LocalSystem→interactive Worker inert positive + negative/teardown tests. Existing v12 named pipe remains inbound-only and has NO authenticated Service→Worker key delivery. **Production generic IPC v11 ClipboardRead still failure-only**; no actual payload, Teacher result, VM2, 2-PC, GPU/classroom/UX/accessibility gates are closed. Mac unavailable and VM2 recorded over its disk quota: do not resume/resize VM2 without resource investigation. Older blocks below archival.
+
+---
+ 
 ## QUICK RESUME — GitHub Live 2026-10-14, after PR #474
 
 **Authoritative main:** `bdcc88b1f01f836d9c6e1d2a3f02de1c0d63e8eb`. **No open PRs**. All #463/#464/#466/#468/#470/#471/#472/#473/#474 merged; do not repeat them. #473 exact-head hosted run `38556156734` **Portable Rust and Windows Build SUCCESS**, #474 run `38557805601` **both SUCCESS**. #473 established only same-session read-only inert section mapping in a spawned child; #474 tested a decoy unable to use the target-only HANDLE number. Neither qualifies LocalSystem Session-0 to interactive launched Worker, real key secrecy, native authorization or payload transfer.
