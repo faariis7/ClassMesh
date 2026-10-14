@@ -165,7 +165,7 @@ fn pagefile_section_is_readable_in_exact_separate_child_after_targeted_duplicati
         ])
         .env("CLASSMESH_INERT_SECTION_TEST_CHILD", "1")
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn inert child test process");
@@ -240,6 +240,14 @@ fn pagefile_section_is_readable_in_exact_separate_child_after_targeted_duplicati
                     stream
                         .read_to_string(&mut reason)
                         .expect("read exited test process diagnostics");
+                }
+                if let Some(mut output_pipe) = child.0.stdout.take() {
+                    use std::io::Read;
+                    let mut captured = String::new();
+                    output_pipe
+                        .read_to_string(&mut captured)
+                        .expect("read exited test child output");
+                    reason.push_str(&captured);
                 }
                 assert!(status.success(), "native test child failure: {reason}");
             }
