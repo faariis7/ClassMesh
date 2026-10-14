@@ -108,9 +108,10 @@ fn inert_target_child_observes_view_after_handle_reclamation() {
 }
 
 fn wait_for_marker(lines: &Receiver<String>, marker: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
     for _ in 0..20 {
         let line = lines
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .expect("test child failed to respond before bounded timeout");
         if line.contains(marker) {
             return;
