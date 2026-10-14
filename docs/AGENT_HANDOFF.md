@@ -1,5 +1,16 @@
 # ClassMesh Agent Handoff
 
+## QUICK RESUME — verified main after #468 (2026-10-14)
+
+**GitHub Live checkpoint:** `main=d3f1daa9df92aa490cdd71a3f5aec86d1a5e4064`; PR #468 12E18b HMAC challenge helper **squash merged**, exact-head `d994700` run `38544709117` Portable Rust **SUCCESS**, Windows Build **SUCCESS**. PR #463/#464/#466/#467 likewise merged; do NOT repeat E17/E18a. Isolated Service-issued one-shot version- and six-field-bound ring HMAC proof, fresh OS nonce, 2500ms deadline/cancellation, MAC-before-policy, panic-safe owned key wiping; local 11 tests × 30 loops (330 cases) passing, full Synology fmt/Clippy/workspace tests passing. Independent native VM testing was NOT run on #468 because Mac only ~14 GiB free and VMPal VM2 exceeds disk quota.
+
+**Current/Next:** independent 12E18c bootstrap design in `docs/PHASE12E18C_BOOTSTRAP.md`. Before coding Service↔Worker secret transfer, prove actual launched Worker cross-session Handle duplication or alternative separate authenticated v12 control channel with targeted OS PID/session, live SessionProcess HANDLE, replay/timeout/grant revocation and zeroizing cleanup. Existing future-v12 listener is **inbound-only** and not able to send a challenge; do not send the 32-byte key or a bearer-capability handle over legacy v11. Ring HMAC internal transient state zeroization is not confirmed; review before production keys. Native Windows OVERLAPPED payload ReadFile with CancelIoEx + completion drain and Worker clipboard read/Teacher response remain UNSOLVED. v11 is failure-only, native clipboard E2E and physical two-PC/GPU/classroom/accessibility gates OPEN. CI/security review required for every code PR before Squash.
+
+**Resource safety:** VM2 is suspended with virtual disk limit 56 GB exceeded, VM1 suspended, Mac Data volume 97% used (~14 GiB free). No random VM resumption, resizing or snapshot deletion. Source of truth GitHub Live; all earlier dated text is archival.
+
+---
+
+
 ## QUICK RESUME — Phase 12E18b unmerged 2026-10-14 (live branch)
 
 **Baseline:** Latest `main` `4cb0d5551d0bae866212e654a86e4e1bece20543` after merged #463/#464/#466/#467; no open earlier v12 PR. Branch `feat/phase12e18b-v12-hmac-gate` in `/tmp/classmesh-e18b` on Mac has test-first isolated new `ipc_sensitive/v12_challenge.rs`, with `ring` HMAC-SHA256, fresh OS nonce, exact v12 version, all six request/Worker identifiers, one-time proof, deadline, current Service-owned grants and cancel wipe. Plan was committed first `8d609ea`; RED test commit `2086543` produced expected missing-module compilation failure in Synology; implemented and local GREEN, plus tampered transcript/cross-challenge test. Synology all-workspace Rustfmt/Clippy -D warnings/tests PASS on the updated local files. Hosted Portable+Windows CI, security review and merge **NOT YET VERIFIED** in this checkpoint. Verify PR state live; never infer merge.
