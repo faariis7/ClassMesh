@@ -244,3 +244,20 @@ fn cryptographic_transcript_rejects_a_different_binding_or_challenge() {
         Err(SensitiveV12ChallengeError::InvalidProof)
     );
 }
+#[test]
+fn no_response_expiry_clears_pending_nonce_without_waiting_for_a_proof() {
+    let mut p = pending();
+    assert!(!p.expire(START + 2_499));
+    assert!(p.nonce().is_some());
+    assert!(p.expire(START + 2_500));
+    assert_eq!(p.nonce(), None);
+    assert!(!p.expire(START + 2_501));
+    assert_eq!(
+        p.verify(&[0; 32], VERSION, START + 2_501, || live(binding(), grants())),
+        Err(SensitiveV12ChallengeError::AlreadyUsed)
+    );
+
+    let mut p = pending();
+    assert!(p.expire(START - 1), "regressed monotonic clock poisons a challenge");
+    assert_eq!(p.nonce(), None);
+}
