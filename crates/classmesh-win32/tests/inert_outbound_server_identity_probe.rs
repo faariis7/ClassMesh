@@ -200,3 +200,22 @@ fn native_test_client_rejects_wrong_expected_server_process() {
         "failure must be identity mismatch, not unrelated client error: {stderr}"
     );
 }
+
+#[test]
+fn native_child_accepts_actual_outbound_server_token_user_sid() {
+    let (success, diagnostics) = run_inert_server_identity_case(false, Some(false));
+    assert!(
+        success,
+        "real native server token user SID should match the same-user test child: {diagnostics}"
+    );
+}
+
+#[test]
+fn native_child_rejects_deliberately_wrong_expected_server_token_user_sid() {
+    let (success, diagnostics) = run_inert_server_identity_case(false, Some(true));
+    assert!(!success, "wrong expected server token SID must be denied");
+    assert!(
+        diagnostics.contains("native server token SID mismatch must fail closed"),
+        "must fail at SID comparison, not at unrelated pipe error: {diagnostics}"
+    );
+}
