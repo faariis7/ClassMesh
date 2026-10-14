@@ -10,7 +10,9 @@ use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, FILETIME, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::Security::{
     CreateWellKnownSid, GetLengthSid, GetTokenInformation, IsValidSid, SECURITY_MAX_SID_SIZE,
     TOKEN_QUERY, TOKEN_USER, TokenUser, WinLocalSystemSid,
@@ -25,8 +27,8 @@ use windows_sys::Win32::System::Pipes::{
 };
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
-    GetProcessId, GetProcessTimes, OpenProcess, OpenProcessToken, WaitForSingleObject,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    GetProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
+    PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
 };
 
 static NEXT_PIPE: AtomicU64 = AtomicU64::new(1);
@@ -151,7 +153,10 @@ fn pinned_native_process_creation_time(process_id: u32) -> u64 {
             process_id,
         )
     });
-    assert!(!process.0.is_null(), "live native server process handle required");
+    assert!(
+        !process.0.is_null(),
+        "live native server process handle required"
+    );
     // SAFETY: verify process identity through the real owned HANDLE, not the
     // untrusted child-declared expected PID. Zero timeout never blocks.
     assert_eq!(
@@ -164,7 +169,10 @@ fn pinned_native_process_creation_time(process_id: u32) -> u64 {
         WAIT_TIMEOUT,
         "native server process must still be alive",
     );
-    let empty_time = || FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let empty_time = || FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
     let mut creation = empty_time();
     let mut exit = empty_time();
     let mut kernel = empty_time();
@@ -176,8 +184,7 @@ fn pinned_native_process_creation_time(process_id: u32) -> u64 {
         0,
         "OS server process creation time unavailable",
     );
-    let created = (u64::from(creation.dwHighDateTime) << 32)
-        | u64::from(creation.dwLowDateTime);
+    let created = (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
     assert_ne!(created, 0, "server process creation time must be nonzero");
     created
 }
@@ -235,7 +242,9 @@ fn child_observes_true_outbound_named_pipe_server_identity() {
     );
     assert_eq!(server_session, session_by_pid, "OS session mismatch");
     if let Ok(expected_birth) = std::env::var("CLASSMESH_INERT_OUTBOUND_EXPECTED_BIRTH") {
-        let expected: u64 = expected_birth.parse().expect("test-only numeric server creation time");
+        let expected: u64 = expected_birth
+            .parse()
+            .expect("test-only numeric server creation time");
         let actual = pinned_native_process_creation_time(server_pid);
         assert!(
             actual == expected,
@@ -320,7 +329,10 @@ fn run_inert_server_identity_case(
         } else {
             actual_birth
         };
-        child_command.env("CLASSMESH_INERT_OUTBOUND_EXPECTED_BIRTH", claimed_birth.to_string());
+        child_command.env(
+            "CLASSMESH_INERT_OUTBOUND_EXPECTED_BIRTH",
+            claimed_birth.to_string(),
+        );
     }
     if let Some(sid_mode) = sid_expectation {
         child_command.env("CLASSMESH_INERT_OUTBOUND_CHECK_TOKEN_SID", "1");
@@ -438,13 +450,19 @@ fn normal_user_outbound_server_cannot_impersonate_required_local_system_identity
 #[test]
 fn native_client_binds_live_server_process_creation_time() {
     let (success, diagnostics) = run_inert_server_lifetime_case(false);
-    assert!(success, "actual live server process binding failed: {diagnostics}");
+    assert!(
+        success,
+        "actual live server process binding failed: {diagnostics}"
+    );
 }
 
 #[test]
 fn native_client_rejects_changed_server_process_creation_time() {
     let (success, diagnostics) = run_inert_server_lifetime_case(true);
-    assert!(!success, "wrong native server process birth time must be denied");
+    assert!(
+        !success,
+        "wrong native server process birth time must be denied"
+    );
     assert!(
         diagnostics.contains("native server process creation time mismatch must fail closed"),
         "denial must be a process lifetime mismatch, not unrelated I/O: {diagnostics}"
