@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::{
-    GetLengthSid, GetTokenInformation, IsValidSid, TokenUser, TOKEN_QUERY, TOKEN_USER,
+    GetLengthSid, GetTokenInformation, IsValidSid, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_NONE, OPEN_EXISTING,
@@ -57,8 +57,12 @@ fn wide_null(text: &OsStr) -> Vec<u16> {
 fn user_sid_of_native_process(process_id: u32) -> Vec<u8> {
     // SAFETY: asks Windows for a process query HANDLE, never creates one
     // based solely on a caller-asserted authorization principal.
-    let process = OwnedHandle(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) });
-    assert!(!process.0.is_null(), "OS server process query handle unavailable");
+    let process =
+        OwnedHandle(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) });
+    assert!(
+        !process.0.is_null(),
+        "OS server process query handle unavailable"
+    );
     let mut token_handle = null_mut();
     // SAFETY: process is a locally owned kernel HANDLE and output is writable.
     assert_ne!(
