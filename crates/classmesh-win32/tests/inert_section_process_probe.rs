@@ -237,7 +237,8 @@ fn pagefile_section_is_readable_in_exact_separate_child_after_targeted_duplicati
                 let mut reason = String::new();
                 if let Some(mut stream) = child.0.stderr.take() {
                     use std::io::Read;
-                    stream.read_to_string(&mut reason)
+                    stream
+                        .read_to_string(&mut reason)
                         .expect("read exited test process diagnostics");
                 }
                 assert!(status.success(), "native test child failure: {reason}");
