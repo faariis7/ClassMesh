@@ -1,5 +1,16 @@
 # ClassMesh Agent Handoff
 
+## QUICK RESUME — 2026-10-15 local, after merged #489
+
+**GitHub Live main=968ac652281151413d6dc5fb745d3d1b85a8734e**. #486 docs, #487 LocalSystem negative native test (run `38636641261` BOTH Portable and Windows green), #488 live OS outbound server HANDLE/creation FILETIME bound (run `38637534664` BOTH green), #489 reject signaled/dead actual `std::process::Child` HANDLE (run `38638656877` BOTH green) **already Squash merged**. Do not repeat. TDD RED before implementation for #488/#489, Windows ARM64 cross-target cargo check + full Synology rustfmt, Clippy -D warnings and workspace tests GREEN. **VM1 native Windows ARM64** #488 8/8 and 160/160 repeats passed; returned to Suspended, no VM1/VM2 snapshot modifications. #489 checked on hosted actual Windows x64; no separate VM1 native c3e execution claimed.
+
+**Actual security barrier remains:** Original adversarial #477 Windows RED (read-only section HANDLE to PAGE_READWRITE source can be re-duplicated writable), #479 section-key bootstrap BLOCKED. Native same-user PID/SID/session/FILETIME/HANDLE tests do **NOT** prove true trusted LocalSystem Session0 Service→interactive Worker, authenticated v12, or eliminate PID race. Need actual privileged native positive/negative process/token/ACL/live launched Worker HANDLE+generation and current Service control/grants. Only then choose independently authenticated outbound secure per-request Worker key delivery. No secrets via generic IPC v11, argv/env/disk/logs. Active `IPC_VERSION_MINOR=11` ClipboardRead failure-only, future v12 no clipboard plaintext or Teacher result. Payload read must use cancellation-safe owned OVERLAPPED buffers, targeted CancelIoEx and completion drain BEFORE free/zeroization.
+
+**Next:** establish a safe privileged Windows Session0→interactive Worker validation harness, test wrong PID/session/user/Worker generation/process death/replay/revocation and Key bootstrap under security review. VM2 suspended at 56.7/56GB guest limit; Mac Data ~12GiB free 98% used, VM1 suspended. No VM2 resume/resize or snapshot deletion. Separate physical two-PC, GPU/media/classroom/latency/UX/accessibility gates OPEN. Older checkpoints historical.
+
+---
+
+
 ## QUICK RESUME — GitHub Live 2026-10-14 after #485
 
 **Source of truth main** `61f02365cf70baddc9e367f1b25b89a43d8c99a7`. #483 merged docs, #484 merged actual same-session Windows OS-attested outbound pipe server PID/session acceptance and wrong expected PID denial (CI `38617974874`, both PASS), #485 merged Windows TokenUser SID query of actual server process, matching and deliberately wrong same-user SID rejection without SID contents in logs (CI `38619466224`, both Portable+Windows PASS). TDD RED cross-target Windows compilation recorded for #485, then Windows ARM64 cross-target GREEN and Synology full fmt/Clippy/tests PASS. No repeat E18c3a/c3b. Windows CI exercised real child processes but **not** privileged LocalSystem Session0→interactive Worker, authenticated Service or physical machines.

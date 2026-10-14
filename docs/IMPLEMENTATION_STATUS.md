@@ -1,5 +1,13 @@
 # ClassMesh Implementation Status
 
+## Verified 2026-10-15 local — merged through Phase 12E18c3e
+
+- **GitHub main:** `968ac652281151413d6dc5fb745d3d1b85a8734e`. #486 docs, #487 `f6bd2ba` non-LocalSystem server test, #488 `31b6cff` pinned server process liveness + OS creation FILETIME and #489 `968ac65` actual already-exited owned process HANDLE rejection are all merged. Hosted exact HEAD Portable Rust AND full Windows Build SUCCESS for #487 (`38636641261`), #488 (`38637534664`), #489 (`38638656877`); Synology Windows ARM64 cross-target check + rustfmt/Clippy -D warnings/full workspace GREEN. VM1 real Windows ARM64 #488 native 8/8 plus 20 serial repeats 160/160 PASS, then VM1 re-suspended. #489 native VM1 not run; Windows hosted x64 test successful.
+- **Unimplemented/blocked:** actual privileged System Service Session0→interactive launched Worker and independently authenticated per-request key/bootstrap to future v12, cancellation-safe OVERLAPPED payload ReadFile, zeroizing Teacher result. Test-only same-user token/PID/timestamp evidence alone is not authentication, and PID→OpenProcess race persists without trusted HANDLE ownership. #477 remains OPEN/Windows RED; #479 forbids section-HANDLE key bootstrap after proven writable escalation. Production v11 ClipboardRead still failure-only. VM2 over 56GB guest limit suspended; Mac ~12GiB free. Physical Windows two-PC, GPU/media, classroom/performance, accessibility and real clipboard E2E OPEN.
+
+---
+
+
 ## VERIFIED CURRENT — 2026-10-14 after #485 (v12 not production)
 
 - **GitHub main:** `61f02365cf70baddc9e367f1b25b89a43d8c99a7`; PR #484 Squash merged `1f4c534` after exact-head full hosted CI `38617974874` SUCCESS for Portable Rust and Windows Build; PR #485 Squash merged `61f0236` after exact-head `38619466224` both SUCCESS. Real separate same-session Windows child probes OS-reported outbound server PID/session and requires wrong-PID denial (#484), then native bounded TokenUser SID retrieval and wrong-SID denial without logging SID bytes (#485). Local Synology Windows ARM64 cross-target compilation, fmt, Clippy -D warnings, full workspace tests PASS.
@@ -23,7 +31,7 @@
 
 - GitHub `main=507518d057b4e2a6ec4ff1c5429dd311ef2ecffe`. **PR #477 OPEN, Windows Build RED** at run `38594235925` (Portable Rust SUCCESS): actual same-session native Windows child could re-duplicate its read-only HANDLE to a `PAGE_READWRITE` section asking for `FILE_MAP_WRITE` and successfully create a writable mapping. The direct read-only handle mapping check in #473 was insufficient. Hard gate **failed**; do not weaken tests, merge the red PR, or claim cross-user privilege escalation. Track [#479](https://github.com/faariis7/ClassMesh/issues/479).
 - **No approved per-request key bootstrap:** section HANDLE-only integrity assumption is blocked. Compare OS-identity-attested, independently authenticated outbound v12 channel and safe object protection only after strict native negative/positive evidence and independent review. Production IPC v11 ClipboardRead remains failure-only; no live v12 payload or Teacher text response.
-- **Next:** threat-model review and inert-only Windows experiments; privileged Session 0→Worker, revocation, key lifecycle, VM2 disk, physical two-PC/GPU/classroom/accessibility gates remain OPEN.
+- **Next:** threat-model review and inert-only Windows experiments; privileged Session 0→Worker, revocation, key lifecycle, VM2 disk (56.7/56GB) and Mac Data ~12GiB free, physical two-PC/GPU/classroom/accessibility gates remain OPEN.
 
 ---
 
