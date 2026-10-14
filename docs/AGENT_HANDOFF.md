@@ -1,5 +1,17 @@
 # ClassMesh Agent Handoff
 
+## QUICK RESUME — GitHub Live 2026-10-14 after #485
+
+**Source of truth main** `61f02365cf70baddc9e367f1b25b89a43d8c99a7`. #483 merged docs, #484 merged actual same-session Windows OS-attested outbound pipe server PID/session acceptance and wrong expected PID denial (CI `38617974874`, both PASS), #485 merged Windows TokenUser SID query of actual server process, matching and deliberately wrong same-user SID rejection without SID contents in logs (CI `38619466224`, both Portable+Windows PASS). TDD RED cross-target Windows compilation recorded for #485, then Windows ARM64 cross-target GREEN and Synology full fmt/Clippy/tests PASS. No repeat E18c3a/c3b. Windows CI exercised real child processes but **not** privileged LocalSystem Session0→interactive Worker, authenticated Service or physical machines.
+
+**Critical remaining security gate:** #477 is intentionally OPEN/RED: native Windows child escalated FILE_MAP_READ to FILE_MAP_WRITE on a PAGE_READWRITE section, ruling out section HANDLE as a safe per-request key bootstrap (#479). Separate outbound v12 still only a test design: no trusted Service-owned per-request key delivery, no negotiated v12 handshake, no zeroizing cancelled OVERLAPPED payload read, no Worker clipboard read or Teacher result. Production IPC minor 11 ClipboardRead remains failure-only, no secret over generic v11/argv/env/disk/logs. Pinned Service process HANDLE, OS token SID, current launched Worker HANDLE, control session/sequence/request and live both grants still need actual privileged native positive+negative validation.
+
+**Next:** secure Session0 LocalSystem→interactive Worker test environment, independently verify process/token/pipe ownership & revocation/replay, then bounded authentication bootstrap and separately cancel/drain payload read. Keep VM2 suspended over 56GB guest limit and ~16GiB Mac disk free; don't alter snapshots or resize to force testing. Physical two Windows PCs, GPU/media, classroom/latency/performance and accessibility gates remain OPEN. CI+security review before all future Squash. Older snapshots are historical.
+
+---
+
+
+
 ## QUICK RESUME — authoritative GitHub Live 2026-10-14 after #482
 
 **Main** `6d6b71a0c596eecd010121b36d6ca526813dd2d6`. **Merged, exact-head Portable + full Windows CI green:** #480 (`8b333b2`, run `38601169040`) documents real native security fail; #481 (`4ce3afe`, run `38602651786`) compares an inert zero-filled anonymous `PAGE_READONLY` section created read-only in a **separate same-session child**; #482 (`6d6b71a`, run `38603907410`) demonstrates `VirtualProtect(PAGE_READONLY)` on one parent's view leaves an original `PAGE_READWRITE` section eligible for a new writable view. Local Synology Rustfmt, workspace Clippy `-D warnings` and full tests were green for the corresponding code heads.
