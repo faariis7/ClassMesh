@@ -472,3 +472,37 @@ fn native_client_rejects_changed_server_process_creation_time() {
 fn run_inert_server_lifetime_case(wrong_expected_birth: bool) -> (bool, String) {
     run_inert_server_identity_case(false, None, Some(wrong_expected_birth))
 }
+
+#[test]
+fn native_current_process_handle_is_live_without_waiting() {
+    // SAFETY: query + sync handle to the true running test process.
+    let process = OwnedHandle(unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            std::process::id(),
+        )
+    });
+    assert!(!process.0.is_null(), "current OS process query handle");
+    assert!(native_process_still_running(process.0));
+}
+
+#[test]
+fn owned_native_child_handle_fails_liveness_after_exit() {
+    use std::os::windows::io::AsRawHandle;
+    // A genuine process HANDLE remains pinned by Child through wait; a PID
+    // reused after death cannot replace this object's signaled state.
+    let mut child = Command::new("cmd.exe")
+        .args(["/C", "exit 0"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn short-lived inert native child");
+    assert!(child.wait().expect("reap inert native child").success());
+    let pinned = child.as_raw_handle().cast();
+    assert!(
+        !native_process_still_running(pinned),
+        "terminated owned child process HANDLE must fail closed"
+    );
+}
