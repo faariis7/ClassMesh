@@ -10,7 +10,9 @@ use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, FILETIME, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::Security::{
     CreateWellKnownSid, GetLengthSid, GetTokenInformation, IsValidSid, SECURITY_MAX_SID_SIZE,
     TOKEN_QUERY, TOKEN_USER, TokenUser, WinLocalSystemSid,
@@ -25,7 +27,8 @@ use windows_sys::Win32::System::Pipes::{
 };
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
+    PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
 };
 
 static NEXT_PIPE: AtomicU64 = AtomicU64::new(1);
@@ -133,6 +136,59 @@ fn local_system_sid() -> Vec<u8> {
     sid
 }
 
+// Windows standard process SYNCHRONIZE access mask for a non-blocking
+// WaitForSingleObject liveness check (PROCESS_QUERY_LIMITED_INFORMATION alone
+// does not grant SYNCHRONIZE). No rights to write or terminate a process.
+const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
+
+/// Test-only process lifetime checkpoint. A returned OS PID alone is not a
+/// stable identity: pin the actual process object, verify it is still alive,
+/// and bind the kernel-reported creation FILETIME to the test parent.
+fn pinned_native_process_creation_time(process_id: u32) -> u64 {
+    // SAFETY: OS returns a process HANDLE with minimal query + wait rights.
+    let process = OwnedHandle(unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            process_id,
+        )
+    });
+    assert!(
+        !process.0.is_null(),
+        "live native server process handle required"
+    );
+    // SAFETY: verify process identity through the real owned HANDLE, not the
+    // untrusted child-declared expected PID. Zero timeout never blocks.
+    assert_eq!(
+        unsafe { GetProcessId(process.0) },
+        process_id,
+        "pinned OS server process PID mismatch must fail closed",
+    );
+    assert_eq!(
+        unsafe { WaitForSingleObject(process.0, 0) },
+        WAIT_TIMEOUT,
+        "native server process must still be alive",
+    );
+    let empty_time = || FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut creation = empty_time();
+    let mut exit = empty_time();
+    let mut kernel = empty_time();
+    let mut user = empty_time();
+    // SAFETY: live owned process HANDLE and four writable Win32 FILETIME
+    // outputs. Creation time is public test metadata, never an auth secret.
+    assert_ne!(
+        unsafe { GetProcessTimes(process.0, &mut creation, &mut exit, &mut kernel, &mut user) },
+        0,
+        "OS server process creation time unavailable",
+    );
+    let created = (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+    assert_ne!(created, 0, "server process creation time must be nonzero");
+    created
+}
+
 #[test]
 fn child_observes_true_outbound_named_pipe_server_identity() {
     if std::env::var_os("CLASSMESH_INERT_OUTBOUND_PEER_CHILD").is_none() {
@@ -185,6 +241,16 @@ fn child_observes_true_outbound_named_pipe_server_identity() {
         0,
     );
     assert_eq!(server_session, session_by_pid, "OS session mismatch");
+    if let Ok(expected_birth) = std::env::var("CLASSMESH_INERT_OUTBOUND_EXPECTED_BIRTH") {
+        let expected: u64 = expected_birth
+            .parse()
+            .expect("test-only numeric server creation time");
+        let actual = pinned_native_process_creation_time(server_pid);
+        assert!(
+            actual == expected,
+            "native server process creation time mismatch must fail closed",
+        );
+    }
     if std::env::var_os("CLASSMESH_INERT_OUTBOUND_CHECK_TOKEN_SID").is_some() {
         let observed = user_sid_of_native_process(server_pid);
         let mut expected =
@@ -207,6 +273,7 @@ fn child_observes_true_outbound_named_pipe_server_identity() {
 fn run_inert_server_identity_case(
     wrong_expected_pid: bool,
     sid_expectation: Option<SidExpectation>,
+    wrong_expected_birth: Option<bool>,
 ) -> (bool, String) {
     let nonce = NEXT_PIPE.fetch_add(1, Ordering::Relaxed);
     let full_name = format!(
@@ -253,7 +320,20 @@ fn run_inert_server_identity_case(
         )
         .env_remove("CLASSMESH_INERT_OUTBOUND_CHECK_TOKEN_SID")
         .env_remove("CLASSMESH_INERT_OUTBOUND_WRONG_TOKEN_SID")
-        .env_remove("CLASSMESH_INERT_OUTBOUND_REQUIRE_SYSTEM_SID");
+        .env_remove("CLASSMESH_INERT_OUTBOUND_REQUIRE_SYSTEM_SID")
+        .env_remove("CLASSMESH_INERT_OUTBOUND_EXPECTED_BIRTH");
+    if let Some(wrong) = wrong_expected_birth {
+        let actual_birth = pinned_native_process_creation_time(actual_pid);
+        let claimed_birth = if wrong {
+            actual_birth.checked_add(1).unwrap_or(1)
+        } else {
+            actual_birth
+        };
+        child_command.env(
+            "CLASSMESH_INERT_OUTBOUND_EXPECTED_BIRTH",
+            claimed_birth.to_string(),
+        );
+    }
     if let Some(sid_mode) = sid_expectation {
         child_command.env("CLASSMESH_INERT_OUTBOUND_CHECK_TOKEN_SID", "1");
         match sid_mode {
@@ -309,7 +389,7 @@ fn run_inert_server_identity_case(
 
 #[test]
 fn native_test_client_reads_actual_server_process_and_session() {
-    let (success, stderr) = run_inert_server_identity_case(false, None);
+    let (success, stderr) = run_inert_server_identity_case(false, None, None);
     assert!(
         success,
         "native OS-reported server identity failed: {stderr}"
@@ -318,7 +398,7 @@ fn native_test_client_reads_actual_server_process_and_session() {
 
 #[test]
 fn native_test_client_rejects_wrong_expected_server_process() {
-    let (success, stderr) = run_inert_server_identity_case(true, None);
+    let (success, stderr) = run_inert_server_identity_case(true, None, None);
     assert!(!success, "wrong expected server PID must not be accepted");
     assert!(
         stderr.contains("native server PID mismatch must fail closed"),
@@ -329,7 +409,7 @@ fn native_test_client_rejects_wrong_expected_server_process() {
 #[test]
 fn native_child_accepts_actual_outbound_server_token_user_sid() {
     let (success, diagnostics) =
-        run_inert_server_identity_case(false, Some(SidExpectation::CurrentUser));
+        run_inert_server_identity_case(false, Some(SidExpectation::CurrentUser), None);
     assert!(
         success,
         "real native server token user SID should match the same-user test child: {diagnostics}"
@@ -339,7 +419,7 @@ fn native_child_accepts_actual_outbound_server_token_user_sid() {
 #[test]
 fn native_child_rejects_deliberately_wrong_expected_server_token_user_sid() {
     let (success, diagnostics) =
-        run_inert_server_identity_case(false, Some(SidExpectation::CorruptCurrentUser));
+        run_inert_server_identity_case(false, Some(SidExpectation::CorruptCurrentUser), None);
     assert!(!success, "wrong expected server token SID must be denied");
     assert!(
         diagnostics.contains("native server token SID mismatch must fail closed"),
@@ -356,7 +436,7 @@ fn normal_user_outbound_server_cannot_impersonate_required_local_system_identity
         "negative test requires a real non-LocalSystem Windows user",
     );
     let (success, diagnostics) =
-        run_inert_server_identity_case(false, Some(SidExpectation::LocalSystem));
+        run_inert_server_identity_case(false, Some(SidExpectation::LocalSystem), None);
     assert!(
         !success,
         "ordinary hosted test user must not be admitted as LocalSystem Service"
@@ -365,4 +445,30 @@ fn normal_user_outbound_server_cannot_impersonate_required_local_system_identity
         diagnostics.contains("native server token SID mismatch must fail closed"),
         "native token identity gate must deny specifically, not unrelated I/O: {diagnostics}"
     );
+}
+
+#[test]
+fn native_client_binds_live_server_process_creation_time() {
+    let (success, diagnostics) = run_inert_server_lifetime_case(false);
+    assert!(
+        success,
+        "actual live server process binding failed: {diagnostics}"
+    );
+}
+
+#[test]
+fn native_client_rejects_changed_server_process_creation_time() {
+    let (success, diagnostics) = run_inert_server_lifetime_case(true);
+    assert!(
+        !success,
+        "wrong native server process birth time must be denied"
+    );
+    assert!(
+        diagnostics.contains("native server process creation time mismatch must fail closed"),
+        "denial must be a process lifetime mismatch, not unrelated I/O: {diagnostics}"
+    );
+}
+
+fn run_inert_server_lifetime_case(wrong_expected_birth: bool) -> (bool, String) {
+    run_inert_server_identity_case(false, None, Some(wrong_expected_birth))
 }
