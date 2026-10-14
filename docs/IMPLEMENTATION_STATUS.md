@@ -1,5 +1,14 @@
 # ClassMesh Implementation Status
 
+## LIVE VERIFIED — 2026-10-14 (supersedes previous snapshots)
+
+- **main** `8741f88adc1fd9c7b98459dfb07454692016523c`: PR #470 Windows-only inert HANDLE duplication into a separately launched child, same-session round-trip proof (hosted `38548912813` Portable/Windows GREEN), squash `b807d465e980b7207712975b33569dcf36ef5e92`. PR #471 inactive HMAC Service v12 challenge live-authority/grants issuance (reconciled head `97d5df423f3931c04bbdf6ba8db3300e84838cf3`, full hosted `38553728969` green, Synology fmt/Clippy/tests green, security reviewed), squash `8741f88adc1fd9c7b98459dfb07454692016523c`.
+- **Active production unchanged:** IPC major/minor still v11 for generic control; ClipboardRead returns unavailable/failure-only. Existing isolated v12 native named pipe, live Worker HANDLE admission, current control policy callback and challenge MAC/grants are **inert security prerequisites**, not a native authenticated clipboard path. No real Service→Worker key bootstrap, zeroizing/panic-safe OS payload I/O, Teacher plaintext result or native clipboard E2E.
+- **Current Phase 12E18c:** qualification before selecting/implementing a Service→launched-Worker per-request key transfer. Same-session event duplication #470 is NOT proof that Session-0 LocalSystem can securely bootstrap an interactive Worker. Wrong-target denial, mapping lifetime/revocation, privilege boundary, impersonation/identity, handle re-use and cancellation/replay must pass native negative tests before any exposure. No unproven key/handle over v11 or logs.
+- **Physical and resources OPEN:** Mac Data ~13 GiB free, 97% used; VM2 last exceeded 56GB configured virtual limit; no VM resume/resize/snapshot deletion without resource remediation. Two physical Windows PCs, GPU/media, classroom and accessibility/teacher experience remain OPEN. Use exact-head hosted Windows+Portable CI and independent security review for test-only next PR.
+
+---
+
 ## VERIFIED 2026-10-14 — Phase 12E18b merged, 12E18c design only
 
 - **Live main:** `d3f1daa9df92aa490cdd71a3f5aec86d1a5e4064`; #468 merged (Squash) after exact-HEAD `d994700` hosted run **38544709117** reported Portable Rust **SUCCESS** and complete Windows Build **SUCCESS**. Earlier #463/#464/#466/#467 merged. Security commentary and explicit no-production gate in PR #468 and Issue #465.

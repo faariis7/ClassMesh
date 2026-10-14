@@ -1,5 +1,19 @@
 # ClassMesh Agent Handoff
 
+## QUICK RESUME — verified GitHub Live after #470 / #471, 2026-10-14
+
+**Source of truth:** `faariis7/ClassMesh` `main=8741f88adc1fd9c7b98459dfb07454692016523c`. **Merged:** #470 Windows test-only inert target process HANDLE duplication / round trip, exact-head run `38548912813` full Portable Rust + Windows Build SUCCESS, squash `b807d465e980b7207712975b33569dcf36ef5e92`. **Merged:** #471 future-v12 HMAC challenge nonce issuance now rejects missing current Service authority, missing either read grant, stale Worker PID/session/generation or control session/sequence/request; after merging latest head `97d5df423f3931c04bbdf6ba8db3300e84838cf3` CI `38553728969` BOTH Portable/Windows SUCCESS; exact-head Synology fmt/Clippy -D warnings/workspace tests green and security review. Squash `8741f88adc1fd9c7b98459dfb07454692016523c`. Existing #463/#464/#466/#467/#468/#469 merged; do not repeat.
+
+**Current:** 12E18c bootstrap **qualification/design**, not key transport. #470 proves same-session process duplication of a harmless Windows event only; does **not** demonstrate LocalSystem Session-0 to an interactive launched Worker, wrong-target confidentiality, section handle capability lifetime or revocation. See `docs/PHASE12E18C_BOOTSTRAP.md` and Issues #328/#465. Next is small test-only inert anonymous section mapping via an OS-launched child before privileged cross-session native tests. A proposed implementation needs correct ownership/cleanup/secret zeroization; never convey secrets/transferable bearer HANDLEs over legacy IPC v11, argv, disk, registry, logs or the current inbound-only v12 pipe.
+
+**Active behavior** is still IPC v11 minor 11 and ClipboardRead **failure-only**. The v12 listener, OS-peer+live HANDLE control preflight, HMAC proof and challenge issuance guards are **inactive**. No real authenticated Service→Worker key bootstrap, negotiated v12 wire, cancellation-safe zeroizing overlapped sensitive payload read, Worker→Teacher successful text flow or physical/native clipboard E2E. `ring` internal HMAC expanded transient key erasure remains **unverified**, regardless of caller key wiping. All two-physical-PC, GPU/media, classroom/performance and accessibility gates OPEN.
+
+**Resource safety:** VMPal VM2 last reported beyond virtual disk 56GB quota; macOS Data volume ~13 GiB free (97%); VM1/VM2 suspended. Avoid VM resume/resize/snapshot removal until disk space resolved; use hosted Windows CI + Synology runner for initial probes. CI != physical qualification.
+
+**Workflow:** verify GitHub Live main/PR/CI first, read `.agents/skills/classmesh-engineering/SKILL.md`; living-plan-first, test-first where practical; changes in small PRs; security review, rustfmt, workspace Clippy -D warnings and tests; hosted exact-head Portable Rust AND full Windows Build green **before** routine squash merges. Older checkpoints below archival.
+
+---
+
 ## QUICK RESUME — verified main after #468 (2026-10-14)
 
 **GitHub Live checkpoint:** `main=d3f1daa9df92aa490cdd71a3f5aec86d1a5e4064`; PR #468 12E18b HMAC challenge helper **squash merged**, exact-head `d994700` run `38544709117` Portable Rust **SUCCESS**, Windows Build **SUCCESS**. PR #463/#464/#466/#467 likewise merged; do NOT repeat E17/E18a. Isolated Service-issued one-shot version- and six-field-bound ring HMAC proof, fresh OS nonce, 2500ms deadline/cancellation, MAC-before-policy, panic-safe owned key wiping; local 11 tests × 30 loops (330 cases) passing, full Synology fmt/Clippy/workspace tests passing. Independent native VM testing was NOT run on #468 because Mac only ~14 GiB free and VMPal VM2 exceeds disk quota.
