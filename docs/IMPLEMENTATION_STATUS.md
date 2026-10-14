@@ -1,5 +1,15 @@
 # ClassMesh Implementation Status
 
+## VERIFIED 2026-10-14 — Phase 12E18b merged, 12E18c design only
+
+- **Live main:** `d3f1daa9df92aa490cdd71a3f5aec86d1a5e4064`; #468 merged (Squash) after exact-HEAD `d994700` hosted run **38544709117** reported Portable Rust **SUCCESS** and complete Windows Build **SUCCESS**. Earlier #463/#464/#466/#467 merged. Security commentary and explicit no-production gate in PR #468 and Issue #465.
+- **Isolated security primitive:** future-v12 OS-random Service challenge nonce, per-request 32-byte caller-provisioned key, domain-separated ring HMAC-SHA256 transcript with exact version and six fields, replay/clock/expiry/permission checks, live Service policy callback, owned nonce/key zeroization; 11 green challenge tests × 30 repeated runs = 330 passing. Synology workspace fmt, Clippy -D warnings and tests pass. This is an **inactive prerequisite only** with no production caller.
+- **Current 12E18c:** documented `docs/PHASE12E18C_BOOTSTRAP.md` alternatives and mandatory native cross-session positive/negative tests before any key bootstrap is selected. Windows Session0→Worker session handle inheritance is not assumed. No actual key provisioning, on-wire negotiation, reliable cancellation-safe payload read, Worker→Service text or Teacher result. `ring`'s internal transient HMAC key-expansion memory zeroization is **unproven**; do not claim comprehensive secret erasure.
+- **Blockers/open physical gates:** VM2 VMPal 56GB cap exceeded and ~14GiB free on Mac; VM1 and VM2 suspended, so only hosted Windows and Linux Synology tests on this PR. Native clipboard E2E, separate physical Windows PCs, GPU/media, classroom/network/performance/accessibility OPEN. Active generic IPC `IPC_VERSION_MINOR=11` ClipboardRead is still failure-only.
+
+---
+
+
 ## Phase 12E18b in progress — 2026-10-14 (local verified, hosted CI pending)
 
 - GitHub `main` at branch point `4cb0d5551d0bae866212e654a86e4e1bece20543`: #463, #464, #466 and #467 already merged; no need to repeat Phase12E17. Isolated branch `feat/phase12e18b-v12-hmac-gate` adds future-v12 Service challenge and one-attempt HMAC-SHA256 request proof with OS CSPRNG nonce, explicit major/minor, six-part Worker/control request binding, key/nonce clearing, deadline and trusted current Service-grants accessor. Proof is **NOT** a native channel or a production authorization token.
