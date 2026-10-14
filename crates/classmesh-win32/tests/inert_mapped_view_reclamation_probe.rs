@@ -12,11 +12,11 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, DUPLICATE_CLOSE_SOURCE, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, DUPLICATE_CLOSE_SOURCE, DuplicateHandle, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::System::Memory::{
-    CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_READ, FILE_MAP_WRITE,
-    MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
+    CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
+    PAGE_READWRITE, UnmapViewOfFile,
 };
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
@@ -70,10 +70,16 @@ fn inert_target_child_observes_view_after_handle_reclamation() {
 
     // SAFETY: Windows validates the HANDLE in this test process. The parent
     // specifically duplicated a read-only anonymous mapping to this child.
-    let mapped = OwnedView(unsafe { MapViewOfFile(remote, FILE_MAP_READ, 0, 0, PUBLIC_MARKER.len()) });
-    assert!(!mapped.0.Value.is_null(), "target first maps its valid handle");
+    let mapped =
+        OwnedView(unsafe { MapViewOfFile(remote, FILE_MAP_READ, 0, 0, PUBLIC_MARKER.len()) });
+    assert!(
+        !mapped.0.Value.is_null(),
+        "target first maps its valid handle"
+    );
     println!("CLASSMESH_VIEW_READY");
-    std::io::stdout().flush().expect("flush test synchronization");
+    std::io::stdout()
+        .flush()
+        .expect("flush test synchronization");
 
     line.clear();
     input.read_line(&mut line).expect("revocation signal");
@@ -81,15 +87,21 @@ fn inert_target_child_observes_view_after_handle_reclamation() {
 
     // A fresh mapping through the reclaimed HANDLE number MUST fail. The
     // existing view is independent of its creator HANDLE's table entry.
-    let fresh = OwnedView(unsafe { MapViewOfFile(remote, FILE_MAP_READ, 0, 0, PUBLIC_MARKER.len()) });
-    assert!(fresh.0.Value.is_null(), "reclaimed handle cannot create another view");
+    let fresh =
+        OwnedView(unsafe { MapViewOfFile(remote, FILE_MAP_READ, 0, 0, PUBLIC_MARKER.len()) });
+    assert!(
+        fresh.0.Value.is_null(),
+        "reclaimed handle cannot create another view"
+    );
 
     // SAFETY: the existing view is owned by this process and maps at least
     // PUBLIC_MARKER.len() bytes until OwnedView is dropped.
-    let bytes = unsafe {
-        std::slice::from_raw_parts(mapped.0.Value.cast::<u8>(), PUBLIC_MARKER.len())
-    };
-    assert_eq!(bytes, PUBLIC_MARKER, "HANDLE closure cannot unmap an existing view");
+    let bytes =
+        unsafe { std::slice::from_raw_parts(mapped.0.Value.cast::<u8>(), PUBLIC_MARKER.len()) };
+    assert_eq!(
+        bytes, PUBLIC_MARKER,
+        "HANDLE closure cannot unmap an existing view"
+    );
     println!("CLASSMESH_VIEW_REMAINS");
     std::io::stdout().flush().expect("flush test result");
     // Do NOT call CloseHandle(remote): the parent already revoked this entry.
@@ -97,7 +109,8 @@ fn inert_target_child_observes_view_after_handle_reclamation() {
 
 fn wait_for_marker(lines: &Receiver<String>, marker: &str) {
     for _ in 0..20 {
-        let line = lines.recv_timeout(Duration::from_secs(5))
+        let line = lines
+            .recv_timeout(Duration::from_secs(5))
             .expect("test child failed to respond before bounded timeout");
         if line.contains(marker) {
             return;
@@ -110,7 +123,11 @@ fn wait_for_marker(lines: &Receiver<String>, marker: &str) {
 fn inert_mapped_view_survives_parent_closing_child_section_handle() {
     let exe = std::env::current_exe().expect("current Windows test executable");
     let child = Command::new(exe)
-        .args(["--exact", "inert_target_child_observes_view_after_handle_reclamation", "--nocapture"])
+        .args([
+            "--exact",
+            "inert_target_child_observes_view_after_handle_reclamation",
+            "--nocapture",
+        ])
         .env(CHILD_ENV, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -122,12 +139,18 @@ fn inert_mapped_view_survives_parent_closing_child_section_handle() {
     // Never expose a key or name. An anonymous, non-inheritable pagefile-backed
     // section stores ONLY this fixed inert public marker.
     let section = OwnedHandle(unsafe {
-        CreateFileMappingW(INVALID_HANDLE_VALUE, null(), PAGE_READWRITE, 0, 4096, null())
+        CreateFileMappingW(
+            INVALID_HANDLE_VALUE,
+            null(),
+            PAGE_READWRITE,
+            0,
+            4096,
+            null(),
+        )
     });
     assert!(!section.0.is_null(), "anonymous inert section");
-    let source_view = OwnedView(unsafe {
-        MapViewOfFile(section.0, FILE_MAP_WRITE, 0, 0, PUBLIC_MARKER.len())
-    });
+    let source_view =
+        OwnedView(unsafe { MapViewOfFile(section.0, FILE_MAP_WRITE, 0, 0, PUBLIC_MARKER.len()) });
     assert!(!source_view.0.Value.is_null());
     // SAFETY: source_view covers the fixed marker length and is writeable.
     unsafe {
@@ -139,13 +162,21 @@ fn inert_mapped_view_survives_parent_closing_child_section_handle() {
     }
 
     let target = child.0.as_raw_handle() as HANDLE;
-    assert!(!target.is_null(), "actual OS-launched target process HANDLE");
+    assert!(
+        !target.is_null(),
+        "actual OS-launched target process HANDLE"
+    );
     let mut remote: HANDLE = null_mut();
     assert_ne!(
         unsafe {
             DuplicateHandle(
-                GetCurrentProcess(), section.0, target, &mut remote,
-                FILE_MAP_READ, 0, 0,
+                GetCurrentProcess(),
+                section.0,
+                target,
+                &mut remote,
+                FILE_MAP_READ,
+                0,
+                0,
             )
         },
         0,
@@ -158,15 +189,27 @@ fn inert_mapped_view_survives_parent_closing_child_section_handle() {
     let reader = std::thread::spawn(move || {
         for line in std::io::BufReader::new(stdout).lines() {
             let Ok(line) = line else { break };
-            if tx.send(line).is_err() { break }
+            if tx.send(line).is_err() {
+                break;
+            }
         }
     });
 
     // Deliberately transfer only the numeric handle of a PUBLIC INERT object
     // via private test stdin; this technique is REJECTED for production keys.
-    writeln!(child.0.stdin.as_mut().expect("child stdin"), "{:x}", remote as usize)
-        .expect("send test-only handle number");
-    child.0.stdin.as_mut().expect("child stdin").flush().expect("flush");
+    writeln!(
+        child.0.stdin.as_mut().expect("child stdin"),
+        "{:x}",
+        remote as usize
+    )
+    .expect("send test-only handle number");
+    child
+        .0
+        .stdin
+        .as_mut()
+        .expect("child stdin")
+        .flush()
+        .expect("flush");
     wait_for_marker(&rx, "CLASSMESH_VIEW_READY");
 
     // After the target MAPS the object, reclaim/close ONLY its remote HANDLE.
@@ -175,8 +218,13 @@ fn inert_mapped_view_survives_parent_closing_child_section_handle() {
     assert_ne!(
         unsafe {
             DuplicateHandle(
-                target, remote, GetCurrentProcess(), &mut reclaimed,
-                FILE_MAP_READ, 0, DUPLICATE_CLOSE_SOURCE,
+                target,
+                remote,
+                GetCurrentProcess(),
+                &mut reclaimed,
+                FILE_MAP_READ,
+                0,
+                DUPLICATE_CLOSE_SOURCE,
             )
         },
         0,
@@ -196,7 +244,10 @@ fn inert_mapped_view_survives_parent_closing_child_section_handle() {
             assert!(exit.success(), "child must finish without access violation");
             break;
         }
-        assert!(Instant::now() < deadline, "target did not exit before deadline");
+        assert!(
+            Instant::now() < deadline,
+            "target did not exit before deadline"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
     reader.join().expect("join bounded child output reader");
