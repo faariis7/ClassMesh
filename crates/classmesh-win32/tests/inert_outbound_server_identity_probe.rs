@@ -303,3 +303,17 @@ fn native_child_rejects_deliberately_wrong_expected_server_token_user_sid() {
         "must fail at SID comparison, not at unrelated pipe error: {diagnostics}"
     );
 }
+
+#[test]
+fn normal_user_outbound_server_cannot_impersonate_required_local_system_identity() {
+    let (success, diagnostics) =
+        run_inert_server_identity_case(false, Some(SidExpectation::LocalSystem));
+    assert!(
+        !success,
+        "ordinary hosted test user must not be admitted as LocalSystem Service"
+    );
+    assert!(
+        diagnostics.contains("native server token SID mismatch must fail closed"),
+        "native token identity gate must deny specifically, not unrelated I/O: {diagnostics}"
+    );
+}
