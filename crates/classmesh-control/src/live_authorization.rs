@@ -108,12 +108,14 @@ mod tests {
     fn poisoned_lock_never_falls_back_to_last_known_authorization() {
         let store = Arc::new(LiveAuthorizationStore::new(AuthorizationStore::default()));
         let corrupt = Arc::clone(&store);
-        assert!(std::thread::spawn(move || {
-            let _guard = corrupt.published.write().expect("initial lock");
-            panic!("simulate publisher unwind while lock is held");
-        })
-        .join()
-        .is_err());
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = corrupt.published.write().expect("initial lock");
+                panic!("simulate publisher unwind while lock is held");
+            })
+            .join()
+            .is_err()
+        );
         assert!(matches!(
             store.snapshot(),
             Err(LiveAuthorizationError::Poisoned)

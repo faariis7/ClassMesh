@@ -1,5 +1,13 @@
 # ClassMesh Implementation Status
 
+## Phase 12E18c4h — canonical atomic live policy publisher and actual Service read-side hookup (hosted CI pending)
+
+- SOURCE: verified latest main 08f3124 after #499 merged; plan-FIRST commit 7804a96; deterministic real Synology E0432 missing module RED commit 1e74c57. Added versioned canonical LiveAuthorizationStore wrapping one AuthorizationStore Arc in a short-held std RwLock (no lock across async await): snapshot returns consistent immutable principal+credential+permissions generation; publish atomically swaps entire validated-by-caller policy, checks epoch overflow, returns explicit Poisoned/GenerationExhausted instead of stale allow. Tested real Security Principal/ReadClipboard grant, credential revoke, 3 concurrent readers, explicit fault poison and generation overflow. New control-side fixture obtains real dispatched move-only AuthorizedClipboardRead, issues existing ClipboardAuthorityLease, then publishes policy without ReadClipboard and rechecks fresh snapshot: original lease fails, follow-up privileged command fails, replay denied. Old retained snapshots remain stale by design: callers MUST resample. No Worker-supplied grants trusted.
+- Actual Windows Service control_runtime now creates a *single* shared store from its durable-loaded state.authorization; takes atomic snapshots for TLS Hello, rechecks peer credential validity on a SECOND fresh snapshot immediately after asynchronous handshake, and re-samples on each incoming control envelope (all existing privileged dispatch paths) plus presentation feedback. No active production publisher/reloader is connected: durable changes cannot yet be observed mid-flight without new trusted update path, and old snapshot held during an awaited operation cannot guarantee continuous permission. This is neither real v12 authorization, Worker lifetime/pipe attestation, key distribution, clipboard data, payload OVERLAPPED CancelIoEx/drain, Teacher result, nor actual 2-physical-PC test. v11 ClipboardRead remains failure-only; #477 deliberately Windows RED and #479 section HANDLE key blocked. Require exact-head fmt/Clippy/workspace+hosted Windows Build/Portable Rust SUCCESS and security review prior to merge.
+
+---
+
+
 
 ## Phase12E18c4g — real enrolled Teacher grant and credential policy contract (CI pending)
 

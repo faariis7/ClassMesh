@@ -9,7 +9,6 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use classmesh_control::authorization::AuthenticatedControlGuard;
-use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::diagnostics::{
     command_authorization_diagnostic_code, handshake_diagnostic_code, heartbeat_diagnostic_code,
     privileged_dispatch_diagnostic_code, stream_offer_diagnostic_code, transport_diagnostic_code,
@@ -26,6 +25,7 @@ use classmesh_control::handshake::{
     EstablishedAuthenticatedPeer, EstablishedControlSession, ServerHelloConfig,
     server_hello_enrolled,
 };
+use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::presentation_state::{PresentationOwnership, PresentationOwnershipError};
 use classmesh_control::quic::{
     ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
