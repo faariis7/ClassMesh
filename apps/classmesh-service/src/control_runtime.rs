@@ -1864,6 +1864,23 @@ async fn run_established_session(
             }
         };
         let authorization = envelope_authorization.store();
+        // Even non-privileged Heartbeat/ACK control messages must not keep an
+        // enrolled session alive after a trusted policy publish revokes the
+        // original TLS credential or disables its stable principal.
+        let current_unix_ms = match unix_time_ms() {
+            Ok(value) => value,
+            Err(_) => {
+                connection.close(0_u32.into(), b"invalid service clock");
+                return;
+            }
+        };
+        if !peer
+            .identity
+            .is_currently_authenticated(authorization, current_unix_ms)
+        {
+            connection.close(0_u32.into(), b"enrolled peer authorization revoked");
+            return;
+        }
         match envelope.payload.as_ref() {
             Some(control_envelope::Payload::Heartbeat(sample)) => {
                 if let Err(error) = guard.validate_envelope(&envelope) {
