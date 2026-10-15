@@ -7,6 +7,7 @@ mod clipboard_read_teacher;
 mod clipboard_read_transport_gate;
 mod contract;
 mod decoder;
+mod service_owned_control_gate;
 mod v12_challenge;
 
 pub use clipboard_read_frame::{
@@ -38,6 +39,10 @@ pub use contract::{
     SensitivePresentationKeyInstall,
 };
 pub use decoder::{DecodedIpcFrame, SensitiveIpcFrameDecoder};
+pub use service_owned_control_gate::{
+    LiveServiceReadState, MAX_POLICY_FRAGMENTS, ServiceReadGate, ServiceReadGateError,
+    ServiceReadStage,
+};
 pub use v12_challenge::{
     SensitiveV12Challenge, SensitiveV12ChallengeError, V12LiveAuthority, compute_v12_challenge_mac,
 };
