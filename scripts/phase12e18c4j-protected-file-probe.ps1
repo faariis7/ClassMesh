@@ -57,8 +57,8 @@ public static class ClassMeshPolicyHandleAttestation {
                 return "NATIVE_INFO_DENIED";
             if((info.FileAttributes&reparse)!=0) return "REPARSE_DENIED";
             if(((info.FileAttributes&directory)!=0)!=isDirectory) return "TYPE_DENIED";
-            IntPtr owner,group,dacl,sacl,descriptor;
-            uint rc=GetSecurityInfo(file,1,5,out owner,out group,out dacl,out sacl,out descriptor);
+            IntPtr owner,dacl,descriptor;
+            uint rc=GetSecurityInfo(file,1,5,out owner,IntPtr.Zero,out dacl,IntPtr.Zero,out descriptor);
             if(rc!=0||descriptor==IntPtr.Zero) return "SECURITY_DENIED";
             try {
                 if(owner==IntPtr.Zero||dacl==IntPtr.Zero) return "NULL_ACL_DENIED";
