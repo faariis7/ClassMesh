@@ -597,6 +597,56 @@ mod tests {
     }
 
     #[test]
+    fn strict_current_load_never_recovers_a_stale_backup_when_primary_is_missing() {
+        let path = test_path();
+        let durable = DurableAuthorizationState::new(&path);
+        durable.save(&test_store()).unwrap();
+        let backup = sibling_with_suffix(&path, ".bak");
+        fs::rename(&path, &backup).unwrap();
+
+        assert!(matches!(
+            durable.load_primary_only(),
+            Err(PersistenceError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(durable.load().unwrap().is_some(), "legacy startup recovery is unchanged");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn strict_current_load_rejects_bad_primary_even_with_valid_backup() {
+        let path = test_path();
+        let durable = DurableAuthorizationState::new(&path);
+        durable.save(&test_store()).unwrap();
+        fs::copy(&path, sibling_with_suffix(&path, ".bak")).unwrap();
+        fs::write(&path, br#"{"version":999,"principals":[]}"#).unwrap();
+
+        assert!(matches!(
+            durable.load_primary_only(),
+            Err(PersistenceError::UnsupportedVersion(999))
+        ));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn strict_current_load_uses_only_current_primary_when_backup_differs() {
+        let path = test_path();
+        let durable = DurableAuthorizationState::new(&path);
+        durable.save(&test_store()).unwrap();
+        fs::copy(&path, sibling_with_suffix(&path, ".bak")).unwrap();
+        let mut denied = test_store();
+        let mut teacher = denied.principal(id(7)).unwrap().clone();
+        teacher.permissions.remove(&Permission::ReadClipboard);
+        denied.upsert(teacher).unwrap();
+        durable.save(&denied).unwrap();
+        let loaded = durable.load_primary_only().unwrap();
+        assert!(!loaded.authorize_credential(
+            fingerprint(11), Permission::ReadClipboard, 30
+        ));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn corrupted_or_oversized_state_fails_closed() {
         let path = test_path();
         fs::write(&path, br#"{"version":999,"principals":[]}"#).expect("write state");
