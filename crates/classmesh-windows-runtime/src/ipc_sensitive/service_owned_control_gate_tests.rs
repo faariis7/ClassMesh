@@ -344,3 +344,19 @@ fn native_peer_and_grant_denials_also_apply_at_first_admission() {
         Some(ServiceReadGateError::ControlUnavailable)
     );
 }
+
+#[test]
+fn panicking_live_service_accessor_must_poison_pending_request() {
+    let mut gate = connected();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = gate.check(ServiceReadStage::BeforeRead, 1002, || {
+            panic!("simulated trusted authority accessor unavailable")
+        });
+    }));
+    assert!(panic.is_err(), "test must exercise an unwinding accessor");
+    assert!(!gate.is_pending(), "panic cannot leave old authorization pending");
+    assert_eq!(
+        gate.check(ServiceReadStage::BeforeRead, 1003, || Some(live())),
+        Err(ServiceReadGateError::AlreadyUsed)
+    );
+}
