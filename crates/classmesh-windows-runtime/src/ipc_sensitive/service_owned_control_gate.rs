@@ -113,15 +113,16 @@ impl ServiceReadGate {
         if !self.is_pending() {
             return Err(ServiceReadGateError::AlreadyUsed);
         }
-        let result = self.check_once(next, now_ms, current_service_state);
-        if result.is_err() {
-            self.stage = PendingStage::Denied;
-        }
-        result
+        // Poison BEFORE calling live Service authority. A panicking accessor
+        // cannot leave this request pending if the caller catches the unwind.
+        let previous = self.stage;
+        self.stage = PendingStage::Denied;
+        self.check_once(previous, next, now_ms, current_service_state)
     }
 
     fn check_once(
         &mut self,
+        previous: PendingStage,
         next: ServiceReadStage,
         now_ms: u64,
         current_service_state: impl FnOnce() -> Option<LiveServiceReadState>,
@@ -133,11 +134,11 @@ impl ServiceReadGate {
             return Err(ServiceReadGateError::Expired);
         }
         let accepted = matches!(
-            (self.stage, next),
+            (previous, next),
             (PendingStage::Initial, ServiceReadStage::Connected)
                 | (PendingStage::Connected, ServiceReadStage::BeforeRead)
                 | (PendingStage::Reading, ServiceReadStage::Fragment)
-        ) || (self.stage == PendingStage::Reading
+        ) || (previous == PendingStage::Reading
             && self.fragments > 0
             && next == ServiceReadStage::BeforeDelivery);
         if !accepted {
