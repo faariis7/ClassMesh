@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Help", "Run", "Pipe", "DenyLocalService", "LaunchWorker", "CancelConnect", "WorkerPipePositive", "WorkerPipeDecoy")]
+    [ValidateSet("Help", "Run", "Pipe", "DenyLocalService", "LaunchWorker", "CancelConnect", "WorkerPipePositive", "WorkerPipeDecoy", "WorkerPipeDeath")]
     [string]$Mode = "Help"
 )
 
@@ -45,6 +45,8 @@ No physical two-PC acceptance is claimed.
 "@ | Write-Output
     return
 }
+
+if ($Mode -eq "WorkerPipeDeath") { throw "SCM_NATIVE_RED: original live Worker death not revoked after pipe peer acceptance" }
 
 if ($env:OS -ne "Windows_NT") {
     throw "This native SCM probe can only run on Windows."
