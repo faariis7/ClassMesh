@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Help", "Run", "Pipe", "DenyLocalService", "LaunchWorker", "CancelConnect")]
+    [ValidateSet("Help", "Run", "Pipe", "DenyLocalService", "LaunchWorker", "CancelConnect", "WorkerPipePositive", "WorkerPipeDecoy")]
     [string]$Mode = "Help"
 )
 
@@ -40,6 +40,8 @@ No physical two-PC acceptance is claimed.
 "@ | Write-Output
     return
 }
+
+if ($Mode -in @("WorkerPipePositive", "WorkerPipeDecoy")) { throw "SCM_NATIVE_RED: launched Worker pipe peer identity unimplemented" }
 
 if ($env:OS -ne "Windows_NT") {
     throw "This native SCM probe can only run on Windows."
