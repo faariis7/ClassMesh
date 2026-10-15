@@ -1,6 +1,14 @@
 # ClassMesh Agent Handoff
 
 
+## QUICK RESUME — 2026-10-15 SCM-launched Worker, local native GREEN, hosted CI pending
+
+Main verified at 3ab9266a131d31b9e37eace5db79a138403b2e71 after already merged #491-#493. c4d branch feat/phase12e18c4d-scm-launched-worker has plan-first commit 2236292, RED absent LaunchWorker mode commit e41855d, followed by implementation. Actual native Windows ARM64 VM1 AND VM2 c4d pass exit0: real SCM LocalSystem Session0 used WTSQueryUserToken and CreateProcessAsUser to launch one non-elevated interactive Worker. Observer verified its real process parent, live owned HANDLE, SID/session/elevation/birth and wrong PID/SID/session/birth negatives; Service stop reaped exact pinned child. VM1 Run/Pipe/DenyLocalService regressions PASS. No clipboard payload, key, v11 change, authenticated v12, Worker-pipe handshake or live grants. Attempt to combine worker-pipe under synchronous ConnectNamedPipe FAILED and temporarily blocked test-only teardown; the uniquely named service/process tree was forcefully cleaned. Revised c4d deliberately tests only real process creation/lifetime; its success does NOT solve the separate securely bounded Worker-pipe control-plane gate. Full Portable + Windows exact-head CI/security review PENDING before Squash. #477 Windows RED, #479 section key forbidden. Next: safely cancellable Service-launched Worker pipe OS identity coupling, current policy both grants and replay, authenticated per-request v12 key transport, payload OVERLAPPED CancelIoEx completion drain zeroization. Physical separate two-PC/GPU/media/classroom/latency/accessibility/clipboard E2E OPEN. Mac ~141GiB free after cleanup, VM2 disk cap 85GB and zero VM snapshots at last check; verify VM state each time.
+
+---
+
+
+
 ## QUICK RESUME — 2026-10-15 c4c real LocalService wrong-SID ACL negative
 
 Verified main cf21bff170ce713831c94109230d31728b750577 after c4b #492 Squash, CI 38645037954 both Portable+Windows SUCCESS. c4a #491 and c4b #492 already merged, do not redo. Plan-first c4c branch feat/phase12e18c4c-localservice-deny based cleanly on new main, now extends same disposable Windows SCM test-only PowerShell helper with DenyLocalService mode. Before allowed client opens SYSTEM Session0 outbound pipe, a second unique SCM service running **actual LocalService SID S-1-5-19** attempts GENERIC_READ, must observe Win32 ACCESS_DENIED 5; it is an actual separate process/OS token, not caller-supplied spoof metadata. The correct interactive user thereafter opens the same service pipe and matches pinned actual SYSTEM SCM service birth/PID/Session0, first-instance and stale-death negatives. Both VM1 and VM2 Windows ARM64 DenyLocalService **32/32 pass exit0**, original VM1 Run 15/15 and VM2 Pipe 25/25 regressions pass. Test LocalService has ONLY RX permission on protected disposable executable directory; never write, never grant pipe ACL rights. No payload or secrets anywhere.
