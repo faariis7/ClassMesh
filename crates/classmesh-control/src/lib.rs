@@ -5,6 +5,7 @@ pub mod authorization;
 pub mod bootstrap;
 pub mod client_session;
 pub mod clipboard_execution;
+pub mod clipboard_live_authority;
 pub mod clipboard_read_correlation;
 pub mod clipboard_utf16;
 pub mod clipboard_utf16_write;
@@ -403,3 +404,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod clipboard_live_authority_tests;

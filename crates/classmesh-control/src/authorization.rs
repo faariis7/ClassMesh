@@ -57,6 +57,11 @@ impl AuthenticatedControlGuard {
     }
 
     #[must_use]
+    pub const fn control_session_id(self) -> u64 {
+        self.control_session_id
+    }
+
+    #[must_use]
     pub const fn last_sequence(self) -> u64 {
         self.last_sequence
     }
