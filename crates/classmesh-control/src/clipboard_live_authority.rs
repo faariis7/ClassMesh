@@ -5,9 +5,11 @@
 //! at every subsequent call. This does not make the running Service store
 //! dynamically mutable, prove current network connection liveness, hold a
 //! Windows Worker HANDLE, negotiate a new IPC version, or move clipboard data.
-use classmesh_protocol::{Capability, ControlRole, ProtocolVersion};
 use classmesh_protocol::control_wire::ControlEnvelope;
-use classmesh_security::{AuthorizationStore, CredentialFingerprint, Permission, PrincipalId, PrincipalKind};
+use classmesh_protocol::{Capability, ControlRole, ProtocolVersion};
+use classmesh_security::{
+    AuthorizationStore, CredentialFingerprint, Permission, PrincipalId, PrincipalKind,
+};
 
 use crate::authorization::AuthenticatedControlGuard;
 use crate::dispatch::AuthorizedClipboardRead;
@@ -171,17 +173,19 @@ impl ClipboardAuthorityLease {
         {
             return Err(ClipboardAuthorityError::SessionChanged);
         }
-        if !session.negotiated.capabilities.contains(&Capability::ClipboardText) {
+        if !session
+            .negotiated
+            .capabilities
+            .contains(&Capability::ClipboardText)
+        {
             return Err(ClipboardAuthorityError::CapabilityGone);
         }
         if session.negotiated.role != ControlRole::Teacher
-            || !store.principal(self.principal).is_some_and(|p| p.kind == PrincipalKind::Teacher)
+            || !store
+                .principal(self.principal)
+                .is_some_and(|p| p.kind == PrincipalKind::Teacher)
             || store.principal_for_credential(self.credential, now_unix_ms) != Some(self.principal)
-            || !store.authorize_credential(
-                self.credential,
-                Permission::ReadClipboard,
-                now_unix_ms,
-            )
+            || !store.authorize_credential(self.credential, Permission::ReadClipboard, now_unix_ms)
         {
             return Err(ClipboardAuthorityError::NotAuthorized);
         }
