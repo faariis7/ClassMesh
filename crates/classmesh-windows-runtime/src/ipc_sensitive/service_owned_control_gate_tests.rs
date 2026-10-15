@@ -284,9 +284,18 @@ fn fail_closed_on_clock_errors_ordering_and_fragment_budget() {
 
 #[test]
 fn invalid_or_overflowing_request_never_admitted() {
-    let bad = ClipboardReadSuccessBinding { control_sequence: 0, ..id() };
-    assert_eq!(ServiceReadGate::new(bad, 1000, || Some(live())).err(), Some(ServiceReadGateError::InvalidBinding));
-    assert_eq!(ServiceReadGate::new(id(), u64::MAX, || Some(live())).err(), Some(ServiceReadGateError::ClockOverflow));
+    let bad = ClipboardReadSuccessBinding {
+        control_sequence: 0,
+        ..id()
+    };
+    assert_eq!(
+        ServiceReadGate::new(bad, 1000, || Some(live())).err(),
+        Some(ServiceReadGateError::InvalidBinding)
+    );
+    assert_eq!(
+        ServiceReadGate::new(id(), u64::MAX, || Some(live())).err(),
+        Some(ServiceReadGateError::ClockOverflow)
+    );
 }
 
 #[test]
@@ -295,21 +304,43 @@ fn explicit_cancellation_is_permanent_and_idempotent() {
     assert!(gate.cancel());
     assert!(!gate.cancel());
     assert!(!gate.is_pending());
-    assert_eq!(gate.check(ServiceReadStage::BeforeRead, 1002, || Some(live())), Err(ServiceReadGateError::AlreadyUsed));
+    assert_eq!(
+        gate.check(ServiceReadStage::BeforeRead, 1002, || Some(live())),
+        Err(ServiceReadGateError::AlreadyUsed)
+    );
 }
 
 #[test]
 fn native_peer_and_grant_denials_also_apply_at_first_admission() {
     for bad in [
-        LiveServiceReadState { native_client_pid: 999, ..live() },
-        LiveServiceReadState { native_client_session: 99, ..live() },
+        LiveServiceReadState {
+            native_client_pid: 999,
+            ..live()
+        },
+        LiveServiceReadState {
+            native_client_session: 99,
+            ..live()
+        },
     ] {
-        assert_eq!(ServiceReadGate::new(id(),1000,||Some(bad)).err(), Some(ServiceReadGateError::PeerMismatch));
+        assert_eq!(
+            ServiceReadGate::new(id(), 1000, || Some(bad)).err(),
+            Some(ServiceReadGateError::PeerMismatch)
+        );
     }
-    assert_eq!(ServiceReadGate::new(id(),1000,||Some(LiveServiceReadState {
-        original_worker_alive:false,..live()
-    })).err(),Some(ServiceReadGateError::WorkerDead));
-    assert_eq!(ServiceReadGate::new(id(),1000,||Some(LiveServiceReadState {
-        control_authenticated:false,..live()
-    })).err(),Some(ServiceReadGateError::ControlUnavailable));
+    assert_eq!(
+        ServiceReadGate::new(id(), 1000, || Some(LiveServiceReadState {
+            original_worker_alive: false,
+            ..live()
+        }))
+        .err(),
+        Some(ServiceReadGateError::WorkerDead)
+    );
+    assert_eq!(
+        ServiceReadGate::new(id(), 1000, || Some(LiveServiceReadState {
+            control_authenticated: false,
+            ..live()
+        }))
+        .err(),
+        Some(ServiceReadGateError::ControlUnavailable)
+    );
 }
