@@ -1,5 +1,14 @@
 # ClassMesh Implementation Status
 
+
+## Phase12E18c4e1 — real SCM overlapped no-client connect cancellation, native proof, CI pending
+
+- Plan-first 89bf185, VM1 missing-mode RED db3cd6a. Separate Windows 11 ARM64 VM1 and VM2 native CancelConnect exit0: genuine LocalSystem SCM Session0 service creates protected first-instance outbound local pipe, FILE_FLAG_OVERLAPPED, stable unmanaged OVERLAPPED and manual-reset event. ConnectNamedPipe returns ERROR_IO_PENDING 997, 750ms timeout with NO client, targeted CancelIoEx then GetOverlappedResult completion ERROR_OPERATION_ABORTED 995 before freeing OS in-flight resources. Parent confirms pinned SCM Service identity/process still alive and responsive, clean SCM stop, stale pipe denied. Eight consecutive VM1 repeats green 8/8. Existing Run/Pipe/DenyLocalService/LaunchWorker modes VM1 and LaunchWorker VM2 regressions pass. No production code changed.
+- This is negative no-client cancellation lifetime evidence, NOT OS client PID-to-launched Worker HANDLE positive, authentication, control/grant rechecks, v12, secret or clipboard payload. Exceptional OS cancellation failure path may still block while draining, so no general bounded-drain or production guarantee claimed. #477 OPEN intentionally Windows RED, #479 section HANDLE forbidden, IPC v11 ClipboardRead failure-only, real E2E two-PC/GPU/classroom/UX/accessibility and payload ReadFile CancelIoEx drain OPEN. Hosted latest-head Portable Rust+full Windows Build/security review pending.
+
+---
+
+
 Security follow-up before merge: CreateProcessAsUser uses explicit minimal Unicode environment instead of inheriting LocalSystem variables; native VM1+VM2 retest exit0; NEW exact-head CI required.
 
 

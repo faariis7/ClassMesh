@@ -1,5 +1,14 @@
 # ClassMesh Agent Handoff
 
+
+## QUICK RESUME — 2026-10-15 Phase12E18c4e1 real SCM CancelConnect native green
+
+Baseline main 43e9614a10ac698abb26862261f21e70b332da2b after merged c4d PR #494; do NOT redo. Active branch feat/phase12e18c4e1-overlapped-cancel, Mac local /tmp/classmesh-oct15-c4e1-overlapped. Plan-first 89bf185; RED missing-mode db3cd6a. Test-only genuine SCM LocalSystem Session0 service creates protected unique first-instance outbound pipe with FILE_FLAG_OVERLAPPED and NO client; ConnectNamedPipe pending 997, 750ms no-client wait timeout, exact CancelIoEx and GetOverlappedResult completion drain 995 before closing unmanaged OVERLAPPED/event/pipe. Native VM1+VM2 Windows ARM64 each exit0; SCM alive/responsive then dead exact pinned HANDLE after stop; stale pipe denied. Eight serial VM1 repetitions all PASS. VM1 Run/Pipe/DenyLocalService/LaunchWorker regressions exit0, VM2 LaunchWorker exit0. Only scripts/phase12e18c4a-scm-probe.ps1 and living docs; CI/security review + PR and Squash still pending.
+Important limits: NO Worker client connected, current grants/control, authenticated v12, key, clipboard, production protocol change or payload. Kernel cancellation exceptional-path completion still might block the test thread, so this does NOT prove uniformly bounded I/O drain. Next separately test real launched Worker positive native pipe peer PID/session pinned Process HANDLE and same-user decoy negative with safe cancellation, then current grants/anti-replay and authenticated secret provisioning. PR #477 Windows RED intentional, #479 section key forbidden, production v11 ClipboardRead failure-only. Physical two-PC/GPU/media/classroom/UX/accessibility and real clipboard E2E open.
+
+---
+
+
 Security follow-up before merge: CreateProcessAsUser uses explicit minimal Unicode environment instead of inheriting LocalSystem variables; native VM1+VM2 retest exit0; NEW exact-head CI required.
 
 
