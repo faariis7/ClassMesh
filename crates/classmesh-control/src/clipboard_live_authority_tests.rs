@@ -1,7 +1,8 @@
 //! Future-v12 control-only: real authorization store + enrolled identity,
 //! intentionally no worker, clipboard, payload or production Service hookup.
 use std::collections::{BTreeMap, BTreeSet};
-use classmesh_protocol::{Capability, ControlRole, NegotiatedHello, ProtocolVersion};
+use classmesh_protocol::{Capability, ControlRole, ProtocolVersion};
+use crate::NegotiatedHello;
 use classmesh_protocol::control_wire::{
     ControlEnvelope, ClipboardReadRequest, control_envelope, ProtocolVersion as WireVersion,
 };
