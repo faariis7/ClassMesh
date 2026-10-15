@@ -403,3 +403,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod clipboard_live_authority_tests;
