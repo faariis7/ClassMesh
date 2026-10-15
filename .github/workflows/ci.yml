@@ -122,6 +122,10 @@ jobs:
         shell: pwsh
         run: .\scripts\phase12e18c4a-scm-probe.ps1 -Mode Help
 
+      - name: Validate Phase 12E18c4j protected policy file probe help (no privileged action)
+        shell: pwsh
+        run: .\scripts\phase12e18c4j-protected-file-probe.ps1 -Mode Help
+
       - name: Build Phase 7 multicast probe
         run: cargo build -p classmesh-lab --bin classmesh-multicast-probe --release
 
