@@ -69,13 +69,13 @@ fn issue(f:&mut Fixture)->ClipboardAuthorityLease{
     ).unwrap()
 }
 fn check(lease:&mut ClipboardAuthorityLease,f:&Fixture,time:u64)->Result<(),ClipboardAuthorityError>{
-    lease.recheck(Some(&f.store),Some(&f.session),Some(f.peer),Some(&f.guard),time)
+    lease.recheck(Some(&f.store),Some(&f.session),Some(f.peer),Some(&f.guard),Some((77,2,91)),time)
 }
 #[test]
 fn actual_dispatch_token_and_live_store_allow_only_one_final_result(){
     let mut f=fixture();let mut lease=issue(&mut f);
     assert_eq!(check(&mut lease,&f,151),Ok(()));
-    assert_eq!(lease.finish(Some(&f.store),Some(&f.session),Some(f.peer),Some(&f.guard),152),Ok(()));
+    assert_eq!(lease.finish(Some(&f.store),Some(&f.session),Some(f.peer),Some(&f.guard),Some((77,2,91)),152),Ok(()));
     assert_eq!(check(&mut lease,&f,153),Err(ClipboardAuthorityError::AlreadyUsed));
 }
 #[test]
@@ -123,7 +123,7 @@ fn missing_capability_or_replaced_control_session_fail_closed(){
 #[test]
 fn unavailable_store_or_replaced_peer_poison_existing_lease(){
     let mut f=fixture();let mut lease=issue(&mut f);
-    assert_eq!(lease.recheck(None,Some(&f.session),Some(f.peer),Some(&f.guard),151),Err(ClipboardAuthorityError::AuthorityUnavailable));
+    assert_eq!(lease.recheck(None,Some(&f.session),Some(f.peer),Some(&f.guard),Some((77,2,91)),151),Err(ClipboardAuthorityError::AuthorityUnavailable));
     assert_eq!(check(&mut lease,&f,152),Err(ClipboardAuthorityError::AlreadyUsed));
     let mut f=fixture();let mut lease=issue(&mut f);
     f.peer.identity=fixture().peer.identity; // same identity is harmless
@@ -137,7 +137,16 @@ fn unauthorized_creation_or_invalid_request_cannot_issue(){
     let PrivilegedControlCommand::ClipboardReadRequest(token)=
         dispatch_privileged_command(&mut f.guard,&f.store,&f.envelope,START_MS).unwrap()
     else {panic!("expected dispatch token")};
-    assert_eq!(ClipboardAuthorityLease::issue(&token,&f.guard,&f.envelope,&f.session,f.peer,&f.store,START_MS).err(),Some(ClipboardAuthorityError::CapabilityGone));
+    assert_eq!(ClipboardAuthorityLease::issue(token,&f.guard,&f.envelope,&f.session,f.peer,&f.store,START_MS).err(),Some(ClipboardAuthorityError::CapabilityGone));
     let mut f=fixture();let mut lease=issue(&mut f);
     assert_eq!(check(&mut lease,&f,149),Err(ClipboardAuthorityError::ClockRegression));
+}
+
+#[test]
+fn switching_current_pending_request_cannot_reuse_lease(){
+    let mut f=fixture();
+    let mut lease=issue(&mut f);
+    assert_eq!(lease.recheck(Some(&f.store),Some(&f.session),Some(f.peer),Some(&f.guard),Some((77,2,999)),151),
+        Err(ClipboardAuthorityError::PendingRequestChanged));
+    assert_eq!(check(&mut lease,&f,152),Err(ClipboardAuthorityError::AlreadyUsed));
 }

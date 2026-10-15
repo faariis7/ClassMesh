@@ -25,6 +25,7 @@ pub enum ClipboardAuthorityError {
     ClockRegression,
     Expired,
     AlreadyUsed,
+    PendingRequestChanged,
 }
 
 /// A one-shot, non-bearer control proof: no clipboard content, encryption keys,
@@ -46,7 +47,7 @@ impl ClipboardAuthorityLease {
     /// Issue only AFTER the real Service enrolled Teacher control command
     /// passed dispatch_privileged_command and yielded AuthorizedClipboardRead.
     pub fn issue(
-        token: &AuthorizedClipboardRead,
+        token: AuthorizedClipboardRead,
         guard: &AuthenticatedControlGuard,
         envelope: &ControlEnvelope,
         session: &EstablishedControlSession,
@@ -96,6 +97,7 @@ impl ClipboardAuthorityLease {
         session: Option<&EstablishedControlSession>,
         peer: Option<EstablishedAuthenticatedPeer>,
         guard: Option<&AuthenticatedControlGuard>,
+        current_pending: Option<(u64, u64, u64)>,
         now_unix_ms: u64,
     ) -> Result<(), ClipboardAuthorityError> {
         if !self.pending {
@@ -108,6 +110,9 @@ impl ClipboardAuthorityLease {
         else {
             return Err(ClipboardAuthorityError::AuthorityUnavailable);
         };
+        if current_pending != Some((self.session, self.sequence, self.request)) {
+            return Err(ClipboardAuthorityError::PendingRequestChanged);
+        }
         self.validate(store, session, peer, guard, now_unix_ms)?;
         self.last_checked_ms = now_unix_ms;
         self.pending = true;
@@ -121,9 +126,10 @@ impl ClipboardAuthorityLease {
         session: Option<&EstablishedControlSession>,
         peer: Option<EstablishedAuthenticatedPeer>,
         guard: Option<&AuthenticatedControlGuard>,
+        current_pending: Option<(u64, u64, u64)>,
         now_unix_ms: u64,
     ) -> Result<(), ClipboardAuthorityError> {
-        self.recheck(store, session, peer, guard, now_unix_ms)?;
+        self.recheck(store, session, peer, guard, current_pending, now_unix_ms)?;
         self.pending = false;
         Ok(())
     }
