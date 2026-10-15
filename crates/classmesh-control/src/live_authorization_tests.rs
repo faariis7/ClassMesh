@@ -200,7 +200,9 @@ fn concurrent_readers_see_whole_old_or_new_policy_with_monotonic_generations() {
         }));
     }
     for index in 0..100 {
-        shared.publish_if_version(index + 1, policy(index % 2 != 0)).unwrap();
+        shared
+            .publish_if_version(index + 1, policy(index % 2 != 0))
+            .unwrap();
     }
     for handle in handles {
         handle.join().unwrap();
@@ -218,7 +220,10 @@ fn read_failures_never_silently_return_a_fallback_policy() {
 fn conditional_publish_rejects_stale_writer_that_would_regrant_clipboard() {
     let source = LiveAuthorizationStore::new(policy(true));
     let outdated = source.snapshot().unwrap();
-    assert_eq!(source.publish_if_version(outdated.version(), policy(false)), Ok(2));
+    assert_eq!(
+        source.publish_if_version(outdated.version(), policy(false)),
+        Ok(2)
+    );
     assert_eq!(
         source.publish_if_version(outdated.version(), policy(true)),
         Err(LiveAuthorizationError::StaleGeneration {
@@ -228,7 +233,11 @@ fn conditional_publish_rejects_stale_writer_that_would_regrant_clipboard() {
     );
     let latest = source.snapshot().unwrap();
     assert_eq!(latest.version(), 2);
-    assert!(!latest.store().authorize(principal(), Permission::ReadClipboard));
+    assert!(
+        !latest
+            .store()
+            .authorize(principal(), Permission::ReadClipboard)
+    );
 }
 
 #[test]
@@ -245,12 +254,22 @@ fn concurrent_conditional_publishers_cannot_both_replace_same_epoch() {
         }));
     }
     barrier.wait();
-    let results: Vec<_> = threads.into_iter().map(|thread| thread.join().unwrap()).collect();
+    let results: Vec<_> = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
     assert_eq!(results.iter().filter(|result| **result == Ok(2)).count(), 1);
     assert_eq!(
-        results.iter().filter(|result| matches!(
-            result, Err(LiveAuthorizationError::StaleGeneration { expected: 1, current: 2 })
-        )).count(),
+        results
+            .iter()
+            .filter(|result| matches!(
+                result,
+                Err(LiveAuthorizationError::StaleGeneration {
+                    expected: 1,
+                    current: 2
+                })
+            ))
+            .count(),
         1
     );
     assert_eq!(source.snapshot().unwrap().version(), 2);
@@ -259,10 +278,20 @@ fn concurrent_conditional_publishers_cannot_both_replace_same_epoch() {
 #[test]
 fn conditional_publish_can_advance_only_from_current_revision() {
     let source = LiveAuthorizationStore::new(policy(false));
-    assert_eq!(source.publish_if_version(0, policy(true)),
-        Err(LiveAuthorizationError::StaleGeneration {expected:0,current:1}));
-    assert_eq!(source.publish_if_version(2, policy(true)),
-        Err(LiveAuthorizationError::StaleGeneration {expected:2,current:1}));
+    assert_eq!(
+        source.publish_if_version(0, policy(true)),
+        Err(LiveAuthorizationError::StaleGeneration {
+            expected: 0,
+            current: 1
+        })
+    );
+    assert_eq!(
+        source.publish_if_version(2, policy(true)),
+        Err(LiveAuthorizationError::StaleGeneration {
+            expected: 2,
+            current: 1
+        })
+    );
     assert_eq!(source.publish_if_version(1, policy(false)), Ok(2));
-    assert_eq!(source.snapshot().unwrap().version(),2);
+    assert_eq!(source.snapshot().unwrap().version(), 2);
 }

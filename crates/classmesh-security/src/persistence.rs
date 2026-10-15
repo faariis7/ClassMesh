@@ -624,7 +624,10 @@ mod tests {
             Err(PersistenceError::Io(error))
                 if error.kind() == std::io::ErrorKind::NotFound
         ));
-        assert!(durable.load().unwrap().is_some(), "legacy startup recovery is unchanged");
+        assert!(
+            durable.load().unwrap().is_some(),
+            "legacy startup recovery is unchanged"
+        );
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -655,9 +658,7 @@ mod tests {
         denied.upsert(teacher).unwrap();
         durable.save(&denied).unwrap();
         let loaded = durable.load_primary_only().unwrap();
-        assert!(!loaded.authorize_credential(
-            fingerprint(11), Permission::ReadClipboard, 30
-        ));
+        assert!(!loaded.authorize_credential(fingerprint(11), Permission::ReadClipboard, 30));
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 

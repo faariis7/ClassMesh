@@ -19,7 +19,10 @@ pub enum LiveAuthorizationError {
     GenerationExhausted,
     /// The caller prepared an update from an older (or speculative future)
     /// policy. Never allow it to replace a newer in-process publication.
-    StaleGeneration { expected: u64, current: u64 },
+    StaleGeneration {
+        expected: u64,
+        current: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -122,7 +125,6 @@ impl LiveAuthorizationStore {
         };
         Ok(next_generation)
     }
-
 }
 
 #[cfg(test)]

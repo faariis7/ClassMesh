@@ -1,5 +1,13 @@
 # ClassMesh Implementation Status
 
+## Phase 12E18c4i — concurrency-safe conditional policy updates and strict primary-only load (CI pending)
+
+- Baseline main 33c0816f after #500 merged. PLAN-first 2177c2d, RED E0599 for both APIs 9a64735 (Synology cargo 101). CAS publishes whole real AuthorizationStore only if current generation equals expected; concurrent writers can't both win, stale revoked ReadClipboard grant cannot overwrite later policy, error keeps version and permissions unchanged. Removed old unchecked publisher (no production callers), updated earlier tests. load_primary_only rejects absent or malformed primary even with readable older .bak; legacy startup load still preserves interrupted save backup recovery. Metadata bound from already-open File. Synology 10 targeted control and 8 persistence tests PASS. No Windows ProgramData ACL, owner, junction/reparse proof, signing or persisted epoch anchor, no production live reload or instant session/Worker cancellation.
+- Scope: in-process optimistic concurrency fence plus strict candidate reader only, not proof of cross-restart anti-rollback or external policy updates. Future separately reviewed native protected durable epoch/owner/DACL/reparse, trusted writer, authorized hot-reload, current-session revoke and physical Windows tests remain OPEN. IPC v11 ClipboardRead remains failure-only; #477 intentionally Windows RED and #479 section HANDLE key/bootstrap forbidden. Exact-HEAD full lint/tests/Windows+Portable CI and security review required before merge.
+
+---
+
+
 ## Phase 12E18c4h — canonical atomic live policy publisher and actual Service read-side hookup (hosted CI pending)
 
 - SOURCE: verified latest main 08f3124 after #499 merged; plan-FIRST commit 7804a96; deterministic real Synology E0432 missing module RED commit 1e74c57. Added versioned canonical LiveAuthorizationStore wrapping one AuthorizationStore Arc in a short-held std RwLock (no lock across async await): snapshot returns consistent immutable principal+credential+permissions generation; publish atomically swaps entire validated-by-caller policy, checks epoch overflow, returns explicit Poisoned/GenerationExhausted instead of stale allow. Tested real Security Principal/ReadClipboard grant, credential revoke, 3 concurrent readers, explicit fault poison and generation overflow. New control-side fixture obtains real dispatched move-only AuthorizedClipboardRead, issues existing ClipboardAuthorityLease, then publishes policy without ReadClipboard and rechecks fresh snapshot: original lease fails, follow-up privileged command fails, replay denied. Old retained snapshots remain stale by design: callers MUST resample. No Worker-supplied grants trusted.
