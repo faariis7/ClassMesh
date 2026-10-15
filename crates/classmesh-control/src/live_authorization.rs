@@ -123,16 +123,6 @@ impl LiveAuthorizationStore {
         Ok(next_generation)
     }
 
-    /// TRUSTED LOCAL CALLER ONLY. Legacy unchecked in-process publication;
-    /// asynchronous reloads MUST use publish_if_version to reject stale work.
-    /// The caller validates the complete policy before invoking either path.
-    pub fn publish(&self, next: AuthorizationStore) -> Result<u64, LiveAuthorizationError> {
-        let mut published = self
-            .published
-            .write()
-            .map_err(|_| LiveAuthorizationError::Poisoned)?;
-        Self::replace(&mut published, next)
-    }
 }
 
 #[cfg(test)]
@@ -156,7 +146,7 @@ mod tests {
             Err(LiveAuthorizationError::Poisoned)
         ));
         assert_eq!(
-            store.publish(AuthorizationStore::default()),
+            store.publish_if_version(1, AuthorizationStore::default()),
             Err(LiveAuthorizationError::Poisoned)
         );
     }
@@ -169,7 +159,7 @@ mod tests {
             guard.generation = u64::MAX;
         }
         assert_eq!(
-            store.publish(AuthorizationStore::default()),
+            store.publish_if_version(u64::MAX, AuthorizationStore::default()),
             Err(LiveAuthorizationError::GenerationExhausted)
         );
         assert_eq!(store.snapshot().unwrap().version(), u64::MAX);

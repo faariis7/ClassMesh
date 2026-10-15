@@ -88,7 +88,7 @@ fn canonical_publication_is_atomic_and_snapshots_are_versioned() {
             .store()
             .authorize(principal(), Permission::ReadClipboard)
     );
-    assert_eq!(source.publish(policy(false)), Ok(2));
+    assert_eq!(source.publish_if_version(1, policy(false)), Ok(2));
     let after = source.snapshot().unwrap();
     assert_eq!(after.version(), 2);
     assert!(
@@ -131,7 +131,7 @@ fn new_current_policy_rejects_previously_dispatched_token_and_replay() {
     let mut lease =
         ClipboardAuthorityLease::issue(token, &guard, &req, &session, peer, initial.store(), 150)
             .unwrap();
-    assert_eq!(source.publish(policy(false)), Ok(2));
+    assert_eq!(source.publish_if_version(1, policy(false)), Ok(2));
     let latest = source.snapshot().unwrap();
     assert_eq!(
         lease.recheck(
@@ -174,7 +174,7 @@ fn revoked_credential_in_published_state_denies_existing_authenticated_identity(
         .unwrap()
         .revoke(151);
     revoked.upsert(teacher).unwrap();
-    assert_eq!(source.publish(revoked), Ok(2));
+    assert_eq!(source.publish_if_version(1, revoked), Ok(2));
     assert!(!identity().is_currently_authenticated(source.snapshot().unwrap().store(), 151));
 }
 #[test]
@@ -200,7 +200,7 @@ fn concurrent_readers_see_whole_old_or_new_policy_with_monotonic_generations() {
         }));
     }
     for index in 0..100 {
-        shared.publish(policy(index % 2 != 0)).unwrap();
+        shared.publish_if_version(index + 1, policy(index % 2 != 0)).unwrap();
     }
     for handle in handles {
         handle.join().unwrap();
