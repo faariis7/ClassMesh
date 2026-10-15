@@ -1,5 +1,7 @@
 # ClassMesh Agent Handoff
 
+Security follow-up before merge: CreateProcessAsUser uses explicit minimal Unicode environment instead of inheriting LocalSystem variables; native VM1+VM2 retest exit0; NEW exact-head CI required.
+
 
 ## QUICK RESUME — 2026-10-15 SCM-launched Worker, local native GREEN, hosted CI pending
 

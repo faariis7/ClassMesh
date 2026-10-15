@@ -195,10 +195,19 @@ if ($Mode -eq "LaunchWorker") {
             string executable = @"__EXE_PATH__";
             var arguments = new System.Text.StringBuilder(
                 "\"" + executable + "\" --interactive-worker");
-            if (!CreateProcessAsUser(userToken, executable, arguments,
-                IntPtr.Zero, IntPtr.Zero, false, 0x08000000, IntPtr.Zero,
-                null, ref startup, out child))
-                throw new InvalidOperationException("SCM CreateProcessAsUser failed " + Marshal.GetLastWin32Error());
+            // CreateProcessAsUser inherits the calling LocalSystem SERVICE
+            // environment when lpEnvironment is NULL. Supply a tiny Unicode
+            // block so its non-elevated Worker never receives Service vars.
+            // One explicit NUL plus the marshaler terminator = double NUL.
+            IntPtr cleanEnvironment = Marshal.StringToHGlobalUni(
+                "SystemRoot=" + Environment.GetEnvironmentVariable("SystemRoot") + "\0");
+            try {
+                // CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT
+                if (!CreateProcessAsUser(userToken, executable, arguments,
+                    IntPtr.Zero, IntPtr.Zero, false, 0x08000400,
+                    cleanEnvironment, null, ref startup, out child))
+                    throw new InvalidOperationException("SCM CreateProcessAsUser failed " + Marshal.GetLastWin32Error());
+            } finally { Marshal.FreeHGlobal(cleanEnvironment); }
             launchedProcess = child.process;
             launchedPid = child.id;
             CloseHandle(child.thread);

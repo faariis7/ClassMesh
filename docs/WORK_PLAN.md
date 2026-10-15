@@ -1,5 +1,7 @@
 # ClassMesh Living Work Plan
 
+Security follow-up before merge: CreateProcessAsUser uses explicit minimal Unicode environment instead of inheriting LocalSystem variables; native VM1+VM2 retest exit0; NEW exact-head CI required.
+
 
 > **Phase 12E18c4d local native VERIFIED (2026-10-15):** On both Windows ARM64 VM1 and VM2, one actual LocalSystem SCM Service in Session0 obtained the real interactive user's OS WTS token, created an inert non-elevated Worker with CreateProcessAsUser, and the observer pinned the original Worker HANDLE plus SCM parent PID, verified process/token SID+interactive session, TokenElevation=0, and native FILETIME; deliberate wrong PID/session/SID/birth rejected. Service stop terminated that very Worker HANDLE. Both exit0. VM1 Run/Pipe/DenyLocalService regressions exit0. The originally attempted Service-to-Worker native pipe connection failed and its specific blocked test instance was explicitly reaped; the successful mode does NOT establish Worker pipe authentication, current control/grants or v12. No key, clipboard, secret, production code or protocol change. Portable+Windows hosted exact-head CI and security review PENDING. #477 remains Windows RED, #479 section option BLOCKED, v11 clipboard failure-only, physical two-PC and clipboard E2E OPEN.
 

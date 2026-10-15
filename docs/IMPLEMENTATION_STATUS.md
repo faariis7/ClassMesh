@@ -1,5 +1,7 @@
 # ClassMesh Implementation Status
 
+Security follow-up before merge: CreateProcessAsUser uses explicit minimal Unicode environment instead of inheriting LocalSystem variables; native VM1+VM2 retest exit0; NEW exact-head CI required.
+
 
 ## Phase 12E18c4d — local native VM1/VM2 GREEN; hosted CI pending
 
