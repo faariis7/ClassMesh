@@ -65,7 +65,7 @@ fn issue(f:&mut Fixture)->ClipboardAuthorityLease{
         dispatch_privileged_command(&mut f.guard,&f.store,&f.envelope,START_MS).unwrap()
     else {panic!("authorized read token required")};
     ClipboardAuthorityLease::issue(
-        &token,&f.guard,&f.envelope,&f.session,f.peer,&f.store,START_MS
+        token,&f.guard,&f.envelope,&f.session,f.peer,&f.store,START_MS
     ).unwrap()
 }
 fn check(lease:&mut ClipboardAuthorityLease,f:&Fixture,time:u64)->Result<(),ClipboardAuthorityError>{

@@ -55,8 +55,11 @@ impl ClipboardAuthorityLease {
         store: &AuthorizationStore,
         now_unix_ms: u64,
     ) -> Result<Self, ClipboardAuthorityError> {
-        if token.request_id() == 0
-            || token.request_id() != envelope.request_id
+        // AuthorizedClipboardRead is intentionally non-Clone/non-Copy.
+        // Consuming its only value exactly once preserves the dispatcher proof.
+        let request_id = token.request_id();
+        if request_id == 0
+            || request_id != envelope.request_id
             || envelope.sequence == 0
             || session.control_session_id == 0
             || guard.last_sequence() != envelope.sequence
@@ -71,7 +74,7 @@ impl ClipboardAuthorityLease {
             credential: peer.identity.credential_fingerprint(),
             session: session.control_session_id,
             sequence: envelope.sequence,
-            request: token.request_id(),
+            request: request_id,
             version: session.negotiated.version,
             last_checked_ms: now_unix_ms,
             deadline_ms,
