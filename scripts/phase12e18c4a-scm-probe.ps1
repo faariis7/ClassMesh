@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Help", "Run", "Pipe", "DenyLocalService", "LaunchWorker")]
+    [ValidateSet("Help", "Run", "Pipe", "DenyLocalService", "LaunchWorker", "CancelConnect")]
     [string]$Mode = "Help"
 )
 
@@ -16,6 +16,7 @@ ClassMesh Phase 12E18c4a/c4b: DISPOSABLE SCM/Session0 native probe
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode Pipe
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode DenyLocalService
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode LaunchWorker
+  .\scripts\phase12e18c4a-scm-probe.ps1 -Mode CancelConnect
 
 Run, Pipe, DenyLocalService and LaunchWorker require a disposable Windows test machine, an elevated interactive
 administrator session (>0), and PowerShell 5.1 with .NET Framework.
@@ -37,6 +38,8 @@ No physical two-PC acceptance is claimed.
 "@ | Write-Output
     return
 }
+
+if ($Mode -eq "CancelConnect") { throw "SCM_NATIVE_RED: no bounded overlapped ConnectNamedPipe cancellation witness" }
 
 if ($env:OS -ne "Windows_NT") {
     throw "This native SCM probe can only run on Windows."
