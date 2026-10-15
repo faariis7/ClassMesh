@@ -47,3 +47,6 @@ mod tests;
 
 #[cfg(test)]
 mod v12_challenge_tests;
+
+#[cfg(test)]
+mod service_owned_control_gate_tests;
