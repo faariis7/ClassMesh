@@ -160,6 +160,7 @@ impl ClipboardAuthorityLease {
         }
         if session.control_session_id != self.session
             || peer.control_session_id != self.session
+            || guard.control_session_id() != self.session
             || guard.peer() != peer.identity
             || peer.identity.principal_id() != self.principal
             || peer.identity.credential_fingerprint() != self.credential
