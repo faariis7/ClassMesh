@@ -9,6 +9,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use classmesh_control::authorization::AuthenticatedControlGuard;
+use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::diagnostics::{
     command_authorization_diagnostic_code, handshake_diagnostic_code, heartbeat_diagnostic_code,
     privileged_dispatch_diagnostic_code, stream_offer_diagnostic_code, transport_diagnostic_code,
@@ -1468,7 +1469,7 @@ async fn run_listener(
         return;
     }
 
-    let authorization = Arc::new(state.authorization);
+    let authorization = Arc::new(LiveAuthorizationStore::new(state.authorization));
     let session_ids = Arc::new(AtomicU64::new(1));
     let input = InputDispatchState {
         channels: input,
@@ -1530,16 +1531,47 @@ async fn run_listener(
                         }
                     };
 
+                    // Snapshot only for this handshake. Its atomic lock was
+                    // released before awaiting QUIC; revalidate the peer
+                    // against the latest published source immediately after.
+                    let hello_authorization = match authorization.snapshot() {
+                        Ok(snapshot) => snapshot,
+                        Err(_) => {
+                            connection.close(0_u32.into(), b"authorization source unavailable");
+                            return;
+                        }
+                    };
                     match server_hello_enrolled(
                         &connection,
                         &mut channel,
                         &hello_config,
-                        authorization.as_ref(),
+                        hello_authorization.store(),
                         now_unix_ms,
                     )
                     .await
                     {
                         Ok((session, peer)) => {
+                            let current_authorization = match authorization.snapshot() {
+                                Ok(snapshot) => snapshot,
+                                Err(_) => {
+                                    connection.close(0_u32.into(), b"authorization source unavailable");
+                                    return;
+                                }
+                            };
+                            let current_unix_ms = match unix_time_ms() {
+                                Ok(value) => value,
+                                Err(_) => {
+                                    connection.close(0_u32.into(), b"invalid service clock");
+                                    return;
+                                }
+                            };
+                            if !peer.identity.is_currently_authenticated(
+                                current_authorization.store(),
+                                current_unix_ms,
+                            ) {
+                                connection.close(0_u32.into(), b"enrolled peer no longer authorized");
+                                return;
+                            }
                             eprintln!(
                                 "ClassMesh enrolled control session {} established",
                                 peer.control_session_id
@@ -1594,7 +1626,7 @@ async fn run_listener(
 
 #[derive(Debug, Clone, Copy)]
 struct EstablishedSessionRuntime<'a> {
-    authorization: &'a AuthorizationStore,
+    authorization: &'a LiveAuthorizationStore,
     input: &'a InputDispatchState,
     system_actions: &'a SystemActionDispatchChannels,
     teacher_interactions: &'a TeacherInteractionDispatchChannels,
@@ -1762,6 +1794,14 @@ async fn run_established_session(
                         return;
                     }
                 };
+                let feedback_authorization = match authorization.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(_) => {
+                        connection.close(0_u32.into(), b"authorization source unavailable");
+                        return;
+                    }
+                };
+                let authorization = feedback_authorization.store();
                 if authorization.principal_for_credential(
                     peer.identity.credential_fingerprint(),
                     now_unix_ms,
@@ -1813,6 +1853,17 @@ async fn run_established_session(
         };
         last_inbound_at = Instant::now();
 
+        // One canonical Service-owned authorization store. Re-sample on
+        // EVERY envelope, rather than using a handshake-time snapshot.
+        // Never hold a std lock across async QUIC I/O.
+        let envelope_authorization = match authorization.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                connection.close(0_u32.into(), b"authorization source unavailable");
+                return;
+            }
+        };
+        let authorization = envelope_authorization.store();
         match envelope.payload.as_ref() {
             Some(control_envelope::Payload::Heartbeat(sample)) => {
                 if let Err(error) = guard.validate_envelope(&envelope) {
