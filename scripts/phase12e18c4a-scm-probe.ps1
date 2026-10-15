@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Help", "Run", "Pipe", "DenyLocalService", "LaunchWorker", "CancelConnect")]
+    [ValidateSet("Help", "Run", "Pipe", "DenyLocalService", "LaunchWorker", "CancelConnect", "WorkerPipePositive", "WorkerPipeDecoy")]
     [string]$Mode = "Help"
 )
 
@@ -17,6 +17,8 @@ ClassMesh Phase 12E18c4a/c4b: DISPOSABLE SCM/Session0 native probe
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode DenyLocalService
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode LaunchWorker
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode CancelConnect
+  .\scripts\phase12e18c4a-scm-probe.ps1 -Mode WorkerPipePositive
+  .\scripts\phase12e18c4a-scm-probe.ps1 -Mode WorkerPipeDecoy
 
 Run, Pipe, DenyLocalService, LaunchWorker and CancelConnect require a disposable Windows test machine, an elevated interactive
 administrator session (>0), and PowerShell 5.1 with .NET Framework.
@@ -36,6 +38,9 @@ LaunchWorker uses WTSQueryUserToken + CreateProcessAsUser under true SCM SYSTEM
  non-elevated token. Worker pipe identity/control remains a separate gate.
 CancelConnect uses true LocalSystem SCM to prove native pending OVERLAPPED pipe
  connect cancellation + kernel completion drain without a client or payload.
+WorkerPipePositive and WorkerPipeDecoy test genuine SCM-launched Worker
+ process identity versus the kernel-reported inbound pipe client process PID.
+ Neither mode sends or accepts any payload or authentication credential.
 No physical two-PC acceptance is claimed.
 "@ | Write-Output
     return
@@ -81,14 +86,18 @@ $deniedCreated = $false
 $launchedHandle = [IntPtr]::Zero
 $witnessFile = Join-Path $workDir "launched-worker.witness"
 $cancelWitness = Join-Path $workDir "cancel-connect.witness"
-$pipeOpenMode = if ($Mode -eq "CancelConnect") { "0x40080002" } else { "0x00080002" }
-$pipeProbe = $Mode -in @("Pipe", "DenyLocalService", "CancelConnect")
+$peerWitness = Join-Path $workDir "worker-pipe.witness"
+$workerPipeMode = $Mode -in @("WorkerPipePositive", "WorkerPipeDecoy")
+$launchMode = $Mode -eq "LaunchWorker" -or $workerPipeMode
+$pipeOpenMode = if ($Mode -eq "CancelConnect" -or $workerPipeMode) { "0x40080002" } else { "0x00080002" }
+$pipeProbe = $Mode -in @("Pipe", "DenyLocalService", "CancelConnect") -or $workerPipeMode
 
 # Native pipe exists in the real SCM-controlled SYSTEM service only in Pipe
 # mode; Run remains the original inert topology probe.
 $serviceExtras = ""
 $startBody = ""
 $stopBody = ""
+$mainBody = "ServiceBase.Run(new InertProbeService());"
 if ($pipeProbe) {
     $serviceExtras = @'
     [StructLayout(LayoutKind.Sequential)]
@@ -234,7 +243,7 @@ if ($Mode -eq "CancelConnect") {
 '@ + $stopBody
 }
 
-if ($Mode -eq "LaunchWorker") {
+if ($launchMode) {
     # OS-created SYSTEM -> real signed-in user child, with a protected public
     # lifetime witness. This DOES NOT authenticate a pipe or Worker grants.
     $serviceExtras += @'
@@ -254,8 +263,8 @@ if ($Mode -eq "LaunchWorker") {
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool GetProcessTimes(IntPtr process, out long creation,
         out long exit, out long kernel, out long user);
-    [DllImport("kernel32.dll", SetLastError=true)]
-    static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", EntryPoint="CloseHandle", SetLastError=true)]
+    static extern bool CloseLaunchedHandle(IntPtr handle);
     [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
     struct NativeStartupInfo {
         public uint cb;
@@ -275,9 +284,29 @@ if ($Mode -eq "LaunchWorker") {
     }
     private IntPtr launchedProcess = IntPtr.Zero;
     private uint launchedPid = 0;
-    static void InteractiveWorker() {
-        // Inert process; never opens clipboard, IPC, files or sends data.
-        System.Threading.Thread.Sleep(60000);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true,
+        EntryPoint="CreateFileW")]
+    static extern IntPtr OpenInteractivePipe(string path, uint access,
+        uint share, IntPtr sec, uint disposition, uint flags, IntPtr template);
+    static void InteractiveWorker(string[] args) {
+        if (args.Length == 3 && args[1] == "--client-pipe") {
+            // Signed-in medium-integrity child opens an inert read-only handle.
+            // The SYSTEM service MUST still independently attest its native PID.
+            IntPtr client = new IntPtr(-1);
+            for (int n = 0; n < 80; n++) {
+                client = OpenInteractivePipe(@"\\.\pipe\" + args[2],
+                    0x80000000, 0, IntPtr.Zero, 3, 0x00110000, IntPtr.Zero);
+                if (client != IntPtr.Zero && client != new IntPtr(-1)) break;
+                System.Threading.Thread.Sleep(100);
+            }
+            if (client == IntPtr.Zero || client == new IntPtr(-1))
+                throw new InvalidOperationException("inert Worker could not open pipe");
+            try { System.Threading.Thread.Sleep(20000); }
+            finally { CloseLaunchedHandle(client); }
+        } else {
+            // WorkerPipeDecoy starts only this sleeping, real owned child.
+            System.Threading.Thread.Sleep(60000);
+        }
     }
     void StartInteractiveWorker() {
         IntPtr userToken = IntPtr.Zero;
@@ -293,7 +322,7 @@ if ($Mode -eq "LaunchWorker") {
             NativeProcessInfo child;
             string executable = @"__EXE_PATH__";
             var arguments = new System.Text.StringBuilder(
-                "\"" + executable + "\" --interactive-worker");
+                "\"" + executable + "\" --interactive-worker__WORKER_CLIENT_ARGS__");
             // CreateProcessAsUser inherits the calling LocalSystem SERVICE
             // environment when lpEnvironment is NULL. Supply a tiny Unicode
             // block so its non-elevated Worker never receives Service vars.
@@ -309,7 +338,7 @@ if ($Mode -eq "LaunchWorker") {
             } finally { Marshal.FreeHGlobal(cleanEnvironment); }
             launchedProcess = child.process;
             launchedPid = child.id;
-            CloseHandle(child.thread);
+            CloseLaunchedHandle(child.thread);
             if (launchedPid == 0 || launchedProcess == IntPtr.Zero ||
                 WaitForSingleObject(launchedProcess, 0) != 0x102)
                 throw new InvalidOperationException("SCM-created Worker not live");
@@ -321,7 +350,7 @@ if ($Mode -eq "LaunchWorker") {
             // the directory. Observer rechecks original pinned native HANDLE.
             System.IO.File.WriteAllText(@"__WITNESS_PATH__",
                 launchedPid + "|" + born + "|" + __SESSION_ID__);
-        } finally { if (userToken != IntPtr.Zero) CloseHandle(userToken); }
+        } finally { if (userToken != IntPtr.Zero) CloseLaunchedHandle(userToken); }
     }
 '@
     $startBody += @'
@@ -333,22 +362,138 @@ if ($Mode -eq "LaunchWorker") {
                 TerminateProcess(launchedProcess, 0);
                 WaitForSingleObject(launchedProcess, 5000);
             }
-            CloseHandle(launchedProcess);
+            CloseLaunchedHandle(launchedProcess);
             launchedProcess = IntPtr.Zero;
         }
 '@
     $mainBody = @'
-if (args.Length == 1 && args[0] == "--interactive-worker")
-    InteractiveWorker();
+if (args.Length >= 1 && args[0] == "--interactive-worker")
+    InteractiveWorker(args);
 else
     ServiceBase.Run(new InertProbeService());
 '@
 }
 
+
+if ($workerPipeMode) {
+    # OS CLIENT PID/session is acquired from the ALREADY-CONNECTED native
+    # pipe; the expected PID and process birth come from the SERVICE-owned
+    # exact HANDLE returned by CreateProcessAsUser, not an observer's claim.
+    $serviceExtras += @'
+    [StructLayout(LayoutKind.Sequential)]
+    struct WorkerPipeOverlap {
+        public IntPtr internalPtr, internalHigh;
+        public uint offset, offsetHigh;
+        public IntPtr eventHandle;
+    }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode,
+        EntryPoint="CreateEventW", SetLastError=true)]
+    static extern IntPtr CreateWorkerEvent(IntPtr attr, bool manual,
+        bool initial, string name);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool ConnectNamedPipe(IntPtr pipe, IntPtr overlap);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool CancelIoEx(IntPtr pipe, IntPtr overlap);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool GetOverlappedResult(IntPtr pipe, IntPtr overlap,
+        out uint done, bool wait);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool GetNamedPipeClientProcessId(IntPtr pipe, out uint clientPid);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool GetNamedPipeClientSessionId(IntPtr pipe, out uint sessionId);
+    private readonly System.Threading.ManualResetEvent workerPeerDone =
+        new System.Threading.ManualResetEvent(false);
+    void AttestNativeWorkerPeer() {
+        IntPtr nativeEvent = IntPtr.Zero;
+        IntPtr overlap = IntPtr.Zero;
+        bool ioUndrained = false;
+        try {
+            nativeEvent = CreateWorkerEvent(IntPtr.Zero, true, false, null);
+            if (nativeEvent == IntPtr.Zero || nativeEvent == new IntPtr(-1))
+                throw new InvalidOperationException("native peer event failed");
+            WorkerPipeOverlap state = new WorkerPipeOverlap();
+            state.eventHandle = nativeEvent;
+            overlap = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WorkerPipeOverlap)));
+            Marshal.StructureToPtr(state, overlap, false);
+            bool immediate = ConnectNamedPipe(pipe, overlap);
+            int error = Marshal.GetLastWin32Error();
+            if (!immediate && error == 997) {
+                ioUndrained = true;
+                uint wait = WaitForSingleObject(nativeEvent, 7000);
+                if (wait == 0) {
+                    uint transferred;
+                    bool complete = GetOverlappedResult(pipe, overlap, out transferred, false);
+                    int finalError = Marshal.GetLastWin32Error();
+                    ioUndrained = false;
+                    if (!complete) throw new InvalidOperationException(
+                        "native connect completion error " + finalError);
+                } else {
+                    // Timeout/unexpected wait: targeted cancel then exact
+                    // kernel completion drain BEFORE the allocation is freed.
+                    CancelIoEx(pipe, overlap);
+                    uint ignored;
+                    GetOverlappedResult(pipe, overlap, out ignored, true);
+                    ioUndrained = false;
+                    throw new InvalidOperationException("native peer connect timeout");
+                }
+            } else if (!immediate && error != 535) {
+                throw new InvalidOperationException("native connect failed " + error);
+            }
+            uint reportedPid = 0, reportedSession = 0;
+            if (!GetNamedPipeClientProcessId(pipe, out reportedPid) ||
+                !GetNamedPipeClientSessionId(pipe, out reportedSession))
+                throw new InvalidOperationException("native kernel client OS identity unavailable");
+            bool sourceAlive = launchedProcess != IntPtr.Zero &&
+                launchedProcess != new IntPtr(-1) &&
+                WaitForSingleObject(launchedProcess, 0) == 0x102;
+            uint ownedPid = launchedPid;
+            long born, exited, kernel, user;
+            if (!sourceAlive ||
+                !GetProcessTimes(launchedProcess, out born, out exited, out kernel, out user))
+                throw new InvalidOperationException("original SCM-launched Worker dead");
+            if (reportedSession != __SESSION_ID__)
+                throw new InvalidOperationException("wrong native interactive session");
+            if (reportedPid == ownedPid && reportedPid != 0) {
+                System.IO.File.WriteAllText(@"__PEER_WITNESS__",
+                    "MATCHED|" + reportedPid + "|" + born + "|" + reportedSession);
+            } else {
+                // Explicit denial, NOT a successful authenticated handshake.
+                System.IO.File.WriteAllText(@"__PEER_WITNESS__",
+                    "REJECTED_PID|" + reportedPid + "|" + ownedPid + "|" + reportedSession);
+            }
+        } catch {
+            try { System.IO.File.WriteAllText(@"__PEER_WITNESS__", "RED"); } catch { }
+        } finally {
+            if (ioUndrained && overlap != IntPtr.Zero) {
+                CancelIoEx(pipe, overlap);
+                uint ignored;
+                GetOverlappedResult(pipe, overlap, out ignored, true);
+            }
+            if (overlap != IntPtr.Zero) Marshal.FreeHGlobal(overlap);
+            if (nativeEvent != IntPtr.Zero && nativeEvent != new IntPtr(-1))
+                CloseHandle(nativeEvent);
+            workerPeerDone.Set();
+        }
+    }
+'@
+    # Spawn after the real service creates the pipe, then complete the
+    # connection on a separate thread. SCM OnStart never blocks for a client.
+    $startBody += @'
+        System.Threading.ThreadPool.QueueUserWorkItem(
+            delegate(object ignored) { AttestNativeWorkerPeer(); });
+'@
+    $stopBody = @'
+        if (!workerPeerDone.WaitOne(7000))
+            throw new InvalidOperationException("native peer did not drain before shutdown");
+        workerPeerDone.Dispose();
+'@ + $stopBody
+}
+
 # Additional real SCM identity: LocalService tries to open the existing
 # SYSTEM-owned pipe before the intended interactive SID. It sends zero data.
 $deniedClass = ""
-$mainBody = "ServiceBase.Run(new InertProbeService());"
+# Keep the LaunchWorker/WorkerPipe entrypoint selected above; only the
+# LocalService negative mode needs a separate dispatcher.
 if ($Mode -eq "DenyLocalService") {
     $deniedClass = @'
 public sealed class DeniedClientService : ServiceBase {
@@ -416,7 +561,9 @@ __DENIED_CLASS__
     Replace("__EXE_PATH__", $serviceExe).
     Replace("__WITNESS_PATH__", $witnessFile).
     Replace("__PIPE_OPEN_MODE__", $pipeOpenMode).
-    Replace("__CANCEL_WITNESS__", $cancelWitness)
+    Replace("__CANCEL_WITNESS__", $cancelWitness).
+    Replace("__PEER_WITNESS__", $peerWitness).
+    Replace("__WORKER_CLIENT_ARGS__", $(if ($Mode -eq "WorkerPipePositive") { " --client-pipe " + $pipeName } else { "" }))
 
 # The observer reads the genuine OS process HANDLE and token. It does not
 # authenticate a named pipe or grant a process authority.
@@ -578,7 +725,7 @@ try {
         $rx = & icacls.exe $workDir "/grant:r" "*S-1-5-19:(OI)(CI)RX" 2>&1
         if ($LASTEXITCODE -ne 0) { throw "Unable to grant LocalService RX: $rx" }
     }
-    if ($Mode -eq "LaunchWorker") {
+    if ($launchMode) {
         # The WTS-derived medium-integrity interactive token cannot execute
         # from an Administrators-only directory. Grant the *exact* target SID
         # RX (traverse/load) but never WRITE/MODIFY to protected test binary.
@@ -648,7 +795,17 @@ try {
             [ClassMeshNativeScmProbe]::WaitForSingleObject($serviceHandle, 0) -eq 0x102) "SCM remained responsive and pinned process alive after cancellation drain"
     }
 
-    if ($Mode -eq "LaunchWorker") {
+    if ($Mode -eq "WorkerPipeDecoy") {
+        $pipeDeadline = [DateTime]::UtcNow.AddSeconds(6)
+        do {
+            $pipeHandle = [ClassMeshNativeScmProbe]::OpenReadonlyClient($pipePath)
+            if ($pipeHandle -ne [IntPtr]::Zero -and $pipeHandle -ne [IntPtr](-1)) { break }
+            Start-Sleep -Milliseconds 100
+        } while ([DateTime]::UtcNow -lt $pipeDeadline)
+        Assert-Probe ($pipeHandle -ne [IntPtr]::Zero -and $pipeHandle -ne [IntPtr](-1)) "same-target-SID but unrelated observer opened protected native pipe as decoy"
+    }
+
+    if ($launchMode) {
         $deadline = [DateTime]::UtcNow.AddSeconds(12)
         while (-not (Test-Path -LiteralPath $witnessFile) -and
             [DateTime]::UtcNow -lt $deadline) {
@@ -691,6 +848,35 @@ try {
         Assert-Probe (-not [ClassMeshNativeScmProbe]::WorkerMatchesExpected($launchedHandle,
             [uint32]$launchedPid, [uint32]$workerSession,
             $identity.User.Value, ($launchedBirth + 1))) "wrong Worker birth FILETIME explicitly rejected"
+    }
+
+    if ($workerPipeMode) {
+        $peerDeadline = [DateTime]::UtcNow.AddSeconds(11)
+        while (-not (Test-Path -LiteralPath $peerWitness) -and
+            [DateTime]::UtcNow -lt $peerDeadline) {
+            Start-Sleep -Milliseconds 100
+        }
+        Assert-Probe (Test-Path -LiteralPath $peerWitness) "SCM generated protected kernel peer PID/session classification witness"
+        $report = [IO.File]::ReadAllText($peerWitness).Trim()
+        if ($Mode -eq "WorkerPipePositive") {
+            Assert-Probe ($report -match '^MATCHED\|(\d+)\|(\d+)\|(\d+)$') "kernel client OS PID matches original SCM-launched child"
+            $actualPid = [uint32]$Matches[1]
+            $actualBirth = [long]$Matches[2]
+            $actualSession = [uint32]$Matches[3]
+            Assert-Probe ($actualPid -eq [uint32]$launchedPid -and
+                $actualBirth -eq $launchedBirth -and
+                $actualSession -eq [uint32]$workerSession) "native connected peer is EXACT pinned live Worker PID/birth/interactive Session"
+        } else {
+            Assert-Probe ($report -match '^REJECTED_PID\|(\d+)\|(\d+)\|(\d+)$') "same-user decoy native client rejected SPECIFICALLY for wrong OS PID"
+            $actualPid = [uint32]$Matches[1]
+            $expectedPid = [uint32]$Matches[2]
+            $actualSession = [uint32]$Matches[3]
+            Assert-Probe ($actualPid -eq [uint32]$workerPid -and
+                $expectedPid -eq [uint32]$launchedPid -and
+                $actualPid -ne $expectedPid -and $actualSession -eq [uint32]$workerSession) "native wrong PID denial despite same SID and interactive Session"
+            [void][ClassMeshNativeScmProbe]::CloseHandle($pipeHandle)
+            $pipeHandle = [IntPtr]::Zero
+        }
     }
 
     if ($Mode -in @("Pipe", "DenyLocalService")) {
@@ -763,9 +949,13 @@ try {
         Assert-Probe $staleDenied "canceled test pipe rejects new client after Service death"
         Write-Output "SCM_SESSION0_OVERLAPPED_CANCEL_DRAIN_PASS"
     }
-    if ($Mode -eq "LaunchWorker") {
+    if ($launchMode) {
         Assert-Probe ([ClassMeshNativeScmProbe]::WaitForSingleObject($launchedHandle, 8000) -eq 0) "SCM Service stop terminates exact launched Worker HANDLE"
-        Write-Output "SCM_SESSION0_LAUNCHED_INTERACTIVE_WORKER_INERT_PASS"
+        if ($workerPipeMode) {
+            Write-Output $(if ($Mode -eq "WorkerPipePositive") { "SCM_LAUNCHED_WORKER_NATIVE_PIPE_PEER_PASS" } else { "SCM_SAME_USER_DECOY_NATIVE_PID_DENIED_PASS" })
+        } else {
+            Write-Output "SCM_SESSION0_LAUNCHED_INTERACTIVE_WORKER_INERT_PASS"
+        }
     }
     if ($Mode -in @("Pipe", "DenyLocalService")) {
         $stale = [ClassMeshNativeScmProbe]::OpenReadonlyClient($pipePath)

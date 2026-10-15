@@ -1,6 +1,16 @@
 # ClassMesh Implementation Status
 
 
+## Phase 12E18c4e2 — actual native SCM-launched Worker pipe peer positive and same-SID decoy negative; CI pending
+
+- **Baseline main:** 8bac719e0f23fd9ebfc6c14dfc4135a5b9ab3029 after #495 merged. Test-only helper extends two opt-in modes WorkerPipePositive and WorkerPipeDecoy, reusing disposable SCM LocalSystem Service, current interactive user WTS token/CreateProcessAsUser, protected target SID pipe DACL, pinned live process HANDLE/birth and async ConnectNamedPipe CancelIoEx completion-drain. Real OS GetNamedPipeClientProcessId+GetNamedPipeClientSessionId is compared inside the *actual Service* against its exact launched child HANDLE/PID and interactive session. Observer also checks SCM->child OS process ancestry, TokenUser SID, non-elevated TokenElevation, process+token SessionId and creation FILETIME.
+- **Actual Windows ARM64 VM1+VM2:** WorkerPipePositive exit0 (exact legitimate live Worker native client PID, correct session and original birth); WorkerPipeDecoy exit0 (another current SID/session process got native pipe HANDLE but OS-reported PID mismatched trusted Worker, specifically **REJECTED**, not marked authenticated). VM1 original Run/Pipe/DenyLocalService/LaunchWorker/CancelConnect regression modes all exit0. First VM2 attempt lost VMPal Tools during auto-update; reconnected and independently confirmed no remaining test services/processes/dirs before rerunning both VM2 cases GREEN. Only public protected witness, no payload sent, no secrets.
+- **Open gates:** Native pipe PID/session plus pinned Service-originated Worker process are OS evidence, but not cryptographic v12 mutual authentication or up-to-date Teacher control, both grants, revoke/replay, key bootstrap, robust process replacement atomicity or production integration. Do not send clipboard bytes. #477 original section HANDLE escalation deliberately Windows RED (#479 blocked); active IPC v11 ClipboardRead failure-only; payload OVERLAPPED ReadFile CancelIoEx completion drain/zeroization and Teacher result UNIMPLEMENTED; actual two physical Windows PCs, GPU/media/classroom/network/performance/accessibility E2E OPEN. Hosted latest-head full CI and security review pending.
+
+---
+
+
+
 ## Phase12E18c4e1 — real SCM overlapped no-client connect cancellation, native proof, CI pending
 
 - Plan-first 89bf185, VM1 missing-mode RED db3cd6a. Separate Windows 11 ARM64 VM1 and VM2 native CancelConnect exit0: genuine LocalSystem SCM Session0 service creates protected first-instance outbound local pipe, FILE_FLAG_OVERLAPPED, stable unmanaged OVERLAPPED and manual-reset event. ConnectNamedPipe returns ERROR_IO_PENDING 997, 750ms timeout with NO client, targeted CancelIoEx then GetOverlappedResult completion ERROR_OPERATION_ABORTED 995 before freeing OS in-flight resources. Parent confirms pinned SCM Service identity/process still alive and responsive, clean SCM stop, stale pipe denied. Eight consecutive VM1 repeats green 8/8. Existing Run/Pipe/DenyLocalService/LaunchWorker modes VM1 and LaunchWorker VM2 regressions pass. No production code changed.
