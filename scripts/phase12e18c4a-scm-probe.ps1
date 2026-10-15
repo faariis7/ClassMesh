@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Help", "Run", "Pipe", "DenyLocalService", "LaunchWorker")]
+    [ValidateSet("Help", "Run", "Pipe", "DenyLocalService", "LaunchWorker", "CancelConnect")]
     [string]$Mode = "Help"
 )
 
@@ -16,8 +16,9 @@ ClassMesh Phase 12E18c4a/c4b: DISPOSABLE SCM/Session0 native probe
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode Pipe
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode DenyLocalService
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode LaunchWorker
+  .\scripts\phase12e18c4a-scm-probe.ps1 -Mode CancelConnect
 
-Run, Pipe, DenyLocalService and LaunchWorker require a disposable Windows test machine, an elevated interactive
+Run, Pipe, DenyLocalService, LaunchWorker and CancelConnect require a disposable Windows test machine, an elevated interactive
 administrator session (>0), and PowerShell 5.1 with .NET Framework.
 It compiles and starts one unique test-only ServiceBase executable under
 the REAL Windows Service Control Manager as LocalSystem. It verifies OS
@@ -33,6 +34,8 @@ Service-launched Worker, grant Worker control, or read clipboard.
 LaunchWorker uses WTSQueryUserToken + CreateProcessAsUser under true SCM SYSTEM
  to launch one inert signed-in user child; checks native parent PID and
  non-elevated token. Worker pipe identity/control remains a separate gate.
+CancelConnect uses true LocalSystem SCM to prove native pending OVERLAPPED pipe
+ connect cancellation + kernel completion drain without a client or payload.
 No physical two-PC acceptance is claimed.
 "@ | Write-Output
     return
@@ -77,7 +80,9 @@ $deniedHandle = [IntPtr]::Zero
 $deniedCreated = $false
 $launchedHandle = [IntPtr]::Zero
 $witnessFile = Join-Path $workDir "launched-worker.witness"
-$pipeProbe = $Mode -in @("Pipe", "DenyLocalService")
+$cancelWitness = Join-Path $workDir "cancel-connect.witness"
+$pipeOpenMode = if ($Mode -eq "CancelConnect") { "0x40080002" } else { "0x00080002" }
+$pipeProbe = $Mode -in @("Pipe", "DenyLocalService", "CancelConnect")
 
 # Native pipe exists in the real SCM-controlled SYSTEM service only in Pipe
 # mode; Run remains the original inert topology probe.
@@ -119,7 +124,7 @@ if ($pipeProbe) {
             // PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE;
             // PIPE_REJECT_REMOTE_CLIENTS; one server instance; NO payload.
             pipe = CreateNativePipe(@"\\.\pipe\__PIPE_NAME__",
-                0x00080002, 0x00000008, 1, 256, 256, 1000, ref attributes);
+                __PIPE_OPEN_MODE__, 0x00000008, 1, 256, 256, 1000, ref attributes);
             if (pipe == IntPtr.Zero || pipe == new IntPtr(-1))
                 throw new InvalidOperationException("restricted native pipe creation");
         } finally {
@@ -134,6 +139,100 @@ if ($pipeProbe) {
 '@
 }
 
+
+
+if ($Mode -eq "CancelConnect") {
+    # A genuine no-client SCM Session0 asynchronous connection. Do not use
+    # managed movable buffers for OS-owned pending OVERLAPPED state.
+    $serviceExtras += @'
+    [StructLayout(LayoutKind.Sequential)]
+    struct PendingConnectOverlap {
+        public IntPtr internalPtr;
+        public IntPtr internalHigh;
+        public uint offset;
+        public uint offsetHigh;
+        public IntPtr eventHandle;
+    }
+    [DllImport("kernel32.dll", SetLastError=true, EntryPoint="CreateEventW",
+        CharSet=CharSet.Unicode)]
+    static extern IntPtr CreateNativeEvent(IntPtr attr, bool manualReset,
+        bool initiallySignaled, string name);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool ConnectNamedPipe(IntPtr pipe, IntPtr overlapped);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool CancelIoEx(IntPtr pipe, IntPtr overlapped);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool GetOverlappedResult(IntPtr pipe, IntPtr overlapped,
+        out uint transferred, bool wait);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+    private readonly System.Threading.ManualResetEvent connectDone =
+        new System.Threading.ManualResetEvent(false);
+    void QualifyNoClientCancellation() {
+        IntPtr nativeEvent = IntPtr.Zero;
+        IntPtr stableOverlapped = IntPtr.Zero;
+        bool pendingUndrained = false;
+        try {
+            nativeEvent = CreateNativeEvent(IntPtr.Zero, true, false, null);
+            if (nativeEvent == IntPtr.Zero || nativeEvent == new IntPtr(-1))
+                throw new InvalidOperationException("manual-reset native event");
+            PendingConnectOverlap state = new PendingConnectOverlap();
+            state.eventHandle = nativeEvent;
+            stableOverlapped = Marshal.AllocHGlobal(
+                Marshal.SizeOf(typeof(PendingConnectOverlap)));
+            Marshal.StructureToPtr(state, stableOverlapped, false);
+            bool immediate = ConnectNamedPipe(pipe, stableOverlapped);
+            int connectError = Marshal.GetLastWin32Error();
+            if (immediate || connectError != 997)
+                throw new InvalidOperationException("security RED: no genuine pending ConnectNamedPipe");
+            pendingUndrained = true;
+            // Deliberately no client. The pending OS request MUST time out.
+            uint wait = WaitForSingleObject(nativeEvent, 750);
+            if (wait != 0x102)
+                throw new InvalidOperationException("security RED: pending connect not timed out");
+            bool cancel = CancelIoEx(pipe, stableOverlapped);
+            int cancelError = Marshal.GetLastWin32Error();
+            if (!cancel && cancelError != 1168)
+                throw new InvalidOperationException("targeted CancelIoEx failed");
+            uint transferred;
+            // This drain is REQUIRED before reusing/freeing the native memory.
+            bool completed = GetOverlappedResult(
+                pipe, stableOverlapped, out transferred, true);
+            int finalError = Marshal.GetLastWin32Error();
+            pendingUndrained = false;
+            if (completed || finalError != 995)
+                throw new InvalidOperationException("security RED: canceled I/O not aborted");
+            System.IO.File.WriteAllText(@"__CANCEL_WITNESS__", "CANCELLED_AND_DRAINED");
+        } catch {
+            // A single nonsensitive status flag: no HANDLE or SID in artifacts.
+            try { System.IO.File.WriteAllText(@"__CANCEL_WITNESS__", "RED"); }
+            catch { }
+        } finally {
+            if (pendingUndrained && stableOverlapped != IntPtr.Zero) {
+                // Exception path must likewise drain the exact pending OS I/O.
+                CancelIoEx(pipe, stableOverlapped);
+                uint ignored;
+                GetOverlappedResult(pipe, stableOverlapped, out ignored, true);
+            }
+            if (stableOverlapped != IntPtr.Zero) Marshal.FreeHGlobal(stableOverlapped);
+            if (nativeEvent != IntPtr.Zero && nativeEvent != new IntPtr(-1))
+                CloseHandle(nativeEvent);
+            connectDone.Set();
+        }
+    }
+'@
+    $startBody += @'
+        System.Threading.ThreadPool.QueueUserWorkItem(
+            delegate(object ignored) { QualifyNoClientCancellation(); });
+'@
+    # Existing base stop body closes pipe only AFTER the dedicated cancellation
+    # has reported completion and released its native pending I/O storage.
+    $stopBody = @'
+        if (!connectDone.WaitOne(5000))
+            throw new InvalidOperationException("security RED: pending connect did not drain");
+        connectDone.Dispose();
+'@ + $stopBody
+}
 
 if ($Mode -eq "LaunchWorker") {
     # OS-created SYSTEM -> real signed-in user child, with a protected public
@@ -315,7 +414,9 @@ __DENIED_CLASS__
     Replace("__PIPE_NAME__", $pipeName).
     Replace("__SESSION_ID__", ([string]$workerSession)).
     Replace("__EXE_PATH__", $serviceExe).
-    Replace("__WITNESS_PATH__", $witnessFile)
+    Replace("__WITNESS_PATH__", $witnessFile).
+    Replace("__PIPE_OPEN_MODE__", $pipeOpenMode).
+    Replace("__CANCEL_WITNESS__", $cancelWitness)
 
 # The observer reads the genuine OS process HANDLE and token. It does not
 # authenticate a named pipe or grant a process authority.
@@ -532,6 +633,21 @@ try {
     Assert-Probe ($serviceSession -ne [uint32]$workerSession) "deliberate wrong expected Service session rejected"
     Assert-Probe ($serviceBirth -ne ($serviceBirth + 1)) "deliberate wrong Service birth stamp rejected"
 
+    if ($Mode -eq "CancelConnect") {
+        $cancelDeadline = [DateTime]::UtcNow.AddSeconds(8)
+        while (-not (Test-Path -LiteralPath $cancelWitness) -and
+            [DateTime]::UtcNow -lt $cancelDeadline) {
+            Start-Sleep -Milliseconds 100
+        }
+        Assert-Probe (Test-Path -LiteralPath $cancelWitness) "SCM bounded async connect cancellation emitted protected completion witness"
+        $actual = [IO.File]::ReadAllText($cancelWitness).Trim()
+        Assert-Probe ($actual -ceq "CANCELLED_AND_DRAINED") "no-client native ConnectNamedPipe pending operation canceled AND completion drained"
+        $stillRunning = Get-CimInstance Win32_Service -Filter ("Name='" + $name + "'")
+        Assert-Probe ($null -ne $stillRunning -and $stillRunning.State -eq "Running" -and
+            $stillRunning.ProcessId -eq $servicePid -and
+            [ClassMeshNativeScmProbe]::WaitForSingleObject($serviceHandle, 0) -eq 0x102) "SCM remained responsive and pinned process alive after cancellation drain"
+    }
+
     if ($Mode -eq "LaunchWorker") {
         $deadline = [DateTime]::UtcNow.AddSeconds(12)
         while (-not (Test-Path -LiteralPath $witnessFile) -and
@@ -577,7 +693,7 @@ try {
             $identity.User.Value, ($launchedBirth + 1))) "wrong Worker birth FILETIME explicitly rejected"
     }
 
-    if ($pipeProbe -and $Mode -ne "LaunchWorker") {
+    if ($Mode -in @("Pipe", "DenyLocalService")) {
         if ($Mode -eq "DenyLocalService") {
             # An OS account other than SYSTEM AND the intended target user:
             # real SCM LocalService, not a forged SID string in our process.
@@ -640,11 +756,18 @@ try {
     Stop-Service -Name $name -ErrorAction Stop
     $exitWait = [ClassMeshNativeScmProbe]::WaitForSingleObject($serviceHandle, 12000)
     Assert-Probe ($exitWait -eq 0) "stopped SCM process fails live-HANDLE check"
+    if ($Mode -eq "CancelConnect") {
+        $stale = [ClassMeshNativeScmProbe]::OpenReadonlyClient($pipePath)
+        $staleDenied = $stale -eq [IntPtr]::Zero -or $stale -eq [IntPtr](-1)
+        if (-not $staleDenied) { [void][ClassMeshNativeScmProbe]::CloseHandle($stale) }
+        Assert-Probe $staleDenied "canceled test pipe rejects new client after Service death"
+        Write-Output "SCM_SESSION0_OVERLAPPED_CANCEL_DRAIN_PASS"
+    }
     if ($Mode -eq "LaunchWorker") {
         Assert-Probe ([ClassMeshNativeScmProbe]::WaitForSingleObject($launchedHandle, 8000) -eq 0) "SCM Service stop terminates exact launched Worker HANDLE"
         Write-Output "SCM_SESSION0_LAUNCHED_INTERACTIVE_WORKER_INERT_PASS"
     }
-    if ($pipeProbe -and $Mode -ne "LaunchWorker") {
+    if ($Mode -in @("Pipe", "DenyLocalService")) {
         $stale = [ClassMeshNativeScmProbe]::OpenReadonlyClient($pipePath)
         $staleDenied = ($stale -eq [IntPtr]::Zero -or $stale -eq [IntPtr](-1))
         if (-not $staleDenied) { [void][ClassMeshNativeScmProbe]::CloseHandle($stale) }
