@@ -354,7 +354,10 @@ fn panicking_live_service_accessor_must_poison_pending_request() {
         });
     }));
     assert!(panic.is_err(), "test must exercise an unwinding accessor");
-    assert!(!gate.is_pending(), "panic cannot leave old authorization pending");
+    assert!(
+        !gate.is_pending(),
+        "panic cannot leave old authorization pending"
+    );
     assert_eq!(
         gate.check(ServiceReadStage::BeforeRead, 1003, || Some(live())),
         Err(ServiceReadGateError::AlreadyUsed)

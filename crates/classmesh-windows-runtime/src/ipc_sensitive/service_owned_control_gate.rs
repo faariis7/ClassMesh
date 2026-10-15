@@ -152,7 +152,10 @@ impl ServiceReadGate {
         match next {
             ServiceReadStage::Connected => self.stage = PendingStage::Connected,
             ServiceReadStage::BeforeRead => self.stage = PendingStage::Reading,
-            ServiceReadStage::Fragment => self.fragments += 1,
+            ServiceReadStage::Fragment => {
+                self.fragments += 1;
+                self.stage = PendingStage::Reading;
+            }
             ServiceReadStage::BeforeDelivery => self.stage = PendingStage::Consumed,
         }
         Ok(())
