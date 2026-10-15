@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Help", "Run", "Pipe", "DenyLocalService")]
+    [ValidateSet("Help", "Run", "Pipe", "DenyLocalService", "LaunchWorker")]
     [string]$Mode = "Help"
 )
 
@@ -33,6 +33,8 @@ No physical two-PC acceptance is claimed.
 "@ | Write-Output
     return
 }
+
+if ($Mode -eq "LaunchWorker") { throw "SCM_NATIVE_RED: Service-launched Worker mode absent" }
 
 if ($env:OS -ne "Windows_NT") {
     throw "This native SCM probe can only run on Windows."
