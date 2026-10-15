@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Help", "Run", "Pipe", "DenyLocalService")]
+    [ValidateSet("Help", "Run", "Pipe", "DenyLocalService", "LaunchWorker")]
     [string]$Mode = "Help"
 )
 
@@ -15,8 +15,9 @@ ClassMesh Phase 12E18c4a/c4b: DISPOSABLE SCM/Session0 native probe
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode Run
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode Pipe
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode DenyLocalService
+  .\scripts\phase12e18c4a-scm-probe.ps1 -Mode LaunchWorker
 
-Run, Pipe and DenyLocalService require a disposable Windows test machine, an elevated interactive
+Run, Pipe, DenyLocalService and LaunchWorker require a disposable Windows test machine, an elevated interactive
 administrator session (>0), and PowerShell 5.1 with .NET Framework.
 It compiles and starts one unique test-only ServiceBase executable under
 the REAL Windows Service Control Manager as LocalSystem. It verifies OS
@@ -29,6 +30,9 @@ DenyLocalService additionally starts an SCM LocalService (S-1-5-19)
 service which must get ERROR_ACCESS_DENIED on the pipe before the authorized
 client connects. None of these modes authenticate v12, prove a normal
 Service-launched Worker, grant Worker control, or read clipboard.
+LaunchWorker uses WTSQueryUserToken + CreateProcessAsUser under true SCM SYSTEM
+ to launch one inert signed-in user child; checks native parent PID and
+ non-elevated token. Worker pipe identity/control remains a separate gate.
 No physical two-PC acceptance is claimed.
 "@ | Write-Output
     return
@@ -71,6 +75,8 @@ $serviceHandle = [IntPtr]::Zero
 $pipeHandle = [IntPtr]::Zero
 $deniedHandle = [IntPtr]::Zero
 $deniedCreated = $false
+$launchedHandle = [IntPtr]::Zero
+$witnessFile = Join-Path $workDir "launched-worker.witness"
 $pipeProbe = $Mode -in @("Pipe", "DenyLocalService")
 
 # Native pipe exists in the real SCM-controlled SYSTEM service only in Pipe
@@ -125,6 +131,118 @@ if ($pipeProbe) {
             CloseHandle(pipe);
             pipe = IntPtr.Zero;
         }
+'@
+}
+
+
+if ($Mode -eq "LaunchWorker") {
+    # OS-created SYSTEM -> real signed-in user child, with a protected public
+    # lifetime witness. This DOES NOT authenticate a pipe or Worker grants.
+    $serviceExtras += @'
+    [DllImport("wtsapi32.dll", SetLastError=true)]
+    static extern bool WTSQueryUserToken(uint sessionId, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode,
+        EntryPoint="CreateProcessAsUserW")]
+    static extern bool CreateProcessAsUser(IntPtr token, string application,
+        System.Text.StringBuilder commandLine, IntPtr processAttributes,
+        IntPtr threadAttributes, bool inheritHandles, uint creationFlags,
+        IntPtr environment, string currentDirectory, ref NativeStartupInfo startup,
+        out NativeProcessInfo information);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool TerminateProcess(IntPtr process, uint exitCode);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool GetProcessTimes(IntPtr process, out long creation,
+        out long exit, out long kernel, out long user);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool CloseHandle(IntPtr handle);
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+    struct NativeStartupInfo {
+        public uint cb;
+        public string reserved;
+        public string desktop;
+        public string title;
+        public uint x, y, xsize, ysize, xcount, ycount, fill, flags;
+        public ushort show;
+        public ushort reserved2;
+        public IntPtr reservedPtr, stdin, stdout, stderr;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct NativeProcessInfo {
+        public IntPtr process;
+        public IntPtr thread;
+        public uint id, threadId;
+    }
+    private IntPtr launchedProcess = IntPtr.Zero;
+    private uint launchedPid = 0;
+    static void InteractiveWorker() {
+        // Inert process; never opens clipboard, IPC, files or sends data.
+        System.Threading.Thread.Sleep(60000);
+    }
+    void StartInteractiveWorker() {
+        IntPtr userToken = IntPtr.Zero;
+        if (!WTSQueryUserToken(__SESSION_ID__, out userToken))
+            throw new InvalidOperationException("SCM SYSTEM WTSQueryUserToken failed");
+        try {
+            string sid = new System.Security.Principal.WindowsIdentity(userToken).User.Value;
+            if (sid != "__CLIENT_SID__" || sid == "S-1-5-18")
+                throw new InvalidOperationException("signed-in user SID mismatch");
+            NativeStartupInfo startup = new NativeStartupInfo();
+            startup.cb = (uint)Marshal.SizeOf(typeof(NativeStartupInfo));
+            startup.desktop = @"winsta0\default";
+            NativeProcessInfo child;
+            string executable = @"__EXE_PATH__";
+            var arguments = new System.Text.StringBuilder(
+                "\"" + executable + "\" --interactive-worker");
+            // CreateProcessAsUser inherits the calling LocalSystem SERVICE
+            // environment when lpEnvironment is NULL. Supply a tiny Unicode
+            // block so its non-elevated Worker never receives Service vars.
+            // One explicit NUL plus the marshaler terminator = double NUL.
+            IntPtr cleanEnvironment = Marshal.StringToHGlobalUni(
+                "SystemRoot=" + Environment.GetEnvironmentVariable("SystemRoot") + "\0");
+            try {
+                // CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT
+                if (!CreateProcessAsUser(userToken, executable, arguments,
+                    IntPtr.Zero, IntPtr.Zero, false, 0x08000400,
+                    cleanEnvironment, null, ref startup, out child))
+                    throw new InvalidOperationException("SCM CreateProcessAsUser failed " + Marshal.GetLastWin32Error());
+            } finally { Marshal.FreeHGlobal(cleanEnvironment); }
+            launchedProcess = child.process;
+            launchedPid = child.id;
+            CloseHandle(child.thread);
+            if (launchedPid == 0 || launchedProcess == IntPtr.Zero ||
+                WaitForSingleObject(launchedProcess, 0) != 0x102)
+                throw new InvalidOperationException("SCM-created Worker not live");
+            long born, exited, kernel, user;
+            if (!GetProcessTimes(launchedProcess, out born,
+                out exited, out kernel, out user))
+                throw new InvalidOperationException("SCM Worker birth FILETIME absent");
+            // Public non-bearer metadata only. The child has RX, not WRITE, on
+            // the directory. Observer rechecks original pinned native HANDLE.
+            System.IO.File.WriteAllText(@"__WITNESS_PATH__",
+                launchedPid + "|" + born + "|" + __SESSION_ID__);
+        } finally { if (userToken != IntPtr.Zero) CloseHandle(userToken); }
+    }
+'@
+    $startBody += @'
+        StartInteractiveWorker();
+'@
+    $stopBody += @'
+        if (launchedProcess != IntPtr.Zero && launchedProcess != new IntPtr(-1)) {
+            if (WaitForSingleObject(launchedProcess, 0) == 0x102) {
+                TerminateProcess(launchedProcess, 0);
+                WaitForSingleObject(launchedProcess, 5000);
+            }
+            CloseHandle(launchedProcess);
+            launchedProcess = IntPtr.Zero;
+        }
+'@
+    $mainBody = @'
+if (args.Length == 1 && args[0] == "--interactive-worker")
+    InteractiveWorker();
+else
+    ServiceBase.Run(new InertProbeService());
 '@
 }
 
@@ -194,7 +312,10 @@ __DENIED_CLASS__
     Replace("__DENIED_CLASS__", $deniedClass).
     Replace("__DENIED_NAME__", $deniedName).
     Replace("__CLIENT_SID__", $identity.User.Value).
-    Replace("__PIPE_NAME__", $pipeName)
+    Replace("__PIPE_NAME__", $pipeName).
+    Replace("__SESSION_ID__", ([string]$workerSession)).
+    Replace("__EXE_PATH__", $serviceExe).
+    Replace("__WITNESS_PATH__", $witnessFile)
 
 # The observer reads the genuine OS process HANDLE and token. It does not
 # authenticate a named pipe or grant a process authority.
@@ -233,6 +354,23 @@ public static class ClassMeshNativeScmProbe {
         EntryPoint="CreateNamedPipeW")]
     public static extern IntPtr TryFirstInstance(string name, uint openMode, uint pipeMode,
         uint instances, uint outBytes, uint inBytes, uint timeout, IntPtr securityAttributes);
+
+    public static bool WorkerMatchesExpected(IntPtr process, uint expectedPid,
+        uint expectedSession, string expectedSid, long expectedBirth) {
+        return GetProcessId(process) == expectedPid &&
+            WaitForSingleObject(process, 0) == 0x102 &&
+            Session(process) == expectedSession &&
+            TokenSession(process) == expectedSession &&
+            TokenUserSid(process) == expectedSid &&
+            Birth(process) == expectedBirth &&
+            !IsElevated(process);
+    }
+
+    public static bool IsElevated(IntPtr process) {
+        // TokenElevation struct: DWORD TokenIsElevated (TOKEN_INFORMATION_CLASS 20).
+        byte[] elevation = ReadTokenInfo(process, 20);
+        return elevation.Length >= 4 && BitConverter.ToUInt32(elevation, 0) != 0;
+    }
 
     public static int LastPipeOpenError;
     public static IntPtr OpenReadonlyClient(string name) {
@@ -339,6 +477,14 @@ try {
         $rx = & icacls.exe $workDir "/grant:r" "*S-1-5-19:(OI)(CI)RX" 2>&1
         if ($LASTEXITCODE -ne 0) { throw "Unable to grant LocalService RX: $rx" }
     }
+    if ($Mode -eq "LaunchWorker") {
+        # The WTS-derived medium-integrity interactive token cannot execute
+        # from an Administrators-only directory. Grant the *exact* target SID
+        # RX (traverse/load) but never WRITE/MODIFY to protected test binary.
+        $targetRx = "*" + $identity.User.Value + ":(OI)(CI)RX"
+        $acl = & icacls.exe $workDir "/grant:r" $targetRx 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "Unable to grant target Worker SID RX: $acl" }
+    }
     Add-Type -TypeDefinition $serviceSource -OutputAssembly $serviceExe `
         -OutputType ConsoleApplication -ReferencedAssemblies "System.ServiceProcess.dll" -ErrorAction Stop
     Add-Type -TypeDefinition $nativeSource -ErrorAction Stop
@@ -386,7 +532,52 @@ try {
     Assert-Probe ($serviceSession -ne [uint32]$workerSession) "deliberate wrong expected Service session rejected"
     Assert-Probe ($serviceBirth -ne ($serviceBirth + 1)) "deliberate wrong Service birth stamp rejected"
 
-    if ($pipeProbe) {
+    if ($Mode -eq "LaunchWorker") {
+        $deadline = [DateTime]::UtcNow.AddSeconds(12)
+        while (-not (Test-Path -LiteralPath $witnessFile) -and
+            [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 120
+        }
+        Assert-Probe (Test-Path -LiteralPath $witnessFile) "SCM emitted protected witness after CreateProcessAsUser"
+        $witness = [IO.File]::ReadAllText($witnessFile).Trim()
+        Assert-Probe ($witness -match '^(\d+)\|(\d+)\|(\d+)$') "protected witness is bounded public PID/birth/session metadata"
+        $launchedPid = [int]$Matches[1]
+        $launchedBirth = [long]$Matches[2]
+        $launchedSession = [uint32]$Matches[3]
+        Assert-Probe ($launchedPid -gt 0 -and $launchedPid -ne $servicePid -and
+            $launchedPid -ne $workerPid) "SCM-created Worker is a different native process"
+        $launchedHandle = [ClassMeshNativeScmProbe]::Pin($launchedPid)
+        $realChild = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $launchedPid)
+        Assert-Probe ($null -ne $realChild -and
+            [uint32]$realChild.ParentProcessId -eq [uint32]$servicePid) "Windows kernel process ancestry points to real SCM Service PID"
+        Assert-Probe ([ClassMeshNativeScmProbe]::GetProcessId($launchedHandle) -eq [uint32]$launchedPid -and
+            [ClassMeshNativeScmProbe]::WaitForSingleObject($launchedHandle, 0) -eq 0x102) "launched Worker original process HANDLE remains live"
+        Assert-Probe ([ClassMeshNativeScmProbe]::TokenUserSid($launchedHandle) -eq $identity.User.Value) "SCM-launched Worker native TokenUser equals signed-in target SID"
+        Assert-Probe ([ClassMeshNativeScmProbe]::Session($launchedHandle) -eq [uint32]$workerSession -and
+            [ClassMeshNativeScmProbe]::TokenSession($launchedHandle) -eq [uint32]$workerSession -and
+            $launchedSession -eq [uint32]$workerSession) "SCM-launched Worker process/token session matches signed-in interactive session"
+        Assert-Probe (-not [ClassMeshNativeScmProbe]::IsElevated($launchedHandle)) "SCM-launched Worker has non-elevated native access token"
+        Assert-Probe ([ClassMeshNativeScmProbe]::Birth($launchedHandle) -eq $launchedBirth) "SCM-launched Worker native FILETIME equals independently pinned birth"
+        Assert-Probe ([ClassMeshNativeScmProbe]::TokenUserSid($launchedHandle) -ne $serviceSid -and
+            [ClassMeshNativeScmProbe]::Session($launchedHandle) -ne $serviceSession) "launched interactive Worker cannot be LocalSystem Session0"
+        Assert-Probe ([ClassMeshNativeScmProbe]::WorkerMatchesExpected($launchedHandle,
+            [uint32]$launchedPid, [uint32]$workerSession, $identity.User.Value,
+            $launchedBirth)) "OS Worker process matches all pinned Service-issued identity fields"
+        Assert-Probe (-not [ClassMeshNativeScmProbe]::WorkerMatchesExpected($launchedHandle,
+            [uint32]($launchedPid + 1), [uint32]$workerSession,
+            $identity.User.Value, $launchedBirth)) "wrong Worker OS PID explicitly rejected"
+        Assert-Probe (-not [ClassMeshNativeScmProbe]::WorkerMatchesExpected($launchedHandle,
+            [uint32]$launchedPid, 0, $identity.User.Value,
+            $launchedBirth)) "wrong Session0 Worker expectation explicitly rejected"
+        Assert-Probe (-not [ClassMeshNativeScmProbe]::WorkerMatchesExpected($launchedHandle,
+            [uint32]$launchedPid, [uint32]$workerSession, $serviceSid,
+            $launchedBirth)) "wrong LocalSystem SID Worker expectation explicitly rejected"
+        Assert-Probe (-not [ClassMeshNativeScmProbe]::WorkerMatchesExpected($launchedHandle,
+            [uint32]$launchedPid, [uint32]$workerSession,
+            $identity.User.Value, ($launchedBirth + 1))) "wrong Worker birth FILETIME explicitly rejected"
+    }
+
+    if ($pipeProbe -and $Mode -ne "LaunchWorker") {
         if ($Mode -eq "DenyLocalService") {
             # An OS account other than SYSTEM AND the intended target user:
             # real SCM LocalService, not a forged SID string in our process.
@@ -449,7 +640,11 @@ try {
     Stop-Service -Name $name -ErrorAction Stop
     $exitWait = [ClassMeshNativeScmProbe]::WaitForSingleObject($serviceHandle, 12000)
     Assert-Probe ($exitWait -eq 0) "stopped SCM process fails live-HANDLE check"
-    if ($pipeProbe) {
+    if ($Mode -eq "LaunchWorker") {
+        Assert-Probe ([ClassMeshNativeScmProbe]::WaitForSingleObject($launchedHandle, 8000) -eq 0) "SCM Service stop terminates exact launched Worker HANDLE"
+        Write-Output "SCM_SESSION0_LAUNCHED_INTERACTIVE_WORKER_INERT_PASS"
+    }
+    if ($pipeProbe -and $Mode -ne "LaunchWorker") {
         $stale = [ClassMeshNativeScmProbe]::OpenReadonlyClient($pipePath)
         $staleDenied = ($stale -eq [IntPtr]::Zero -or $stale -eq [IntPtr](-1))
         if (-not $staleDenied) { [void][ClassMeshNativeScmProbe]::CloseHandle($stale) }
@@ -459,11 +654,14 @@ try {
         } else {
             Write-Output "SCM_SESSION0_NATIVE_PIPE_INERT_PASS"
         }
-    } else {
+    } elseif ($Mode -eq "Run") {
         Write-Output "SCM_SESSION0_NATIVE_INERT_PASS"
     }
     Write-Output "NOT_AUTHENTICATED_V12_NOT_PIPE_NOT_CLIPBOARD"
 } finally {
+    if ($launchedHandle -ne [IntPtr]::Zero) {
+        [void][ClassMeshNativeScmProbe]::CloseHandle($launchedHandle)
+    }
     if ($deniedHandle -ne [IntPtr]::Zero) {
         [void][ClassMeshNativeScmProbe]::CloseHandle($deniedHandle)
     }

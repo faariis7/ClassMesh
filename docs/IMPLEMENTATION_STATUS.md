@@ -1,5 +1,16 @@
 # ClassMesh Implementation Status
 
+Security follow-up before merge: CreateProcessAsUser uses explicit minimal Unicode environment instead of inheriting LocalSystem variables; native VM1+VM2 retest exit0; NEW exact-head CI required.
+
+
+## Phase 12E18c4d — local native VM1/VM2 GREEN; hosted CI pending
+
+- Real SCM-managed LocalSystem Session0 process calls WTSQueryUserToken and CreateProcessAsUser to launch only a disposable inert interactive Worker. In actual separate Windows ARM64 VM1 and VM2, both test invocations exit0: original pinned OS process HANDLE alive, OS ParentProcessId equals live SCM PID, exact expected TokenUser SID, process and token session>0, TokenElevation=0, creation FILETIME; mismatched Worker PID, session, SYSTEM SID and creation time DENIED. Stopping SCM signals exact pinned Worker HANDLE. Public PID/birth/session witness in SYSTEM/Administrators protected temporary folder; target user has read/execute only, no writable service executable.
+- Windows VM1 prior Run, Pipe, DenyLocalService regression modes also PASS after c4d. A combined Service-launched Worker native pipe attempt was RED, and a blocked disposable ConnectNamedPipe test instance was force-cleaned by exact process/service identity. C4d GREEN is strictly launched-process topology, NOT a Worker-to-pipe handshake, cryptographic authentication, new clipboard route, control/permissions or physical PC proof. #477 still OPEN Windows RED, #479 section bootstrap BLOCKED, v11 clipboard failure-only. Require exact-head Portable Rust and full Windows CI plus security review before merge. Safe cancellable real Worker-pipe identity proof, authenticated v12/current grants/replay and payload ReadFile cancellation/completion-drain/zeroization remain OPEN.
+
+---
+
+
 
 ## Active Phase 12E18c4c — actual denied LocalService OS SID (2026-10-15)
 
