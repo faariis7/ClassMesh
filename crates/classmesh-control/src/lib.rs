@@ -407,3 +407,6 @@ mod tests {
 
 #[cfg(test)]
 mod clipboard_live_authority_tests;
+
+#[cfg(test)]
+mod current_policy_tests;
