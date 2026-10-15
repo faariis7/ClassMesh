@@ -1,6 +1,15 @@
 # ClassMesh Implementation Status
 
 
+## Phase12E18c4f — inert Service-owned live-control and dual-grant recheck contract (CI pending)
+
+- Plan FIRST commit 2e06f6b; tests RED commit 7c8f783 produced real Synology missing-module unresolved-import error (exit101). A new, deliberately **unwired** portable Rust policy seam requires the caller to query fresh Service-owned authority on initialization, native pipe connection, before native clipboard read, every bounded fragment and pre-Teacher delivery. It matches all six Worker/control/request identity fields, current native-attested original peer PID/session, live original Worker process, authenticated control and both grants; any missing/changed/revoked state permanently poisons the request. Per-request one-shot, monotonic time/2.5s expiry, max 64 fragments. Synthetic tests cover valid transition, all six mismatches, both grants, decoy native PID/session, dead Worker, control unavailable, lost accessor, time/order/budget/replay and explicit cancellation. No payload or new IPC, Service/Worker integration, authenticated v12, cryptographic key transport, actual current Service authority provider, global replay DB or physical Windows proof is claimed. Legacy v11 ClipboardRead remains failure-only, #477 Windows-RED/#479 section-key blocked.
+- Require exact head Synology fmt/Clippy/workspace tests + full hosted Portable Rust and Windows Build CI plus structured security review before Squash. Next separately attach real Service-owned control store and Windows-native Worker handle accessor and prove revocation before considering an independent authenticated key channel, payload cancellation/drain/zeroization and two-PC clipboard E2E.
+
+---
+
+
+
 ## Phase12E18c4e3 — post-connect original Worker death fails closed (native VM1+VM2, CI pending)
 
 - Test-only opt-in WorkerPipeDeath on Windows ARM64 VM1 and VM2 under genuine SCM LocalSystem Session0. Service creates original OS Worker with WTS/CreateProcessAsUser and native protected first-instance overlapped Named Pipe. Previously admitted OS client PID/session is first verified against *original live owned* Worker process HANDLE/birth/user SID. The interactive Worker naturally exits after a bounded 12-second wait. SCM independently waits for actual original OS HANDLE to become signaled; marks stale once-valid peer status as DEAD_WORKER_DENIED. Observer confirms native live-Worker identity predicate no longer accepts that same PID/session/birth and Service itself remains live; stop/teardown only unique test resources. Native mode EXIT0 VM1 + VM2.
