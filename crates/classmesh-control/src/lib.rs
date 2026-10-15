@@ -23,6 +23,7 @@ pub mod group_media_key;
 pub mod group_media_session;
 pub mod handshake;
 pub mod issuance;
+pub mod live_authorization;
 pub mod peer_identity;
 pub mod presentation_fallback;
 pub mod presentation_recovery;
@@ -407,3 +408,6 @@ mod tests {
 
 #[cfg(test)]
 mod clipboard_live_authority_tests;
+
+#[cfg(test)]
+mod live_authorization_tests;

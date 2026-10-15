@@ -1,5 +1,12 @@
 # ClassMesh Agent Handoff
 
+## QUICK RESUME — 2026-10-15 Phase12E18c4h Service single live authorization source (CI pending)
+
+Latest GitHub main 08f3124ea5158a27cbd800076dad2788087e6479 (#499 Squash merged; DO NOT repeat). Active branch feat/phase12e18c4h-shared-authorization-publisher on Mac /tmp/classmesh-oct15-c4h-policy-publisher and Synology runner /tmp/classmesh-c4h-authority. PLAN FIRST 7804a96; targeted RED E0432 missing module 1e74c57. Implemented real Service read-side integration: classmesh-control LiveAuthorizationStore atomically publishes versioned whole principal/credential/permission AuthorizationStore via RwLock<Arc<...>>; snapshot clones Arc and releases lock immediately. Windows Service control_runtime now owns ONE canonical store, obtains fresh snapshot for enrolled Hello, fresh credential check after awaited Hello, every later QUIC envelope command including credential verification for heartbeat/non-privileged traffic, and presentation feedback. Concurrent unit tests: policy revoke denies already dispatched real ClipboardAuthorityLease and future same-session privileged command; credential revoke denies; 3 concurrent readers see whole versions; lock poisoning/epoch exhaustion fail-closed. WARNING: no trusted durable reload/publisher command is connected at runtime, so this is not proof actual midflight Service policy revocation: prepare separate reviewed privileged reload and lifecycle, never permit untrusted Worker/Teacher writes or stale snapshot across await. Do NOT enable v11 ClipboardRead success; no v12 authenticated local channel, native Worker HANDLE/pipe trust combined, v12 key bootstrap or real clipboard text, payload IO drain/zeroize or physical 2 Windows PCs E2E. #477 remains deliberately Windows RED, #479 prohibits section HANDLE secrets. Before Squash require fmt, clippy, all workspace tests, hosted Portable+Windows CI exact HEAD and security review. NEXT independently design + implement trusted durable signed/authorized local policy reload plus live session owner revocation; and separately native OS Worker lifetime/pipe binding and authenticated v12 key path.
+
+---
+
+
 
 ## QUICK RESUME — 2026-10-15 Phase12E18c4g enrolled Teacher live-policy source (CI pending)
 
