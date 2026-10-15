@@ -17,6 +17,9 @@ use classmesh_security::AuthorizationStore;
 pub enum LiveAuthorizationError {
     Poisoned,
     GenerationExhausted,
+    /// The caller prepared an update from an older (or speculative future)
+    /// policy. Never allow it to replace a newer in-process publication.
+    StaleGeneration { expected: u64, current: u64 },
 }
 
 #[derive(Debug)]
@@ -80,14 +83,35 @@ impl LiveAuthorizationStore {
         })
     }
 
-    /// TRUSTED LOCAL CALLER ONLY. The caller must validate and securely load
-    /// an authoritative complete policy BEFORE calling this method.
-    /// No partial state mutation, in-place edits or network update path.
-    pub fn publish(&self, next: AuthorizationStore) -> Result<u64, LiveAuthorizationError> {
+    /// Compare-and-publish from a trusted, previously observed version.
+    /// Two asynchronous publishers with the same snapshot cannot both win:
+    /// rejected stale writers leave policy AND generation untouched.
+    ///
+    /// This is an *in-process* concurrency fence, not persisted anti-rollback:
+    /// a trusted durable reload still requires a separately protected,
+    /// monotonic on-disk epoch and OS file ownership/reparse verification.
+    pub fn publish_if_version(
+        &self,
+        expected: u64,
+        next: AuthorizationStore,
+    ) -> Result<u64, LiveAuthorizationError> {
         let mut published = self
             .published
             .write()
             .map_err(|_| LiveAuthorizationError::Poisoned)?;
+        if published.generation != expected {
+            return Err(LiveAuthorizationError::StaleGeneration {
+                expected,
+                current: published.generation,
+            });
+        }
+        Self::replace(&mut published, next)
+    }
+
+    fn replace(
+        published: &mut PublishedAuthorization,
+        next: AuthorizationStore,
+    ) -> Result<u64, LiveAuthorizationError> {
         let next_generation = published
             .generation
             .checked_add(1)
@@ -97,6 +121,17 @@ impl LiveAuthorizationStore {
             authorization: Arc::new(next),
         };
         Ok(next_generation)
+    }
+
+    /// TRUSTED LOCAL CALLER ONLY. Legacy unchecked in-process publication;
+    /// asynchronous reloads MUST use publish_if_version to reject stale work.
+    /// The caller validates the complete policy before invoking either path.
+    pub fn publish(&self, next: AuthorizationStore) -> Result<u64, LiveAuthorizationError> {
+        let mut published = self
+            .published
+            .write()
+            .map_err(|_| LiveAuthorizationError::Poisoned)?;
+        Self::replace(&mut published, next)
     }
 }
 
