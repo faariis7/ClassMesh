@@ -303,33 +303,59 @@ fn switching_current_pending_request_cannot_reuse_lease() {
 
 #[test]
 fn removing_enrolled_teacher_role_fails_closed() {
-    let mut f=fixture();
-    let mut lease=issue(&mut f);
-    let mut principal=f.store.principal(f.principal).unwrap().clone();
-    principal.kind=PrincipalKind::StudentDevice;
+    let mut f = fixture();
+    let mut lease = issue(&mut f);
+    let mut principal = f.store.principal(f.principal).unwrap().clone();
+    principal.kind = PrincipalKind::StudentDevice;
     f.store.upsert(principal).unwrap();
-    assert_eq!(check(&mut lease,&f,151),Err(ClipboardAuthorityError::NotAuthorized));
+    assert_eq!(
+        check(&mut lease, &f, 151),
+        Err(ClipboardAuthorityError::NotAuthorized)
+    );
     assert!(!lease.is_pending());
 }
 #[test]
 fn wrong_pending_session_or_sequence_is_never_authorized() {
-    for pending in [Some((78,2,91)),Some((77,3,91)),Some((77,2,92)),None] {
-        let mut f=fixture();
-        let mut lease=issue(&mut f);
-        assert_eq!(lease.recheck(Some(&f.store),Some(&f.session),Some(f.peer),Some(&f.guard),pending,151),
-            Err(ClipboardAuthorityError::PendingRequestChanged));
-        assert_eq!(check(&mut lease,&f,152),Err(ClipboardAuthorityError::AlreadyUsed));
+    for pending in [
+        Some((78, 2, 91)),
+        Some((77, 3, 91)),
+        Some((77, 2, 92)),
+        None,
+    ] {
+        let mut f = fixture();
+        let mut lease = issue(&mut f);
+        assert_eq!(
+            lease.recheck(
+                Some(&f.store),
+                Some(&f.session),
+                Some(f.peer),
+                Some(&f.guard),
+                pending,
+                151
+            ),
+            Err(ClipboardAuthorityError::PendingRequestChanged)
+        );
+        assert_eq!(
+            check(&mut lease, &f, 152),
+            Err(ClipboardAuthorityError::AlreadyUsed)
+        );
     }
 }
 #[test]
 fn control_lease_does_not_survive_monotonic_deadline_or_cancel() {
-    let mut f=fixture();
-    let mut lease=issue(&mut f);
-    assert_eq!(check(&mut lease,&f,START_MS+2500),Err(ClipboardAuthorityError::Expired));
+    let mut f = fixture();
+    let mut lease = issue(&mut f);
+    assert_eq!(
+        check(&mut lease, &f, START_MS + 2500),
+        Err(ClipboardAuthorityError::Expired)
+    );
     assert!(!lease.is_pending());
-    let mut f=fixture();
-    let mut lease=issue(&mut f);
+    let mut f = fixture();
+    let mut lease = issue(&mut f);
     assert!(lease.cancel());
     assert!(!lease.cancel());
-    assert_eq!(check(&mut lease,&f,151),Err(ClipboardAuthorityError::AlreadyUsed));
+    assert_eq!(
+        check(&mut lease, &f, 151),
+        Err(ClipboardAuthorityError::AlreadyUsed)
+    );
 }
