@@ -22,6 +22,7 @@ pub mod group_media_feedback;
 pub mod group_media_key;
 pub mod group_media_session;
 pub mod handshake;
+pub mod live_authorization;
 pub mod issuance;
 pub mod peer_identity;
 pub mod presentation_fallback;
