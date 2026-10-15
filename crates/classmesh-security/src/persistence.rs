@@ -152,7 +152,23 @@ impl DurableAuthorizationState {
             return Ok(None);
         };
 
-        let metadata = fs::metadata(source)?;
+        Self::load_from_file(source).map(Some)
+    }
+
+    /// Strict reload *candidate* only: never use the crash-recovery .bak
+    /// path as a substitute for missing, unreadable or malformed primary.
+    /// This is NOT sufficient to authorize live reload: Windows ProgramData
+    /// owner/DACL/reparse-point checks and a durable anti-rollback epoch are
+    /// required before any production caller may publish its result.
+    pub fn load_primary_only(&self) -> Result<AuthorizationStore, PersistenceError> {
+        Self::load_from_file(&self.path)
+    }
+
+    fn load_from_file(source: &Path) -> Result<AuthorizationStore, PersistenceError> {
+        // Metadata is obtained from the file actually opened, not a separate
+        // by-path metadata lookup (which could race with a file replacement).
+        let file = File::open(source)?;
+        let metadata = file.metadata()?;
         let declared = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
         if declared > MAX_STATE_BYTES {
             return Err(PersistenceError::StateTooLarge {
@@ -161,7 +177,6 @@ impl DurableAuthorizationState {
             });
         }
 
-        let file = File::open(source)?;
         let mut bytes = Vec::with_capacity(declared.min(MAX_STATE_BYTES));
         file.take(u64::try_from(MAX_STATE_BYTES + 1).expect("state bound fits u64"))
             .read_to_end(&mut bytes)?;
@@ -173,7 +188,7 @@ impl DurableAuthorizationState {
         }
 
         let persisted: PersistedState = serde_json::from_slice(&bytes)?;
-        Ok(Some(persisted.into_store()?))
+        persisted.into_store()
     }
 
     pub fn save(&self, store: &AuthorizationStore) -> Result<(), PersistenceError> {
@@ -594,6 +609,57 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(path.parent().expect("test parent"));
+    }
+
+    #[test]
+    fn strict_current_load_never_recovers_a_stale_backup_when_primary_is_missing() {
+        let path = test_path();
+        let durable = DurableAuthorizationState::new(&path);
+        durable.save(&test_store()).unwrap();
+        let backup = sibling_with_suffix(&path, ".bak");
+        fs::rename(&path, &backup).unwrap();
+
+        assert!(matches!(
+            durable.load_primary_only(),
+            Err(PersistenceError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(
+            durable.load().unwrap().is_some(),
+            "legacy startup recovery is unchanged"
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn strict_current_load_rejects_bad_primary_even_with_valid_backup() {
+        let path = test_path();
+        let durable = DurableAuthorizationState::new(&path);
+        durable.save(&test_store()).unwrap();
+        fs::copy(&path, sibling_with_suffix(&path, ".bak")).unwrap();
+        fs::write(&path, br#"{"version":999,"principals":[]}"#).unwrap();
+
+        assert!(matches!(
+            durable.load_primary_only(),
+            Err(PersistenceError::UnsupportedVersion(999))
+        ));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn strict_current_load_uses_only_current_primary_when_backup_differs() {
+        let path = test_path();
+        let durable = DurableAuthorizationState::new(&path);
+        durable.save(&test_store()).unwrap();
+        fs::copy(&path, sibling_with_suffix(&path, ".bak")).unwrap();
+        let mut denied = test_store();
+        let mut teacher = denied.principal(id(7)).unwrap().clone();
+        teacher.permissions.remove(&Permission::ReadClipboard);
+        denied.upsert(teacher).unwrap();
+        durable.save(&denied).unwrap();
+        let loaded = durable.load_primary_only().unwrap();
+        assert!(!loaded.authorize_credential(fingerprint(11), Permission::ReadClipboard, 30));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

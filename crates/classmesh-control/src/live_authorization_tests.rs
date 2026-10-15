@@ -88,7 +88,7 @@ fn canonical_publication_is_atomic_and_snapshots_are_versioned() {
             .store()
             .authorize(principal(), Permission::ReadClipboard)
     );
-    assert_eq!(source.publish(policy(false)), Ok(2));
+    assert_eq!(source.publish_if_version(1, policy(false)), Ok(2));
     let after = source.snapshot().unwrap();
     assert_eq!(after.version(), 2);
     assert!(
@@ -131,7 +131,7 @@ fn new_current_policy_rejects_previously_dispatched_token_and_replay() {
     let mut lease =
         ClipboardAuthorityLease::issue(token, &guard, &req, &session, peer, initial.store(), 150)
             .unwrap();
-    assert_eq!(source.publish(policy(false)), Ok(2));
+    assert_eq!(source.publish_if_version(1, policy(false)), Ok(2));
     let latest = source.snapshot().unwrap();
     assert_eq!(
         lease.recheck(
@@ -174,7 +174,7 @@ fn revoked_credential_in_published_state_denies_existing_authenticated_identity(
         .unwrap()
         .revoke(151);
     revoked.upsert(teacher).unwrap();
-    assert_eq!(source.publish(revoked), Ok(2));
+    assert_eq!(source.publish_if_version(1, revoked), Ok(2));
     assert!(!identity().is_currently_authenticated(source.snapshot().unwrap().store(), 151));
 }
 #[test]
@@ -200,7 +200,9 @@ fn concurrent_readers_see_whole_old_or_new_policy_with_monotonic_generations() {
         }));
     }
     for index in 0..100 {
-        shared.publish(policy(index % 2 != 0)).unwrap();
+        shared
+            .publish_if_version(index + 1, policy(index % 2 != 0))
+            .unwrap();
     }
     for handle in handles {
         handle.join().unwrap();
@@ -212,4 +214,84 @@ fn read_failures_never_silently_return_a_fallback_policy() {
     // Poison/integrity denial is exercised by a separate in-module test.
     // This test pins the public error contract instead of auto-falling back.
     let _: Option<LiveAuthorizationError> = None;
+}
+
+#[test]
+fn conditional_publish_rejects_stale_writer_that_would_regrant_clipboard() {
+    let source = LiveAuthorizationStore::new(policy(true));
+    let outdated = source.snapshot().unwrap();
+    assert_eq!(
+        source.publish_if_version(outdated.version(), policy(false)),
+        Ok(2)
+    );
+    assert_eq!(
+        source.publish_if_version(outdated.version(), policy(true)),
+        Err(LiveAuthorizationError::StaleGeneration {
+            expected: 1,
+            current: 2,
+        })
+    );
+    let latest = source.snapshot().unwrap();
+    assert_eq!(latest.version(), 2);
+    assert!(
+        !latest
+            .store()
+            .authorize(principal(), Permission::ReadClipboard)
+    );
+}
+
+#[test]
+fn concurrent_conditional_publishers_cannot_both_replace_same_epoch() {
+    let source = Arc::new(LiveAuthorizationStore::new(policy(true)));
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let mut threads = Vec::new();
+    for grant in [true, false] {
+        let source = Arc::clone(&source);
+        let barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            barrier.wait();
+            source.publish_if_version(1, policy(grant))
+        }));
+    }
+    barrier.wait();
+    let results: Vec<_> = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
+    assert_eq!(results.iter().filter(|result| **result == Ok(2)).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(
+                result,
+                Err(LiveAuthorizationError::StaleGeneration {
+                    expected: 1,
+                    current: 2
+                })
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(source.snapshot().unwrap().version(), 2);
+}
+
+#[test]
+fn conditional_publish_can_advance_only_from_current_revision() {
+    let source = LiveAuthorizationStore::new(policy(false));
+    assert_eq!(
+        source.publish_if_version(0, policy(true)),
+        Err(LiveAuthorizationError::StaleGeneration {
+            expected: 0,
+            current: 1
+        })
+    );
+    assert_eq!(
+        source.publish_if_version(2, policy(true)),
+        Err(LiveAuthorizationError::StaleGeneration {
+            expected: 2,
+            current: 1
+        })
+    );
+    assert_eq!(source.publish_if_version(1, policy(false)), Ok(2));
+    assert_eq!(source.snapshot().unwrap().version(), 2);
 }
