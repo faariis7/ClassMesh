@@ -1,6 +1,15 @@
 # ClassMesh Implementation Status
 
 
+## Phase12E18c4e3 — post-connect original Worker death fails closed (native VM1+VM2, CI pending)
+
+- Test-only opt-in WorkerPipeDeath on Windows ARM64 VM1 and VM2 under genuine SCM LocalSystem Session0. Service creates original OS Worker with WTS/CreateProcessAsUser and native protected first-instance overlapped Named Pipe. Previously admitted OS client PID/session is first verified against *original live owned* Worker process HANDLE/birth/user SID. The interactive Worker naturally exits after a bounded 12-second wait. SCM independently waits for actual original OS HANDLE to become signaled; marks stale once-valid peer status as DEAD_WORKER_DENIED. Observer confirms native live-Worker identity predicate no longer accepts that same PID/session/birth and Service itself remains live; stop/teardown only unique test resources. Native mode EXIT0 VM1 + VM2.
+- A C# Add-Type static compiler warning (unreachable false branch) surfaced during VM1 baseline WorkerPipePositive regression, then was fixed using a runtime readonly test-mode boolean without weakening any security assertion. Afterwards WorkerPipePositive/WorkerPipeDecoy/WorkerPipeDeath EXIT0 on VM1 and VM2; before that adjustment Run/Pipe/DenyLocalService/LaunchWorker/CancelConnect all PASS on VM1. Native proof is *test-only* OS process liveness, NOT actual live Teacher authorization or revocation, cryptographic future-v12 handshake, safe key bootstrap, Windows payload ReadFile cancellation/drain, clipboard success or physical E2E. #477 red and #479 section bootstrap blocked; v11 ClipboardRead failure-only. CI/security review pending.
+
+---
+
+
+
 ## Phase 12E18c4e2 — actual native SCM-launched Worker pipe peer positive and same-SID decoy negative; CI pending
 
 - **Baseline main:** 8bac719e0f23fd9ebfc6c14dfc4135a5b9ab3029 after #495 merged. Test-only helper extends two opt-in modes WorkerPipePositive and WorkerPipeDecoy, reusing disposable SCM LocalSystem Service, current interactive user WTS token/CreateProcessAsUser, protected target SID pipe DACL, pinned live process HANDLE/birth and async ConnectNamedPipe CancelIoEx completion-drain. Real OS GetNamedPipeClientProcessId+GetNamedPipeClientSessionId is compared inside the *actual Service* against its exact launched child HANDLE/PID and interactive session. Observer also checks SCM->child OS process ancestry, TokenUser SID, non-elevated TokenElevation, process+token SessionId and creation FILETIME.

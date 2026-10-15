@@ -19,6 +19,7 @@ ClassMesh Phase 12E18c4a/c4b: DISPOSABLE SCM/Session0 native probe
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode CancelConnect
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode WorkerPipePositive
   .\scripts\phase12e18c4a-scm-probe.ps1 -Mode WorkerPipeDecoy
+  .\scripts\phase12e18c4a-scm-probe.ps1 -Mode WorkerPipeDeath
 
 Run, Pipe, DenyLocalService, LaunchWorker and CancelConnect require a disposable Windows test machine, an elevated interactive
 administrator session (>0), and PowerShell 5.1 with .NET Framework.
@@ -45,8 +46,6 @@ No physical two-PC acceptance is claimed.
 "@ | Write-Output
     return
 }
-
-if ($Mode -eq "WorkerPipeDeath") { throw "SCM_NATIVE_RED: original live Worker death not revoked after pipe peer acceptance" }
 
 if ($env:OS -ne "Windows_NT") {
     throw "This native SCM probe can only run on Windows."
@@ -89,7 +88,8 @@ $launchedHandle = [IntPtr]::Zero
 $witnessFile = Join-Path $workDir "launched-worker.witness"
 $cancelWitness = Join-Path $workDir "cancel-connect.witness"
 $peerWitness = Join-Path $workDir "worker-pipe.witness"
-$workerPipeMode = $Mode -in @("WorkerPipePositive", "WorkerPipeDecoy")
+$deathWitness = Join-Path $workDir "worker-death.witness"
+$workerPipeMode = $Mode -in @("WorkerPipePositive", "WorkerPipeDecoy", "WorkerPipeDeath")
 $launchMode = $Mode -eq "LaunchWorker" -or $workerPipeMode
 $pipeOpenMode = if ($Mode -eq "CancelConnect" -or $workerPipeMode) { "0x40080002" } else { "0x00080002" }
 $pipeProbe = $Mode -in @("Pipe", "DenyLocalService", "CancelConnect") -or $workerPipeMode
@@ -291,7 +291,7 @@ if ($launchMode) {
     static extern IntPtr OpenInteractivePipe(string path, uint access,
         uint share, IntPtr sec, uint disposition, uint flags, IntPtr template);
     static void InteractiveWorker(string[] args) {
-        if (args.Length == 3 && args[1] == "--client-pipe") {
+        if (args.Length >= 3 && args[1] == "--client-pipe") {
             // Signed-in medium-integrity child opens an inert read-only handle.
             // The SYSTEM service MUST still independently attest its native PID.
             IntPtr client = new IntPtr(-1);
@@ -303,7 +303,10 @@ if ($launchMode) {
             }
             if (client == IntPtr.Zero || client == new IntPtr(-1))
                 throw new InvalidOperationException("inert Worker could not open pipe");
-            try { System.Threading.Thread.Sleep(20000); }
+            // No payload: death mode deliberately completes the process
+            // naturally after a bounded time, after observer pins its HANDLE.
+            try { System.Threading.Thread.Sleep(
+                args.Length == 4 && args[3] == "--self-expire" ? 12000 : 20000); }
             finally { CloseLaunchedHandle(client); }
         } else {
             // WorkerPipeDecoy starts only this sleeping, real owned child.
@@ -403,6 +406,7 @@ if ($workerPipeMode) {
     static extern bool GetNamedPipeClientProcessId(IntPtr pipe, out uint clientPid);
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool GetNamedPipeClientSessionId(IntPtr pipe, out uint sessionId);
+    private readonly bool simulateWorkerExpiry = __SELF_EXPIRE_MODE__;
     private readonly System.Threading.ManualResetEvent workerPeerDone =
         new System.Threading.ManualResetEvent(false);
     void AttestNativeWorkerPeer() {
@@ -458,6 +462,17 @@ if ($workerPipeMode) {
             if (reportedPid == ownedPid && reportedPid != 0) {
                 System.IO.File.WriteAllText(@"__PEER_WITNESS__",
                     "MATCHED|" + reportedPid + "|" + born + "|" + reportedSession);
+                if (simulateWorkerExpiry) {
+                    // The peer was valid at connection, but its original OS
+                    // process may die. A stale accepted PID cannot remain
+                    // authorized solely because it matched before.
+                    if (WaitForSingleObject(launchedProcess, 18000) != 0 ||
+                        WaitForSingleObject(launchedProcess, 0) != 0)
+                        throw new InvalidOperationException("Worker lifetime not signaled");
+                    System.IO.File.WriteAllText(@"__DEATH_WITNESS__",
+                        "DEAD_WORKER_DENIED|" + reportedPid + "|" +
+                        born + "|" + reportedSession);
+                }
             } else {
                 // Explicit denial, NOT a successful authenticated handshake.
                 System.IO.File.WriteAllText(@"__PEER_WITNESS__",
@@ -565,7 +580,9 @@ __DENIED_CLASS__
     Replace("__PIPE_OPEN_MODE__", $pipeOpenMode).
     Replace("__CANCEL_WITNESS__", $cancelWitness).
     Replace("__PEER_WITNESS__", $peerWitness).
-    Replace("__WORKER_CLIENT_ARGS__", $(if ($Mode -eq "WorkerPipePositive") { " --client-pipe " + $pipeName } else { "" }))
+    Replace("__DEATH_WITNESS__", $deathWitness).
+    Replace("__SELF_EXPIRE_MODE__", $(if ($Mode -eq "WorkerPipeDeath") { "true" } else { "false" })).
+    Replace("__WORKER_CLIENT_ARGS__", $(if ($Mode -in @("WorkerPipePositive", "WorkerPipeDeath")) { " --client-pipe " + $pipeName + $(if ($Mode -eq "WorkerPipeDeath") { " --self-expire" } else { "" }) } else { "" }))
 
 # The observer reads the genuine OS process HANDLE and token. It does not
 # authenticate a named pipe or grant a process authority.
@@ -860,7 +877,7 @@ try {
         }
         Assert-Probe (Test-Path -LiteralPath $peerWitness) "SCM generated protected kernel peer PID/session classification witness"
         $report = [IO.File]::ReadAllText($peerWitness).Trim()
-        if ($Mode -eq "WorkerPipePositive") {
+        if ($Mode -in @("WorkerPipePositive", "WorkerPipeDeath")) {
             Assert-Probe ($report -match '^MATCHED\|(\d+)\|(\d+)\|(\d+)$') "kernel client OS PID matches original SCM-launched child"
             $actualPid = [uint32]$Matches[1]
             $actualBirth = [long]$Matches[2]
@@ -868,6 +885,22 @@ try {
             Assert-Probe ($actualPid -eq [uint32]$launchedPid -and
                 $actualBirth -eq $launchedBirth -and
                 $actualSession -eq [uint32]$workerSession) "native connected peer is EXACT pinned live Worker PID/birth/interactive Session"
+            if ($Mode -eq "WorkerPipeDeath") {
+                Assert-Probe ([ClassMeshNativeScmProbe]::WaitForSingleObject($launchedHandle, 0) -eq 0x102) "accepted Worker originally live on the owned native process HANDLE"
+                $deathDeadline = [DateTime]::UtcNow.AddSeconds(21)
+                while (-not (Test-Path -LiteralPath $deathWitness) -and
+                    [DateTime]::UtcNow -lt $deathDeadline) {
+                    Start-Sleep -Milliseconds 100
+                }
+                Assert-Probe (Test-Path -LiteralPath $deathWitness) "SCM detects natural Worker process exit after peer acceptance"
+                $deathReport = [IO.File]::ReadAllText($deathWitness).Trim()
+                Assert-Probe ($deathReport -ceq ("DEAD_WORKER_DENIED|" + $actualPid + "|" + $actualBirth + "|" + $actualSession)) "stale once-accepted peer identity is explicitly rejected after original Worker dies"
+                Assert-Probe ([ClassMeshNativeScmProbe]::WaitForSingleObject($launchedHandle, 0) -eq 0 -and
+                    [ClassMeshNativeScmProbe]::WaitForSingleObject($serviceHandle, 0) -eq 0x102) "original Worker signaled while authentic SCM service remains live"
+                Assert-Probe (-not [ClassMeshNativeScmProbe]::WorkerMatchesExpected(
+                    $launchedHandle, $actualPid, $actualSession,
+                    $identity.User.Value, $actualBirth)) "live Worker acceptance predicate rejects its own previously matched dead HANDLE"
+            }
         } else {
             Assert-Probe ($report -match '^REJECTED_PID\|(\d+)\|(\d+)\|(\d+)$') "same-user decoy native client rejected SPECIFICALLY for wrong OS PID"
             $actualPid = [uint32]$Matches[1]
@@ -954,7 +987,7 @@ try {
     if ($launchMode) {
         Assert-Probe ([ClassMeshNativeScmProbe]::WaitForSingleObject($launchedHandle, 8000) -eq 0) "SCM Service stop terminates exact launched Worker HANDLE"
         if ($workerPipeMode) {
-            Write-Output $(if ($Mode -eq "WorkerPipePositive") { "SCM_LAUNCHED_WORKER_NATIVE_PIPE_PEER_PASS" } else { "SCM_SAME_USER_DECOY_NATIVE_PID_DENIED_PASS" })
+            Write-Output $(if ($Mode -eq "WorkerPipePositive") { "SCM_LAUNCHED_WORKER_NATIVE_PIPE_PEER_PASS" } elseif ($Mode -eq "WorkerPipeDeath") { "SCM_DEAD_WORKER_STALE_PIPE_AUTHORITY_DENIED_PASS" } else { "SCM_SAME_USER_DECOY_NATIVE_PID_DENIED_PASS" })
         } else {
             Write-Output "SCM_SESSION0_LAUNCHED_INTERACTIVE_WORKER_INERT_PASS"
         }
