@@ -6,6 +6,7 @@ pub enum PolicyEpochError {
     InvalidCandidate,
     NotNewer { trusted: u64, candidate: u64 },
     Exhausted,
+    StartupEpochMismatch { trusted: u64, candidate: u64 },
 }
 
 /// Require a nonzero strictly increasing policy generation after reading a
@@ -24,6 +25,61 @@ pub fn verify_next_policy_epoch(trusted: u64, candidate: u64) -> Result<(), Poli
         return Err(PolicyEpochError::NotNewer { trusted, candidate });
     }
     Ok(())
+}
+
+
+/// Startup admission for a separately authenticated durable anchor and an
+/// already authenticated policy. Equality is mandatory: a newer candidate
+/// cannot silently advance trust at restart, and an older one is a rollback.
+/// This does NOT authenticate either input or open any files.
+pub fn verify_startup_policy_epoch(trusted: u64, candidate: u64) -> Result<(), PolicyEpochError> {
+    if trusted == 0 {
+        return Err(PolicyEpochError::MissingOrInvalidAnchor);
+    }
+    if candidate == 0 {
+        return Err(PolicyEpochError::InvalidCandidate);
+    }
+    if trusted != candidate {
+        return Err(PolicyEpochError::StartupEpochMismatch { trusted, candidate });
+    }
+    Ok(())
+}
+
+/// Proof of successful invocation of the caller-supplied durable commit hook.
+/// Not proof of OS ACL, filesystem durability, or independently trusted origin:
+/// only a future authenticated anchor implementation can supply those.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CommittedPolicyEpoch {
+    epoch: u64,
+}
+
+impl CommittedPolicyEpoch {
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum EpochTransitionError<E> {
+    Invalid(PolicyEpochError),
+    Commit(E),
+}
+
+/// Validate the proposed generation before touching storage. Return a receipt
+/// ONLY if the supplied *trusted durable* commit succeeds. A publisher must
+/// never install policy before this returns Ok; if a crash happens after the
+/// commit but before policy publication, startup equality rejects stale data.
+///
+/// The callback is an interface contract, NOT a trusted writer: callers must
+/// separately prove protected persistence, atomicity and fsync semantics.
+pub fn commit_policy_epoch<E>(
+    trusted: u64,
+    candidate: u64,
+    durable_commit: impl FnOnce(u64) -> Result<(), E>,
+) -> Result<CommittedPolicyEpoch, EpochTransitionError<E>> {
+    verify_next_policy_epoch(trusted, candidate).map_err(EpochTransitionError::Invalid)?;
+    durable_commit(candidate).map_err(EpochTransitionError::Commit)?;
+    Ok(CommittedPolicyEpoch { epoch: candidate })
 }
 
 #[cfg(test)]
