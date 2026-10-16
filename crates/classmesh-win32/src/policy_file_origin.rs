@@ -219,6 +219,70 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn protected_subtree_denies_untrusted_state_directory() {
+        use std::process::Command;
+
+        fn acl(path: &Path, args: &[&str]) {
+            assert!(
+                Command::new("icacls.exe")
+                    .arg(path)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "failed native ACL fixture: {args:?}"
+            );
+        }
+
+        let fixture = std::env::temp_dir().join(format!(
+            "classmesh-subtree-policy-{}",
+            std::process::id()
+        ));
+        let root = fixture.join("ClassMesh");
+        let state = root.join("state");
+        fs::create_dir_all(&state).unwrap();
+        let leaf = state.join("authorization.json");
+        fs::write(&leaf, b"qualified").unwrap();
+        for directory in [&root, &state] {
+            acl(
+                directory,
+                &[
+                    "/inheritance:r",
+                    "/grant:r",
+                    "*S-1-5-18:(OI)(CI)F",
+                    "*S-1-5-32-544:(OI)(CI)F",
+                ],
+            );
+            acl(directory, &["/setowner", "*S-1-5-32-544"]);
+        }
+        acl(
+            &leaf,
+            &[
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-5-18:F",
+                "*S-1-5-32-544:F",
+            ],
+        );
+        acl(&leaf, &["/setowner", "*S-1-5-32-544"]);
+
+        let candidate = open_protected_policy_in_app_root(&root).unwrap();
+        assert_eq!(candidate.with_file(|f| f.metadata().unwrap().len()), 9);
+        drop(candidate);
+
+        acl(&state, &["/grant", "*S-1-5-32-545:R"]);
+        assert_eq!(
+            open_protected_policy_in_app_root(&root)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        acl(&state, &["/remove:g", "*S-1-5-32-545"]);
+        assert!(open_protected_policy_in_app_root(&root).is_ok());
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
     fn protected_owner_dacl_round_trip() {
         use std::process::Command;
 
