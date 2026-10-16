@@ -8,7 +8,13 @@
 The isolated Windows-only Rust policy opener opens the file once with
 `FILE_FLAG_OPEN_REPARSE_POINT` and exclusive sharing and retains the exact HANDLE.
 `GetFileInformationByHandle` rejects leaf directories, reparse points and multiple
-hardlinks. `GetSecurityInfo` is called on the same live HANDLE; a NULL DACL,
+hardlinks. `GetSecurityInfo` is called on the same live HANDLE; the SYSTEM and
+Administrators allowed ACEs must EACH grant READ_DATA/LIST_DIRECTORY and
+READ_CONTROL (or mapped GENERIC_READ/ALL), not merely mention those SIDs.
+A RED native Windows regression proved a SYSTEM write-only ACE was previously
+accepted despite the trusted-SID name; after the bounded mask fix both leaf
+and ancestor write-only regressions pass on VM1/VM2, including SCM LocalSystem.
+A NULL DACL,
 untrusted owner or trustee, non-allow ACE, unknown flags, truncated or invalid
 SID, missing SYSTEM/Administrators allowance, or excessive ACE count is denied.
 
