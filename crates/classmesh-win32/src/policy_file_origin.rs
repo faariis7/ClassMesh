@@ -501,12 +501,14 @@ mod tests {
             let rights = if is_directory { "(OI)(CI)F" } else { "F" };
             let system = format!("*S-1-5-18:{rights}");
             let admins = format!("*S-1-5-32-544:{rights}");
-            assert!(Command::new("icacls.exe")
-                .arg(path)
-                .arg("/reset")
-                .status()
-                .unwrap()
-                .success());
+            assert!(
+                Command::new("icacls.exe")
+                    .arg(path)
+                    .arg("/reset")
+                    .status()
+                    .unwrap()
+                    .success()
+            );
             for args in [
                 vec![
                     "/inheritance:r",
