@@ -12,8 +12,7 @@ use classmesh_security::persistence::DurableAuthorizationState;
 use classmesh_security::{AuthorizationStore, Permission, Principal, PrincipalId, PrincipalKind};
 use classmesh_win32::policy_file_origin::{
     open_protected_epoch_policy_in_app_root, open_protected_policy_in_app_root,
-    open_protected_policy_in_program_data,
-    open_protected_policy_leaf,
+    open_protected_policy_in_program_data, open_protected_policy_leaf,
 };
 
 fn icacls(path: &Path, options: &[&str]) {
@@ -232,7 +231,6 @@ fn protected_programdata_prefix_pins_same_handle_during_policy_parse() {
     fs::remove_dir_all(fixture).unwrap();
 }
 
-
 /// Integration proof only: an epoch-selected protected leaf is parsed through
 /// its pinned HANDLE while the protected ClassMesh/state parents remain held.
 /// The V2 record here is a test fixture, NOT a trusted durable epoch anchor.
@@ -254,28 +252,52 @@ fn protected_epoch_blob_matches_v2_checkpoint_on_same_pinned_handle() {
     fs::write(&path, original).unwrap();
     for directory in [&app, &state] {
         icacls(directory, &["/reset"]);
-        icacls(directory, &["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"]);
+        icacls(
+            directory,
+            &[
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-5-18:(OI)(CI)F",
+                "*S-1-5-32-544:(OI)(CI)F",
+            ],
+        );
         icacls(directory, &["/setowner", "*S-1-5-32-544"]);
     }
     icacls(&path, &["/reset"]);
-    icacls(&path, &["/inheritance:r", "/grant:r", "*S-1-5-18:F", "*S-1-5-32-544:F"]);
+    icacls(
+        &path,
+        &[
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:F",
+            "*S-1-5-32-544:F",
+        ],
+    );
     icacls(&path, &["/setowner", "*S-1-5-32-544"]);
     let checkpoint = encode_bound_policy_checkpoint(51, original).unwrap();
     let pinned = open_protected_epoch_policy_in_app_root(&app, 51).unwrap();
     assert!(fs::rename(&state, app.join("state-replaced")).is_err());
-    let verified = pinned.with_file(|file| {
-        verify_bound_policy_checkpoint(checkpoint.as_slice(), file, 4096)
-    }).unwrap();
+    let verified = pinned
+        .with_file(|file| verify_bound_policy_checkpoint(checkpoint.as_slice(), file, 4096))
+        .unwrap();
     assert_eq!(verified.epoch(), 51);
     assert_eq!(verified.policy_bytes(), original);
     drop(pinned);
 
     let wrong = encode_bound_policy_checkpoint(51, b"different policy").unwrap();
     let pinned = open_protected_epoch_policy_in_app_root(&app, 51).unwrap();
-    assert_eq!(pinned.with_file(|file| {
-        verify_bound_policy_checkpoint(wrong.as_slice(), file, 4096)
-    }).unwrap_err(), BoundPolicyError::DigestMismatch);
+    assert_eq!(
+        pinned
+            .with_file(|file| { verify_bound_policy_checkpoint(wrong.as_slice(), file, 4096) })
+            .unwrap_err(),
+        BoundPolicyError::DigestMismatch
+    );
     drop(pinned);
-    assert_eq!(open_protected_epoch_policy_in_app_root(&app, 52).unwrap_err().kind(), io::ErrorKind::NotFound);
+    assert_eq!(
+        open_protected_epoch_policy_in_app_root(&app, 52)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
     fs::remove_dir_all(fixture).unwrap();
 }
