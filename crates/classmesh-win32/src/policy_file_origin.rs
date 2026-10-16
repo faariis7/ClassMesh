@@ -929,3 +929,59 @@ mod epoch_blob_tests {
         fs::remove_dir_all(fixture).unwrap();
     }
 }
+
+/// Experimental dual-file checkpoint+epoch policy preflight. Both protected
+/// leaves and their ClassMesh/state ancestors stay pinned through the callback.
+/// This does NOT attest the volume root, ProgramData prefix, trusted anchor
+/// provenance or checkpoint durability; never use as a production publisher.
+#[derive(Debug)]
+pub struct PinnedBoundPolicyPair {
+    epoch: u64,
+    checkpoint: File,
+    policy: File,
+    _app_root: File,
+    _state_dir: File,
+}
+
+impl PinnedBoundPolicyPair {
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn with_files<T>(&self, action: impl FnOnce(&File, &File) -> T) -> T {
+        action(&self.checkpoint, &self.policy)
+    }
+}
+
+/// Fixed V2 checkpoint and deterministic epoch blob only. The caller must
+/// independently establish that `epoch` came from a trusted durable anchor;
+/// this function does NOT infer it from a path or trust unverified bytes.
+pub fn open_protected_bound_policy_pair_in_app_root(
+    app_root: &Path,
+    epoch: u64,
+) -> io::Result<PinnedBoundPolicyPair> {
+    if epoch == 0 {
+        return Err(permission_denied());
+    }
+    validate_app_root(app_root)?;
+    let filename = format!("policy-{epoch:016x}.json");
+    let pinned_app_root = open_protected_directory(app_root)?;
+    let state_root = app_root.join("state");
+    let pinned_state_dir = open_protected_directory(&state_root)?;
+    let checkpoint = open_protected_policy_leaf(&state_root.join("policy-checkpoint.v2"))?;
+    let policy = open_protected_policy_leaf(&state_root.join(&filename))?;
+    attest_immediate_child(&pinned_app_root, &pinned_state_dir, "state")?;
+    attest_immediate_child(&pinned_state_dir, &checkpoint, "policy-checkpoint.v2")?;
+    attest_immediate_child(&pinned_state_dir, &policy, &filename)?;
+    attest_same_volume_distinct_file_ids(
+        &information_from_handle(&checkpoint)?,
+        &information_from_handle(&policy)?,
+    )?;
+    Ok(PinnedBoundPolicyPair {
+        epoch,
+        checkpoint,
+        policy,
+        _app_root: pinned_app_root,
+        _state_dir: pinned_state_dir,
+    })
+}
