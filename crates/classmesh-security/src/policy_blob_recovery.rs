@@ -20,6 +20,38 @@ use crate::policy_epoch::{
 /// missing, modified or unreadable blobs fail closed with NO backup fallback.
 /// No in-process policy is published by this helper.
 pub fn recover_committed_policy_from_qualified_handle(
+    qualified_checkpoint: impl Read,
+    open_qualified_blob: impl FnOnce(u64) -> io::Result<File>,
+    maximum_policy_bytes: usize,
+) -> Result<VerifiedPolicyBytes, BoundPolicyError> {
+    recover_committed_policy_inner(
+        None,
+        qualified_checkpoint,
+        open_qualified_blob,
+        maximum_policy_bytes,
+    )
+}
+
+/// Fail-closed startup recovery when a separately authenticated durable epoch
+/// is available. The checkpoint epoch must match BEFORE any blob opener runs.
+/// This helper cannot authenticate the caller-supplied anchor or file HANDLEs.
+/// A mismatch is not an opportunity to scan older blobs or fallback backups.
+pub fn recover_committed_policy_at_trusted_epoch(
+    trusted_epoch: u64,
+    qualified_checkpoint: impl Read,
+    open_qualified_blob: impl FnOnce(u64) -> io::Result<File>,
+    maximum_policy_bytes: usize,
+) -> Result<VerifiedPolicyBytes, BoundPolicyError> {
+    recover_committed_policy_inner(
+        Some(trusted_epoch),
+        qualified_checkpoint,
+        open_qualified_blob,
+        maximum_policy_bytes,
+    )
+}
+
+fn recover_committed_policy_inner(
+    trusted_epoch: Option<u64>,
     mut qualified_checkpoint: impl Read,
     open_qualified_blob: impl FnOnce(u64) -> io::Result<File>,
     maximum_policy_bytes: usize,
@@ -45,6 +77,11 @@ pub fn recover_committed_policy_from_qualified_handle(
     let epoch = u64::from_le_bytes(record[8..16].try_into().expect("fixed-width epoch"));
     if epoch == 0 {
         return Err(BoundPolicyError::InvalidEpoch);
+    }
+    if let Some(trusted) = trusted_epoch {
+        if trusted == 0 || trusted != epoch {
+            return Err(BoundPolicyError::EpochMismatch);
+        }
     }
     let file = open_qualified_blob(epoch).map_err(|_| BoundPolicyError::Unreadable)?;
     verify_bound_policy_checkpoint(record.as_slice(), file, maximum_policy_bytes)
@@ -218,5 +255,62 @@ mod tests {
             BoundPolicyError::InvalidPolicy
         );
         assert_eq!(opened.get(), 0);
+    }
+}
+
+#[cfg(test)]
+mod trusted_epoch_admission_tests {
+    use super::*;
+    use crate::policy_epoch::encode_bound_policy_checkpoint;
+    use std::cell::Cell;
+
+    #[test]
+    fn mismatch_or_missing_trusted_epoch_never_opens_policy_blob() {
+        let record = encode_bound_policy_checkpoint(33, b"policy").unwrap();
+        for trusted in [0, 32, 34, u64::MAX] {
+            let opens = Cell::new(0);
+            let result = recover_committed_policy_at_trusted_epoch(
+                trusted,
+                record.as_slice(),
+                |_| {
+                    opens.set(opens.get() + 1);
+                    panic!("untrusted epoch must never open blob")
+                },
+                4096,
+            );
+            assert_eq!(result.unwrap_err(), BoundPolicyError::EpochMismatch);
+            assert_eq!(opens.get(), 0);
+        }
+    }
+
+    #[test]
+    fn equal_trusted_epoch_verifies_exact_blob_without_fallback() {
+        let record = encode_bound_policy_checkpoint(33, b"policy").unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("classmesh-epoch-admission-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let blob = dir.join("policy-0000000000000021.json");
+        std::fs::write(&blob, b"policy").unwrap();
+        let verified = recover_committed_policy_at_trusted_epoch(
+            33,
+            record.as_slice(),
+            |_| File::open(&blob),
+            4096,
+        )
+        .unwrap();
+        assert_eq!(verified.epoch(), 33);
+        assert_eq!(verified.policy_bytes(), b"policy");
+        std::fs::write(&blob, b"tampered").unwrap();
+        assert_eq!(
+            recover_committed_policy_at_trusted_epoch(
+                33,
+                record.as_slice(),
+                |_| File::open(&blob),
+                4096
+            )
+            .unwrap_err(),
+            BoundPolicyError::DigestMismatch
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
