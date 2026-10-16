@@ -135,3 +135,54 @@ pub fn create_new_protected_classmesh_app_root(program_data: &Path) -> io::Resul
     }
     Ok(CreatedAppRoot { root, _parent: parent })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    #[test]
+    fn create_only_protected_root_excludes_inherited_users_and_refuses_recreate() {
+        let fixture = std::env::temp_dir().join(format!("classmesh-bootstrap-{}", std::process::id()));
+        let program_data = fixture.join("ProgramData");
+        fs::create_dir_all(&program_data).unwrap();
+        // A writable parent is an intentional hostile inheritance fixture;
+        // never modify the actual Windows ProgramData ACL.
+        assert!(Command::new("icacls.exe").arg(&program_data)
+            .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"]).status().unwrap().success());
+        let created = create_new_protected_classmesh_app_root(&program_data).unwrap();
+        assert!(created.with_root(|f| f.metadata().unwrap().is_dir()));
+        assert!(fs::rename(program_data.join("ClassMesh"), program_data.join("renamed")).is_err());
+        drop(created);
+        assert_eq!(create_new_protected_classmesh_app_root(&program_data).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        let root = program_data.join("ClassMesh");
+        assert!(super::super::policy_file_origin::open_protected_directory_for_bootstrap(&root).is_ok());
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn precreated_untrusted_root_is_never_adopted_or_modified() {
+        let fixture = std::env::temp_dir().join(format!("classmesh-bootstrap-precreated-{}", std::process::id()));
+        let program_data = fixture.join("ProgramData");
+        let root = program_data.join("ClassMesh");
+        fs::create_dir_all(&root).unwrap();
+        let marker = root.join("attacker.txt");
+        fs::write(&marker, b"original").unwrap();
+        assert_eq!(create_new_protected_classmesh_app_root(&program_data).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(marker).unwrap(), b"original");
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn refuses_non_programdata_ambiguous_and_remote_paths() {
+        for path in [
+            r"C:\ProgramData\..\ProgramData",
+            r"\\host\share\ProgramData",
+            r"C:\NotProgramData",
+            "ProgramData",
+        ] {
+            assert_eq!(create_new_protected_classmesh_app_root(Path::new(path)).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        }
+    }
+}
