@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{self, Read};
 
 use crate::policy_epoch::{
-    BoundPolicyError, VerifiedPolicyBytes, verify_bound_policy_checkpoint,
+    BOUND_POLICY_CHECKPOINT_LEN, BOUND_POLICY_CHECKPOINT_MAGIC, BoundPolicyError,\n    VerifiedPolicyBytes, verify_bound_policy_checkpoint,
 };
 
 const V2_RECORD_LEN: usize = 48;
@@ -29,7 +29,7 @@ pub fn recover_committed_policy_from_qualified_handle(
     if maximum_policy_bytes == 0 {
         return Err(BoundPolicyError::InvalidPolicy);
     }
-    let mut record = [0_u8; V2_RECORD_LEN];
+    let mut record = [0_u8; BOUND_POLICY_CHECKPOINT_LEN];
     qualified_checkpoint
         .read_exact(&mut record)
         .map_err(|_| BoundPolicyError::Unreadable)?;
@@ -41,7 +41,7 @@ pub fn recover_committed_policy_from_qualified_handle(
     {
         return Err(BoundPolicyError::InvalidCheckpoint);
     }
-    if &record[..8] != V2_MAGIC {
+    if &record[..8] != BOUND_POLICY_CHECKPOINT_MAGIC {
         return Err(BoundPolicyError::InvalidCheckpoint);
     }
     let epoch = u64::from_le_bytes(record[8..16].try_into().expect("fixed-width epoch"));
