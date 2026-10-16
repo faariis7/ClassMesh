@@ -17,6 +17,8 @@ pub mod policy_file_origin;
 #[cfg(windows)]
 mod power;
 #[cfg(windows)]
+pub mod protected_app_bootstrap;
+#[cfg(windows)]
 mod sensitive_pipe_listener;
 #[cfg(windows)]
 mod session;
