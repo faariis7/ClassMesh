@@ -200,6 +200,54 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn protected_owner_dacl_round_trip() {
+        use std::process::Command;
+
+        fn icacls(path: &Path, args: &[&str]) {
+            let status = Command::new("icacls.exe")
+                .arg(path)
+                .args(args)
+                .status()
+                .expect("icacls must run on native elevated Windows");
+            assert!(status.success(), "icacls failed: {args:?}");
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "classmesh-policy-acl-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let policy = dir.join("authorization.json");
+        fs::write(&policy, b"test-only").unwrap();
+
+        icacls(
+            &policy,
+            &[
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-5-18:F",
+                "*S-1-5-32-544:F",
+            ],
+        );
+        icacls(&policy, &["/setowner", "*S-1-5-32-544"]);
+
+        let file = open_protected_policy_leaf(&policy).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 9);
+        drop(file);
+
+        icacls(&policy, &["/grant", "*S-1-5-32-545:R"]);
+        assert_eq!(
+            open_protected_policy_leaf(&policy).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        icacls(&policy, &["/remove:g", "*S-1-5-32-545"]);
+        assert!(open_protected_policy_leaf(&policy).is_ok());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn rejects_hardlink_and_retains_original_file() {
         let dir = std::env::temp_dir().join(format!(
             "classmesh-win32-policy-leaf-{}",
