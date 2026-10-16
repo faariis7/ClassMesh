@@ -1,3 +1,11 @@
+## Phase 12E18c4n — native policy hardlink-origin qualification fixture (NOT production integration)
+
+- From #505 merged main `e14f1133`, plan FIRST `c19e316`. Test FIRST `9ff5df9`: elevated Windows VM1 and VM2 both actually failed with explicit `RED: exact-handle owner/DACL predicate accepts multiply-linked policy inode`. The c4j/C# fixture checked OWNER/DACL and reparse status but missed native hardlink count.
+- Follow-up fixture-only implementation `d01f26a` adds Win32 `GetFileInformationByHandle` link count inspection to the SAME already-open handle; both VM1 and VM2 returned `NATIVE_HARDLINK_ORIGIN_DENIED`, exit 0. All fixtures use isolated GUID directories and cleanup in finally. The reviewed c4j source is left unchanged; only the derived c4n test fixture is hardened.
+- This is **NOT the ClassMesh Rust Service production file opener**. It does not protect canonical ancestor identity against races, retain an attested HANDLE into `DurableAuthorizationState`, prove privileged stable owner/DACL post-open, enforce protected persistent epoch or implement reload/revocation. Do not claim any production fix from the fixture alone. #477/#479 and ClipboardRead v11 fail-only boundaries remain.
+
+---
+
 ## Phase 12E18c4m — disposable SCM ancestor negative tests (VMs qualified; CI pending)
 
 - PLAN FIRST `282d8de`; missing-script RED `9800afb` verified on macOS PowerShell (NOT a native Windows security RED). Implemented separate disposable SCM LocalSystem Session0 probe, added Windows CI Help-only smoke and repaired an observed native Windows Junction cleanup NullReferenceException in `d8f49c4`.

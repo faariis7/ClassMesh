@@ -134,6 +134,14 @@ jobs:
         shell: pwsh
         run: .\scripts\phase12e18c4m-ancestor-policy-probe.ps1 -Mode Help
 
+      - name: Parse Phase 12E18c4n hardlink probe without elevation
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path '.\scripts\phase12e18c4n-hardlink-origin-test.ps1'), [ref]$tokens, [ref]$errors)
+          if ($errors.Count -gt 0) { throw ($errors | Out-String) }
+
       - name: Build Phase 7 multicast probe
         run: cargo build -p classmesh-lab --bin classmesh-multicast-probe --release
 
