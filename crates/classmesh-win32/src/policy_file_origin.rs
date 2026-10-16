@@ -264,7 +264,9 @@ pub fn open_protected_policy_in_app_root(app_root: &Path) -> io::Result<PinnedPo
     );
     if !app_root.is_absolute()
         || !absolute_local_drive
-        || app_root.components().any(|part| matches!(part, Component::ParentDir))
+        || app_root
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
         || app_root.file_name() != Some(std::ffi::OsStr::new("ClassMesh"))
     {
         return Err(permission_denied());
