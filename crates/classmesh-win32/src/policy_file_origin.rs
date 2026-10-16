@@ -427,10 +427,8 @@ mod tests {
 
     #[test]
     fn ancestry_requires_same_volume_and_distinct_file_id() {
-        let dir = std::env::temp_dir().join(format!(
-            "classmesh-volume-witness-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("classmesh-volume-witness-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let child = dir.join("child.json");
