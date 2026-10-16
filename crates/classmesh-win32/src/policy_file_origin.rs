@@ -339,6 +339,20 @@ mod tests {
         );
         acl(&state, &["/remove:g", "*S-1-5-32-545"]);
         assert!(open_protected_policy_in_app_root(&root).is_ok());
+
+        let relocated = root.join("state-original");
+        fs::rename(&state, &relocated).unwrap();
+        std::os::windows::fs::symlink_dir(&relocated, &state).unwrap();
+        assert_eq!(
+            open_protected_policy_in_app_root(&root)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied,
+            "state junction must never be followed"
+        );
+        fs::remove_dir(&state).unwrap();
+        fs::rename(&relocated, &state).unwrap();
+        assert!(open_protected_policy_in_app_root(&root).is_ok());
         fs::remove_dir_all(fixture).unwrap();
     }
 
