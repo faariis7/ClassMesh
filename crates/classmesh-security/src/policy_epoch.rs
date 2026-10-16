@@ -349,7 +349,7 @@ pub fn encode_bound_policy_checkpoint(
 /// and does not open paths. Both readers must already be OS-attested.
 pub fn verify_bound_policy_checkpoint(
     mut checkpoint: impl std::io::Read,
-    mut policy: impl std::io::Read,
+    policy: impl std::io::Read,
     maximum_policy_bytes: usize,
 ) -> Result<VerifiedPolicyBytes, BoundPolicyError> {
     use std::io::Read;
@@ -378,8 +378,15 @@ pub fn verify_bound_policy_checkpoint(
         return Err(BoundPolicyError::InvalidPolicy);
     }
     let actual = ring::digest::digest(&ring::digest::SHA256, &bytes);
-    ring::constant_time::verify_slices_are_equal(&record[16..], actual.as_ref())
-        .map_err(|_| BoundPolicyError::DigestMismatch)?;
+    // Digest is unkeyed and not a secret; fixed-width XOR aggregation avoids
+    // leaking the first mismatching byte and does not use deprecated APIs.
+    let mismatch = record[16..]
+        .iter()
+        .zip(actual.as_ref().iter())
+        .fold(0_u8, |acc, (expected, observed)| acc | (expected ^ observed));
+    if mismatch != 0 {
+        return Err(BoundPolicyError::DigestMismatch);
+    }
     Ok(VerifiedPolicyBytes { epoch, bytes })
 }
 
