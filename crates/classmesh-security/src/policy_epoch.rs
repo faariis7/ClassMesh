@@ -188,3 +188,51 @@ mod transition_contract_tests {
         assert_eq!(verify_startup_policy_epoch(anchor, 8), Ok(()));
     }
 }
+
+#[cfg(test)]
+mod checkpoint_contract_tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_roundtrip_accepts_only_nonzero_epoch() {
+        for epoch in [1, 7, u64::MAX] {
+            let encoded = encode_policy_epoch_checkpoint(epoch).unwrap();
+            assert_eq!(encoded.len(), 16);
+            assert_eq!(parse_policy_epoch_checkpoint(encoded.as_slice()), Ok(epoch));
+        }
+        assert!(encode_policy_epoch_checkpoint(0).is_err());
+    }
+
+    #[test]
+    fn malformed_truncated_and_trailing_checkpoints_fail_closed() {
+        let valid = encode_policy_epoch_checkpoint(42).unwrap();
+        for len in 0..valid.len() {
+            assert!(parse_policy_epoch_checkpoint(&valid[..len]).is_err());
+        }
+        let mut trailing = valid.to_vec();
+        trailing.push(0);
+        assert!(parse_policy_epoch_checkpoint(trailing.as_slice()).is_err());
+        let mut wrong_magic = valid;
+        wrong_magic[0] ^= 1;
+        assert!(parse_policy_epoch_checkpoint(wrong_magic.as_slice()).is_err());
+        let mut zero = valid;
+        zero[8..].fill(0);
+        assert!(parse_policy_epoch_checkpoint(zero.as_slice()).is_err());
+    }
+
+    #[test]
+    fn decoder_accepts_short_reads_without_ever_accepting_short_file() {
+        struct Bytewise<'a>(&'a [u8]);
+        impl std::io::Read for Bytewise<'_> {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.is_empty() || output.is_empty() { return Ok(0); }
+                output[0] = self.0[0];
+                self.0 = &self.0[1..];
+                Ok(1)
+            }
+        }
+        let valid = encode_policy_epoch_checkpoint(21).unwrap();
+        assert_eq!(parse_policy_epoch_checkpoint(Bytewise(&valid)), Ok(21));
+        assert!(parse_policy_epoch_checkpoint(Bytewise(&valid[..15])).is_err());
+    }
+}
