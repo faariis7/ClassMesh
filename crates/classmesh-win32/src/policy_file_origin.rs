@@ -348,6 +348,32 @@ mod tests {
     }
 
     #[test]
+    fn resolved_handle_must_be_immediate_named_child() {
+        let dir = std::env::temp_dir().join(format!(
+            "classmesh-resolved-handle-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let sibling = dir.join("sibling.json");
+        fs::write(&sibling, b"fixture").unwrap();
+
+        let held_parent = File::open(&dir).unwrap();
+        let held_sibling = File::open(&sibling).unwrap();
+        assert_eq!(
+            attest_immediate_child(&held_parent, &held_sibling, "authorization.json")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(attest_immediate_child(&held_parent, &held_sibling, "sibling.json").is_ok());
+
+        drop(held_sibling);
+        drop(held_parent);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn protected_programdata_parent_is_required_even_if_app_tree_is_secured() {
         use std::process::Command;
 
