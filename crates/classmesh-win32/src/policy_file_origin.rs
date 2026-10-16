@@ -349,6 +349,10 @@ mod tests {
 
         let candidate = open_protected_policy_in_app_root(&root).unwrap();
         assert_eq!(candidate.with_file(|f| f.metadata().unwrap().len()), 9);
+        assert!(
+            fs::rename(&state, root.join("renamed-while-pinned")).is_err(),
+            "pinned protected directory unexpectedly allowed a rename"
+        );
         drop(candidate);
 
         acl(&state, &["/grant", "*S-1-5-32-545:R"]);
