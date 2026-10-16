@@ -52,6 +52,9 @@ try {
     [IO.File]::WriteAllText($primary, '{"testOnly":true}')
     & icacls.exe $primary '/inheritance:r' '/grant:r' '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'file ACL fixture failed' }
+    if ([ClassMeshPolicyHandleAttestation]::Check($primary, $false) -ne 'ALLOW') {
+        throw 'Protected single-link policy control unexpectedly rejected'
+    }
     & fsutil.exe hardlink create $hardlink $primary | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'hardlink fixture creation failed' }
     $observed = [ClassMeshPolicyHandleAttestation]::Check($primary, $false)
@@ -60,6 +63,10 @@ try {
     }
     if ($observed -ne 'HARDLINK_DENIED') {
         throw "RED: expected explicit HARDLINK_DENIED, observed $observed"
+    }
+    Remove-Item -LiteralPath $hardlink -Force -ErrorAction Stop
+    if ([ClassMeshPolicyHandleAttestation]::Check($primary, $false) -ne 'ALLOW') {
+        throw 'Protected original policy must return to ALLOW after removing alias'
     }
     'NATIVE_HARDLINK_ORIGIN_DENIED'
 } finally {
