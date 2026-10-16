@@ -945,7 +945,14 @@ mod bound_pair_tests {
             vec!["/inheritance:r", "/grant:r", &system, &admins],
             vec!["/setowner", "*S-1-5-32-544"],
         ] {
-            assert!(Command::new("icacls.exe").arg(path).args(args).status().unwrap().success());
+            assert!(
+                Command::new("icacls.exe")
+                    .arg(path)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
         }
     }
 
@@ -959,24 +966,54 @@ mod bound_pair_tests {
         let blob = state.join("policy-0000000000000033.json");
         fs::write(&checkpoint, b"checkpoint").unwrap();
         fs::write(&blob, b"policy").unwrap();
-        for directory in [&root, &state] { privileged(directory, true); }
-        for leaf in [&checkpoint, &blob] { privileged(leaf, false); }
+        for directory in [&root, &state] {
+            privileged(directory, true);
+        }
+        for leaf in [&checkpoint, &blob] {
+            privileged(leaf, false);
+        }
         let pair = open_protected_bound_policy_pair_in_app_root(&root, 51).unwrap();
         assert_eq!(pair.epoch(), 51);
-        assert_eq!(pair.with_files(|a, b| (a.metadata().unwrap().len(), b.metadata().unwrap().len())), (10, 6));
+        assert_eq!(
+            pair.with_files(|a, b| (a.metadata().unwrap().len(), b.metadata().unwrap().len())),
+            (10, 6)
+        );
         assert!(fs::rename(&checkpoint, state.join("checkpoint-replaced")).is_err());
         assert!(fs::rename(&blob, state.join("blob-replaced")).is_err());
         drop(pair);
-        assert_eq!(open_protected_bound_policy_pair_in_app_root(&root, 52).unwrap_err().kind(), io::ErrorKind::NotFound);
-        assert_eq!(open_protected_bound_policy_pair_in_app_root(&root, 0).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-        assert!(Command::new("icacls.exe").arg(&checkpoint).args(["/grant", "*S-1-5-32-545:R"]).status().unwrap().success());
-        assert_eq!(open_protected_bound_policy_pair_in_app_root(&root, 51).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            open_protected_bound_policy_pair_in_app_root(&root, 52)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            open_protected_bound_policy_pair_in_app_root(&root, 0)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(
+            Command::new("icacls.exe")
+                .arg(&checkpoint)
+                .args(["/grant", "*S-1-5-32-545:R"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            open_protected_bound_policy_pair_in_app_root(&root, 51)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
         fs::remove_dir_all(fixture).unwrap();
     }
 
     #[test]
     fn checkpoint_hardlink_is_not_a_trusted_pair() {
-        let fixture = std::env::temp_dir().join(format!("classmesh-pair-link-{}", std::process::id()));
+        let fixture =
+            std::env::temp_dir().join(format!("classmesh-pair-link-{}", std::process::id()));
         let root = fixture.join("ClassMesh");
         let state = root.join("state");
         fs::create_dir_all(&state).unwrap();
@@ -985,9 +1022,18 @@ mod bound_pair_tests {
         fs::write(&checkpoint, b"checkpoint").unwrap();
         fs::write(&blob, b"policy").unwrap();
         fs::hard_link(&checkpoint, state.join("checkpoint-alias")).unwrap();
-        for directory in [&root, &state] { privileged(directory, true); }
-        for leaf in [&checkpoint, &blob] { privileged(leaf, false); }
-        assert_eq!(open_protected_bound_policy_pair_in_app_root(&root, 51).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        for directory in [&root, &state] {
+            privileged(directory, true);
+        }
+        for leaf in [&checkpoint, &blob] {
+            privileged(leaf, false);
+        }
+        assert_eq!(
+            open_protected_bound_policy_pair_in_app_root(&root, 51)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
         fs::remove_dir_all(fixture).unwrap();
     }
 }
