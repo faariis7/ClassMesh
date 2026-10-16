@@ -1,8 +1,6 @@
 //! Read-only Windows OS Known Folder discovery, NOT an attested trust root.
 //! Never resolve security-critical ProgramData from mutable environment text.
-use std::ffi::OsString;
 use std::io;
-use std::os::windows::ffi::OsStringExt;
 use std::path::{Component, PathBuf, Prefix};
 
 use windows_sys::Win32::System::Com::{
