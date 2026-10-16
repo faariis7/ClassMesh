@@ -275,11 +275,60 @@ pub fn open_protected_policy_in_app_root(app_root: &Path) -> io::Result<PinnedPo
     let state_root = app_root.join("state");
     let pinned_state_dir = open_protected_directory(&state_root)?;
     let leaf = open_protected_policy_leaf(&state_root.join("authorization.json"))?;
+    attest_immediate_child(&pinned_app_root, &pinned_state_dir, "state")?;
+    attest_immediate_child(&pinned_state_dir, &leaf, "authorization.json")?;
     Ok(PinnedPolicyCandidate {
         leaf,
         _app_root: pinned_app_root,
         _state_dir: pinned_state_dir,
     })
+}
+
+/// Return the resolved Windows path of the ORIGINAL held HANDLE (not a fresh
+/// pathname lookup). Reject unbounded results and malformed UTF-16.
+fn resolved_handle_path(file: &File) -> io::Result<String> {
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+
+    // Safety: file owns a valid HANDLE; first call only queries buffer length.
+    let required =
+        unsafe { GetFinalPathNameByHandleW(file.as_raw_handle(), std::ptr::null_mut(), 0, 0) };
+    if required == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if required > 32_767 {
+        return Err(permission_denied());
+    }
+    let mut name = vec![0u16; required as usize + 1];
+    // Safety: allocated UTF-16 buffer is writable and sized to the first
+    // query. A raced name-length increase is rejected rather than retried.
+    let written = unsafe {
+        GetFinalPathNameByHandleW(
+            file.as_raw_handle(),
+            name.as_mut_ptr(),
+            name.len() as u32,
+            0,
+        )
+    };
+    if written == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if written > required || written as usize >= name.len() {
+        return Err(permission_denied());
+    }
+    String::from_utf16(&name[..written as usize]).map_err(|_| permission_denied())
+}
+
+fn attest_immediate_child(parent: &File, child: &File, leaf: &str) -> io::Result<()> {
+    if leaf.is_empty() || leaf.contains(['/', '\\']) || leaf == "." || leaf == ".." {
+        return Err(permission_denied());
+    }
+    let parent_name = resolved_handle_path(parent)?;
+    let child_name = resolved_handle_path(child)?;
+    let expected = format!("{}\\{}", parent_name.trim_end_matches('\\'), leaf);
+    if !child_name.eq_ignore_ascii_case(&expected) {
+        return Err(permission_denied());
+    }
+    Ok(())
 }
 
 /// Experimental protected ProgramData prefix qualification. This type pins
@@ -320,6 +369,7 @@ pub fn open_protected_policy_in_program_data(
     }
     let pinned_data = open_protected_directory(program_data)?;
     let inner = open_protected_policy_in_app_root(&program_data.join("ClassMesh"))?;
+    attest_immediate_child(&pinned_data, &inner._app_root, "ClassMesh")?;
     Ok(PinnedProgramDataCandidate {
         _program_data: pinned_data,
         inner,
