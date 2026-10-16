@@ -165,9 +165,13 @@ impl DurableAuthorizationState {
     }
 
     fn load_from_file(source: &Path) -> Result<AuthorizationStore, PersistenceError> {
-        // Metadata is obtained from the file actually opened, not a separate
-        // by-path metadata lookup (which could race with a file replacement).
-        let file = File::open(source)?;
+        Self::load_from_open_file(File::open(source)?)
+    }
+
+    // The verified Windows policy opener can eventually pass its retained
+    // OS-validated file into this bounded parser without reopening a path.
+    // This private primitive is not evidence that the input HANDLE was trusted.
+    fn load_from_open_file(file: File) -> Result<AuthorizationStore, PersistenceError> {
         let metadata = file.metadata()?;
         let declared = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
         if declared > MAX_STATE_BYTES {
@@ -658,6 +662,27 @@ mod tests {
         denied.upsert(teacher).unwrap();
         durable.save(&denied).unwrap();
         let loaded = durable.load_primary_only().unwrap();
+        assert!(!loaded.authorize_credential(fingerprint(11), Permission::ReadClipboard, 30));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn already_open_policy_handle_cannot_be_redirected_by_path_replacement() {
+        let path = test_path();
+        let durable = DurableAuthorizationState::new(&path);
+        let mut revoked = test_store();
+        let mut teacher = revoked.principal(id(7)).unwrap().clone();
+        teacher.permissions.remove(&Permission::ReadClipboard);
+        revoked.upsert(teacher).unwrap();
+        durable.save(&revoked).unwrap();
+
+        // The trusted Windows opener must eventually hand this exact open
+        // FILE HANDLE to the bounded parser, not a path to open again.
+        let opened = File::open(&path).unwrap();
+        let original = path.with_extension("held");
+        fs::rename(&path, &original).unwrap();
+        durable.save(&test_store()).unwrap();
+        let loaded = DurableAuthorizationState::load_from_open_file(opened).unwrap();
         assert!(!loaded.authorize_credential(fingerprint(11), Permission::ReadClipboard, 30));
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
