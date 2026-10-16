@@ -63,9 +63,8 @@ mod tests {
     #[test]
     fn rejects_hardlink_and_retains_original_file() {
         let dir = std::env::temp_dir().join(format!(
-            "classmesh-win32-leaf-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            "classmesh-win32-policy-leaf-{}",
+            std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
