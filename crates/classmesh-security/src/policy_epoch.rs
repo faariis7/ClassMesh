@@ -509,7 +509,8 @@ pub fn stage_then_commit_bound_policy<E>(
         .map_err(BoundInstallError::InvalidEpoch)?;
     let checkpoint = encode_bound_policy_checkpoint(candidate_epoch, candidate_policy)
         .map_err(BoundInstallError::InvalidPolicy)?;
-    stage_immutable_and_flush(candidate_epoch, candidate_policy).map_err(BoundInstallError::Stage)?;
+    stage_immutable_and_flush(candidate_epoch, candidate_policy)
+        .map_err(BoundInstallError::Stage)?;
     commit_trusted_checkpoint(&checkpoint).map_err(BoundInstallError::Commit)?;
     Ok(CommittedBoundPolicy {
         epoch: candidate_epoch,
@@ -539,7 +540,10 @@ mod immutable_policy_install_tests {
 
         fn startup(&self) -> Result<VerifiedPolicyBytes, BoundPolicyError> {
             let epoch = u64::from_le_bytes(self.checkpoint[8..16].try_into().unwrap());
-            let blob = self.blobs.get(&epoch).ok_or(BoundPolicyError::InvalidPolicy)?;
+            let blob = self
+                .blobs
+                .get(&epoch)
+                .ok_or(BoundPolicyError::InvalidPolicy)?;
             verify_bound_policy_checkpoint(self.checkpoint.as_slice(), blob.as_slice(), 1024)
         }
 
@@ -572,12 +576,25 @@ mod immutable_policy_install_tests {
 
     #[test]
     fn invalid_candidates_never_touch_storage() {
-        for (trusted, next, policy) in [(0, 5, NEW), (4, 4, NEW), (4, 3, NEW), (4, 5, b"".as_slice())] {
+        for (trusted, next, policy) in [
+            (0, 5, NEW),
+            (4, 4, NEW),
+            (4, 3, NEW),
+            (4, 5, b"".as_slice()),
+        ] {
             let touched = std::cell::Cell::new(0);
             let result = stage_then_commit_bound_policy(
-                trusted, next, policy,
-                |_, _| { touched.set(touched.get() + 1); Ok::<(), ()>(()) },
-                |_| { touched.set(touched.get() + 1); Ok::<(), ()>(()) },
+                trusted,
+                next,
+                policy,
+                |_, _| {
+                    touched.set(touched.get() + 1);
+                    Ok::<(), ()>(())
+                },
+                |_| {
+                    touched.set(touched.get() + 1);
+                    Ok::<(), ()>(())
+                },
             );
             assert!(result.is_err());
             assert_eq!(touched.get(), 0);
@@ -587,13 +604,20 @@ mod immutable_policy_install_tests {
     #[test]
     fn staging_failure_never_commits_and_commit_failure_never_returns_receipt() {
         let mut committed = false;
-        let result = stage_then_commit_bound_policy(4, 5, NEW, |_, _| Err("stage failed"), |_| {
-            committed = true;
-            Ok(())
-        });
+        let result = stage_then_commit_bound_policy(
+            4,
+            5,
+            NEW,
+            |_, _| Err("stage failed"),
+            |_| {
+                committed = true;
+                Ok(())
+            },
+        );
         assert_eq!(result, Err(BoundInstallError::Stage("stage failed")));
         assert!(!committed);
-        let result = stage_then_commit_bound_policy(4, 5, NEW, |_, _| Ok(()), |_| Err("commit failed"));
+        let result =
+            stage_then_commit_bound_policy(4, 5, NEW, |_, _| Ok(()), |_| Err("commit failed"));
         assert_eq!(result, Err(BoundInstallError::Commit("commit failed")));
     }
 
@@ -601,16 +625,23 @@ mod immutable_policy_install_tests {
     fn successful_install_orders_stage_before_anchor_and_receipt() {
         use std::cell::RefCell;
         let events = RefCell::new(Vec::new());
-        let receipt = stage_then_commit_bound_policy(4, 5, NEW, |epoch, bytes| {
-            assert_eq!(epoch, 5);
-            assert_eq!(bytes, NEW);
-            events.borrow_mut().push("stage");
-            Ok::<(), ()>(())
-        }, |record| {
-            assert_eq!(record, &encode_bound_policy_checkpoint(5, NEW).unwrap());
-            events.borrow_mut().push("commit");
-            Ok::<(), ()>(())
-        }).unwrap();
+        let receipt = stage_then_commit_bound_policy(
+            4,
+            5,
+            NEW,
+            |epoch, bytes| {
+                assert_eq!(epoch, 5);
+                assert_eq!(bytes, NEW);
+                events.borrow_mut().push("stage");
+                Ok::<(), ()>(())
+            },
+            |record| {
+                assert_eq!(record, &encode_bound_policy_checkpoint(5, NEW).unwrap());
+                events.borrow_mut().push("commit");
+                Ok::<(), ()>(())
+            },
+        )
+        .unwrap();
         assert_eq!(receipt.epoch(), 5);
         assert_eq!(events.into_inner(), ["stage", "commit"]);
     }
