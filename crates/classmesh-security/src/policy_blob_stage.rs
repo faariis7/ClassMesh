@@ -34,8 +34,7 @@ impl StagedPolicyBlob {
     pub fn verify_open_handle(&mut self) -> io::Result<Vec<u8>> {
         self.handle.seek(SeekFrom::Start(0))?;
         let mut bytes = Vec::new();
-        self.handle
-            .by_ref()
+        Read::by_ref(&mut self.handle)
             .take((MAX_STAGED_POLICY_BYTES as u64) + 1)
             .read_to_end(&mut bytes)?;
         if bytes.is_empty() || bytes.len() > MAX_STAGED_POLICY_BYTES {
