@@ -79,7 +79,7 @@ fn attest_leaf_owner_acl(file: &File) -> io::Result<()> {
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
-        ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION, GetAce, IsValidAcl,
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, GetAce, IsValidAcl,
         OWNER_SECURITY_INFORMATION, PSID, PSECURITY_DESCRIPTOR,
     };
 
@@ -171,16 +171,18 @@ fn attest_leaf_owner_acl(file: &File) -> io::Result<()> {
         if unsafe { GetAce(dacl, idx, &raw mut ace) } == 0 || ace.is_null() {
             return Err(permission_denied());
         }
-        // Safety: GetAce returns a complete, in-bounds ACE including its header.
-        let allowed = unsafe { &*(ace.cast::<ACCESS_ALLOWED_ACE>()) };
-        if allowed.Header.AceType != 0
-            || allowed.Header.AceFlags != 0
-            || usize::from(allowed.Header.AceSize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+        // Safety: GetAce returns at least an in-bounds ACE_HEADER. Check size
+        // BEFORE treating its memory as an ACCESS_ALLOWED_ACE.
+        let header = unsafe { &*(ace.cast::<ACE_HEADER>()) };
+        if header.AceType != 0
+            || header.AceFlags != 0
+            || usize::from(header.AceSize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>()
         {
             return Err(permission_denied());
         }
-        // Safety: for ACCESS_ALLOWED_ACE, SidStart is the first DWORD of the SID
-        // embedded in this validated ACE. sid_string validates the SID conversion.
+        // Safety: ACE size and type checked above. SidStart is the SID embedded
+        // in the allowed ACE, not a separate pathname lookup.
+        let allowed = unsafe { &*(ace.cast::<ACCESS_ALLOWED_ACE>()) };
         let sid = sid_string(std::ptr::addr_of!(allowed.SidStart).cast_mut().cast())?;
         match sid.as_str() {
             "S-1-5-18" => system = true,
