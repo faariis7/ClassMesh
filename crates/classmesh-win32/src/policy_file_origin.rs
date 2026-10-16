@@ -55,7 +55,6 @@ pub fn open_single_link_policy_leaf(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-
 /// Require the retained *leaf* HANDLE to have a non-NULL, explicitly
 /// allow-only DACL containing only SYSTEM and BUILTIN\Administrators, with
 /// both SIDs present and the owner one of those SIDs.
@@ -79,8 +78,8 @@ fn attest_leaf_owner_acl(file: &File) -> io::Result<()> {
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{
-        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, GetAce, IsValidAcl,
-        OWNER_SECURITY_INFORMATION, PSID, PSECURITY_DESCRIPTOR,
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, GetAce, GetLengthSid,
+        IsValidAcl, IsValidSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
     };
 
     struct Descriptor(PSECURITY_DESCRIPTOR);
@@ -183,7 +182,25 @@ fn attest_leaf_owner_acl(file: &File) -> io::Result<()> {
         // Safety: ACE size and type checked above. SidStart is the SID embedded
         // in the allowed ACE, not a separate pathname lookup.
         let allowed = unsafe { &*(ace.cast::<ACCESS_ALLOWED_ACE>()) };
-        let sid = sid_string(std::ptr::addr_of!(allowed.SidStart).cast_mut().cast())?;
+        let sid_ptr = std::ptr::addr_of!(allowed.SidStart).cast_mut().cast();
+        let ace_bytes = usize::from(header.AceSize);
+        let sid_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+        // A SID needs at least its 8-byte fixed header. Validate that it fits
+        // wholly INSIDE this ACE before parsing any variable subauthority data.
+        if ace_bytes.saturating_sub(sid_offset) < 8 {
+            return Err(permission_denied());
+        }
+        // Safety: GetAce supplied an in-bounds ACE, and at least the SID header
+        // fits. GetLengthSid only reads that header's SubAuthorityCount.
+        let length = unsafe { GetLengthSid(sid_ptr) };
+        if length < 8 || usize::try_from(length).unwrap_or(usize::MAX) > ace_bytes - sid_offset {
+            return Err(permission_denied());
+        }
+        // Safety: the full SID now fits in the ACE allocation.
+        if unsafe { IsValidSid(sid_ptr) } == 0 {
+            return Err(permission_denied());
+        }
+        let sid = sid_string(sid_ptr)?;
         match sid.as_str() {
             "S-1-5-18" => system = true,
             "S-1-5-32-544" => administrators = true,
@@ -214,10 +231,7 @@ mod tests {
             assert!(status.success(), "icacls failed: {args:?}");
         }
 
-        let dir = std::env::temp_dir().join(format!(
-            "classmesh-policy-acl-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("classmesh-policy-acl-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let policy = dir.join("authorization.json");
