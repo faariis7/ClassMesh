@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::policy_epoch::{verify_bound_policy_checkpoint, verify_startup_policy_epoch};
+
 use super::{
     AuthorizationStore, AuthorizationStoreError, CredentialFingerprint, CredentialRecord,
     CredentialState, Permission, Principal, PrincipalId, PrincipalKind,
@@ -21,6 +23,7 @@ const MAX_PERMISSIONS_PER_PRINCIPAL: usize = 32;
 pub enum PersistenceError {
     Io(std::io::Error),
     Json(serde_json::Error),
+    UntrustedPolicyBinding,
     StateTooLarge {
         bytes: usize,
         maximum: usize,
@@ -49,6 +52,7 @@ impl fmt::Display for PersistenceError {
         match self {
             Self::Io(error) => write!(f, "security state I/O failed: {error}"),
             Self::Json(error) => write!(f, "security state JSON failed: {error}"),
+            Self::UntrustedPolicyBinding => f.write_str("policy checkpoint or trusted epoch binding rejected"),
             Self::StateTooLarge { bytes, maximum } => {
                 write!(f, "security state is {bytes} bytes; maximum is {maximum}")
             }
@@ -172,6 +176,25 @@ impl DurableAuthorizationState {
         file: File,
     ) -> Result<AuthorizationStore, PersistenceError> {
         Self::load_from_open_file(file)
+    }
+
+    /// Experimental fail-closed primary loader: consumes the exact verified
+    /// bytes from two ALREADY OS-attested retained file HANDLEs. The trusted
+    /// epoch must originate from a separately qualified persistent anchor;
+    /// a caller-provided number is NOT independently trustworthy.
+    /// Never wired to production Service until all Windows origin/rollback
+    /// and atomic persistence gates are closed.
+    pub fn parse_bound_primary_from_open_files(
+        checkpoint: File,
+        policy: File,
+        trusted_epoch: u64,
+    ) -> Result<AuthorizationStore, PersistenceError> {
+        let verified = verify_bound_policy_checkpoint(checkpoint, policy, MAX_STATE_BYTES)
+            .map_err(|_| PersistenceError::UntrustedPolicyBinding)?;
+        verify_startup_policy_epoch(trusted_epoch, verified.epoch())
+            .map_err(|_| PersistenceError::UntrustedPolicyBinding)?;
+        let persisted: PersistedState = serde_json::from_slice(verified.policy_bytes())?;
+        persisted.into_store()
     }
 
     fn load_from_file(source: &Path) -> Result<AuthorizationStore, PersistenceError> {
@@ -550,6 +573,33 @@ mod tests {
         ));
         fs::create_dir_all(&directory).expect("test directory");
         directory.join("authorization.json")
+    }
+
+    #[test]
+    fn bound_primary_loader_parses_exact_verified_bytes_and_rejects_replacement() {
+        use crate::policy_epoch::encode_bound_policy_checkpoint;
+        let path = test_path();
+        DurableAuthorizationState::new(&path).save(&test_store()).unwrap();
+        let original = fs::read(&path).unwrap();
+        let checkpoint_path = path.with_extension("epoch");
+        fs::write(&checkpoint_path, encode_bound_policy_checkpoint(7, &original).unwrap()).unwrap();
+        let open = || (File::open(&checkpoint_path).unwrap(), File::open(&path).unwrap());
+        let (anchor, policy) = open();
+        let store = DurableAuthorizationState::parse_bound_primary_from_open_files(anchor, policy, 7).unwrap();
+        assert_eq!(store.principal_for_credential(fingerprint(11), 30), Some(id(7)));
+        for wrong_epoch in [0, 6, 8] {
+            let (anchor, policy) = open();
+            assert!(DurableAuthorizationState::parse_bound_primary_from_open_files(anchor, policy, wrong_epoch).is_err());
+        }
+        let mut altered = original.clone();
+        altered.push(b' '); // Still valid JSON, but different bytes at same epoch.
+        fs::write(&path, altered).unwrap();
+        let (anchor, policy) = open();
+        assert!(matches!(
+            DurableAuthorizationState::parse_bound_primary_from_open_files(anchor, policy, 7),
+            Err(PersistenceError::UntrustedPolicyBinding)
+        ));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
