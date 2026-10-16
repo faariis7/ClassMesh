@@ -70,6 +70,11 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let original = dir.join("authorization.json");
         let alias = dir.join("alias.json");
+        assert!(open_single_link_policy_leaf(&dir).is_err());
+        assert_eq!(
+            open_single_link_policy_leaf(&original).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
         fs::write(&original, b"fixed inert fixture").unwrap();
         {
             let file = open_single_link_policy_leaf(&original).unwrap();
