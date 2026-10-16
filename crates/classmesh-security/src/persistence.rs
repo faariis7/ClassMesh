@@ -683,9 +683,7 @@ mod tests {
         fs::rename(&path, &original).unwrap();
         durable.save(&test_store()).unwrap();
         let loaded = DurableAuthorizationState::load_from_open_file(opened).unwrap();
-        assert!(!loaded.authorize_credential(
-            fingerprint(11), Permission::ReadClipboard, 30
-        ));
+        assert!(!loaded.authorize_credential(fingerprint(11), Permission::ReadClipboard, 30));
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
