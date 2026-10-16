@@ -301,6 +301,8 @@ const MAX_BOUND_POLICY_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoundPolicyError {
     InvalidEpoch,
+    /// Independently trusted startup epoch absent or not equal to checkpoint.
+    EpochMismatch,
     InvalidCheckpoint,
     InvalidPolicy,
     DigestMismatch,

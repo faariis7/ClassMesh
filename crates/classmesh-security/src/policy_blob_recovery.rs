@@ -20,6 +20,32 @@ use crate::policy_epoch::{
 /// missing, modified or unreadable blobs fail closed with NO backup fallback.
 /// No in-process policy is published by this helper.
 pub fn recover_committed_policy_from_qualified_handle(
+    qualified_checkpoint: impl Read,
+    open_qualified_blob: impl FnOnce(u64) -> io::Result<File>,
+    maximum_policy_bytes: usize,
+) -> Result<VerifiedPolicyBytes, BoundPolicyError> {
+    recover_committed_policy_inner(
+        None, qualified_checkpoint, open_qualified_blob, maximum_policy_bytes,
+    )
+}
+
+/// Fail-closed startup recovery when a separately authenticated durable epoch
+/// is available. The checkpoint epoch must match BEFORE any blob opener runs.
+/// This helper cannot authenticate the caller-supplied anchor or file HANDLEs.
+/// A mismatch is not an opportunity to scan older blobs or fallback backups.
+pub fn recover_committed_policy_at_trusted_epoch(
+    trusted_epoch: u64,
+    qualified_checkpoint: impl Read,
+    open_qualified_blob: impl FnOnce(u64) -> io::Result<File>,
+    maximum_policy_bytes: usize,
+) -> Result<VerifiedPolicyBytes, BoundPolicyError> {
+    recover_committed_policy_inner(
+        Some(trusted_epoch), qualified_checkpoint, open_qualified_blob, maximum_policy_bytes,
+    )
+}
+
+fn recover_committed_policy_inner(
+    trusted_epoch: Option<u64>,
     mut qualified_checkpoint: impl Read,
     open_qualified_blob: impl FnOnce(u64) -> io::Result<File>,
     maximum_policy_bytes: usize,
@@ -45,6 +71,11 @@ pub fn recover_committed_policy_from_qualified_handle(
     let epoch = u64::from_le_bytes(record[8..16].try_into().expect("fixed-width epoch"));
     if epoch == 0 {
         return Err(BoundPolicyError::InvalidEpoch);
+    }
+    if let Some(trusted) = trusted_epoch {
+        if trusted == 0 || trusted != epoch {
+            return Err(BoundPolicyError::EpochMismatch);
+        }
     }
     let file = open_qualified_blob(epoch).map_err(|_| BoundPolicyError::Unreadable)?;
     verify_bound_policy_checkpoint(record.as_slice(), file, maximum_policy_bytes)
