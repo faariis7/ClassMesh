@@ -68,9 +68,9 @@ pub fn resolve_os_program_data_path() -> io::Result<PathBuf> {
         return Err(invalid());
     }
     // Safety: the first `len` UTF-16 units were read above and remain live.
-    let path = PathBuf::from(OsString::from_wide(unsafe {
-        std::slice::from_raw_parts(raw, len)
-    }));
+    let text = String::from_utf16(unsafe { std::slice::from_raw_parts(raw, len) })
+        .map_err(|_| invalid())?;
+    let path = PathBuf::from(text);
     let drive = matches!(path.components().next(), Some(Component::Prefix(p))
         if matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)));
     if !path.is_absolute()
