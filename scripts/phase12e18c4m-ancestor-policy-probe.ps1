@@ -28,7 +28,7 @@ if (-not $match.Success) {throw 'Reviewed native c4j file predicate not found'}
 $nativeSource=$match.Groups[1].Value
 $id=[Guid]::NewGuid().ToString('N')
 $name='ClassMeshE18c4m'+$id.Substring(0,12)
-$root=Join-Path $env:ProgramData ('classmesh-e18c4k-'+$id)
+$root=Join-Path $env:ProgramData ('classmesh-e18c4m-'+$id)
 $leaf=Join-Path $root 'authorization.json'
 $target=Join-Path $root 'authorization-target.json'
 $witness=Join-Path $root 'service-file.witness'
@@ -96,7 +96,6 @@ public sealed class PolicyFileProbeService : System.ServiceProcess.ServiceBase {
     $out=& sc.exe create $name 'binPath=' $quoted 'start=' 'demand' 'type=' 'own' 'obj=' 'LocalSystem' 2>&1
     if ($LASTEXITCODE -ne 0) {throw "sc create failed $($out -join ';')"}
     $created=$true
-    Invoke-Witness 'SCM_ANCESTOR_PROTECTED_ALLOW' 'ALLOW' 'ALLOW'
     Invoke-Witness 'SCM_ANCESTOR_PROTECTED_ALLOW' 'ALLOW' 'ALLOW'
     NativeAcl $root @('/grant',"$($bu):(OI)(CI)M")
     Invoke-Witness 'SCM_ANCESTOR_USERS_WRITABLE_DENIED' 'OTHER_TRUSTEE_DENIED' 'ALLOW'
