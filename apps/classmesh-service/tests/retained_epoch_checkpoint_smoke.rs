@@ -11,12 +11,14 @@ use classmesh_security::policy_epoch::{
 use classmesh_win32::policy_file_origin::open_protected_policy_leaf;
 
 fn icacls(path: &std::path::Path, args: &[&str]) {
-    assert!(Command::new("icacls.exe")
-        .arg(path)
-        .args(args)
-        .status()
-        .expect("Windows ACL utility")
-        .success());
+    assert!(
+        Command::new("icacls.exe")
+            .arg(path)
+            .args(args)
+            .status()
+            .expect("Windows ACL utility")
+            .success()
+    );
 }
 
 #[test]
