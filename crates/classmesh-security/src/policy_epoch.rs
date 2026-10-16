@@ -492,9 +492,11 @@ pub enum BoundInstallError<E> {
 /// 2. Atomically and durably commit an independently trusted checkpoint
 ///    pointing at those exact staged bytes, with anti-rollback protection.
 /// 3. Publish only after this method returns Ok.
+///
 /// Startup must load the exact blob selected by the trusted checkpoint, never
 /// fallback to a different version or unverified backup. Orphan staged blobs
 /// may be cleaned ONLY after independent trust and recovery qualification.
+///
 /// No Windows filesystem implementation or Service wiring is provided here.
 pub fn stage_then_commit_bound_policy<E>(
     trusted_epoch: u64,
