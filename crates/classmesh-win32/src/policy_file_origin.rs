@@ -76,6 +76,12 @@ mod tests {
             io::ErrorKind::NotFound
         );
         fs::write(&original, b"fixed inert fixture").unwrap();
+        // RED: a regular single-link file owned/writable by the interactive
+        // user is NOT sufficiently protected for policy authorization.
+        assert_eq!(
+            open_protected_policy_leaf(&original).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
         {
             let file = open_single_link_policy_leaf(&original).unwrap();
             assert_eq!(file.metadata().unwrap().len(), 19);
