@@ -47,7 +47,8 @@ pub fn resolve_os_program_data_path() -> io::Result<PathBuf> {
     let _com = ComScope;
     let mut raw: *mut u16 = std::ptr::null_mut();
     // Safety: known GUID, initialized output pointer, and null user token.
-    let hr = unsafe { SHGetKnownFolderPath(&raw const FOLDERID_ProgramData, 0, std::ptr::null_mut(), &raw mut raw) };
+    let folder_id = FOLDERID_ProgramData;
+    let hr = unsafe { SHGetKnownFolderPath(&raw const folder_id, 0, std::ptr::null_mut(), &raw mut raw) };
     let _owned = TaskMem(raw);
     if hr < 0 || raw.is_null() {
         return Err(io::Error::other(format!("ProgramData Known Folder failed: {hr:#x}")));
