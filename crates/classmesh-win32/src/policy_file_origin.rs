@@ -212,9 +212,7 @@ fn attest_restricted_owner_acl(file: &File, directory: bool) -> io::Result<()> {
         const GENERIC_READ: u32 = 0x8000_0000;
         const GENERIC_ALL: u32 = 0x1000_0000;
         let mask = allowed.Mask;
-        if mask & REQUIRED_READ != REQUIRED_READ
-            && mask & (GENERIC_READ | GENERIC_ALL) == 0
-        {
+        if mask & REQUIRED_READ != REQUIRED_READ && mask & (GENERIC_READ | GENERIC_ALL) == 0 {
             return Err(permission_denied());
         }
         let sid = sid_string(sid_ptr)?;
