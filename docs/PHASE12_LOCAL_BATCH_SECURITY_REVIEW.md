@@ -22,16 +22,21 @@ SID, missing SYSTEM/Administrators allowance, or excessive ACE count is denied.
 directory handles together with the policy leaf. A separate, stricter
 `PinnedProgramDataCandidate` also pins a **test** ProgramData prefix.
 `GetFinalPathNameByHandleW` verifies direct-child path relationships using those
-already-open handles; lexical UNC/traversal and reparse paths are denied.
+already-open handles; `GetFileInformationByHandle` additionally requires
+matching volume serial numbers and different file IDs at every pinned parent/
+child edge. Native positive fixture plus synthetic mismatched-volume and
+same-file-ID negative tests pass on VM1/VM2. This does NOT authenticate the
+volume root, mount manager or prior-open races. Lexical UNC/traversal and
+reparse paths are denied.
 The bounded `DurableAuthorizationState::parse_primary_from_open_file` consumes a
 clone of the same trusted candidate HANDLE in the isolated Service-package
 integration tests; no pathname reopen is required to parse those fixtures.
 
 ### Observed Windows evidence
 
-- VM1 ARM64: **six Rust file-origin unit tests PASS** in an actual disposable
+- VM1 ARM64: **seven Rust file-origin unit tests PASS** in an actual disposable
   SCM own-process LocalSystem Service (SID S-1-5-18, session 0).
-- VM2 Windows ARM64 running Windows x64-emulated test binaries: **six Rust
+- VM2 Windows ARM64 running Windows x64-emulated test binaries: **seven Rust
   unit tests PASS** in the same genuine SCM LocalSystem configuration.
 - VM2: **three `classmesh-service` package integration tests PASS**
   under SCM LocalSystem, including pinned ProgramData→ClassMesh→state→leaf
