@@ -165,9 +165,13 @@ impl DurableAuthorizationState {
     }
 
     fn load_from_file(source: &Path) -> Result<AuthorizationStore, PersistenceError> {
-        // Metadata is obtained from the file actually opened, not a separate
-        // by-path metadata lookup (which could race with a file replacement).
-        let file = File::open(source)?;
+        Self::load_from_open_file(File::open(source)?)
+    }
+
+    // The verified Windows policy opener can eventually pass its retained
+    // OS-validated file into this bounded parser without reopening a path.
+    // This private primitive is not evidence that the input HANDLE was trusted.
+    fn load_from_open_file(file: File) -> Result<AuthorizationStore, PersistenceError> {
         let metadata = file.metadata()?;
         let declared = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
         if declared > MAX_STATE_BYTES {
