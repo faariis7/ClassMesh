@@ -1,3 +1,11 @@
+## Local-First Phase12 policy origin batch (unpublished; 2026-10-16)
+
+- Working branch `batch/phase12-policy-origin-qualification` remains LOCAL to Mac checkout, based on merged #507 main `1f499197`; do not infer any GitHub PR/CI from these commits. Current local changes: retained file parser strict malformed/oversize test `e962317`, primary-only refuses absent/malformed primary even when .bak valid `cada0d7`, pure fail-closed monotonic generation decision (NO protected on-disk anchor) `bee7f2e`, Windows native c4p disallowed Users read ACE qualification `100bb65`.
+- Synology Rust fmt/clippy/workspace GREEN after the first three commits. Native disposable Windows VM1 AND VM2 c4p test returned `POLICY_UNTRUSTED_READ_ACE_DENIED` on both, and subsequent independent scan reported zero residual `classmesh-e18c4p-*` directories on each VM. This c4p test is non-Service admin-mode security predicate coverage, NOT production verified origin.
+- Still BLOCKED: production trusted retained HANDLE owner/DACL of entire canonical ancestor chain under LocalSystem, pinned ancestry and cross-directory replacement / TOCTOU / hardlink integrity, persistent independently protected epoch, authorized live reload and Teacher/Worker revocation. Do not wire into production or claim physical two-PC proof. v11 ClipboardRead failure-only; #477/#479 security gates intact.
+
+---
+
 ## Phase 12E18c4n — native policy hardlink-origin qualification fixture (NOT production integration)
 
 - From #505 merged main `e14f1133`, plan FIRST `c19e316`. Test FIRST `9ff5df9`: elevated Windows VM1 and VM2 both actually failed with explicit `RED: exact-handle owner/DACL predicate accepts multiply-linked policy inode`. The c4j/C# fixture checked OWNER/DACL and reparse status but missed native hardlink count.
