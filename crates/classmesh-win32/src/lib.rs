@@ -15,6 +15,8 @@ mod named_pipe;
 #[cfg(windows)]
 pub mod policy_file_origin;
 #[cfg(windows)]
+pub mod protected_app_bootstrap;
+#[cfg(windows)]
 mod power;
 #[cfg(windows)]
 mod sensitive_pipe_listener;
