@@ -1,5 +1,104 @@
 //! Experimental create-only blob staging; NOT a trusted Windows store.
 
+
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+
+const MAX_STAGED_POLICY_BYTES: usize = 4 * 1024 * 1024;
+
+/// A create-only staged candidate. This is NOT an OS-immutable file, a trusted
+/// checkpoint, or proof that its directory metadata has been durably flushed.
+/// The directory must be independently authenticated and protected from all
+/// untrusted mutation BEFORE any caller can rely on the blob's provenance.
+#[derive(Debug)]
+pub struct StagedPolicyBlob {
+    epoch: u64,
+    path: PathBuf,
+    handle: File,
+    expected_digest: [u8; 32],
+}
+
+impl StagedPolicyBlob {
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Read back from the SAME retained file handle; no pathname reopen.
+    /// The returned bytes must still be authenticated by a trusted checkpoint
+    /// before they may be used as an authorization policy.
+    pub fn verify_open_handle(&mut self) -> io::Result<Vec<u8>> {
+        self.handle.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        self.handle
+            .by_ref()
+            .take((MAX_STAGED_POLICY_BYTES as u64) + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.is_empty() || bytes.len() > MAX_STAGED_POLICY_BYTES {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "staged policy size changed"));
+        }
+        let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
+        let mismatch = self
+            .expected_digest
+            .iter()
+            .zip(digest.as_ref().iter())
+            .fold(0_u8, |acc, (expected, actual)| acc | (expected ^ actual));
+        if mismatch != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "staged policy bytes changed"));
+        }
+        Ok(bytes)
+    }
+}
+
+/// Deterministic, filename-only key; no user-controlled path segments.
+pub fn policy_blob_filename(epoch: u64) -> io::Result<String> {
+    if epoch == 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "zero policy epoch"));
+    }
+    Ok(format!("policy-{epoch:016x}.json"))
+}
+
+/// Experimental create-only stage. Refuses preexisting targets, including
+/// symlinks; writes and syncs the file and verifies from its retained handle.
+/// It does NOT sync parent-directory metadata or implement Windows ACL / owner
+/// checks, trusted ancestor pinning, cross-process exclusion or durable anchor.
+/// An error after create_new may leave an orphan; NEVER automatically reuse it.
+pub fn stage_new_policy_blob(
+    trusted_directory: &Path,
+    epoch: u64,
+    policy_bytes: &[u8],
+) -> io::Result<StagedPolicyBlob> {
+    let filename = policy_blob_filename(epoch)?;
+    if policy_bytes.is_empty() || policy_bytes.len() > MAX_STAGED_POLICY_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid policy byte count"));
+    }
+    let path = trusted_directory.join(filename);
+    let mut handle = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    // A failed write/sync leaves a quarantined orphan, not a silently reusable
+    // file or a commit receipt. No overwrite/rename/fallback occurs here.
+    handle.write_all(policy_bytes)?;
+    handle.sync_all()?;
+    let digest = ring::digest::digest(&ring::digest::SHA256, policy_bytes);
+    let mut expected_digest = [0_u8; 32];
+    expected_digest.copy_from_slice(digest.as_ref());
+    let mut staged = StagedPolicyBlob {
+        epoch,
+        path,
+        handle,
+        expected_digest,
+    };
+    staged.verify_open_handle()?;
+    Ok(staged)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -32,7 +131,8 @@ mod tests {
     #[test]
     fn invalid_inputs_have_no_side_effects() {
         let dir = scratch();
-        for (epoch, data) in [(0, b"valid".as_slice()), (3, b"".as_slice()), (3, &vec![0; 4 * 1024 * 1024 + 1])] {
+        let oversized = vec![0; 4 * 1024 * 1024 + 1];
+        for (epoch, data) in [(0, b"valid".as_slice()), (3, b"".as_slice()), (3, oversized.as_slice())] {
             assert!(stage_new_policy_blob(&dir, epoch, data).is_err());
         }
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
