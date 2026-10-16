@@ -833,7 +833,14 @@ mod epoch_blob_tests {
     use std::process::Command;
 
     fn icacls(path: &Path, args: &[&str]) {
-        assert!(Command::new("icacls.exe").arg(path).args(args).status().unwrap().success());
+        assert!(
+            Command::new("icacls.exe")
+                .arg(path)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 
     fn privileged(path: &Path, directory: bool) {
@@ -847,23 +854,41 @@ mod epoch_blob_tests {
 
     #[test]
     fn pinned_epoch_blob_enforces_exact_epoch_and_parent_security() {
-        let fixture = std::env::temp_dir().join(format!("classmesh-epoch-blob-{}", std::process::id()));
+        let fixture =
+            std::env::temp_dir().join(format!("classmesh-epoch-blob-{}", std::process::id()));
         let root = fixture.join("ClassMesh");
         let state = root.join("state");
         fs::create_dir_all(&state).unwrap();
         let leaf = state.join("policy-000000000000002a.json");
         fs::write(&leaf, b"epoch 42").unwrap();
-        for path in [&root, &state] { privileged(path, true); }
+        for path in [&root, &state] {
+            privileged(path, true);
+        }
         privileged(&leaf, false);
         let candidate = open_protected_epoch_policy_in_app_root(&root, 42).unwrap();
         assert_eq!(candidate.epoch(), 42);
         assert_eq!(candidate.with_file(|f| f.metadata().unwrap().len()), 8);
         assert!(fs::rename(&state, root.join("moved-state")).is_err());
         drop(candidate);
-        assert_eq!(open_protected_epoch_policy_in_app_root(&root, 43).unwrap_err().kind(), io::ErrorKind::NotFound);
-        assert_eq!(open_protected_epoch_policy_in_app_root(&root, 0).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            open_protected_epoch_policy_in_app_root(&root, 43)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            open_protected_epoch_policy_in_app_root(&root, 0)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
         icacls(&state, &["/grant", "*S-1-5-32-545:R"]);
-        assert_eq!(open_protected_epoch_policy_in_app_root(&root, 42).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            open_protected_epoch_policy_in_app_root(&root, 42)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
         icacls(&state, &["/remove:g", "*S-1-5-32-545"]);
         assert!(open_protected_epoch_policy_in_app_root(&root, 42).is_ok());
         fs::remove_dir_all(fixture).unwrap();
@@ -871,19 +896,36 @@ mod epoch_blob_tests {
 
     #[test]
     fn rejects_hardlink_and_ambiguous_epoch_paths() {
-        for path in [r"C:\ProgramData\ClassMesh\..\ClassMesh", r"\\host\share\ClassMesh", "ClassMesh"] {
-            assert_eq!(open_protected_epoch_policy_in_app_root(Path::new(path), 42).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        for path in [
+            r"C:\ProgramData\ClassMesh\..\ClassMesh",
+            r"\\host\share\ClassMesh",
+            "ClassMesh",
+        ] {
+            assert_eq!(
+                open_protected_epoch_policy_in_app_root(Path::new(path), 42)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
         }
-        let fixture = std::env::temp_dir().join(format!("classmesh-epoch-hardlink-{}", std::process::id()));
+        let fixture =
+            std::env::temp_dir().join(format!("classmesh-epoch-hardlink-{}", std::process::id()));
         let root = fixture.join("ClassMesh");
         let state = root.join("state");
         fs::create_dir_all(&state).unwrap();
         let leaf = state.join("policy-000000000000002a.json");
         fs::write(&leaf, b"data").unwrap();
         fs::hard_link(&leaf, state.join("alias.json")).unwrap();
-        for path in [&root, &state] { privileged(path, true); }
+        for path in [&root, &state] {
+            privileged(path, true);
+        }
         privileged(&leaf, false);
-        assert_eq!(open_protected_epoch_policy_in_app_root(&root, 42).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            open_protected_epoch_policy_in_app_root(&root, 42)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
         fs::remove_dir_all(fixture).unwrap();
     }
 }
