@@ -164,6 +164,16 @@ impl DurableAuthorizationState {
         Self::load_from_file(&self.path)
     }
 
+    /// Parse a primary authorization candidate from an already-open operating-system
+    /// file handle without reopening the pathname. The caller remains responsible for
+    /// proving the file's origin, owner, ACL, ancestor chain and rollback freshness.
+    /// This method does not grant trust or authorize publishing live policy.
+    pub fn parse_primary_from_open_file(
+        file: File,
+    ) -> Result<AuthorizationStore, PersistenceError> {
+        Self::load_from_open_file(file)
+    }
+
     fn load_from_file(source: &Path) -> Result<AuthorizationStore, PersistenceError> {
         Self::load_from_open_file(File::open(source)?)
     }
@@ -682,7 +692,7 @@ mod tests {
         let original = path.with_extension("held");
         fs::rename(&path, &original).unwrap();
         durable.save(&test_store()).unwrap();
-        let loaded = DurableAuthorizationState::load_from_open_file(opened).unwrap();
+        let loaded = DurableAuthorizationState::parse_primary_from_open_file(opened).unwrap();
         assert!(!loaded.authorize_credential(fingerprint(11), Permission::ReadClipboard, 30));
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
