@@ -614,6 +614,17 @@ mod tests {
         icacls(&policy, &["/remove:g", "*S-1-5-32-545"]);
         assert!(open_protected_policy_leaf(&policy).is_ok());
 
+        // An ACE naming SYSTEM but granting WRITE without READ must not
+        // satisfy the service's ability to read trusted policy bytes.
+        icacls(&policy, &["/grant:r", "*S-1-5-18:W"]);
+        assert_eq!(
+            open_protected_policy_leaf(&policy).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied,
+            "SYSTEM write-only must not qualify as a policy reader"
+        );
+        icacls(&policy, &["/grant:r", "*S-1-5-18:F"]);
+        assert!(open_protected_policy_leaf(&policy).is_ok());
+
         // Removing the SYSTEM allowance must fail even though the elevated
         // Administrators account still has read access to the file.
         icacls(&policy, &["/remove:g", "*S-1-5-18"]);
