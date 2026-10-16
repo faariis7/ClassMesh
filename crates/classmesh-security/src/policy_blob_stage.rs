@@ -149,6 +149,30 @@ mod tests {
     }
 
     #[test]
+    fn changed_staged_bytes_are_rejected_from_retained_handle() {
+        let dir = scratch();
+        let mut staged = stage_new_policy_blob(&dir, 44, b"original").unwrap();
+        staged.handle.seek(SeekFrom::Start(0)).unwrap();
+        staged.handle.write_all(b"modified").unwrap();
+        staged.handle.sync_all().unwrap();
+        assert_eq!(staged.verify_open_handle().unwrap_err().kind(), io::ErrorKind::InvalidData);
+        drop(staged);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn hardlink_precreation_cannot_redirect_create_new() {
+        let dir = scratch();
+        let original = dir.join("preexisting.txt");
+        fs::write(&original, b"untrusted").unwrap();
+        let target = dir.join(policy_blob_filename(45).unwrap());
+        fs::hard_link(&original, &target).unwrap();
+        assert_eq!(stage_new_policy_blob(&dir, 45, b"policy").unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&original).unwrap(), b"untrusted");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn partial_staging_crash_orphan_is_not_reused() {
         let dir = scratch();
         let target = dir.join(policy_blob_filename(43).unwrap());
