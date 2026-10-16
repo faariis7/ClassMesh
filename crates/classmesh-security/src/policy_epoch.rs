@@ -462,3 +462,200 @@ mod bound_checkpoint_contract_tests {
         assert_eq!(verified.policy_bytes(), original);
     }
 }
+
+/// Receipt for the *ordering* of a versioned immutable policy blob and its
+/// checkpoint. This does not authenticate either callback or establish disk
+/// durability; the caller must independently attest and implement both.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CommittedBoundPolicy {
+    epoch: u64,
+}
+
+impl CommittedBoundPolicy {
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum BoundInstallError<E> {
+    InvalidEpoch(PolicyEpochError),
+    InvalidPolicy(BoundPolicyError),
+    Stage(E),
+    Commit(E),
+}
+
+/// Experimental crash-consistent *ordering* contract for an immutable,
+/// versioned policy store. Caller must:
+/// 1. Stage a NEW immutable blob, flush its file and containing directory,
+///    and refuse overwrite/reuse with different bytes; never replace current.
+/// 2. Atomically and durably commit an independently trusted checkpoint
+///    pointing at those exact staged bytes, with anti-rollback protection.
+/// 3. Publish only after this method returns Ok.
+///
+/// Startup must load the exact blob selected by the trusted checkpoint, never
+/// fallback to a different version or unverified backup. Orphan staged blobs
+/// may be cleaned ONLY after independent trust and recovery qualification.
+///
+/// No Windows filesystem implementation or Service wiring is provided here.
+pub fn stage_then_commit_bound_policy<E>(
+    trusted_epoch: u64,
+    candidate_epoch: u64,
+    candidate_policy: &[u8],
+    stage_immutable_and_flush: impl FnOnce(u64, &[u8]) -> Result<(), E>,
+    commit_trusted_checkpoint: impl FnOnce(&[u8; BOUND_POLICY_CHECKPOINT_LEN]) -> Result<(), E>,
+) -> Result<CommittedBoundPolicy, BoundInstallError<E>> {
+    verify_next_policy_epoch(trusted_epoch, candidate_epoch)
+        .map_err(BoundInstallError::InvalidEpoch)?;
+    let checkpoint = encode_bound_policy_checkpoint(candidate_epoch, candidate_policy)
+        .map_err(BoundInstallError::InvalidPolicy)?;
+    stage_immutable_and_flush(candidate_epoch, candidate_policy)
+        .map_err(BoundInstallError::Stage)?;
+    commit_trusted_checkpoint(&checkpoint).map_err(BoundInstallError::Commit)?;
+    Ok(CommittedBoundPolicy {
+        epoch: candidate_epoch,
+    })
+}
+
+#[cfg(test)]
+mod immutable_policy_install_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    const OLD: &[u8] = br#"{"version":1,"principals":[]}"#;
+    const NEW: &[u8] = br#"{"version":1,"principals":[1]}"#;
+
+    struct InMemoryDurableStore {
+        checkpoint: [u8; BOUND_POLICY_CHECKPOINT_LEN],
+        blobs: BTreeMap<u64, Vec<u8>>,
+    }
+
+    impl InMemoryDurableStore {
+        fn initial() -> Self {
+            Self {
+                checkpoint: encode_bound_policy_checkpoint(4, OLD).unwrap(),
+                blobs: BTreeMap::from([(4, OLD.to_vec())]),
+            }
+        }
+
+        fn startup(&self) -> Result<VerifiedPolicyBytes, BoundPolicyError> {
+            let epoch = u64::from_le_bytes(self.checkpoint[8..16].try_into().unwrap());
+            let blob = self
+                .blobs
+                .get(&epoch)
+                .ok_or(BoundPolicyError::InvalidPolicy)?;
+            verify_bound_policy_checkpoint(self.checkpoint.as_slice(), blob.as_slice(), 1024)
+        }
+
+        fn stage(&mut self, epoch: u64, bytes: &[u8]) -> Result<(), &'static str> {
+            if self.blobs.contains_key(&epoch) {
+                return Err("immutable blob already exists");
+            }
+            self.blobs.insert(epoch, bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn crash_after_stage_before_anchor_commit_loads_only_old_policy() {
+        let mut store = InMemoryDurableStore::initial();
+        store.stage(5, NEW).unwrap(); // simulated crash: no anchor commit
+        assert_eq!(store.startup().unwrap().policy_bytes(), OLD);
+        assert_eq!(store.startup().unwrap().epoch(), 4);
+    }
+
+    #[test]
+    fn crash_after_anchor_commit_before_publication_loads_new_policy() {
+        let mut store = InMemoryDurableStore::initial();
+        store.stage(5, NEW).unwrap();
+        store.checkpoint = encode_bound_policy_checkpoint(5, NEW).unwrap();
+        // simulated crash before in-process publication
+        assert_eq!(store.startup().unwrap().policy_bytes(), NEW);
+        assert_eq!(store.startup().unwrap().epoch(), 5);
+    }
+
+    #[test]
+    fn invalid_candidates_never_touch_storage() {
+        for (trusted, next, policy) in [
+            (0, 5, NEW),
+            (4, 4, NEW),
+            (4, 3, NEW),
+            (4, 5, b"".as_slice()),
+        ] {
+            let touched = std::cell::Cell::new(0);
+            let result = stage_then_commit_bound_policy(
+                trusted,
+                next,
+                policy,
+                |_, _| {
+                    touched.set(touched.get() + 1);
+                    Ok::<(), ()>(())
+                },
+                |_| {
+                    touched.set(touched.get() + 1);
+                    Ok::<(), ()>(())
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(touched.get(), 0);
+        }
+    }
+
+    #[test]
+    fn staging_failure_never_commits_and_commit_failure_never_returns_receipt() {
+        let mut committed = false;
+        let result = stage_then_commit_bound_policy(
+            4,
+            5,
+            NEW,
+            |_, _| Err("stage failed"),
+            |_| {
+                committed = true;
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err(BoundInstallError::Stage("stage failed")));
+        assert!(!committed);
+        let result =
+            stage_then_commit_bound_policy(4, 5, NEW, |_, _| Ok(()), |_| Err("commit failed"));
+        assert_eq!(result, Err(BoundInstallError::Commit("commit failed")));
+    }
+
+    #[test]
+    fn successful_install_orders_stage_before_anchor_and_receipt() {
+        use std::cell::RefCell;
+        let events = RefCell::new(Vec::new());
+        let receipt = stage_then_commit_bound_policy(
+            4,
+            5,
+            NEW,
+            |epoch, bytes| {
+                assert_eq!(epoch, 5);
+                assert_eq!(bytes, NEW);
+                events.borrow_mut().push("stage");
+                Ok::<(), ()>(())
+            },
+            |record| {
+                assert_eq!(record, &encode_bound_policy_checkpoint(5, NEW).unwrap());
+                events.borrow_mut().push("commit");
+                Ok::<(), ()>(())
+            },
+        )
+        .unwrap();
+        assert_eq!(receipt.epoch(), 5);
+        assert_eq!(events.into_inner(), ["stage", "commit"]);
+    }
+
+    #[test]
+    fn missing_or_mutated_committed_blob_fails_closed_without_old_version_fallback() {
+        let mut store = InMemoryDurableStore::initial();
+        store.stage(5, NEW).unwrap();
+        store.checkpoint = encode_bound_policy_checkpoint(5, NEW).unwrap();
+        store.blobs.remove(&5);
+        assert!(store.startup().is_err());
+        store.blobs.insert(5, OLD.to_vec());
+        assert!(store.startup().is_err());
+        assert_eq!(store.blobs.get(&4).unwrap(), OLD);
+        assert!(store.stage(4, NEW).is_err());
+    }
+}
