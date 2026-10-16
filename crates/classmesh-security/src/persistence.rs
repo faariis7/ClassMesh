@@ -663,6 +663,29 @@ mod tests {
     }
 
     #[test]
+    fn already_open_policy_handle_cannot_be_redirected_by_path_replacement() {
+        let path = test_path();
+        let durable = DurableAuthorizationState::new(&path);
+        let mut revoked = test_store();
+        let mut teacher = revoked.principal(id(7)).unwrap().clone();
+        teacher.permissions.remove(&Permission::ReadClipboard);
+        revoked.upsert(teacher).unwrap();
+        durable.save(&revoked).unwrap();
+
+        // The trusted Windows opener must eventually hand this exact open
+        // FILE HANDLE to the bounded parser, not a path to open again.
+        let opened = File::open(&path).unwrap();
+        let original = path.with_extension("held");
+        fs::rename(&path, &original).unwrap();
+        durable.save(&test_store()).unwrap();
+        let loaded = DurableAuthorizationState::load_from_open_file(opened).unwrap();
+        assert!(!loaded.authorize_credential(
+            fingerprint(11), Permission::ReadClipboard, 30
+        ));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn corrupted_or_oversized_state_fails_closed() {
         let path = test_path();
         fs::write(&path, br#"{"version":999,"principals":[]}"#).expect("write state");
