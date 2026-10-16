@@ -203,6 +203,20 @@ fn attest_restricted_owner_acl(file: &File, directory: bool) -> io::Result<()> {
         if unsafe { IsValidSid(sid_ptr) } == 0 {
             return Err(permission_denied());
         }
+        // A trusted SID in an ACE with no usable read rights is not an
+        // authorization to consume policy bytes. File READ_DATA and directory
+        // LIST_DIRECTORY share bit 0x0001; READ_CONTROL (0x0002_0000) is
+        // required for the same-HANDLE descriptor check. Explicit GENERIC_READ
+        // and GENERIC_ALL are also sufficient when the ACL was not mapped.
+        const REQUIRED_READ: u32 = 0x0002_0001;
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const GENERIC_ALL: u32 = 0x1000_0000;
+        let mask = allowed.Mask;
+        if mask & REQUIRED_READ != REQUIRED_READ
+            && mask & (GENERIC_READ | GENERIC_ALL) == 0
+        {
+            return Err(permission_denied());
+        }
         let sid = sid_string(sid_ptr)?;
         match sid.as_str() {
             "S-1-5-18" => system = true,
