@@ -126,13 +126,7 @@ pub fn create_new_protected_classmesh_app_root(program_data: &Path) -> io::Resul
     // The existing strict ACL verifier is used for post-create qualification.
     // Parent and child HANDLEs are both retained, but parent trust is unproven.
     let root = super::policy_file_origin::open_protected_directory_for_bootstrap(&path)?;
-    let parent_info = info(&parent)?;
-    let child_info = info(&root)?;
-    if parent_info.dwVolumeSerialNumber != child_info.dwVolumeSerialNumber
-        || (parent_info.nFileIndexHigh == child_info.nFileIndexHigh
-            && parent_info.nFileIndexLow == child_info.nFileIndexLow) {
-        return Err(denied());
-    }
+    super::policy_file_origin::attest_bootstrap_child(&parent, &root)?;
     Ok(CreatedAppRoot { root, _parent: parent })
 }
 

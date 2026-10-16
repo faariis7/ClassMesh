@@ -1099,3 +1099,9 @@ pub fn open_protected_bound_policy_pair_in_app_root(
 pub(crate) fn open_protected_directory_for_bootstrap(path: &Path) -> io::Result<File> {
     open_protected_directory(path)
 }
+
+/// Internal-only same-HANDLE immediate-child adjacency for bootstrap tests.
+/// Does not establish trust in the supplied ProgramData parent.
+pub(crate) fn attest_bootstrap_child(parent: &File, child: &File) -> io::Result<()> {
+    attest_immediate_child(parent, child, "ClassMesh")
+}
