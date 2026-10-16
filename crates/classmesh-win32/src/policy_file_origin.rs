@@ -408,7 +408,12 @@ mod tests {
         let sibling = dir.join("sibling.json");
         fs::write(&sibling, b"fixture").unwrap();
 
-        let held_parent = File::open(&dir).unwrap();
+        let held_parent = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&dir)
+            .unwrap();
         let held_sibling = File::open(&sibling).unwrap();
         assert_eq!(
             attest_immediate_child(&held_parent, &held_sibling, "authorization.json")
