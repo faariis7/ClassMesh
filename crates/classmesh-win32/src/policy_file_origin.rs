@@ -244,6 +244,16 @@ mod tests {
         icacls(&policy, &["/remove:g", "*S-1-5-32-545"]);
         assert!(open_protected_policy_leaf(&policy).is_ok());
 
+        // Removing the SYSTEM allowance must fail even though the elevated
+        // Administrators account still has read access to the file.
+        icacls(&policy, &["/remove:g", "*S-1-5-18"]);
+        assert_eq!(
+            open_protected_policy_leaf(&policy).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        icacls(&policy, &["/grant", "*S-1-5-18:F"]);
+        assert!(open_protected_policy_leaf(&policy).is_ok());
+
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -273,6 +283,14 @@ mod tests {
             let file = open_single_link_policy_leaf(&original).unwrap();
             assert_eq!(file.metadata().unwrap().len(), 19);
         }
+        let reparse = dir.join("redirect.json");
+        std::os::windows::fs::symlink_file(&original, &reparse).unwrap();
+        assert_eq!(
+            open_single_link_policy_leaf(&reparse).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        fs::remove_file(reparse).unwrap();
+
         fs::hard_link(&original, &alias).unwrap();
         assert_eq!(
             open_single_link_policy_leaf(&original).unwrap_err().kind(),
