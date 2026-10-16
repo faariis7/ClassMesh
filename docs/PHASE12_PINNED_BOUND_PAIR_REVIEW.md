@@ -15,3 +15,9 @@
 - **Not production**: `classmesh-service::load_control_state()` is unchanged. No authenticated reload, Worker cancellation, power-loss test, physical two-PC E2E or security-gate closure. Default Windows ProgramData ACLs must not be modified or silently weakened.
 
 **Next:** secure installer-controlled subtree under the actual OS-resolved ProgramData prefix, pinned volume/NT relative directory opens, durable checkpoint CAS and power-loss qualification; only then gated Service activation.
+
+## Follow-up: trusted startup epoch admission (isolated pure Rust)
+
+`recover_committed_policy_at_trusted_epoch(trusted_epoch, qualified_checkpoint, qualified_blob_opener, max_bytes)` is a separate opt-in recovery helper. It parses the fixed V2 checkpoint first, and if the caller-supplied trusted epoch is zero or differs from the checkpoint, it returns `BoundPolicyError::EpochMismatch` **before invoking the blob opener**. On equality it still performs exact bounded digest validation. The original `recover_committed_policy_from_qualified_handle` remains unchanged for compatibility. RED/GREEN tests assert no opener side effects on mismatch and digest rejection on tampering.
+
+**Critical:** this helper does not establish where the `trusted_epoch` came from, whether it is monotonic or durable, nor whether the checkpoint/blob HANDLEs are trustworthy. It is not wired into production Service startup or policy publication.
