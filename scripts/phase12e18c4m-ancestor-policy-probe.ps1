@@ -106,7 +106,8 @@ public sealed class PolicyFileProbeService : System.ServiceProcess.ServiceBase {
     Rename-Item -LiteralPath $root -NewName (Split-Path $other -Leaf)
     New-Item -ItemType Junction -Path $root -Target $other -ErrorAction Stop | Out-Null
     Invoke-Witness 'SCM_ANCESTOR_REPARSE_DENIED' 'REPARSE_DENIED' 'ALLOW'
-    Remove-Item -LiteralPath $root -Force
+    & cmd.exe /d /c rmdir $root
+    if ($LASTEXITCODE -ne 0) { throw 'junction removal failed' }
     Rename-Item -LiteralPath $other -NewName (Split-Path $root -Leaf)
 
 } finally {
@@ -121,7 +122,10 @@ public sealed class PolicyFileProbeService : System.ServiceProcess.ServiceBase {
     }
     if (Test-Path -LiteralPath $root) {
         $item=Get-Item -LiteralPath $root -Force
-        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { Remove-Item -LiteralPath $root -Force -ErrorAction Stop }
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            & cmd.exe /d /c rmdir $root
+            if ($LASTEXITCODE -ne 0) { throw 'junction cleanup failed' }
+        }
         else { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop }
     }
     if (Test-Path -LiteralPath $other) {Remove-Item -LiteralPath $other -Recurse -Force -ErrorAction Stop}
