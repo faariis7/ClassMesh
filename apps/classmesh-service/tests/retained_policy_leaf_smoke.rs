@@ -10,7 +10,9 @@ use std::process::Command;
 
 use classmesh_security::persistence::DurableAuthorizationState;
 use classmesh_security::{AuthorizationStore, Permission, Principal, PrincipalId, PrincipalKind};
-use classmesh_win32::policy_file_origin::open_protected_policy_leaf;
+use classmesh_win32::policy_file_origin::{
+    open_protected_policy_in_app_root, open_protected_policy_leaf,
+};
 
 fn icacls(path: &Path, options: &[&str]) {
     let status = Command::new("icacls.exe")
@@ -75,4 +77,60 @@ fn protected_leaf_passes_retained_handle_to_bounded_parser() {
         io::ErrorKind::PermissionDenied
     );
     fs::remove_dir_all(folder).unwrap();
+}
+
+#[test]
+fn pinned_protected_subtree_keeps_original_authorization_during_parse() {
+    let fixture = std::env::temp_dir().join(format!(
+        "classmesh-service-pinned-subtree-{}",
+        std::process::id()
+    ));
+    let app = fixture.join("ClassMesh");
+    let state = app.join("state");
+    fs::create_dir_all(&state).unwrap();
+    let path = state.join("authorization.json");
+    let durable = DurableAuthorizationState::new(&path);
+    let principal = PrincipalId([88; 32]);
+    let mut store = AuthorizationStore::default();
+    store
+        .upsert(Principal {
+            id: principal,
+            kind: PrincipalKind::Teacher,
+            enabled: true,
+            permissions: BTreeSet::from([Permission::ViewMonitoring]),
+            credentials: BTreeMap::new(),
+        })
+        .unwrap();
+    durable.save(&store).unwrap();
+    for directory in [&app, &state] {
+        icacls(
+            directory,
+            &[
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-5-18:(OI)(CI)F",
+                "*S-1-5-32-544:(OI)(CI)F",
+            ],
+        );
+        icacls(directory, &["/setowner", "*S-1-5-32-544"]);
+    }
+    icacls(
+        &path,
+        &["/inheritance:r", "/grant:r", "*S-1-5-18:F", "*S-1-5-32-544:F"],
+    );
+    icacls(&path, &["/setowner", "*S-1-5-32-544"]);
+
+    let pinned = open_protected_policy_in_app_root(&app).unwrap();
+    let loaded = pinned.with_file(|file| {
+        DurableAuthorizationState::parse_primary_from_open_file(file.try_clone().unwrap())
+    });
+    assert!(loaded.unwrap().principal(principal).unwrap().enabled);
+    drop(pinned);
+
+    icacls(&state, &["/grant", "*S-1-5-32-545:R"]);
+    assert_eq!(
+        open_protected_policy_in_app_root(&app).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    fs::remove_dir_all(fixture).unwrap();
 }
