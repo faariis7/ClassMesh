@@ -19,6 +19,8 @@ mod power;
 #[cfg(windows)]
 pub mod protected_app_bootstrap;
 #[cfg(windows)]
+pub mod program_data_known_folder;
+#[cfg(windows)]
 mod sensitive_pipe_listener;
 #[cfg(windows)]
 mod session;
