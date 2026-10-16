@@ -42,8 +42,11 @@ integration tests; no pathname reopen is required to parse those fixtures.
 
 ## Blocking security gaps (DO NOT enable production reload)
 
-1. The real **C:\\ProgramData** on VM1 has default Users ACL grants, including
-   an apparent WRITE entry. The strict experimental ProgramData gate correctly
+1. The real **C:\\ProgramData** on VM1 was read without mutation: owner
+   `NT AUTHORITY\SYSTEM`, with `BUILTIN\Users` `ReadAndExecute` (OI,CI)
+   and **Write (ContainerInherit)** explicit allowed ACEs, plus
+   `CREATOR OWNER` (InheritOnly) and SYSTEM/Admin FullControl. The Users
+   Write ACE is therefore not just an ambiguous formatting artifact. The strict experimental ProgramData gate correctly
    fails closed for extra trustees. Do **not** weaken it or alter Windows global
    permissions to make tests pass; design an installer-verified app-root bootstrap
    and account for Windows directory-specific create vs delete-child rights.
