@@ -189,7 +189,6 @@ mod transition_contract_tests {
     }
 }
 
-
 const POLICY_EPOCH_CHECKPOINT_MAGIC: &[u8; 8] = b"CMPECH01";
 const POLICY_EPOCH_CHECKPOINT_LEN: usize = 16;
 
@@ -220,7 +219,6 @@ pub fn encode_policy_epoch_checkpoint(
 pub fn parse_policy_epoch_checkpoint(
     mut source: impl std::io::Read,
 ) -> Result<u64, PolicyEpochCheckpointError> {
-    use std::io::Read;
     let mut bytes = [0_u8; POLICY_EPOCH_CHECKPOINT_LEN];
     source
         .read_exact(&mut bytes)
@@ -279,7 +277,9 @@ mod checkpoint_contract_tests {
         struct Bytewise<'a>(&'a [u8]);
         impl std::io::Read for Bytewise<'_> {
             fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
-                if self.0.is_empty() || output.is_empty() { return Ok(0); }
+                if self.0.is_empty() || output.is_empty() {
+                    return Ok(0);
+                }
                 output[0] = self.0[0];
                 self.0 = &self.0[1..];
                 Ok(1)
