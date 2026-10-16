@@ -698,6 +698,49 @@ mod tests {
     }
 
     #[test]
+    fn primary_only_loader_never_recovers_from_backup() {
+        let path = test_path();
+        let durable = DurableAuthorizationState::new(&path);
+        durable.save(&test_store()).unwrap();
+        let backup = sibling_with_suffix(&path, ".bak");
+        fs::copy(&path, &backup).unwrap();
+
+        fs::remove_file(&path).unwrap();
+        assert!(matches!(
+            durable.load_primary_only(),
+            Err(PersistenceError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound
+        ));
+
+        fs::write(&path, b"{invalid policy").unwrap();
+        assert!(matches!(
+            durable.load_primary_only(),
+            Err(PersistenceError::Json(_))
+        ));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn retained_primary_parser_rejects_corrupted_and_oversized_inputs() {
+        let path = test_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"{not valid json").unwrap();
+        let opened = File::open(&path).unwrap();
+        assert!(matches!(
+            DurableAuthorizationState::parse_primary_from_open_file(opened),
+            Err(PersistenceError::Json(_))
+        ));
+
+        fs::write(&path, vec![b' '; MAX_STATE_BYTES + 1]).unwrap();
+        let opened = File::open(&path).unwrap();
+        assert!(matches!(
+            DurableAuthorizationState::parse_primary_from_open_file(opened),
+            Err(PersistenceError::StateTooLarge { .. })
+        ));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn corrupted_or_oversized_state_fails_closed() {
         let path = test_path();
         fs::write(&path, br#"{"version":999,"principals":[]}"#).expect("write state");

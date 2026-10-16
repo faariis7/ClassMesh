@@ -13,6 +13,8 @@ mod input;
 #[cfg(windows)]
 mod named_pipe;
 #[cfg(windows)]
+pub mod policy_file_origin;
+#[cfg(windows)]
 mod power;
 #[cfg(windows)]
 mod sensitive_pipe_listener;
