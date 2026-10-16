@@ -52,7 +52,9 @@ impl fmt::Display for PersistenceError {
         match self {
             Self::Io(error) => write!(f, "security state I/O failed: {error}"),
             Self::Json(error) => write!(f, "security state JSON failed: {error}"),
-            Self::UntrustedPolicyBinding => f.write_str("policy checkpoint or trusted epoch binding rejected"),
+            Self::UntrustedPolicyBinding => {
+                f.write_str("policy checkpoint or trusted epoch binding rejected")
+            }
             Self::StateTooLarge { bytes, maximum } => {
                 write!(f, "security state is {bytes} bytes; maximum is {maximum}")
             }
@@ -579,17 +581,40 @@ mod tests {
     fn bound_primary_loader_parses_exact_verified_bytes_and_rejects_replacement() {
         use crate::policy_epoch::encode_bound_policy_checkpoint;
         let path = test_path();
-        DurableAuthorizationState::new(&path).save(&test_store()).unwrap();
+        DurableAuthorizationState::new(&path)
+            .save(&test_store())
+            .unwrap();
         let original = fs::read(&path).unwrap();
         let checkpoint_path = path.with_extension("epoch");
-        fs::write(&checkpoint_path, encode_bound_policy_checkpoint(7, &original).unwrap()).unwrap();
-        let open = || (File::open(&checkpoint_path).unwrap(), File::open(&path).unwrap());
+        fs::write(
+            &checkpoint_path,
+            encode_bound_policy_checkpoint(7, &original).unwrap(),
+        )
+        .unwrap();
+        let open = || {
+            (
+                File::open(&checkpoint_path).unwrap(),
+                File::open(&path).unwrap(),
+            )
+        };
         let (anchor, policy) = open();
-        let store = DurableAuthorizationState::parse_bound_primary_from_open_files(anchor, policy, 7).unwrap();
-        assert_eq!(store.principal_for_credential(fingerprint(11), 30), Some(id(7)));
+        let store =
+            DurableAuthorizationState::parse_bound_primary_from_open_files(anchor, policy, 7)
+                .unwrap();
+        assert_eq!(
+            store.principal_for_credential(fingerprint(11), 30),
+            Some(id(7))
+        );
         for wrong_epoch in [0, 6, 8] {
             let (anchor, policy) = open();
-            assert!(DurableAuthorizationState::parse_bound_primary_from_open_files(anchor, policy, wrong_epoch).is_err());
+            assert!(
+                DurableAuthorizationState::parse_bound_primary_from_open_files(
+                    anchor,
+                    policy,
+                    wrong_epoch
+                )
+                .is_err()
+            );
         }
         let mut altered = original.clone();
         altered.push(b' '); // Still valid JSON, but different bytes at same epoch.

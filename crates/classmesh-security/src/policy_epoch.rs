@@ -291,7 +291,6 @@ mod checkpoint_contract_tests {
     }
 }
 
-
 /// V2 binds the *exact* policy bytes to a separately protected epoch anchor.
 /// SHA-256 is unkeyed: this is not authentication unless the checkpoint's
 /// provenance is independently established by the caller.
@@ -340,7 +339,8 @@ pub fn encode_bound_policy_checkpoint(
     let mut record = [0_u8; BOUND_POLICY_CHECKPOINT_LEN];
     record[..8].copy_from_slice(BOUND_POLICY_CHECKPOINT_MAGIC);
     record[8..16].copy_from_slice(&epoch.to_le_bytes());
-    record[16..].copy_from_slice(ring::digest::digest(&ring::digest::SHA256, policy_bytes).as_ref());
+    record[16..]
+        .copy_from_slice(ring::digest::digest(&ring::digest::SHA256, policy_bytes).as_ref());
     Ok(record)
 }
 
@@ -358,7 +358,11 @@ pub fn verify_bound_policy_checkpoint(
         .read_exact(&mut record)
         .map_err(|_| BoundPolicyError::Unreadable)?;
     let mut extra = [0_u8; 1];
-    if checkpoint.read(&mut extra).map_err(|_| BoundPolicyError::Unreadable)? != 0 {
+    if checkpoint
+        .read(&mut extra)
+        .map_err(|_| BoundPolicyError::Unreadable)?
+        != 0
+    {
         return Err(BoundPolicyError::InvalidCheckpoint);
     }
     if &record[..8] != BOUND_POLICY_CHECKPOINT_MAGIC {
@@ -383,7 +387,9 @@ pub fn verify_bound_policy_checkpoint(
     let mismatch = record[16..]
         .iter()
         .zip(actual.as_ref().iter())
-        .fold(0_u8, |acc, (expected, observed)| acc | (expected ^ observed));
+        .fold(0_u8, |acc, (expected, observed)| {
+            acc | (expected ^ observed)
+        });
     if mismatch != 0 {
         return Err(BoundPolicyError::DigestMismatch);
     }
@@ -399,12 +405,16 @@ mod bound_checkpoint_contract_tests {
         let original = br#"{"version":1,"principals":[]}"#;
         let checkpoint = encode_bound_policy_checkpoint(17, original).unwrap();
         assert_eq!(checkpoint.len(), 48);
-        let verified = verify_bound_policy_checkpoint(checkpoint.as_slice(), original.as_slice(), 1024)
-            .unwrap();
+        let verified =
+            verify_bound_policy_checkpoint(checkpoint.as_slice(), original.as_slice(), 1024)
+                .unwrap();
         assert_eq!(verified.epoch(), 17);
         assert_eq!(verified.policy_bytes(), original);
         let modified = br#"{"version":1,"principals":[1]}"#;
-        assert!(verify_bound_policy_checkpoint(checkpoint.as_slice(), modified.as_slice(), 1024).is_err());
+        assert!(
+            verify_bound_policy_checkpoint(checkpoint.as_slice(), modified.as_slice(), 1024)
+                .is_err()
+        );
     }
 
     #[test]
@@ -414,14 +424,20 @@ mod bound_checkpoint_contract_tests {
         let v1 = encode_policy_epoch_checkpoint(19).unwrap();
         assert!(verify_bound_policy_checkpoint(v1.as_slice(), original.as_slice(), 1024).is_err());
         for len in 0..valid.len() {
-            assert!(verify_bound_policy_checkpoint(&valid[..len], original.as_slice(), 1024).is_err());
+            assert!(
+                verify_bound_policy_checkpoint(&valid[..len], original.as_slice(), 1024).is_err()
+            );
         }
         let mut trailing = valid.to_vec();
         trailing.push(0);
-        assert!(verify_bound_policy_checkpoint(trailing.as_slice(), original.as_slice(), 1024).is_err());
+        assert!(
+            verify_bound_policy_checkpoint(trailing.as_slice(), original.as_slice(), 1024).is_err()
+        );
         let mut zero = valid;
         zero[8..16].fill(0);
-        assert!(verify_bound_policy_checkpoint(zero.as_slice(), original.as_slice(), 1024).is_err());
+        assert!(
+            verify_bound_policy_checkpoint(zero.as_slice(), original.as_slice(), 1024).is_err()
+        );
         assert!(verify_bound_policy_checkpoint(valid.as_slice(), original.as_slice(), 5).is_err());
         assert!(encode_bound_policy_checkpoint(0, original).is_err());
     }
@@ -431,7 +447,9 @@ mod bound_checkpoint_contract_tests {
         struct Bytewise<'a>(&'a [u8]);
         impl std::io::Read for Bytewise<'_> {
             fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
-                if self.0.is_empty() || output.is_empty() { return Ok(0); }
+                if self.0.is_empty() || output.is_empty() {
+                    return Ok(0);
+                }
                 output[0] = self.0[0];
                 self.0 = &self.0[1..];
                 Ok(1)
@@ -439,7 +457,8 @@ mod bound_checkpoint_contract_tests {
         }
         let original = b"policy contents";
         let valid = encode_bound_policy_checkpoint(20, original).unwrap();
-        let verified = verify_bound_policy_checkpoint(Bytewise(&valid), Bytewise(original), 64).unwrap();
+        let verified =
+            verify_bound_policy_checkpoint(Bytewise(&valid), Bytewise(original), 64).unwrap();
         assert_eq!(verified.policy_bytes(), original);
     }
 }

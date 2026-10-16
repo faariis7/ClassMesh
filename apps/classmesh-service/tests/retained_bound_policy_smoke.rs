@@ -4,18 +4,20 @@ use std::fs;
 use std::io;
 use std::process::Command;
 
-use classmesh_security::persistence::{DurableAuthorizationState, PersistenceError};
 use classmesh_security::PrincipalId;
+use classmesh_security::persistence::{DurableAuthorizationState, PersistenceError};
 use classmesh_security::policy_epoch::encode_bound_policy_checkpoint;
 use classmesh_win32::policy_file_origin::open_protected_policy_leaf;
 
 fn icacls(path: &std::path::Path, args: &[&str]) {
-    assert!(Command::new("icacls.exe")
-        .arg(path)
-        .args(args)
-        .status()
-        .expect("native Windows ACL tool")
-        .success());
+    assert!(
+        Command::new("icacls.exe")
+            .arg(path)
+            .args(args)
+            .status()
+            .expect("native Windows ACL tool")
+            .success()
+    );
 }
 
 fn protect(path: &std::path::Path) {
@@ -44,7 +46,11 @@ fn bound_policy_uses_two_retained_protected_handles_and_rejects_tampering() {
     let anchor = fixture.join("epoch-v2.bin");
     let original = br#"{"version":1,"principals":[]}"#;
     fs::write(&policy, original).unwrap();
-    fs::write(&anchor, encode_bound_policy_checkpoint(31, original).unwrap()).unwrap();
+    fs::write(
+        &anchor,
+        encode_bound_policy_checkpoint(31, original).unwrap(),
+    )
+    .unwrap();
     for path in [&policy, &anchor] {
         assert_eq!(
             open_protected_policy_leaf(path).unwrap_err().kind(),
@@ -70,7 +76,11 @@ fn bound_policy_uses_two_retained_protected_handles_and_rejects_tampering() {
         open_protected_policy_leaf(&policy).unwrap(),
     );
     assert!(matches!(
-        DurableAuthorizationState::parse_bound_primary_from_open_files(anchor_handle, policy_handle, 30),
+        DurableAuthorizationState::parse_bound_primary_from_open_files(
+            anchor_handle,
+            policy_handle,
+            30
+        ),
         Err(PersistenceError::UntrustedPolicyBinding)
     ));
     icacls(&policy, &["/grant", "*S-1-5-32-545:R"]);
