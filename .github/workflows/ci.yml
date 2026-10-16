@@ -130,6 +130,10 @@ jobs:
         shell: pwsh
         run: .\scripts\phase12e18c4k-scm-policy-probe.ps1 -Mode Help
 
+      - name: Validate Phase 12E18c4m ancestor policy probe help (no privileged action)
+        shell: pwsh
+        run: .\scripts\phase12e18c4m-ancestor-policy-probe.ps1 -Mode Help
+
       - name: Build Phase 7 multicast probe
         run: cargo build -p classmesh-lab --bin classmesh-multicast-probe --release
 

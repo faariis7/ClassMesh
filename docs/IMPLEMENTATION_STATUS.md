@@ -1,3 +1,11 @@
+## Phase 12E18c4m — disposable SCM ancestor negative tests (VMs qualified; CI pending)
+
+- PLAN FIRST `282d8de`; missing-script RED `9800afb` verified on macOS PowerShell (NOT a native Windows security RED). Implemented separate disposable SCM LocalSystem Session0 probe, added Windows CI Help-only smoke and repaired an observed native Windows Junction cleanup NullReferenceException in `d8f49c4`.
+- Native Windows 11 VM2 and VM1 **independently** ran the PowerShell test wrapper elevated; both `SCM_ANCESTOR_POLICY_PROBE_PASS` proving protected policy test directory allow, Users-writable parent denial and test-directory Junction/reparse denial by actual SCM LocalSystem process using existing native same-HANDLE predicate. After fixing cleanup, independently confirmed **0 remaining `ClassMeshE18c4m*` services and 0 `classmesh-e18c4m-*` directories** on BOTH VMs. These are virtual Windows machines, NOT two physical computers.
+- Test harness ONLY; no production Service origin reader/path ancestor pinning, policy parse from verified HANDLE, arbitrary ancestor rename and hardlink race protection, persistent monotonic generation, trusted live reload or midflight Teacher/Worker cancellation. Protocol v11 ClipboardRead remains failure-only, #477 intentionally open, #479 section HANDLE secret bootstrap forbidden. Require final same-HEAD hosted Windows Build and Portable Rust success and complete security review before merge.
+
+---
+
 ## Phase 12E18c4l — retained open-file parser foundation (IN PROGRESS; NOT production path trust)
 
 - From merged #503 main `4400319d`, plan-first `46fa3a0`, test-first `6c1b476` actually failed on Synology Rust E0599 (no open-file parser), then private bounded `load_from_open_file(File)` refactor `88af974` made the exact focused test GREEN. The test opens a revoked-policy file, renames it, replaces the canonical path with a more permissive policy, then proves parsing of the pre-opened file does **not** follow the replacement path. Existing path-based loaders still delegate to the private file-handle parser.
