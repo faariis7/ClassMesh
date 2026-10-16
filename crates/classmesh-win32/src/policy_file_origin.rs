@@ -330,10 +330,26 @@ fn resolved_handle_path(file: &File) -> io::Result<String> {
     String::from_utf16(&name[..written as usize]).map_err(|_| permission_denied())
 }
 
+fn attest_same_volume_distinct_file_ids(
+    parent: &BY_HANDLE_FILE_INFORMATION,
+    child: &BY_HANDLE_FILE_INFORMATION,
+) -> io::Result<()> {
+    let same_volume = parent.dwVolumeSerialNumber == child.dwVolumeSerialNumber;
+    let same_file = parent.nFileIndexHigh == child.nFileIndexHigh
+        && parent.nFileIndexLow == child.nFileIndexLow;
+    if !same_volume || same_file {
+        return Err(permission_denied());
+    }
+    Ok(())
+}
+
 fn attest_immediate_child(parent: &File, child: &File, leaf: &str) -> io::Result<()> {
     if leaf.is_empty() || leaf.contains(['/', '\\']) || leaf == "." || leaf == ".." {
         return Err(permission_denied());
     }
+    let parent_info = information_from_handle(parent)?;
+    let child_info = information_from_handle(child)?;
+    attest_same_volume_distinct_file_ids(&parent_info, &child_info)?;
     let parent_name = resolved_handle_path(parent)?;
     let child_name = resolved_handle_path(child)?;
     let expected = format!("{}\\{}", parent_name.trim_end_matches('\\'), leaf);
@@ -407,6 +423,47 @@ mod tests {
                 io::ErrorKind::PermissionDenied
             );
         }
+    }
+
+    #[test]
+    fn ancestry_requires_same_volume_and_distinct_file_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "classmesh-volume-witness-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let child = dir.join("child.json");
+        fs::write(&child, b"inert").unwrap();
+        let held_parent = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&dir)
+            .unwrap();
+        let held_child = File::open(&child).unwrap();
+        let parent_info = information_from_handle(&held_parent).unwrap();
+        let child_info = information_from_handle(&held_child).unwrap();
+        assert!(attest_same_volume_distinct_file_ids(&parent_info, &child_info).is_ok());
+        assert!(attest_immediate_child(&held_parent, &held_child, "child.json").is_ok());
+
+        let mut other_volume = child_info;
+        other_volume.dwVolumeSerialNumber ^= 1;
+        assert_eq!(
+            attest_same_volume_distinct_file_ids(&parent_info, &other_volume)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            attest_same_volume_distinct_file_ids(&parent_info, &parent_info)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        drop(held_child);
+        drop(held_parent);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
