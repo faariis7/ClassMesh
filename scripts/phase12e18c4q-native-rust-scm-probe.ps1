@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory=$true)][string]$RustTestExe
+    [Parameter(Mandatory=$true)][string]$RustTestExe,
+    [ValidatePattern('^[A-Za-z0-9_:]*$')][string]$TestFilter = 'policy_file_origin::tests',
+    [ValidateRange(1,64)][int]$ExpectedPassCount = 4
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
@@ -54,7 +56,7 @@ public sealed class ClassMeshNativeRustService : ServiceBase {
         try {
             using (Process p = new Process()) {
                 p.StartInfo.FileName = @"__BINARY__";
-                p.StartInfo.Arguments = "policy_file_origin::tests --test-threads=1";
+                p.StartInfo.Arguments = "__FILTER__ --test-threads=1";
                 p.StartInfo.UseShellExecute = false;
                 p.StartInfo.CreateNoWindow = true;
                 p.StartInfo.RedirectStandardOutput = true;
@@ -78,7 +80,7 @@ public sealed class ClassMeshNativeRustService : ServiceBase {
     protected override void OnStop() {}
 }
 '@
-    $source=$source.Replace('__NAME__',$name).Replace('__BINARY__',$binary).Replace('__WITNESS__',$witness)
+    $source=$source.Replace('__NAME__',$name).Replace('__BINARY__',$binary).Replace('__WITNESS__',$witness).Replace('__FILTER__',$TestFilter)
     Add-Type -TypeDefinition $source -OutputAssembly $serviceExe -OutputType ConsoleApplication -ReferencedAssemblies 'System.ServiceProcess.dll' -ErrorAction Stop
     NativeAcl $serviceExe @('/inheritance:r','/grant:r','*S-1-5-18:F','*S-1-5-32-544:F')
     $sc=& sc.exe create $name 'binPath=' ('"'+$serviceExe+'"') 'start=' 'demand' 'type=' 'own' 'obj=' 'LocalSystem' 2>&1
@@ -94,7 +96,7 @@ public sealed class ClassMeshNativeRustService : ServiceBase {
     }
     $content=[IO.File]::ReadAllText($witness)
     if (-not $content.Contains("SID=S-1-5-18`nSESSION=0`nEXIT=0`n") -or
-        -not $content.Contains('test result: ok. 4 passed; 0 failed')) {
+        -not $content.Contains("test result: ok. $ExpectedPassCount passed; 0 failed")) {
         throw "Unqualified SCM Rust native result: $content"
     }
     $svc=Get-CimInstance Win32_Service -Filter ("Name='"+$name+"'")
@@ -102,7 +104,7 @@ public sealed class ClassMeshNativeRustService : ServiceBase {
         $svc.StartName -notin @('LocalSystem','NT AUTHORITY\SYSTEM') -or $svc.ProcessId -le 0) {
         throw 'Failed SCM LocalSystem own-process verification'
     }
-    'SCM_NATIVE_RUST_LOCALSYSTEM_4_PASS'
+    "SCM_NATIVE_RUST_LOCALSYSTEM_$($ExpectedPassCount)_PASS"
 } finally {
     if ($created) {
         try {
