@@ -291,6 +291,98 @@ mod checkpoint_contract_tests {
     }
 }
 
+
+/// V2 binds the *exact* policy bytes to a separately protected epoch anchor.
+/// SHA-256 is unkeyed: this is not authentication unless the checkpoint's
+/// provenance is independently established by the caller.
+const BOUND_POLICY_CHECKPOINT_MAGIC: &[u8; 8] = b"CMPBND02";
+const BOUND_POLICY_CHECKPOINT_LEN: usize = 48;
+const MAX_BOUND_POLICY_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundPolicyError {
+    InvalidEpoch,
+    InvalidCheckpoint,
+    InvalidPolicy,
+    DigestMismatch,
+    Unreadable,
+}
+
+/// The exact byte buffer which passed the checkpoint digest check.
+/// Not an authorization capability: caller must attest both open HANDLEs and
+/// parse these same bytes without reopening or rereading a pathname.
+#[derive(Debug)]
+pub struct VerifiedPolicyBytes {
+    epoch: u64,
+    bytes: Vec<u8>,
+}
+
+impl VerifiedPolicyBytes {
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn policy_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+pub fn encode_bound_policy_checkpoint(
+    epoch: u64,
+    policy_bytes: &[u8],
+) -> Result<[u8; BOUND_POLICY_CHECKPOINT_LEN], BoundPolicyError> {
+    if epoch == 0 {
+        return Err(BoundPolicyError::InvalidEpoch);
+    }
+    if policy_bytes.is_empty() || policy_bytes.len() > MAX_BOUND_POLICY_BYTES {
+        return Err(BoundPolicyError::InvalidPolicy);
+    }
+    let mut record = [0_u8; BOUND_POLICY_CHECKPOINT_LEN];
+    record[..8].copy_from_slice(BOUND_POLICY_CHECKPOINT_MAGIC);
+    record[8..16].copy_from_slice(&epoch.to_le_bytes());
+    record[16..].copy_from_slice(ring::digest::digest(&ring::digest::SHA256, policy_bytes).as_ref());
+    Ok(record)
+}
+
+/// Bounded exact-record reader + exact-policy-byte digest binding.
+/// Rejects the legacy 16-byte V1 checkpoint, never falls back to backups,
+/// and does not open paths. Both readers must already be OS-attested.
+pub fn verify_bound_policy_checkpoint(
+    mut checkpoint: impl std::io::Read,
+    mut policy: impl std::io::Read,
+    maximum_policy_bytes: usize,
+) -> Result<VerifiedPolicyBytes, BoundPolicyError> {
+    use std::io::Read;
+    let mut record = [0_u8; BOUND_POLICY_CHECKPOINT_LEN];
+    checkpoint
+        .read_exact(&mut record)
+        .map_err(|_| BoundPolicyError::Unreadable)?;
+    let mut extra = [0_u8; 1];
+    if checkpoint.read(&mut extra).map_err(|_| BoundPolicyError::Unreadable)? != 0 {
+        return Err(BoundPolicyError::InvalidCheckpoint);
+    }
+    if &record[..8] != BOUND_POLICY_CHECKPOINT_MAGIC {
+        return Err(BoundPolicyError::InvalidCheckpoint);
+    }
+    let epoch = u64::from_le_bytes(record[8..16].try_into().expect("fixed-width epoch"));
+    if epoch == 0 {
+        return Err(BoundPolicyError::InvalidEpoch);
+    }
+    let bound = maximum_policy_bytes.min(MAX_BOUND_POLICY_BYTES);
+    let mut bytes = Vec::new();
+    policy
+        .take(u64::try_from(bound).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| BoundPolicyError::Unreadable)?;
+    if bytes.is_empty() || bytes.len() > bound {
+        return Err(BoundPolicyError::InvalidPolicy);
+    }
+    let actual = ring::digest::digest(&ring::digest::SHA256, &bytes);
+    ring::constant_time::verify_slices_are_equal(&record[16..], actual.as_ref())
+        .map_err(|_| BoundPolicyError::DigestMismatch)?;
+    Ok(VerifiedPolicyBytes { epoch, bytes })
+}
+
 #[cfg(test)]
 mod bound_checkpoint_contract_tests {
     use super::*;
