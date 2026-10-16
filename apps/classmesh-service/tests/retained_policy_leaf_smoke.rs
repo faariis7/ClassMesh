@@ -11,7 +11,8 @@ use std::process::Command;
 use classmesh_security::persistence::DurableAuthorizationState;
 use classmesh_security::{AuthorizationStore, Permission, Principal, PrincipalId, PrincipalKind};
 use classmesh_win32::policy_file_origin::{
-    open_protected_epoch_policy_in_app_root, open_protected_policy_in_app_root,
+    open_protected_bound_policy_pair_in_app_root, open_protected_epoch_policy_in_app_root,
+    open_protected_policy_in_app_root,
     open_protected_policy_in_program_data, open_protected_policy_leaf,
 };
 
@@ -299,5 +300,48 @@ fn protected_epoch_blob_matches_v2_checkpoint_on_same_pinned_handle() {
             .kind(),
         io::ErrorKind::NotFound
     );
+    fs::remove_dir_all(fixture).unwrap();
+}
+
+
+/// Test-only end-to-end V2 read through TWO simultaneously pinned protected
+/// Windows HANDLEs. This is not an independently authenticated durable anchor.
+#[test]
+fn protected_bound_checkpoint_and_epoch_blob_verify_without_path_reopen() {
+    use classmesh_security::policy_epoch::{
+        encode_bound_policy_checkpoint, verify_bound_policy_checkpoint,
+        verify_startup_policy_epoch, PolicyEpochError,
+    };
+    let fixture = std::env::temp_dir().join(format!(
+        "classmesh-service-bound-pair-{}", std::process::id()
+    ));
+    let app = fixture.join("ClassMesh");
+    let state = app.join("state");
+    fs::create_dir_all(&state).unwrap();
+    let policy = br#"{"version":1,"principals":[]}"#;
+    let checkpoint = state.join("policy-checkpoint.v2");
+    let blob = state.join("policy-0000000000000034.json");
+    fs::write(&checkpoint, encode_bound_policy_checkpoint(52, policy).unwrap()).unwrap();
+    fs::write(&blob, policy).unwrap();
+    for directory in [&app, &state] {
+        icacls(directory, &["/reset"]);
+        icacls(directory, &["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"]);
+        icacls(directory, &["/setowner", "*S-1-5-32-544"]);
+    }
+    for leaf in [&checkpoint, &blob] {
+        icacls(leaf, &["/reset"]);
+        icacls(leaf, &["/inheritance:r", "/grant:r", "*S-1-5-18:F", "*S-1-5-32-544:F"]);
+        icacls(leaf, &["/setowner", "*S-1-5-32-544"]);
+    }
+    let pair = open_protected_bound_policy_pair_in_app_root(&app, 52).unwrap();
+    assert!(fs::rename(&state, app.join("moved")).is_err());
+    let verified = pair.with_files(|checkpoint, blob| {
+        verify_bound_policy_checkpoint(checkpoint, blob, 4096)
+    }).unwrap();
+    assert_eq!(verified.policy_bytes(), policy);
+    assert_eq!(verify_startup_policy_epoch(pair.epoch(), verified.epoch()), Ok(()));
+    assert_eq!(verify_startup_policy_epoch(51, verified.epoch()), Err(PolicyEpochError::StartupEpochMismatch { trusted: 51, candidate: 52 }));
+    drop(pair);
+    assert_eq!(open_protected_bound_policy_pair_in_app_root(&app, 53).unwrap_err().kind(), io::ErrorKind::NotFound);
     fs::remove_dir_all(fixture).unwrap();
 }
