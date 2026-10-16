@@ -1,5 +1,13 @@
 # ClassMesh Implementation Status
 
+## Phase12E18c4k — actual SCM LocalSystem native test-file owner/ACL/reparse proof (CI pending)
+
+- Plan FIRST bb23674, native test RED 52f33d1 missing SCM probe, real VM1. Created unique isolated ProgramData test binary/dir/file, compiled C# ServiceBase, registered SCM own-process LocalSystem, checked true SCM running PID/StartName plus OS runtime SID S-1-5-18/Session0, executed native c4j exact opened-HANDLE OWNER+DACL and FileAttributeTagInfo predicate INSIDE SERVICE. Positive SYSTEM+Builtin Admin protected policy file/dir, five fail-closed negative witnesses: user-writable file, user-writable parent, untrusted owner, leaf symbolic-link reparse, missing primary. Actual independent Windows 11 VM1 and VM2 SCM_POLICY_PROBE_PASS with stop/delete + cleanup unique GUID subtree. Hosted Windows pipeline only validates Help without elevation.
+- Still a disposable standalone TEST SERVICE; production ClassMesh Service not modified and no sensitive data, keys, IPC or Teacher clipboard result touched. No production safe canonical path/ancestor handle chain, actual protected file lifetime across parser/publisher, hardlink/race proof, persistent anti-rollback source, trusted policy reload or midflight Worker cancellation. Requires exact-head fmt/Clippy/workspace and hosted Windows+Portable CI prior to merge; #477 RED, #479 section key forbidden, generic v11 ClipboardRead failure-only.
+
+---
+
+
 ## Phase 12E18c4j — native Windows file owner, ACL and reparse attestation (hosted CI pending)
 
 - Baseline main 4ca8f92 from #501. PLAN first 8b6287f; RED test witness contract 3a2d88b actually executed on VM1 and threw because implementation was missing. Added opt-in disposable script scripts/phase12e18c4j-protected-file-probe.ps1 and wrapper test. Real Windows ARM64 VM1+VM2 (elevated, signed-in non-SYSTEM interactive user) compiled C# Win32 P/Invoke and verified CreateFileW OPEN_REPARSE_POINT, GetFileInformationByHandleEx(FileAttributeTagInfo) and GetSecurityInfo OWNER+DACL on same opened handle for both a new disposable ProgramData directory and canonical test file. Positive ACL with SYSTEM/Admin and correct owner ALLOW; fail-close witnesses for Users-writable file, Users-writable parent, untrusted user owner, symlink leaf reparse, missing file. Test wrapper reports SECURITY_PROBE_PASS; native cleanup reports CLEANUP_COMPLETE. Initial native C# optional-argument signature compile error caught and corrected before final tests. No ClassMesh real auth file modified. Hosted Windows job now validates -Mode Help, no elevated action.
