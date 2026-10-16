@@ -1,3 +1,5 @@
+> **2026-10-16 Phase12E18c4v (isolated epoch transition slice):** Added fail-closed startup epoch equality, commit-first transition receipt, bounded versioned 16-byte checkpoint codec, portable negative tests and Windows retained-HANDLE checkpoint integration test. VM2 Windows x64-emulated native Rust: 10/10 policy epoch tests, 1/1 Service-package checkpoint integration, rustfmt and Clippy -D warnings PASS. Not production-wired; no authenticated durable anchor, policy/epoch cryptographic binding, transactional crash recovery, full Windows ProgramData trust or authorized live reload. See `docs/PHASE12_EPOCH_TRANSITION_REVIEW.md`.
+
 > **Merge scope update (2026-10-16):** Prior “local-only” and “unpublished” entries are historical execution evidence. The current isolated batch can be submitted as a PR after native validation. All production enablement blockers remain open; the legacy Service loader is unchanged.
 
 ## Latest local-only Phase 12 security qualification (2026-10-16)
