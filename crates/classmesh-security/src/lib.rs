@@ -3,6 +3,7 @@
 pub mod group_media;
 pub mod group_media_coordinator;
 pub mod persistence;
+pub mod policy_blob_stage;
 pub mod policy_epoch;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
