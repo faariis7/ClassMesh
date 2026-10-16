@@ -52,6 +52,7 @@ fn protected_leaf_passes_retained_handle_to_bounded_parser() {
         io::ErrorKind::PermissionDenied,
         "untrusted user-owned leaf must not parse as trusted policy"
     );
+    icacls(&path, &["/reset"]);
     icacls(
         &path,
         &[
@@ -62,7 +63,11 @@ fn protected_leaf_passes_retained_handle_to_bounded_parser() {
         ],
     );
     icacls(&path, &["/setowner", "*S-1-5-32-544"]);
-    let retained = open_protected_policy_leaf(&path).unwrap();
+    let retained = open_protected_policy_leaf(&path).unwrap_or_else(|error| {
+        eprintln!("protected leaf attestation failed: {error}");
+        let _ = Command::new("icacls.exe").arg(&path).status();
+        panic!("protected fixture ACL rejected: {error}");
+    });
 
     // Exclusive sharing keeps other writers from replacing the file while
     // this exact retained handle is being parsed.
@@ -104,6 +109,7 @@ fn pinned_protected_subtree_keeps_original_authorization_during_parse() {
         .unwrap();
     durable.save(&store).unwrap();
     for directory in [&app, &state] {
+        icacls(directory, &["/reset"]);
         icacls(
             directory,
             &[
@@ -115,6 +121,7 @@ fn pinned_protected_subtree_keeps_original_authorization_during_parse() {
         );
         icacls(directory, &["/setowner", "*S-1-5-32-544"]);
     }
+    icacls(&path, &["/reset"]);
     icacls(
         &path,
         &[
@@ -126,7 +133,13 @@ fn pinned_protected_subtree_keeps_original_authorization_during_parse() {
     );
     icacls(&path, &["/setowner", "*S-1-5-32-544"]);
 
-    let pinned = open_protected_policy_in_app_root(&app).unwrap();
+    let pinned = open_protected_policy_in_app_root(&app).unwrap_or_else(|error| {
+        eprintln!("protected subtree attestation failed: {error}");
+        for node in [&app, &state, &path] {
+            let _ = Command::new("icacls.exe").arg(node).status();
+        }
+        panic!("protected subtree fixture rejected: {error}");
+    });
     let loaded = pinned.with_file(|file| {
         DurableAuthorizationState::parse_primary_from_open_file(file.try_clone().unwrap())
     });
@@ -167,6 +180,7 @@ fn protected_programdata_prefix_pins_same_handle_during_policy_parse() {
     durable.save(&store).unwrap();
 
     for directory in [&program_data, &app, &state] {
+        icacls(directory, &["/reset"]);
         icacls(
             directory,
             &[
@@ -178,6 +192,7 @@ fn protected_programdata_prefix_pins_same_handle_during_policy_parse() {
         );
         icacls(directory, &["/setowner", "*S-1-5-32-544"]);
     }
+    icacls(&path, &["/reset"]);
     icacls(
         &path,
         &[
@@ -189,7 +204,13 @@ fn protected_programdata_prefix_pins_same_handle_during_policy_parse() {
     );
     icacls(&path, &["/setowner", "*S-1-5-32-544"]);
 
-    let candidate = open_protected_policy_in_program_data(&program_data).unwrap();
+    let candidate = open_protected_policy_in_program_data(&program_data).unwrap_or_else(|error| {
+        eprintln!("protected ProgramData fixture attestation failed: {error}");
+        for node in [&program_data, &app, &state, &path] {
+            let _ = Command::new("icacls.exe").arg(node).status();
+        }
+        panic!("protected ProgramData fixture rejected: {error}");
+    });
     assert!(
         fs::rename(&program_data, fixture.join("renamed-programdata")).is_err(),
         "ancestor must remain pinned while the parser runs"
