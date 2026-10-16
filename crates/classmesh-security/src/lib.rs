@@ -3,6 +3,7 @@
 pub mod group_media;
 pub mod group_media_coordinator;
 pub mod persistence;
+pub mod policy_blob_recovery;
 pub mod policy_blob_stage;
 pub mod policy_epoch;
 
