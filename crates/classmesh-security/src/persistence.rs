@@ -698,6 +698,26 @@ mod tests {
     }
 
     #[test]
+    fn retained_primary_parser_rejects_corrupted_and_oversized_inputs() {
+        let path = test_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"{not valid json").unwrap();
+        let opened = File::open(&path).unwrap();
+        assert!(matches!(
+            DurableAuthorizationState::parse_primary_from_open_file(opened),
+            Err(PersistenceError::Json(_))
+        ));
+
+        fs::write(&path, vec![b' '; MAX_STATE_BYTES + 1]).unwrap();
+        let opened = File::open(&path).unwrap();
+        assert!(matches!(
+            DurableAuthorizationState::parse_primary_from_open_file(opened),
+            Err(PersistenceError::StateTooLarge { .. })
+        ));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn corrupted_or_oversized_state_fails_closed() {
         let path = test_path();
         fs::write(&path, br#"{"version":999,"principals":[]}"#).expect("write state");
