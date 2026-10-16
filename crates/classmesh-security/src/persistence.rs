@@ -168,7 +168,9 @@ impl DurableAuthorizationState {
     /// file handle without reopening the pathname. The caller remains responsible for
     /// proving the file's origin, owner, ACL, ancestor chain and rollback freshness.
     /// This method does not grant trust or authorize publishing live policy.
-    pub fn parse_primary_from_open_file(file: File) -> Result<AuthorizationStore, PersistenceError> {
+    pub fn parse_primary_from_open_file(
+        file: File,
+    ) -> Result<AuthorizationStore, PersistenceError> {
         Self::load_from_open_file(file)
     }
 
