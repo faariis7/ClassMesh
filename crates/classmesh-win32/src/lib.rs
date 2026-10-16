@@ -17,9 +17,9 @@ pub mod policy_file_origin;
 #[cfg(windows)]
 mod power;
 #[cfg(windows)]
-pub mod protected_app_bootstrap;
-#[cfg(windows)]
 pub mod program_data_known_folder;
+#[cfg(windows)]
+pub mod protected_app_bootstrap;
 #[cfg(windows)]
 mod sensitive_pipe_listener;
 #[cfg(windows)]
