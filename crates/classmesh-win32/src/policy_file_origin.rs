@@ -304,6 +304,71 @@ mod tests {
     }
 
     #[test]
+    fn protected_programdata_parent_is_required_even_if_app_tree_is_secured() {
+        use std::process::Command;
+
+        fn allow_only_privileged(path: &Path, is_directory: bool) {
+            let rights = if is_directory { "(OI)(CI)F" } else { "F" };
+            let system = format!("*S-1-5-18:{rights}");
+            let admins = format!("*S-1-5-32-544:{rights}");
+            for args in [
+                vec!["/inheritance:r", "/grant:r", system.as_str(), admins.as_str()],
+                vec!["/setowner", "*S-1-5-32-544"],
+            ] {
+                assert!(Command::new("icacls.exe")
+                    .arg(path)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+        }
+        let fixture = std::env::temp_dir().join(format!(
+            "classmesh-programdata-root-{}",
+            std::process::id()
+        ));
+        let data = fixture.join("ProgramData");
+        let app = data.join("ClassMesh");
+        let state = app.join("state");
+        fs::create_dir_all(&state).unwrap();
+        let leaf = state.join("authorization.json");
+        fs::write(&leaf, b"fixture").unwrap();
+        for directory in [&data, &app, &state] {
+            allow_only_privileged(directory, true);
+        }
+        allow_only_privileged(&leaf, false);
+
+        let candidate = open_protected_policy_in_program_data(&data).unwrap();
+        assert_eq!(candidate.with_file(|f| f.metadata().unwrap().len()), 7);
+        assert!(
+            fs::rename(&data, fixture.join("renamed")).is_err(),
+            "pinned data root must not be movable until parsing ends"
+        );
+        drop(candidate);
+
+        let output = Command::new("icacls.exe")
+            .arg(&data)
+            .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"])
+            .status()
+            .unwrap();
+        assert!(output.success());
+        assert_eq!(
+            open_protected_policy_in_program_data(&data)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let output = Command::new("icacls.exe")
+            .arg(&data)
+            .args(["/remove:g", "*S-1-5-32-545"])
+            .status()
+            .unwrap();
+        assert!(output.success());
+        assert!(open_protected_policy_in_program_data(&data).is_ok());
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
     fn protected_subtree_denies_untrusted_state_directory() {
         use std::process::Command;
 
