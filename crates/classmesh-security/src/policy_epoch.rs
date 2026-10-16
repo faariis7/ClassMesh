@@ -35,18 +35,33 @@ mod tests {
         assert_eq!(verify_next_policy_epoch(4, 5), Ok(()));
         assert_eq!(
             verify_next_policy_epoch(4, 4),
-            Err(PolicyEpochError::NotNewer { trusted: 4, candidate: 4 })
+            Err(PolicyEpochError::NotNewer {
+                trusted: 4,
+                candidate: 4
+            })
         );
         assert_eq!(
             verify_next_policy_epoch(4, 3),
-            Err(PolicyEpochError::NotNewer { trusted: 4, candidate: 3 })
+            Err(PolicyEpochError::NotNewer {
+                trusted: 4,
+                candidate: 3
+            })
         );
     }
 
     #[test]
     fn invalid_anchor_zero_candidate_and_overflow_are_fail_closed() {
-        assert_eq!(verify_next_policy_epoch(0, 1), Err(PolicyEpochError::MissingOrInvalidAnchor));
-        assert_eq!(verify_next_policy_epoch(1, 0), Err(PolicyEpochError::InvalidCandidate));
-        assert_eq!(verify_next_policy_epoch(u64::MAX, u64::MAX), Err(PolicyEpochError::Exhausted));
+        assert_eq!(
+            verify_next_policy_epoch(0, 1),
+            Err(PolicyEpochError::MissingOrInvalidAnchor)
+        );
+        assert_eq!(
+            verify_next_policy_epoch(1, 0),
+            Err(PolicyEpochError::InvalidCandidate)
+        );
+        assert_eq!(
+            verify_next_policy_epoch(u64::MAX, u64::MAX),
+            Err(PolicyEpochError::Exhausted)
+        );
     }
 }

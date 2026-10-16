@@ -257,9 +257,7 @@ fn open_protected_directory(path: &Path) -> io::Result<File> {
 /// connected to Service startup or policy reload until those trust gates and
 /// durable rollback / TOCTOU requirements have independent native proof.
 pub fn open_protected_policy_in_app_root(app_root: &Path) -> io::Result<PinnedPolicyCandidate> {
-    if !app_root.is_absolute()
-        || app_root.file_name() != Some(std::ffi::OsStr::new("ClassMesh"))
-    {
+    if !app_root.is_absolute() || app_root.file_name() != Some(std::ffi::OsStr::new("ClassMesh")) {
         return Err(permission_denied());
     }
     let pinned_app_root = open_protected_directory(app_root)?;
@@ -294,10 +292,8 @@ mod tests {
             );
         }
 
-        let fixture = std::env::temp_dir().join(format!(
-            "classmesh-subtree-policy-{}",
-            std::process::id()
-        ));
+        let fixture =
+            std::env::temp_dir().join(format!("classmesh-subtree-policy-{}", std::process::id()));
         let root = fixture.join("ClassMesh");
         let state = root.join("state");
         fs::create_dir_all(&state).unwrap();
@@ -332,9 +328,7 @@ mod tests {
 
         acl(&state, &["/grant", "*S-1-5-32-545:R"]);
         assert_eq!(
-            open_protected_policy_in_app_root(&root)
-                .unwrap_err()
-                .kind(),
+            open_protected_policy_in_app_root(&root).unwrap_err().kind(),
             io::ErrorKind::PermissionDenied
         );
         acl(&state, &["/remove:g", "*S-1-5-32-545"]);
@@ -344,9 +338,7 @@ mod tests {
         fs::rename(&state, &relocated).unwrap();
         std::os::windows::fs::symlink_dir(&relocated, &state).unwrap();
         assert_eq!(
-            open_protected_policy_in_app_root(&root)
-                .unwrap_err()
-                .kind(),
+            open_protected_policy_in_app_root(&root).unwrap_err().kind(),
             io::ErrorKind::PermissionDenied,
             "state junction must never be followed"
         );
