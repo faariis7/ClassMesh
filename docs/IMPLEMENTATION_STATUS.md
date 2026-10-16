@@ -1,3 +1,10 @@
+## Local-First Phase12 Windows retained policy leaf preflight — native code (unpublished)
+
+- Mac local batch commits `203818e`, `cbee67b`, `23bbb48`: Windows-only `classmesh-win32::policy_file_origin::open_single_link_policy_leaf` uses `OpenOptionsExt` with FILE_FLAG_OPEN_REPARSE_POINT, share_mode(0), same retained File HANDLE and Win32 GetFileInformationByHandle to fail closed on leaf reparse, directories and link count != 1. Missing leaf naturally fails I/O. Native Rust test on VM1 **PASS** after initial test-fixture filename correction (original Windows Error 123). Windows VM1 actual focused test reports `rejects_hardlink_and_retains_original_file ... ok`. Synology mirror fmt/clippy/whole workspace GREEN.
+- Important limitations: does not check Windows OWNER/DACL of held file, pin/verify every ProgramData ancestor, prove trust against races with previously opened write HANDLEs, or establish protected durable epoch. This function is NOT wired to production `load_control_state` and MUST NOT be mistaken for a trusted file origin. VM2 native Rust test currently blocked by missing MSVC `link.exe` (older VM checkout); its earlier native PowerShell tests do not qualify this new Rust module. `#477`, `#479`, v11 ClipboardRead failure-only and physical 2-PC gates remain.
+
+---
+
 ## Local-First Phase12 policy origin batch (unpublished; 2026-10-16)
 
 - Working branch `batch/phase12-policy-origin-qualification` remains LOCAL to Mac checkout, based on merged #507 main `1f499197`; do not infer any GitHub PR/CI from these commits. Current local changes: retained file parser strict malformed/oversize test `e962317`, primary-only refuses absent/malformed primary even when .bak valid `cada0d7`, pure fail-closed monotonic generation decision (NO protected on-disk anchor) `bee7f2e`, Windows native c4p disallowed Users read ACE qualification `100bb65`.
