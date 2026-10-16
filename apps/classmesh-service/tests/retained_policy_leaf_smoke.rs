@@ -141,7 +141,6 @@ fn pinned_protected_subtree_keeps_original_authorization_during_parse() {
     fs::remove_dir_all(fixture).unwrap();
 }
 
-
 #[test]
 fn protected_programdata_prefix_pins_same_handle_during_policy_parse() {
     let fixture = std::env::temp_dir().join(format!(
@@ -181,7 +180,12 @@ fn protected_programdata_prefix_pins_same_handle_during_policy_parse() {
     }
     icacls(
         &path,
-        &["/inheritance:r", "/grant:r", "*S-1-5-18:F", "*S-1-5-32-544:F"],
+        &[
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:F",
+            "*S-1-5-32-544:F",
+        ],
     );
     icacls(&path, &["/setowner", "*S-1-5-32-544"]);
 

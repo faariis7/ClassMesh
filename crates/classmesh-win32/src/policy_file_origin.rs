@@ -399,10 +399,8 @@ mod tests {
 
     #[test]
     fn resolved_handle_must_be_immediate_named_child() {
-        let dir = std::env::temp_dir().join(format!(
-            "classmesh-resolved-handle-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("classmesh-resolved-handle-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let sibling = dir.join("sibling.json");
@@ -437,21 +435,26 @@ mod tests {
             let system = format!("*S-1-5-18:{rights}");
             let admins = format!("*S-1-5-32-544:{rights}");
             for args in [
-                vec!["/inheritance:r", "/grant:r", system.as_str(), admins.as_str()],
+                vec![
+                    "/inheritance:r",
+                    "/grant:r",
+                    system.as_str(),
+                    admins.as_str(),
+                ],
                 vec!["/setowner", "*S-1-5-32-544"],
             ] {
-                assert!(Command::new("icacls.exe")
-                    .arg(path)
-                    .args(args)
-                    .status()
-                    .unwrap()
-                    .success());
+                assert!(
+                    Command::new("icacls.exe")
+                        .arg(path)
+                        .args(args)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
             }
         }
-        let fixture = std::env::temp_dir().join(format!(
-            "classmesh-programdata-root-{}",
-            std::process::id()
-        ));
+        let fixture =
+            std::env::temp_dir().join(format!("classmesh-programdata-root-{}", std::process::id()));
         let data = fixture.join("ProgramData");
         let app = data.join("ClassMesh");
         let state = app.join("state");
