@@ -5,11 +5,9 @@ use std::fs::File;
 use std::io::{self, Read};
 
 use crate::policy_epoch::{
-    BOUND_POLICY_CHECKPOINT_LEN, BOUND_POLICY_CHECKPOINT_MAGIC, BoundPolicyError,\n    VerifiedPolicyBytes, verify_bound_policy_checkpoint,
+    BOUND_POLICY_CHECKPOINT_LEN, BOUND_POLICY_CHECKPOINT_MAGIC, BoundPolicyError,
+    VerifiedPolicyBytes, verify_bound_policy_checkpoint,
 };
-
-const V2_RECORD_LEN: usize = 48;
-const V2_MAGIC: &[u8; 8] = b"CMPBND02";
 
 /// Recover exactly the policy selected by an independently authenticated V2
 /// checkpoint. The opener MUST return an OS-qualified retained File HANDLE for
