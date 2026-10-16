@@ -294,8 +294,8 @@ mod checkpoint_contract_tests {
 /// V2 binds the *exact* policy bytes to a separately protected epoch anchor.
 /// SHA-256 is unkeyed: this is not authentication unless the checkpoint's
 /// provenance is independently established by the caller.
-const BOUND_POLICY_CHECKPOINT_MAGIC: &[u8; 8] = b"CMPBND02";
-const BOUND_POLICY_CHECKPOINT_LEN: usize = 48;
+pub(crate) const BOUND_POLICY_CHECKPOINT_MAGIC: &[u8; 8] = b"CMPBND02";
+pub(crate) const BOUND_POLICY_CHECKPOINT_LEN: usize = 48;
 const MAX_BOUND_POLICY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
