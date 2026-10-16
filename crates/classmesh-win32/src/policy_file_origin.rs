@@ -929,3 +929,167 @@ mod epoch_blob_tests {
         fs::remove_dir_all(fixture).unwrap();
     }
 }
+
+#[cfg(test)]
+mod bound_pair_tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    fn privileged(path: &Path, directory: bool) {
+        let rights = if directory { "(OI)(CI)F" } else { "F" };
+        let system = format!("*S-1-5-18:{rights}");
+        let admins = format!("*S-1-5-32-544:{rights}");
+        for args in [
+            vec!["/reset"],
+            vec!["/inheritance:r", "/grant:r", &system, &admins],
+            vec!["/setowner", "*S-1-5-32-544"],
+        ] {
+            assert!(
+                Command::new("icacls.exe")
+                    .arg(path)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+    }
+
+    #[test]
+    fn protected_pair_pins_both_leaves_and_rejects_checkpoint_acl() {
+        let fixture = std::env::temp_dir().join(format!("classmesh-pair-{}", std::process::id()));
+        let root = fixture.join("ClassMesh");
+        let state = root.join("state");
+        fs::create_dir_all(&state).unwrap();
+        let checkpoint = state.join("policy-checkpoint.v2");
+        let blob = state.join("policy-0000000000000033.json");
+        fs::write(&checkpoint, b"checkpoint").unwrap();
+        fs::write(&blob, b"policy").unwrap();
+        for directory in [&root, &state] {
+            privileged(directory, true);
+        }
+        for leaf in [&checkpoint, &blob] {
+            privileged(leaf, false);
+        }
+        let pair = open_protected_bound_policy_pair_in_app_root(&root, 51).unwrap();
+        assert_eq!(pair.epoch(), 51);
+        assert_eq!(
+            pair.with_files(|a, b| (a.metadata().unwrap().len(), b.metadata().unwrap().len())),
+            (10, 6)
+        );
+        assert!(fs::rename(&checkpoint, state.join("checkpoint-replaced")).is_err());
+        assert!(fs::rename(&blob, state.join("blob-replaced")).is_err());
+        drop(pair);
+        assert_eq!(
+            open_protected_bound_policy_pair_in_app_root(&root, 52)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            open_protected_bound_policy_pair_in_app_root(&root, 0)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(
+            Command::new("icacls.exe")
+                .arg(&checkpoint)
+                .args(["/grant", "*S-1-5-32-545:R"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            open_protected_bound_policy_pair_in_app_root(&root, 51)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_hardlink_is_not_a_trusted_pair() {
+        let fixture =
+            std::env::temp_dir().join(format!("classmesh-pair-link-{}", std::process::id()));
+        let root = fixture.join("ClassMesh");
+        let state = root.join("state");
+        fs::create_dir_all(&state).unwrap();
+        let checkpoint = state.join("policy-checkpoint.v2");
+        let blob = state.join("policy-0000000000000033.json");
+        fs::write(&checkpoint, b"checkpoint").unwrap();
+        fs::write(&blob, b"policy").unwrap();
+        fs::hard_link(&checkpoint, state.join("checkpoint-alias")).unwrap();
+        for directory in [&root, &state] {
+            privileged(directory, true);
+        }
+        for leaf in [&checkpoint, &blob] {
+            privileged(leaf, false);
+        }
+        assert_eq!(
+            open_protected_bound_policy_pair_in_app_root(&root, 51)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        fs::remove_dir_all(fixture).unwrap();
+    }
+}
+
+/// Experimental dual-file checkpoint+epoch policy preflight. Both protected
+/// leaves and their ClassMesh/state ancestors stay pinned through the callback.
+/// This does NOT attest the volume root, ProgramData prefix, trusted anchor
+/// provenance or checkpoint durability; never use as a production publisher.
+#[derive(Debug)]
+pub struct PinnedBoundPolicyPair {
+    epoch: u64,
+    checkpoint: File,
+    policy: File,
+    _app_root: File,
+    _state_dir: File,
+}
+
+impl PinnedBoundPolicyPair {
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn with_files<T>(&self, action: impl FnOnce(&File, &File) -> T) -> T {
+        action(&self.checkpoint, &self.policy)
+    }
+}
+
+/// Fixed V2 checkpoint and deterministic epoch blob only. The caller must
+/// independently establish that `epoch` came from a trusted durable anchor;
+/// this function does NOT infer it from a path or trust unverified bytes.
+pub fn open_protected_bound_policy_pair_in_app_root(
+    app_root: &Path,
+    epoch: u64,
+) -> io::Result<PinnedBoundPolicyPair> {
+    if epoch == 0 {
+        return Err(permission_denied());
+    }
+    validate_app_root(app_root)?;
+    let filename = format!("policy-{epoch:016x}.json");
+    let pinned_app_root = open_protected_directory(app_root)?;
+    let state_root = app_root.join("state");
+    let pinned_state_dir = open_protected_directory(&state_root)?;
+    let checkpoint = open_protected_policy_leaf(&state_root.join("policy-checkpoint.v2"))?;
+    let policy = open_protected_policy_leaf(&state_root.join(&filename))?;
+    attest_immediate_child(&pinned_app_root, &pinned_state_dir, "state")?;
+    attest_immediate_child(&pinned_state_dir, &checkpoint, "policy-checkpoint.v2")?;
+    attest_immediate_child(&pinned_state_dir, &policy, &filename)?;
+    attest_same_volume_distinct_file_ids(
+        &information_from_handle(&checkpoint)?,
+        &information_from_handle(&policy)?,
+    )?;
+    Ok(PinnedBoundPolicyPair {
+        epoch,
+        checkpoint,
+        policy,
+        _app_root: pinned_app_root,
+        _state_dir: pinned_state_dir,
+    })
+}
