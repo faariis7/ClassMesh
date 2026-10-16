@@ -1,6 +1,5 @@
 //! Experimental create-only blob staging; NOT a trusted Windows store.
 
-
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -38,7 +37,10 @@ impl StagedPolicyBlob {
             .take((MAX_STAGED_POLICY_BYTES as u64) + 1)
             .read_to_end(&mut bytes)?;
         if bytes.is_empty() || bytes.len() > MAX_STAGED_POLICY_BYTES {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "staged policy size changed"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged policy size changed",
+            ));
         }
         let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
         let mismatch = self
@@ -47,7 +49,10 @@ impl StagedPolicyBlob {
             .zip(digest.as_ref().iter())
             .fold(0_u8, |acc, (expected, actual)| acc | (expected ^ actual));
         if mismatch != 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "staged policy bytes changed"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged policy bytes changed",
+            ));
         }
         Ok(bytes)
     }
@@ -56,7 +61,10 @@ impl StagedPolicyBlob {
 /// Deterministic, filename-only key; no user-controlled path segments.
 pub fn policy_blob_filename(epoch: u64) -> io::Result<String> {
     if epoch == 0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "zero policy epoch"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "zero policy epoch",
+        ));
     }
     Ok(format!("policy-{epoch:016x}.json"))
 }
@@ -73,7 +81,10 @@ pub fn stage_new_policy_blob(
 ) -> io::Result<StagedPolicyBlob> {
     let filename = policy_blob_filename(epoch)?;
     if policy_bytes.is_empty() || policy_bytes.len() > MAX_STAGED_POLICY_BYTES {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid policy byte count"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid policy byte count",
+        ));
     }
     let path = trusted_directory.join(filename);
     let mut handle = OpenOptions::new()
@@ -121,7 +132,12 @@ mod tests {
         assert_eq!(staged.epoch(), 41);
         assert_eq!(fs::read(staged.path()).unwrap(), b"new policy");
         assert_eq!(staged.verify_open_handle().unwrap(), b"new policy");
-        assert_eq!(stage_new_policy_blob(&dir, 41, b"other").unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            stage_new_policy_blob(&dir, 41, b"other")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
         assert_eq!(fs::read(staged.path()).unwrap(), b"new policy");
         drop(staged);
         fs::remove_dir_all(dir).unwrap();
@@ -131,7 +147,11 @@ mod tests {
     fn invalid_inputs_have_no_side_effects() {
         let dir = scratch();
         let oversized = vec![0; 4 * 1024 * 1024 + 1];
-        for (epoch, data) in [(0, b"valid".as_slice()), (3, b"".as_slice()), (3, oversized.as_slice())] {
+        for (epoch, data) in [
+            (0, b"valid".as_slice()),
+            (3, b"".as_slice()),
+            (3, oversized.as_slice()),
+        ] {
             assert!(stage_new_policy_blob(&dir, epoch, data).is_err());
         }
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
@@ -143,7 +163,10 @@ mod tests {
         let dir = scratch();
         let target = dir.join(policy_blob_filename(42).unwrap());
         fs::write(&target, b"attacker content").unwrap();
-        assert_eq!(stage_new_policy_blob(&dir, 42, b"safe").unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            stage_new_policy_blob(&dir, 42, b"safe").unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
         assert_eq!(fs::read(target).unwrap(), b"attacker content");
         fs::remove_dir_all(dir).unwrap();
     }
@@ -155,7 +178,10 @@ mod tests {
         staged.handle.seek(SeekFrom::Start(0)).unwrap();
         staged.handle.write_all(b"modified").unwrap();
         staged.handle.sync_all().unwrap();
-        assert_eq!(staged.verify_open_handle().unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            staged.verify_open_handle().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
         drop(staged);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -167,7 +193,12 @@ mod tests {
         fs::write(&original, b"untrusted").unwrap();
         let target = dir.join(policy_blob_filename(45).unwrap());
         fs::hard_link(&original, &target).unwrap();
-        assert_eq!(stage_new_policy_blob(&dir, 45, b"policy").unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            stage_new_policy_blob(&dir, 45, b"policy")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
         assert_eq!(fs::read(&original).unwrap(), b"untrusted");
         fs::remove_dir_all(dir).unwrap();
     }
@@ -177,7 +208,12 @@ mod tests {
         let dir = scratch();
         let target = dir.join(policy_blob_filename(43).unwrap());
         fs::write(&target, b"torn").unwrap();
-        assert_eq!(stage_new_policy_blob(&dir, 43, b"complete").unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            stage_new_policy_blob(&dir, 43, b"complete")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
         assert_eq!(fs::read(target).unwrap(), b"torn");
         fs::remove_dir_all(dir).unwrap();
     }
