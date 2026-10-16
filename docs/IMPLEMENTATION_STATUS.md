@@ -1,3 +1,5 @@
+> **Merge scope update (2026-10-16):** Prior “local-only” and “unpublished” entries are historical execution evidence. The current isolated batch can be submitted as a PR after native validation. All production enablement blockers remain open; the legacy Service loader is unchanged.
+
 ## Latest local-only Phase 12 security qualification (2026-10-16)
 
 - Unpublished `batch/phase12-policy-origin-qualification`: ProgramData-prefix same-HANDLE strict qualification, retained-handle GetFinalPathNameByHandleW parent/child path attestation, native source program data path rejection for Users-writable ACL, and disposable SCM service harness that executes **the actual Rust test executable under LocalSystem Session0** (not merely a separate C# predicate).

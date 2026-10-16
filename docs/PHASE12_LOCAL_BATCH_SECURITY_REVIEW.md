@@ -1,7 +1,7 @@
 # Phase 12 local-first policy-origin security review — 2026-10-16
 
 **Status: preliminary Windows-native qualification only, NOT production acceptance.**
-**Branch:** `batch/phase12-policy-origin-qualification` — intentionally unpushed.
+**Branch:** `batch/phase12-policy-origin-qualification` — isolated, non-production PR candidate. May merge only after exact-head CI/review; production activation remains blocked.
 
 ## Actual trust boundary and proof
 
