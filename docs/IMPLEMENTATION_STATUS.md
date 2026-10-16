@@ -1,3 +1,11 @@
+## Latest local-only Phase 12 security qualification (2026-10-16)
+
+- Unpublished `batch/phase12-policy-origin-qualification`: ProgramData-prefix same-HANDLE strict qualification, retained-handle GetFinalPathNameByHandleW parent/child path attestation, native source program data path rejection for Users-writable ACL, and disposable SCM service harness that executes **the actual Rust test executable under LocalSystem Session0** (not merely a separate C# predicate).
+- **VM1 ARM64 SCM LocalSystem:** 6/6 native Rust security unit tests PASS; clean temporary service. **VM2 Windows ARM64 with x64-emulated binaries SCM LocalSystem:** 6/6 native Rust tests PASS; **3/3 Service-package parser integration tests** PASS under SCM LocalSystem; clean services. VM2 Toolchain now installed (Visual Studio Build Tools 2022 and x64 Rust), no GitHub needed for these local native runs. All tests are still isolated; production `load_control_state` is unchanged.
+- Security review: `docs/PHASE12_LOCAL_BATCH_SECURITY_REVIEW.md`. Not ready to enable because system C:\ProgramData has a nontrivial Users ACL by default, no volume-to-ProgramData atomic relative-handle chain, no durable protected epoch/bootstrapping, no trusted reload or mid-flight Worker cancellation. Keep #477/#479 and clipboard v11 fail-only.
+
+---
+
 ## Phase 12 local-first verified leaf / pinned app-subtree proof (unpublished, 2026-10-16)
 
 - Working Mac-only branch `batch/phase12-policy-origin-qualification`; NOT pushed or merged. Independent new Windows Rust leaf opener `open_protected_policy_leaf` retains its OS HANDLE, opens with no sharing and OPEN_REPARSE_POINT, denies directory/reparse/missing/multiple-hardlink file, then reads owner + DACL from that SAME HANDLE using GetSecurityInfo. Owner must be SYSTEM or BUILTIN\Administrators; DACL must be non-null, explicitly allowed only SYSTEM/Administrators with both present, and ACE types/flags/SID lengths bounded (fail-closed). Test-first native VM1 RED missing function then GREEN; VM1 ARM64 and VM2 x64-emulated Windows tests each passed **3/3**: leaf hardlink/reparse, protected owner ACL positive→Users ACE denial→restoration, protected ClassMesh/state ancestor Users ACE denial and junction/reparse denial→restoration.
