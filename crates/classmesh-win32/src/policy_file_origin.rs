@@ -572,6 +572,16 @@ mod tests {
         acl(&state, &["/remove:g", "*S-1-5-32-545"]);
         assert!(open_protected_policy_in_app_root(&root).is_ok());
 
+        // A protected ancestor with SYSTEM write-only but Admin full is not
+        // sufficient to authorize traversal and descriptor inspection.
+        acl(&state, &["/grant:r", "*S-1-5-18:(OI)(CI)W"]);
+        assert_eq!(
+            open_protected_policy_in_app_root(&root).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        acl(&state, &["/grant:r", "*S-1-5-18:(OI)(CI)F"]);
+        assert!(open_protected_policy_in_app_root(&root).is_ok());
+
         let relocated = root.join("state-original");
         fs::rename(&state, &relocated).unwrap();
         std::os::windows::fs::symlink_dir(&relocated, &state).unwrap();
