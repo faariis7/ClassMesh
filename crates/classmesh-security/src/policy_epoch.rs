@@ -571,14 +571,14 @@ mod immutable_policy_install_tests {
     #[test]
     fn invalid_candidates_never_touch_storage() {
         for (trusted, next, policy) in [(0, 5, NEW), (4, 4, NEW), (4, 3, NEW), (4, 5, b"".as_slice())] {
-            let mut touched = 0;
+            let touched = std::cell::Cell::new(0);
             let result = stage_then_commit_bound_policy(
                 trusted, next, policy,
-                |_, _| { touched += 1; Ok::<(), ()>(()) },
-                |_| { touched += 1; Ok::<(), ()>(()) },
+                |_, _| { touched.set(touched.get() + 1); Ok::<(), ()>(()) },
+                |_| { touched.set(touched.get() + 1); Ok::<(), ()>(()) },
             );
             assert!(result.is_err());
-            assert_eq!(touched, 0);
+            assert_eq!(touched.get(), 0);
         }
     }
 
