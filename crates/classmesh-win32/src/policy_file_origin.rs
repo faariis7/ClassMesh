@@ -268,7 +268,7 @@ fn open_protected_directory(path: &Path) -> io::Result<File> {
 /// Does NOT attest the drive root or ProgramData ancestors and must not be
 /// connected to Service startup or policy reload until those trust gates and
 /// durable rollback / TOCTOU requirements have independent native proof.
-pub fn open_protected_policy_in_app_root(app_root: &Path) -> io::Result<PinnedPolicyCandidate> {
+fn validate_app_root(app_root: &Path) -> io::Result<()> {
     let absolute_local_drive = matches!(
         app_root.components().next(),
         Some(Component::Prefix(prefix))
@@ -283,6 +283,11 @@ pub fn open_protected_policy_in_app_root(app_root: &Path) -> io::Result<PinnedPo
     {
         return Err(permission_denied());
     }
+    Ok(())
+}
+
+pub fn open_protected_policy_in_app_root(app_root: &Path) -> io::Result<PinnedPolicyCandidate> {
+    validate_app_root(app_root)?;
     let pinned_app_root = open_protected_directory(app_root)?;
     let state_root = app_root.join("state");
     let pinned_state_dir = open_protected_directory(&state_root)?;
@@ -770,5 +775,115 @@ mod tests {
         assert_eq!(handle.metadata().unwrap().len(), 19);
         drop(handle);
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// Epoch-scoped protected policy blob preflight. This only qualifies the
+/// ClassMesh/state subtree and the selected leaf. The volume root and real
+/// ProgramData ancestors are NOT qualified; not a production trust token.
+#[derive(Debug)]
+pub struct PinnedEpochPolicyCandidate {
+    epoch: u64,
+    leaf: File,
+    _app_root: File,
+    _state_dir: File,
+}
+
+impl PinnedEpochPolicyCandidate {
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Caller must keep this candidate alive throughout the SAME-HANDLE parse.
+    pub fn with_file<T>(&self, action: impl FnOnce(&File) -> T) -> T {
+        action(&self.leaf)
+    }
+}
+
+/// Rejects zero epoch, ambiguous app-root and unprotected or non-immediate
+/// child. The filename is derived solely from the numeric checkpoint epoch;
+/// never accepts caller-supplied filenames or backup paths.
+pub fn open_protected_epoch_policy_in_app_root(
+    app_root: &Path,
+    epoch: u64,
+) -> io::Result<PinnedEpochPolicyCandidate> {
+    if epoch == 0 {
+        return Err(permission_denied());
+    }
+    validate_app_root(app_root)?;
+    let filename = format!("policy-{epoch:016x}.json");
+    let pinned_app_root = open_protected_directory(app_root)?;
+    let state_root = app_root.join("state");
+    let pinned_state_dir = open_protected_directory(&state_root)?;
+    let leaf = open_protected_policy_leaf(&state_root.join(&filename))?;
+    attest_immediate_child(&pinned_app_root, &pinned_state_dir, "state")?;
+    attest_immediate_child(&pinned_state_dir, &leaf, &filename)?;
+    Ok(PinnedEpochPolicyCandidate {
+        epoch,
+        leaf,
+        _app_root: pinned_app_root,
+        _state_dir: pinned_state_dir,
+    })
+}
+
+#[cfg(test)]
+mod epoch_blob_tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    fn icacls(path: &Path, args: &[&str]) {
+        assert!(Command::new("icacls.exe").arg(path).args(args).status().unwrap().success());
+    }
+
+    fn privileged(path: &Path, directory: bool) {
+        let rights = if directory { "(OI)(CI)F" } else { "F" };
+        let system = format!("*S-1-5-18:{rights}");
+        let admins = format!("*S-1-5-32-544:{rights}");
+        icacls(path, &["/reset"]);
+        icacls(path, &["/inheritance:r", "/grant:r", &system, &admins]);
+        icacls(path, &["/setowner", "*S-1-5-32-544"]);
+    }
+
+    #[test]
+    fn pinned_epoch_blob_enforces_exact_epoch_and_parent_security() {
+        let fixture = std::env::temp_dir().join(format!("classmesh-epoch-blob-{}", std::process::id()));
+        let root = fixture.join("ClassMesh");
+        let state = root.join("state");
+        fs::create_dir_all(&state).unwrap();
+        let leaf = state.join("policy-000000000000002a.json");
+        fs::write(&leaf, b"epoch 42").unwrap();
+        for path in [&root, &state] { privileged(path, true); }
+        privileged(&leaf, false);
+        let candidate = open_protected_epoch_policy_in_app_root(&root, 42).unwrap();
+        assert_eq!(candidate.epoch(), 42);
+        assert_eq!(candidate.with_file(|f| f.metadata().unwrap().len()), 8);
+        assert!(fs::rename(&state, root.join("moved-state")).is_err());
+        drop(candidate);
+        assert_eq!(open_protected_epoch_policy_in_app_root(&root, 43).unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(open_protected_epoch_policy_in_app_root(&root, 0).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        icacls(&state, &["/grant", "*S-1-5-32-545:R"]);
+        assert_eq!(open_protected_epoch_policy_in_app_root(&root, 42).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        icacls(&state, &["/remove:g", "*S-1-5-32-545"]);
+        assert!(open_protected_epoch_policy_in_app_root(&root, 42).is_ok());
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn rejects_hardlink_and_ambiguous_epoch_paths() {
+        for path in [r"C:\ProgramData\ClassMesh\..\ClassMesh", r"\\host\share\ClassMesh", "ClassMesh"] {
+            assert_eq!(open_protected_epoch_policy_in_app_root(Path::new(path), 42).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        }
+        let fixture = std::env::temp_dir().join(format!("classmesh-epoch-hardlink-{}", std::process::id()));
+        let root = fixture.join("ClassMesh");
+        let state = root.join("state");
+        fs::create_dir_all(&state).unwrap();
+        let leaf = state.join("policy-000000000000002a.json");
+        fs::write(&leaf, b"data").unwrap();
+        fs::hard_link(&leaf, state.join("alias.json")).unwrap();
+        for path in [&root, &state] { privileged(path, true); }
+        privileged(&leaf, false);
+        assert_eq!(open_protected_epoch_policy_in_app_root(&root, 42).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        fs::remove_dir_all(fixture).unwrap();
     }
 }
