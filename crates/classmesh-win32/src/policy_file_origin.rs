@@ -55,6 +55,145 @@ pub fn open_single_link_policy_leaf(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+
+/// Require the retained *leaf* HANDLE to have a non-NULL, explicitly
+/// allow-only DACL containing only SYSTEM and BUILTIN\Administrators, with
+/// both SIDs present and the owner one of those SIDs.
+/// This is still a leaf-only preflight: no trusted ancestor chain, protected
+/// durable epoch or TOCTOU-safe production policy publisher is established.
+pub fn open_protected_policy_leaf(path: &Path) -> io::Result<File> {
+    let file = open_single_link_policy_leaf(path)?;
+    attest_leaf_owner_acl(&file)?;
+    Ok(file)
+}
+
+fn permission_denied() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "policy leaf owner or ACL is not a protected SYSTEM/Administrators descriptor",
+    )
+}
+
+fn attest_leaf_owner_acl(file: &File) -> io::Result<()> {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION, GetAce, IsValidAcl,
+        OWNER_SECURITY_INFORMATION, PSID, PSECURITY_DESCRIPTOR,
+    };
+
+    struct Descriptor(PSECURITY_DESCRIPTOR);
+    impl Drop for Descriptor {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // Safety: GetSecurityInfo allocates this descriptor with LocalAlloc.
+                unsafe { LocalFree(self.0) };
+            }
+        }
+    }
+
+    fn sid_string(sid: PSID) -> io::Result<String> {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+        if sid.is_null() {
+            return Err(permission_denied());
+        }
+        let mut allocated: *mut u16 = std::ptr::null_mut();
+        // Safety: owner/ACE SID comes from a live GetSecurityInfo descriptor.
+        if unsafe { ConvertSidToStringSidW(sid, &raw mut allocated) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if allocated.is_null() {
+            return Err(permission_denied());
+        }
+        let text = (|| {
+            let mut length = 0usize;
+            // Safety: ConvertSidToStringSidW allocated a NUL-terminated SID string.
+            while length < 128 && unsafe { *allocated.add(length) } != 0 {
+                length += 1;
+            }
+            if length == 128 {
+                return Err(permission_denied());
+            }
+            // Safety: all characters are within the measured allocation.
+            String::from_utf16(unsafe { std::slice::from_raw_parts(allocated, length) })
+                .map_err(|_| permission_denied())
+        })();
+        // Safety: matches the allocation from ConvertSidToStringSidW.
+        unsafe { LocalFree(allocated.cast()) };
+        text
+    }
+
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut descriptor = Descriptor(std::ptr::null_mut());
+    // Safety: the File is open and held through all checks; output pointers are
+    // writable; GetSecurityInfo returns descriptor-owned owner and DACL pointers.
+    let status = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &raw mut owner,
+            std::ptr::null_mut(),
+            &raw mut dacl,
+            std::ptr::null_mut(),
+            &raw mut descriptor.0,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    if descriptor.0.is_null() || owner.is_null() || dacl.is_null() {
+        return Err(permission_denied());
+    }
+    let owner_sid = sid_string(owner)?;
+    if owner_sid != "S-1-5-18" && owner_sid != "S-1-5-32-544" {
+        return Err(permission_denied());
+    }
+
+    // Safety: ACL and ACE addresses are inside the descriptor allocated by
+    // GetSecurityInfo, kept live by Descriptor until this method returns.
+    if unsafe { IsValidAcl(dacl) } == 0 {
+        return Err(permission_denied());
+    }
+    // Safety: non-null ACL pointer validated by IsValidAcl.
+    let count = unsafe { (*dacl).AceCount };
+    if count < 2 || count > 32 {
+        return Err(permission_denied());
+    }
+    let mut system = false;
+    let mut administrators = false;
+    for idx in 0..u32::from(count) {
+        let mut ace: *mut c_void = std::ptr::null_mut();
+        // Safety: GetAce validates index and returns an ACL-owned ACE pointer.
+        if unsafe { GetAce(dacl, idx, &raw mut ace) } == 0 || ace.is_null() {
+            return Err(permission_denied());
+        }
+        // Safety: GetAce returns a complete, in-bounds ACE including its header.
+        let allowed = unsafe { &*(ace.cast::<ACCESS_ALLOWED_ACE>()) };
+        if allowed.Header.AceType != 0
+            || allowed.Header.AceFlags != 0
+            || usize::from(allowed.Header.AceSize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+        {
+            return Err(permission_denied());
+        }
+        // Safety: for ACCESS_ALLOWED_ACE, SidStart is the first DWORD of the SID
+        // embedded in this validated ACE. sid_string validates the SID conversion.
+        let sid = sid_string(std::ptr::addr_of!(allowed.SidStart).cast_mut().cast())?;
+        match sid.as_str() {
+            "S-1-5-18" => system = true,
+            "S-1-5-32-544" => administrators = true,
+            _ => return Err(permission_denied()),
+        }
+    }
+    if !system || !administrators {
+        return Err(permission_denied());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
