@@ -36,6 +36,18 @@ try {
     if ([ClassMeshPolicyHandleAttestation]::Check($leaf, $false) -ne 'ALLOW') {
         throw 'Original protected control did not recover after ACL restoration'
     }
+    & icacls.exe $root '/grant' '*S-1-5-32-545:(OI)(CI)R' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Fixture ancestor read ACE failed' }
+    $parentObserved = [ClassMeshPolicyHandleAttestation]::Check($root, $true)
+    if ($parentObserved -ne 'OTHER_TRUSTEE_DENIED') {
+        throw "Unexpected allowed ancestor read trustee: $parentObserved"
+    }
+    & icacls.exe $root '/remove:g' '*S-1-5-32-545' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Fixture ancestor ACE removal failed' }
+    if ([ClassMeshPolicyHandleAttestation]::Check($root, $true) -ne 'ALLOW') {
+        throw 'Original protected ancestor failed recovery'
+    }
+    'POLICY_ANCESTOR_UNTRUSTED_READ_ACE_DENIED'
     'POLICY_UNTRUSTED_READ_ACE_DENIED'
 } finally {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop }
