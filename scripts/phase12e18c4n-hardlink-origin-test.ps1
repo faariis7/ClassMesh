@@ -10,7 +10,37 @@ $c4j = Join-Path $PSScriptRoot 'phase12e18c4j-protected-file-probe.ps1'
 if (-not (Test-Path -LiteralPath $c4j -PathType Leaf)) { throw 'Missing prerequisite native predicate' }
 $match = [regex]::Match([IO.File]::ReadAllText($c4j), "(?ms)^\`$nativeSource = @'\r?\n(.*?)\r?\n'@\r?$")
 if (-not $match.Success) { throw 'Reviewed native predicate unavailable' }
-Add-Type -TypeDefinition $match.Groups[1].Value -ErrorAction Stop
+# Extend the reviewed same-HANDLE fixture with a native hardlink count
+# probe. This DOES NOT wire an attested handle into the Rust Service loader.
+$additional = @'
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTime { public uint LowDateTime; public uint HighDateTime; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ByHandleFileInformation {
+        public uint FileAttributes;
+        public FileTime CreationTime;
+        public FileTime LastAccessTime;
+        public FileTime LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern bool GetFileInformationByHandle(IntPtr handle,out ByHandleFileInformation info);
+'@
+$original = $match.Groups[1].Value
+$hook = 'if((info.FileAttributes&reparse)!=0) return "REPARSE_DENIED";'
+if (-not $original.Contains($hook)) { throw 'Native source hook changed; refusing stale fixture' }
+$patched = $original.Replace('public static string Check(string path,bool isDirectory) {', $additional + [Environment]::NewLine + 'public static string Check(string path,bool isDirectory) {')
+$patched = $patched.Replace($hook, $hook + [Environment]::NewLine + @'
+            ByHandleFileInformation hardlinkInfo;
+            if(!GetFileInformationByHandle(file,out hardlinkInfo)) return "NATIVE_LINK_INFO_DENIED";
+            if(hardlinkInfo.NumberOfLinks!=1) return "HARDLINK_DENIED";
+'@)
+Add-Type -TypeDefinition $patched -ErrorAction Stop
 $id = [Guid]::NewGuid().ToString('N')
 $folder = Join-Path $env:ProgramData ('classmesh-e18c4n-' + $id)
 $primary = Join-Path $folder 'authorization.json'
