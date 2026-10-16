@@ -290,3 +290,175 @@ mod checkpoint_contract_tests {
         assert!(parse_policy_epoch_checkpoint(Bytewise(&valid[..15])).is_err());
     }
 }
+
+/// V2 binds the *exact* policy bytes to a separately protected epoch anchor.
+/// SHA-256 is unkeyed: this is not authentication unless the checkpoint's
+/// provenance is independently established by the caller.
+const BOUND_POLICY_CHECKPOINT_MAGIC: &[u8; 8] = b"CMPBND02";
+const BOUND_POLICY_CHECKPOINT_LEN: usize = 48;
+const MAX_BOUND_POLICY_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundPolicyError {
+    InvalidEpoch,
+    InvalidCheckpoint,
+    InvalidPolicy,
+    DigestMismatch,
+    Unreadable,
+}
+
+/// The exact byte buffer which passed the checkpoint digest check.
+/// Not an authorization capability: caller must attest both open HANDLEs and
+/// parse these same bytes without reopening or rereading a pathname.
+#[derive(Debug)]
+pub struct VerifiedPolicyBytes {
+    epoch: u64,
+    bytes: Vec<u8>,
+}
+
+impl VerifiedPolicyBytes {
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn policy_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+pub fn encode_bound_policy_checkpoint(
+    epoch: u64,
+    policy_bytes: &[u8],
+) -> Result<[u8; BOUND_POLICY_CHECKPOINT_LEN], BoundPolicyError> {
+    if epoch == 0 {
+        return Err(BoundPolicyError::InvalidEpoch);
+    }
+    if policy_bytes.is_empty() || policy_bytes.len() > MAX_BOUND_POLICY_BYTES {
+        return Err(BoundPolicyError::InvalidPolicy);
+    }
+    let mut record = [0_u8; BOUND_POLICY_CHECKPOINT_LEN];
+    record[..8].copy_from_slice(BOUND_POLICY_CHECKPOINT_MAGIC);
+    record[8..16].copy_from_slice(&epoch.to_le_bytes());
+    record[16..]
+        .copy_from_slice(ring::digest::digest(&ring::digest::SHA256, policy_bytes).as_ref());
+    Ok(record)
+}
+
+/// Bounded exact-record reader + exact-policy-byte digest binding.
+/// Rejects the legacy 16-byte V1 checkpoint, never falls back to backups,
+/// and does not open paths. Both readers must already be OS-attested.
+pub fn verify_bound_policy_checkpoint(
+    mut checkpoint: impl std::io::Read,
+    policy: impl std::io::Read,
+    maximum_policy_bytes: usize,
+) -> Result<VerifiedPolicyBytes, BoundPolicyError> {
+    use std::io::Read;
+    let mut record = [0_u8; BOUND_POLICY_CHECKPOINT_LEN];
+    checkpoint
+        .read_exact(&mut record)
+        .map_err(|_| BoundPolicyError::Unreadable)?;
+    let mut extra = [0_u8; 1];
+    if checkpoint
+        .read(&mut extra)
+        .map_err(|_| BoundPolicyError::Unreadable)?
+        != 0
+    {
+        return Err(BoundPolicyError::InvalidCheckpoint);
+    }
+    if &record[..8] != BOUND_POLICY_CHECKPOINT_MAGIC {
+        return Err(BoundPolicyError::InvalidCheckpoint);
+    }
+    let epoch = u64::from_le_bytes(record[8..16].try_into().expect("fixed-width epoch"));
+    if epoch == 0 {
+        return Err(BoundPolicyError::InvalidEpoch);
+    }
+    let bound = maximum_policy_bytes.min(MAX_BOUND_POLICY_BYTES);
+    let mut bytes = Vec::new();
+    policy
+        .take(u64::try_from(bound).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| BoundPolicyError::Unreadable)?;
+    if bytes.is_empty() || bytes.len() > bound {
+        return Err(BoundPolicyError::InvalidPolicy);
+    }
+    let actual = ring::digest::digest(&ring::digest::SHA256, &bytes);
+    // Digest is unkeyed and not a secret; fixed-width XOR aggregation avoids
+    // leaking the first mismatching byte and does not use deprecated APIs.
+    let mismatch = record[16..]
+        .iter()
+        .zip(actual.as_ref().iter())
+        .fold(0_u8, |acc, (expected, observed)| {
+            acc | (expected ^ observed)
+        });
+    if mismatch != 0 {
+        return Err(BoundPolicyError::DigestMismatch);
+    }
+    Ok(VerifiedPolicyBytes { epoch, bytes })
+}
+
+#[cfg(test)]
+mod bound_checkpoint_contract_tests {
+    use super::*;
+
+    #[test]
+    fn bound_checkpoint_accepts_only_original_policy_bytes() {
+        let original = br#"{"version":1,"principals":[]}"#;
+        let checkpoint = encode_bound_policy_checkpoint(17, original).unwrap();
+        assert_eq!(checkpoint.len(), 48);
+        let verified =
+            verify_bound_policy_checkpoint(checkpoint.as_slice(), original.as_slice(), 1024)
+                .unwrap();
+        assert_eq!(verified.epoch(), 17);
+        assert_eq!(verified.policy_bytes(), original);
+        let modified = br#"{"version":1,"principals":[1]}"#;
+        assert!(
+            verify_bound_policy_checkpoint(checkpoint.as_slice(), modified.as_slice(), 1024)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_unbound_v1_truncation_trailing_zero_epoch_and_oversize() {
+        let original = b"authorized";
+        let valid = encode_bound_policy_checkpoint(19, original).unwrap();
+        let v1 = encode_policy_epoch_checkpoint(19).unwrap();
+        assert!(verify_bound_policy_checkpoint(v1.as_slice(), original.as_slice(), 1024).is_err());
+        for len in 0..valid.len() {
+            assert!(
+                verify_bound_policy_checkpoint(&valid[..len], original.as_slice(), 1024).is_err()
+            );
+        }
+        let mut trailing = valid.to_vec();
+        trailing.push(0);
+        assert!(
+            verify_bound_policy_checkpoint(trailing.as_slice(), original.as_slice(), 1024).is_err()
+        );
+        let mut zero = valid;
+        zero[8..16].fill(0);
+        assert!(
+            verify_bound_policy_checkpoint(zero.as_slice(), original.as_slice(), 1024).is_err()
+        );
+        assert!(verify_bound_policy_checkpoint(valid.as_slice(), original.as_slice(), 5).is_err());
+        assert!(encode_bound_policy_checkpoint(0, original).is_err());
+    }
+
+    #[test]
+    fn readers_with_partial_reads_are_supported() {
+        struct Bytewise<'a>(&'a [u8]);
+        impl std::io::Read for Bytewise<'_> {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.is_empty() || output.is_empty() {
+                    return Ok(0);
+                }
+                output[0] = self.0[0];
+                self.0 = &self.0[1..];
+                Ok(1)
+            }
+        }
+        let original = b"policy contents";
+        let valid = encode_bound_policy_checkpoint(20, original).unwrap();
+        let verified =
+            verify_bound_policy_checkpoint(Bytewise(&valid), Bytewise(original), 64).unwrap();
+        assert_eq!(verified.policy_bytes(), original);
+    }
+}
