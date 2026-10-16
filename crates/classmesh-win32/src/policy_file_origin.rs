@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
-use std::path::Path;
+use std::path::{Component, Path, Prefix};
 
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -257,7 +257,16 @@ fn open_protected_directory(path: &Path) -> io::Result<File> {
 /// connected to Service startup or policy reload until those trust gates and
 /// durable rollback / TOCTOU requirements have independent native proof.
 pub fn open_protected_policy_in_app_root(app_root: &Path) -> io::Result<PinnedPolicyCandidate> {
-    if !app_root.is_absolute() || app_root.file_name() != Some(std::ffi::OsStr::new("ClassMesh")) {
+    let absolute_local_drive = matches!(
+        app_root.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+    );
+    if !app_root.is_absolute()
+        || !absolute_local_drive
+        || app_root.components().any(|part| matches!(part, Component::ParentDir))
+        || app_root.file_name() != Some(std::ffi::OsStr::new("ClassMesh"))
+    {
         return Err(permission_denied());
     }
     let pinned_app_root = open_protected_directory(app_root)?;
