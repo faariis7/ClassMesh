@@ -1,3 +1,11 @@
+## Phase 12E18c4l — retained open-file parser foundation (IN PROGRESS; NOT production path trust)
+
+- From merged #503 main `4400319d`, plan-first `46fa3a0`, test-first `6c1b476` actually failed on Synology Rust E0599 (no open-file parser), then private bounded `load_from_open_file(File)` refactor `88af974` made the exact focused test GREEN. The test opens a revoked-policy file, renames it, replaces the canonical path with a more permissive policy, then proves parsing of the pre-opened file does **not** follow the replacement path. Existing path-based loaders still delegate to the private file-handle parser.
+- This is only the **portable retained-handle parsing primitive**. It performs NO native Windows owner/DACL, ancestor, reparse, file-ID or hardlink attestation and does NOT wire the production ClassMesh Service to a verified OS handle. It does not activate live reload, cross-restart rollback prevention or Worker cancellation. These remain mandatory separately test-first and native Windows-qualified steps.
+- Generic IPC v11 ClipboardRead remains failure-only; #477 native RED / #479 forbids section-HANDLE secret bootstrap; no actual v12 clipboard bytes, keys or physical two-PC proof.
+
+---
+
 # ClassMesh Implementation Status
 
 ## Phase12E18c4k — actual SCM LocalSystem native test-file owner/ACL/reparse proof (CI pending)
