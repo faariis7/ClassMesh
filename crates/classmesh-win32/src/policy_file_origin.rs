@@ -161,7 +161,7 @@ fn attest_restricted_owner_acl(file: &File, directory: bool) -> io::Result<()> {
     }
     // Safety: non-null ACL pointer validated by IsValidAcl.
     let count = unsafe { (*dacl).AceCount };
-    if count < 2 || count > 32 {
+    if !(2..=32).contains(&count) {
         return Err(permission_denied());
     }
     let mut system = false;
