@@ -282,6 +282,50 @@ pub fn open_protected_policy_in_app_root(app_root: &Path) -> io::Result<PinnedPo
     })
 }
 
+/// Experimental protected ProgramData prefix qualification. This type pins
+/// the data root together with the protected ClassMesh/state subtree for the
+/// whole parse. The system volume root and mount/relative-handle chain are
+/// NOT attested. Do not use as a production Service trust token.
+#[derive(Debug)]
+pub struct PinnedProgramDataCandidate {
+    _program_data: File,
+    inner: PinnedPolicyCandidate,
+}
+
+impl PinnedProgramDataCandidate {
+    pub fn with_file<T>(&self, action: impl FnOnce(&File) -> T) -> T {
+        self.inner.with_file(action)
+    }
+}
+
+/// Strict experimental ancestry check. Windows default ProgramData ACLs may
+/// contain writable Users entries, which this *deliberately* rejects; never
+/// relax the check silently or change the OS-wide ProgramData permissions.
+pub fn open_protected_policy_in_program_data(
+    program_data: &Path,
+) -> io::Result<PinnedProgramDataCandidate> {
+    let disk_prefix = matches!(
+        program_data.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+    );
+    if !program_data.is_absolute()
+        || !disk_prefix
+        || program_data
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+        || program_data.file_name() != Some(std::ffi::OsStr::new("ProgramData"))
+    {
+        return Err(permission_denied());
+    }
+    let pinned_data = open_protected_directory(program_data)?;
+    let inner = open_protected_policy_in_app_root(&program_data.join("ClassMesh"))?;
+    Ok(PinnedProgramDataCandidate {
+        _program_data: pinned_data,
+        inner,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
