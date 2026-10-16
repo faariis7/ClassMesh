@@ -27,7 +27,6 @@ pub fn verify_next_policy_epoch(trusted: u64, candidate: u64) -> Result<(), Poli
     Ok(())
 }
 
-
 /// Startup admission for a separately authenticated durable anchor and an
 /// already authenticated policy. Equality is mandatory: a newer candidate
 /// cannot silently advance trust at restart, and an older one is a rollback.
@@ -141,7 +140,8 @@ mod transition_contract_tests {
         let receipt = commit_policy_epoch(7, 9, |candidate| {
             committed = candidate;
             Ok::<(), &'static str>(())
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(committed, 9);
         assert_eq!(receipt.epoch(), 9);
     }
@@ -153,7 +153,10 @@ mod transition_contract_tests {
             attempts += 1;
             Err::<(), _>("disk sync failed")
         });
-        assert!(matches!(result, Err(EpochTransitionError::Commit("disk sync failed"))));
+        assert!(matches!(
+            result,
+            Err(EpochTransitionError::Commit("disk sync failed"))
+        ));
         assert_eq!(attempts, 1);
     }
 
@@ -178,7 +181,8 @@ mod transition_contract_tests {
         let receipt = commit_policy_epoch(anchor, 8, |next| {
             anchor = next;
             Ok::<(), ()>(())
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(receipt.epoch(), 8);
         assert!(verify_startup_policy_epoch(anchor, 7).is_err());
         assert_eq!(verify_startup_policy_epoch(anchor, 8), Ok(()));
