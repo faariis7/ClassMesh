@@ -26,6 +26,16 @@ pub fn open_single_link_policy_leaf(path: &Path) -> io::Result<File> {
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
 
+    let info = information_from_handle(&file)?;
+    if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        || info.nNumberOfLinks != 1
+    {
+        return Err(permission_denied());
+    }
+    Ok(file)
+}
+
+fn information_from_handle(file: &File) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
     let mut info = BY_HANDLE_FILE_INFORMATION {
         dwFileAttributes: 0,
         ftCreationTime: Default::default(),
@@ -44,15 +54,7 @@ pub fn open_single_link_policy_leaf(path: &Path) -> io::Result<File> {
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
-        || info.nNumberOfLinks != 1
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "policy leaf must be a regular, non-reparse single-link file",
-        ));
-    }
-    Ok(file)
+    Ok(info)
 }
 
 /// Require the retained *leaf* HANDLE to have a non-NULL, explicitly
@@ -62,7 +64,7 @@ pub fn open_single_link_policy_leaf(path: &Path) -> io::Result<File> {
 /// durable epoch or TOCTOU-safe production policy publisher is established.
 pub fn open_protected_policy_leaf(path: &Path) -> io::Result<File> {
     let file = open_single_link_policy_leaf(path)?;
-    attest_leaf_owner_acl(&file)?;
+    attest_restricted_owner_acl(&file, false)?;
     Ok(file)
 }
 
@@ -73,7 +75,7 @@ fn permission_denied() -> io::Error {
     )
 }
 
-fn attest_leaf_owner_acl(file: &File) -> io::Result<()> {
+fn attest_restricted_owner_acl(file: &File, directory: bool) -> io::Result<()> {
     use std::ffi::c_void;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
@@ -173,8 +175,9 @@ fn attest_leaf_owner_acl(file: &File) -> io::Result<()> {
         // Safety: GetAce returns at least an in-bounds ACE_HEADER. Check size
         // BEFORE treating its memory as an ACCESS_ALLOWED_ACE.
         let header = unsafe { &*(ace.cast::<ACE_HEADER>()) };
+        let allowed_inheritance = if directory { 0x01 | 0x02 } else { 0 };
         if header.AceType != 0
-            || header.AceFlags != 0
+            || header.AceFlags & !allowed_inheritance != 0
             || usize::from(header.AceSize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>()
         {
             return Err(permission_denied());
@@ -211,6 +214,63 @@ fn attest_leaf_owner_acl(file: &File) -> io::Result<()> {
         return Err(permission_denied());
     }
     Ok(())
+}
+
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+/// One file handle for each protected ClassMesh subtree node is retained
+/// alongside the leaf during validation and parsing. The caller MUST still
+/// prove the system-selected ProgramData prefix is trusted before production
+/// use; this type alone is not an authorization publisher.
+#[derive(Debug)]
+pub struct PinnedPolicyCandidate {
+    leaf: File,
+    _app_root: File,
+    _state_dir: File,
+}
+
+impl PinnedPolicyCandidate {
+    /// Keep the ancestors pinned for the full duration of the caller's parse.
+    pub fn with_file<T>(&self, action: impl FnOnce(&File) -> T) -> T {
+        action(&self.leaf)
+    }
+}
+
+fn open_protected_directory(path: &Path) -> io::Result<File> {
+    let dir = OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    let info = information_from_handle(&dir)?;
+    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(permission_denied());
+    }
+    attest_restricted_owner_acl(&dir, true)?;
+    Ok(dir)
+}
+
+/// Isolated Windows qualification boundary for fixed ClassMesh/state tree.
+/// Does NOT attest the drive root or ProgramData ancestors and must not be
+/// connected to Service startup or policy reload until those trust gates and
+/// durable rollback / TOCTOU requirements have independent native proof.
+pub fn open_protected_policy_in_app_root(app_root: &Path) -> io::Result<PinnedPolicyCandidate> {
+    if !app_root.is_absolute()
+        || app_root.file_name() != Some(std::ffi::OsStr::new("ClassMesh"))
+    {
+        return Err(permission_denied());
+    }
+    let pinned_app_root = open_protected_directory(app_root)?;
+    let state_root = app_root.join("state");
+    let pinned_state_dir = open_protected_directory(&state_root)?;
+    let leaf = open_protected_policy_leaf(&state_root.join("authorization.json"))?;
+    Ok(PinnedPolicyCandidate {
+        leaf,
+        _app_root: pinned_app_root,
+        _state_dir: pinned_state_dir,
+    })
 }
 
 #[cfg(test)]
