@@ -189,6 +189,60 @@ mod transition_contract_tests {
     }
 }
 
+
+const POLICY_EPOCH_CHECKPOINT_MAGIC: &[u8; 8] = b"CMPECH01";
+const POLICY_EPOCH_CHECKPOINT_LEN: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyEpochCheckpointError {
+    InvalidFormat,
+    InvalidEpoch,
+    Unreadable,
+}
+
+/// Canonical fixed-width checkpoint bytes for a future protected epoch store.
+/// These bytes are NOT authenticated or tamper-resistant by themselves.
+pub fn encode_policy_epoch_checkpoint(
+    epoch: u64,
+) -> Result<[u8; POLICY_EPOCH_CHECKPOINT_LEN], PolicyEpochCheckpointError> {
+    if epoch == 0 {
+        return Err(PolicyEpochCheckpointError::InvalidEpoch);
+    }
+    let mut bytes = [0_u8; POLICY_EPOCH_CHECKPOINT_LEN];
+    bytes[..8].copy_from_slice(POLICY_EPOCH_CHECKPOINT_MAGIC);
+    bytes[8..].copy_from_slice(&epoch.to_le_bytes());
+    Ok(bytes)
+}
+
+/// Read exactly one checkpoint from a caller-supplied, already-authenticated
+/// open HANDLE/reader. Never silently accept trailing data or a torn record.
+/// The caller must independently attest trusted origin and durable storage.
+pub fn parse_policy_epoch_checkpoint(
+    mut source: impl std::io::Read,
+) -> Result<u64, PolicyEpochCheckpointError> {
+    use std::io::Read;
+    let mut bytes = [0_u8; POLICY_EPOCH_CHECKPOINT_LEN];
+    source
+        .read_exact(&mut bytes)
+        .map_err(|_| PolicyEpochCheckpointError::Unreadable)?;
+    if &bytes[..8] != POLICY_EPOCH_CHECKPOINT_MAGIC {
+        return Err(PolicyEpochCheckpointError::InvalidFormat);
+    }
+    let mut extra = [0_u8; 1];
+    if source
+        .read(&mut extra)
+        .map_err(|_| PolicyEpochCheckpointError::Unreadable)?
+        != 0
+    {
+        return Err(PolicyEpochCheckpointError::InvalidFormat);
+    }
+    let epoch = u64::from_le_bytes(bytes[8..].try_into().expect("fixed width"));
+    if epoch == 0 {
+        return Err(PolicyEpochCheckpointError::InvalidEpoch);
+    }
+    Ok(epoch)
+}
+
 #[cfg(test)]
 mod checkpoint_contract_tests {
     use super::*;
