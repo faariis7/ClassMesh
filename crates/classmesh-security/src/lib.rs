@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod policy_blob_stage;
 pub mod group_media;
 pub mod group_media_coordinator;
 pub mod persistence;
