@@ -277,6 +277,22 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn candidate_root_rejects_parent_traversal_and_remote_prefixes() {
+        for ambiguous in [
+            r"C:\ProgramData\ClassMesh\..\ClassMesh",
+            r"\\untrusted-server\share\ClassMesh",
+            "ClassMesh",
+        ] {
+            assert_eq!(
+                open_protected_policy_in_app_root(Path::new(ambiguous))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+    }
+
+    #[test]
     fn protected_subtree_denies_untrusted_state_directory() {
         use std::process::Command;
 
