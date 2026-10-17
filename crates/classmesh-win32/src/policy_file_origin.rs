@@ -383,21 +383,39 @@ impl PinnedProgramDataCandidate {
 /// Strict experimental ancestry check. Windows default ProgramData ACLs may
 /// contain writable Users entries, which this *deliberately* rejects; never
 /// relax the check silently or change the OS-wide ProgramData permissions.
-pub fn open_protected_policy_in_program_data(
-    program_data: &Path,
-) -> io::Result<PinnedProgramDataCandidate> {
+/// Raw path spelling check only; HANDLE ancestry remains unqualified.
+fn safe_program_data_prefix(path: &Path) -> bool {
+    let Some(raw) = path.to_str() else {
+        return false;
+    };
+    if raw.contains('/') || raw.contains('\0') {
+        return false;
+    }
+    let tail = raw.strip_prefix(r"\\?\").unwrap_or(raw);
+    if tail
+        .split('\\')
+        .skip(1)
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return false;
+    }
     let disk_prefix = matches!(
-        program_data.components().next(),
+        path.components().next(),
         Some(Component::Prefix(prefix))
             if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
     );
-    if !program_data.is_absolute()
-        || !disk_prefix
-        || program_data
+    path.is_absolute()
+        && disk_prefix
+        && path
             .components()
-            .any(|part| matches!(part, Component::ParentDir))
-        || program_data.file_name() != Some(std::ffi::OsStr::new("ProgramData"))
-    {
+            .all(|part| !matches!(part, Component::ParentDir))
+        && path.file_name() == Some(std::ffi::OsStr::new("ProgramData"))
+}
+
+pub fn open_protected_policy_in_program_data(
+    program_data: &Path,
+) -> io::Result<PinnedProgramDataCandidate> {
+    if !safe_program_data_prefix(program_data) {
         return Err(permission_denied());
     }
     let pinned_data = open_protected_directory(program_data)?;
@@ -413,6 +431,21 @@ pub fn open_protected_policy_in_program_data(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn programdata_prefix_preflight_rejects_ambiguous_spelling() {
+        for raw in [
+            r"C:\Users\.\ProgramData",
+            r"C:\Users\\ProgramData",
+            r"C:\Users/ProgramData",
+            r"C:\Users\..\ProgramData",
+            r"\\server\share\ProgramData",
+        ] {
+            assert!(!safe_program_data_prefix(Path::new(raw)), "accepted: {raw}");
+        }
+        assert!(safe_program_data_prefix(Path::new(r"C:\ProgramData")));
+        assert!(safe_program_data_prefix(Path::new(r"\\?\C:\ProgramData")));
+    }
 
     #[test]
     fn candidate_root_rejects_parent_traversal_and_remote_prefixes() {

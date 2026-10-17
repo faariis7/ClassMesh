@@ -1,3 +1,5 @@
+> **Phase12 policy-origin preflight (2026-10-17):** Harden the isolated ProgramData candidate opener against raw lexical dot/repeated/mixed separators before Windows normalisation. Unit RED/GREEN; no trusted volume HANDLE root, NT relative opener, durable anchor or production activation claim. Require exact-head hosted CI and native Windows before merge.
+
 > **Phase12 next batch (2026-10-17):** Harden the experimental create-only ProgramData root path preflight against lexical dot/duplicate/mixed separators before Windows path normalization; keep sandboxed bootstrap only, no trusted origin or production Service wiring. Test on native Windows and exact-head CI before merge.
 
 > **Phase12 lexical Known Folder hardening (2026-10-17, PLAN):** reject raw dot/dotdot, repeated/mixed separator and embedded NUL before Windows PathBuf normalization; add negative tests. No new filesystem writes or production wiring. Hosted native Windows CI required before merge.
