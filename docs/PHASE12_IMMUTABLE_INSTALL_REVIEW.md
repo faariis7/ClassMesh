@@ -16,3 +16,7 @@ The previous epoch-first ordering can strand a valid old policy after the anchor
 ## Still blocked
 
 The callbacks are **not** trusted storage implementations: neither fsync nor atomic rename nor root-of-volume and ProgramData ancestry, Windows ACL/owner attestation, untrusted existing blobs, preexisting writable handles, directory hardlinks/junctions, cross-process races, independent anti-rollback trust, installer bootstrap, crash durability nor garbage collection are proven. The V2 hash is unkeyed. The old `commit_policy_epoch` helper remains available for isolated callers and must not be mistaken for a crash-safe install. A real implementation must use OS-qualified native retained handles and verify durable commit semantics, including power-loss fault injection, before Service integration. Existing physical and protocol gates remain open.
+
+## Post-commit qualified checkpoint readback (experimental)
+
+`stage_commit_verify_bound_policy` adds a mandatory caller-provided *qualified* checkpoint readback after successful stage/commit callbacks. Only an exact V2 epoch+SHA-256 record match returns `CommittedBoundPolicy`; stale, missing, unreadable, mismatched, or error results fail closed without a receipt. Native Rust tests inject a dishonest success callback, readback failure, and stage failure, and assert stage→commit→readback ordering. **This contract does not implement the independent durable writer, trusted storage origin, fsync, ACL, anti-rollback or production publishing.**

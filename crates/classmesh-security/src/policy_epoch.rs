@@ -519,6 +519,45 @@ pub fn stage_then_commit_bound_policy<E>(
     })
 }
 
+/// Experimental post-commit readback contract. The callback must independently
+/// open and qualify the trusted checkpoint; equality alone cannot prove that
+/// its filesystem, ACL or anti-rollback origin is authentic or durable.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BoundReadbackError<E> {
+    Install(BoundInstallError<E>),
+    Readback(E),
+    Mismatch,
+}
+
+/// Stage and commit in order, then refuse success unless the qualified
+/// checkpoint readback exactly matches the newly committed digest and epoch.
+/// If readback fails, callers MUST recover from the trusted anchor on startup,
+/// not publish or fallback to an older policy. This is not a durable writer.
+pub fn stage_commit_verify_bound_policy<E>(
+    trusted_epoch: u64,
+    candidate_epoch: u64,
+    candidate_policy: &[u8],
+    stage_immutable_and_flush: impl FnOnce(u64, &[u8]) -> Result<(), E>,
+    commit_trusted_checkpoint: impl FnOnce(&[u8; BOUND_POLICY_CHECKPOINT_LEN]) -> Result<(), E>,
+    read_back_qualified_checkpoint: impl FnOnce() -> Result<[u8; BOUND_POLICY_CHECKPOINT_LEN], E>,
+) -> Result<CommittedBoundPolicy, BoundReadbackError<E>> {
+    let receipt = stage_then_commit_bound_policy(
+        trusted_epoch,
+        candidate_epoch,
+        candidate_policy,
+        stage_immutable_and_flush,
+        commit_trusted_checkpoint,
+    )
+    .map_err(BoundReadbackError::Install)?;
+    let expected = encode_bound_policy_checkpoint(candidate_epoch, candidate_policy)
+        .map_err(|error| BoundReadbackError::Install(BoundInstallError::InvalidPolicy(error)))?;
+    let observed = read_back_qualified_checkpoint().map_err(BoundReadbackError::Readback)?;
+    if observed != expected {
+        return Err(BoundReadbackError::Mismatch);
+    }
+    Ok(receipt)
+}
+
 #[cfg(test)]
 mod immutable_policy_install_tests {
     use super::*;
@@ -621,6 +660,88 @@ mod immutable_policy_install_tests {
         let result =
             stage_then_commit_bound_policy(4, 5, NEW, |_, _| Ok(()), |_| Err("commit failed"));
         assert_eq!(result, Err(BoundInstallError::Commit("commit failed")));
+    }
+
+    #[test]
+    fn readback_commit_receipt_requires_exact_committed_checkpoint() {
+        let old = encode_bound_policy_checkpoint(4, OLD).unwrap();
+        let expected = encode_bound_policy_checkpoint(5, NEW).unwrap();
+        let stale = stage_commit_verify_bound_policy(
+            4,
+            5,
+            NEW,
+            |_, _| Ok::<(), &'static str>(()),
+            |_| Ok(()),
+            || Ok(old),
+        );
+        assert_eq!(stale, Err(BoundReadbackError::Mismatch));
+        let verified = stage_commit_verify_bound_policy(
+            4,
+            5,
+            NEW,
+            |_, _| Ok::<(), &'static str>(()),
+            |_| Ok(()),
+            || Ok(expected),
+        )
+        .unwrap();
+        assert_eq!(verified.epoch(), 5);
+    }
+
+    #[test]
+    fn readback_only_runs_after_successful_stage_and_commit() {
+        use std::cell::RefCell;
+        let order = RefCell::new(Vec::new());
+        let checkpoint = encode_bound_policy_checkpoint(5, NEW).unwrap();
+        let receipt = stage_commit_verify_bound_policy(
+            4,
+            5,
+            NEW,
+            |_, _| {
+                order.borrow_mut().push("stage");
+                Ok::<(), &'static str>(())
+            },
+            |_| {
+                order.borrow_mut().push("commit");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("readback");
+                Ok(checkpoint)
+            },
+        )
+        .unwrap();
+        assert_eq!(receipt.epoch(), 5);
+        assert_eq!(order.into_inner(), ["stage", "commit", "readback"]);
+        let result = stage_commit_verify_bound_policy(
+            4,
+            5,
+            NEW,
+            |_, _| Err::<(), _>("stage failed"),
+            |_| panic!("commit after stage failure"),
+            || panic!("readback after stage failure"),
+        );
+        assert_eq!(
+            result,
+            Err(BoundReadbackError::Install(BoundInstallError::Stage(
+                "stage failed"
+            )))
+        );
+    }
+
+    #[test]
+    fn readback_failure_never_produces_success_receipt() {
+        let result = stage_commit_verify_bound_policy(
+            4,
+            5,
+            NEW,
+            |_, _| Ok::<(), &'static str>(()),
+            |_| Ok(()),
+            || Err("unreadable anchor"),
+        );
+        assert_eq!(
+            result,
+            Err(BoundReadbackError::Readback("unreadable anchor"))
+        );
     }
 
     #[test]
