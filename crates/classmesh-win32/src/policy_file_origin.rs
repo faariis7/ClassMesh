@@ -367,7 +367,7 @@ fn safe_child_leaf(leaf: &str) -> bool {
         || leaf == "."
         || leaf == ".."
         || leaf.contains(['/', '\\', ':', '\0', '?', '*', '<', '>', '|', '"'])
-        || leaf.chars().any(|c| c <= '\u{1f}')
+        || leaf.chars().any(char::is_control)
         || leaf.ends_with(['.', ' '])
     {
         return false;
@@ -522,6 +522,7 @@ mod tests {
             "file|",
             "file\"",
             "file\x1f",
+            "file\u{7f}",
             "COM1.txt",
             "LPT9.cfg",
         ] {
