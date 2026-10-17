@@ -42,7 +42,11 @@ fn valid_os_program_data_path(text: &str) -> bool {
         return false;
     }
     let parts: Vec<_> = text.split('\\').collect();
-    if parts.iter().skip(1).any(|segment| segment.is_empty() || *segment == "." || *segment == "..") {
+    if parts
+        .iter()
+        .skip(1)
+        .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+    {
         return false;
     }
     let path = PathBuf::from(text);
