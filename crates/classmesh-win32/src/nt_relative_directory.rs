@@ -52,33 +52,115 @@ unsafe extern "system" {
     ) -> i32;
 }
 
+/// Query an Object Manager symbolic link itself, without following it through
+/// the filesystem. Only fixed OS namespace names are accepted by callers.
+pub(crate) fn query_object_link(name: &str) -> io::Result<String> {
+    use std::os::windows::io::OwnedHandle;
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    type OpenLink = unsafe extern "system" fn(*mut HANDLE, u32, *mut NativeObjectAttributes) -> i32;
+    type QueryLink = unsafe extern "system" fn(HANDLE, *mut NativeUnicodeString, *mut u32) -> i32;
+    let module_name: Vec<u16> = "ntdll.dll\0".encode_utf16().collect();
+    // Safety: ntdll is loaded for this process lifetime; bounded NUL-terminated name.
+    let module = unsafe { GetModuleHandleW(module_name.as_ptr()) };
+    if module.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // Safety: exact exported names and documented system ABI signatures. Missing
+    // exports fail closed; no fallback to ordinary pathname opens.
+    let open: OpenLink = unsafe {
+        std::mem::transmute(
+            GetProcAddress(module, c"NtOpenSymbolicLinkObject".as_ptr().cast())
+                .ok_or_else(denied)?,
+        )
+    };
+    let query: QueryLink = unsafe {
+        std::mem::transmute(
+            GetProcAddress(module, c"NtQuerySymbolicLinkObject".as_ptr().cast())
+                .ok_or_else(denied)?,
+        )
+    };
+    let mut source: Vec<u16> = name.encode_utf16().collect();
+    let length = u16::try_from(source.len() * 2).map_err(|_| denied())?;
+    let mut input = NativeUnicodeString {
+        length,
+        maximum_length: length,
+        buffer: source.as_mut_ptr(),
+    };
+    let mut attributes = NativeObjectAttributes {
+        length: std::mem::size_of::<NativeObjectAttributes>() as u32,
+        root_directory: std::ptr::null_mut(),
+        object_name: &raw mut input,
+        attributes: 0x40,
+        security_descriptor: std::ptr::null_mut(),
+        security_quality_of_service: std::ptr::null_mut(),
+    };
+    let mut raw = std::ptr::null_mut();
+    // Safety: initialized ABI buffers remain alive for synchronous call.
+    let status = unsafe { open(&raw mut raw, 1, &raw mut attributes) }; // SYMBOLIC_LINK_QUERY
+    if status != 0 || raw.is_null() || raw == INVALID_HANDLE_VALUE {
+        if !raw.is_null() && raw != INVALID_HANDLE_VALUE {
+            // Safety: release returned handle on the failure path.
+            unsafe { CloseHandle(raw) };
+        }
+        return Err(io::Error::other(format!(
+            "Open object link {name}: {status:#010x}"
+        )));
+    }
+    // Safety: single owner of the successfully returned native handle.
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut buffer = vec![0u16; 32767];
+    let mut output = NativeUnicodeString {
+        length: 0,
+        maximum_length: 65534,
+        buffer: buffer.as_mut_ptr(),
+    };
+    // Safety: retained link and writable UTF-16 storage sized by MaximumLength.
+    if unsafe {
+        query(
+            handle.as_raw_handle(),
+            &raw mut output,
+            std::ptr::null_mut(),
+        )
+    } != 0
+        || output.length == 0
+        || output.length % 2 != 0
+        || output.length > output.maximum_length
+    {
+        return Err(denied());
+    }
+    String::from_utf16(&buffer[..usize::from(output.length / 2)]).map_err(|_| denied())
+}
+
 /// Compare the live OS volume and file IDs of two pinned directory objects.
 /// Equality is object identity, not proof that the objects are OS-trusted.
-fn same_native_file_identity(left: &File, right: &File) -> io::Result<bool> {
-    fn file_identity(file: &File) -> io::Result<(u32, u32, u32)> {
-        let mut info = BY_HANDLE_FILE_INFORMATION {
-            dwFileAttributes: 0,
-            ftCreationTime: Default::default(),
-            ftLastAccessTime: Default::default(),
-            ftLastWriteTime: Default::default(),
-            dwVolumeSerialNumber: 0,
-            nFileSizeHigh: 0,
-            nFileSizeLow: 0,
-            nNumberOfLinks: 0,
-            nFileIndexHigh: 0,
-            nFileIndexLow: 0,
-        };
-        // Safety: live owned HANDLE and initialized writable result storage.
-        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok((
-            info.dwVolumeSerialNumber,
-            info.nFileIndexHigh,
-            info.nFileIndexLow,
-        ))
+pub(crate) fn same_native_file_identity(left: &File, right: &File) -> io::Result<bool> {
+    Ok(native_file_identity(left)? == native_file_identity(right)?)
+}
+
+fn native_file_identity(file: &File) -> io::Result<(u64, [u8; 16])> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ID_128, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+    };
+    let mut info = FILE_ID_INFO {
+        VolumeSerialNumber: 0,
+        FileId: FILE_ID_128 {
+            Identifier: [0; 16],
+        },
+    };
+    // Safety: live retained HANDLE and exactly sized writable OS output. No
+    // truncated 64-bit fallback: failure to obtain full identity fails closed.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            (&raw mut info).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
     }
-    Ok(file_identity(left)? == file_identity(right)?)
+    Ok((info.VolumeSerialNumber, info.FileId.Identifier))
 }
 
 fn denied() -> io::Error {
@@ -92,11 +174,29 @@ fn denied() -> io::Error {
 /// The parent HANDLE must be independently authenticated by the caller;
 /// this method does NOT establish its authority or production eligibility.
 pub(crate) fn open_relative_readonly_directory(parent: &File, leaf: &str) -> io::Result<File> {
-    if !super::policy_file_origin::safe_child_leaf(leaf) {
+    if !super::policy_file_origin::safe_child_leaf(leaf) || leaf.encode_utf16().count() > 255 {
         return Err(denied());
     }
-    let mut utf16: Vec<u16> = leaf.encode_utf16().collect();
-    if utf16.is_empty() || utf16.len() > 255 {
+    open_native_readonly_directory(Some(parent), leaf)
+}
+
+/// Internal NT object-name entry point. Absolute names must come from the OS
+/// authority module, never from a policy or remote caller.
+pub(crate) fn open_native_readonly_directory(
+    parent: Option<&File>,
+    name: &str,
+) -> io::Result<File> {
+    open_native_node(parent, name, true, false)
+}
+
+fn open_native_node(
+    parent: Option<&File>,
+    name: &str,
+    directory: bool,
+    protected: bool,
+) -> io::Result<File> {
+    let mut utf16: Vec<u16> = name.encode_utf16().collect();
+    if utf16.is_empty() || utf16.len() > 32766 || name.contains('\0') {
         return Err(denied());
     }
     let length = u16::try_from(utf16.len() * 2).map_err(|_| denied())?;
@@ -107,7 +207,7 @@ pub(crate) fn open_relative_readonly_directory(parent: &File, leaf: &str) -> io:
     };
     let mut object = NativeObjectAttributes {
         length: std::mem::size_of::<NativeObjectAttributes>() as u32,
-        root_directory: parent.as_raw_handle(),
+        root_directory: parent.map_or(std::ptr::null_mut(), AsRawHandle::as_raw_handle),
         object_name: &raw mut name,
         // OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE
         attributes: 0x0040 | 0x1000,
@@ -124,14 +224,18 @@ pub(crate) fn open_relative_readonly_directory(parent: &File, leaf: &str) -> io:
     let status = unsafe {
         nt_create_file(
             &raw mut handle,
-            0x0010_0080, // SYNCHRONIZE | FILE_READ_ATTRIBUTES
+            // Protected directories need LIST_DIRECTORY (same bit as READ_DATA)
+            // so Windows enforces sharing against rename/delete opens. Metadata-only
+            // directory handles do not provide that sharing exclusion.
+            0x0010_0080 | if protected { 0x0002_0001 } else { 0 },
             &raw mut object,
             &raw mut status_block,
             std::ptr::null_mut(),
             0,
-            0x0000_0001 | 0x0000_0002 | 0x0000_0004,
-            1,                                       // FILE_OPEN, never create/write
-            0x0000_0001 | 0x0000_0020 | 0x0020_0000, // DIRECTORY | synchronous | OPEN_REPARSE_POINT
+            // Protected subtree refuses existing/future data writers or deleters.
+            if protected { 1 } else { 7 },
+            1, // FILE_OPEN, never create/write
+            (if directory { 1 } else { 0x40 }) | 0x20 | 0x0020_0000, // type | synchronous | no-follow
             std::ptr::null_mut(),
             0,
         )
@@ -141,7 +245,10 @@ pub(crate) fn open_relative_readonly_directory(parent: &File, leaf: &str) -> io:
             // Safety: a non-null NT-issued HANDLE must be released on error.
             unsafe { CloseHandle(handle) };
         }
-        return Err(denied());
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("NT directory open failed: {status:#010x}"),
+        ));
     }
     // Safety: successful NtCreateFile gave an owned real HANDLE exactly once.
     let file = unsafe { File::from_raw_handle(handle) };
@@ -161,12 +268,34 @@ pub(crate) fn open_relative_readonly_directory(parent: &File, leaf: &str) -> io:
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+    if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0) != directory
         || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || (!directory && info.nNumberOfLinks != 1)
     {
         return Err(denied());
     }
+    if let Some(parent) = parent {
+        let parent_id = native_file_identity(parent)?;
+        let child_id = native_file_identity(&file)?;
+        if parent_id.0 != child_id.0 || parent_id.1 == child_id.1 {
+            return Err(denied());
+        }
+    }
+    if protected {
+        crate::policy_file_origin::attest_restricted_owner_acl(&file, directory)?;
+    }
     Ok(file)
+}
+
+pub(crate) fn open_relative_protected_node(
+    parent: &File,
+    leaf: &str,
+    directory: bool,
+) -> io::Result<File> {
+    if !crate::policy_file_origin::safe_child_leaf(leaf) || leaf.encode_utf16().count() > 255 {
+        return Err(denied());
+    }
+    open_native_node(Some(parent), leaf, directory, true)
 }
 
 #[cfg(test)]
@@ -245,6 +374,145 @@ mod tests {
             .unwrap();
         assert!(open_relative_readonly_directory(&parent, "link").is_err());
         assert!(open_relative_readonly_directory(&parent, "real").is_ok());
+        drop(parent);
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn relative_open_refuses_mount_point_junction() {
+        let fixture =
+            std::env::temp_dir().join(format!("classmesh-nt-junction-{}", std::process::id()));
+        std::fs::create_dir(&fixture).unwrap();
+        std::fs::create_dir(fixture.join("target")).unwrap();
+        let result = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(fixture.join("junction"))
+            .arg(fixture.join("target"))
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let parent = OpenOptions::new()
+            .read(true)
+            .share_mode(7)
+            .custom_flags(0x0220_0000)
+            .open(&fixture)
+            .unwrap();
+        assert!(open_relative_readonly_directory(&parent, "junction").is_err());
+        assert!(open_relative_readonly_directory(&parent, "target").is_ok());
+        drop(parent);
+        std::fs::remove_dir(fixture.join("junction")).unwrap();
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn protected_relative_leaf_checks_acl_hardlinks_and_existing_writers() {
+        use std::io::Read;
+        let fixture =
+            std::env::temp_dir().join(format!("classmesh-nt-policy-{}", std::process::id()));
+        std::fs::create_dir(&fixture).unwrap();
+        let path = fixture.join("policy");
+        std::fs::write(&path, b"verified bytes").unwrap();
+        let acl = |path: &std::path::Path, args: &[&str]| {
+            let result = std::process::Command::new("icacls.exe")
+                .arg(path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        };
+        acl(
+            &path,
+            &[
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-5-18:F",
+                "*S-1-5-32-544:F",
+            ],
+        );
+        acl(&path, &["/setowner", "*S-1-5-32-544"]);
+        let parent = OpenOptions::new()
+            .read(true)
+            .share_mode(7)
+            .custom_flags(0x0220_0000)
+            .open(&fixture)
+            .unwrap();
+        let mut pinned =
+            open_relative_protected_node(&parent, "policy", false).expect("secure relative file");
+        let mut bytes = Vec::new();
+        pinned.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"verified bytes");
+        assert!(OpenOptions::new().write(true).open(&path).is_err());
+        assert!(std::fs::rename(&path, fixture.join("moved")).is_err());
+        drop(pinned);
+        let writer = OpenOptions::new()
+            .write(true)
+            .share_mode(7)
+            .open(&path)
+            .unwrap();
+        assert!(open_relative_protected_node(&parent, "policy", false).is_err());
+        drop(writer);
+        // A writable section can outlive its original file HANDLE. Sharing
+        // exclusion must reject it too, not just ordinary open writers.
+        {
+            use std::os::windows::io::OwnedHandle;
+            use windows_sys::Win32::System::Memory::{CreateFileMappingW, PAGE_READWRITE};
+            let writer = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(7)
+                .open(&path)
+                .unwrap();
+            // Safety: live regular file, no name, existing nonzero file length.
+            let mapping = unsafe {
+                CreateFileMappingW(
+                    writer.as_raw_handle(),
+                    std::ptr::null(),
+                    PAGE_READWRITE,
+                    0,
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            assert!(!mapping.is_null());
+            // Safety: own the successful mapping handle exactly once.
+            let mapping = unsafe { OwnedHandle::from_raw_handle(mapping) };
+            drop(writer);
+            assert!(
+                open_relative_protected_node(&parent, "policy", false).is_err(),
+                "writable section must prevent policy admission"
+            );
+            drop(mapping);
+        }
+        std::fs::hard_link(&path, fixture.join("alias")).unwrap();
+        assert!(open_relative_protected_node(&parent, "policy", false).is_err());
+        std::fs::remove_file(fixture.join("alias")).unwrap();
+        acl(&path, &["/grant", "*S-1-5-32-545:R"]);
+        assert!(open_relative_protected_node(&parent, "policy", false).is_err());
+        let state = fixture.join("state");
+        std::fs::create_dir(&state).unwrap();
+        assert!(open_relative_protected_node(&parent, "state", true).is_err());
+        acl(
+            &state,
+            &[
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-5-18:(OI)(CI)F",
+                "*S-1-5-32-544:(OI)(CI)F",
+            ],
+        );
+        acl(&state, &["/setowner", "*S-1-5-32-544"]);
+        let state_handle = open_relative_protected_node(&parent, "state", true).unwrap();
+        assert!(std::fs::rename(&state, fixture.join("moved-state")).is_err());
+        assert!(open_relative_protected_node(&parent, "state", false).is_err());
+        drop(state_handle);
         drop(parent);
         std::fs::remove_dir_all(fixture).unwrap();
     }

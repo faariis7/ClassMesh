@@ -75,7 +75,7 @@ fn permission_denied() -> io::Error {
     )
 }
 
-fn attest_restricted_owner_acl(file: &File, directory: bool) -> io::Result<()> {
+pub(crate) fn attest_restricted_owner_acl(file: &File, directory: bool) -> io::Result<()> {
     use std::ffi::c_void;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
