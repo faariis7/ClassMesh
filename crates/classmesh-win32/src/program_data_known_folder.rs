@@ -130,7 +130,9 @@ mod tests {
         }
         assert!(valid_os_program_data_path(r"C:\ProgramData"));
         assert!(valid_os_program_data_path(r"\\?\C:\ProgramData"));
-        assert!(!valid_os_program_data_path(r"\\?\UNC\server\share\ProgramData"));
+        assert!(!valid_os_program_data_path(
+            r"\\?\UNC\server\share\ProgramData"
+        ));
         assert!(valid_os_program_data_path(r"D:\SystemData\ProgramData"));
     }
 
