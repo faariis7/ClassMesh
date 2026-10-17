@@ -34,6 +34,33 @@ fn invalid() -> io::Error {
     )
 }
 
+/// Validate the raw spelling before Path normalization can hide dot segments,
+/// duplicate separators or mixed separators. This remains only a text check;
+/// it does not authenticate filesystem ancestry or a directory HANDLE.
+fn valid_os_program_data_path(text: &str) -> bool {
+    if text.contains('/') || text.contains('\0') || text.len() < 3 {
+        return false;
+    }
+    // Windows verbatim drive paths have a legitimate \\\\?\\ prefix.
+    // Validate the drive-rooted remainder without treating prefix delimiters
+    // as duplicate path separators. UNC verbatim paths still fail below.
+    let raw_segments = text.strip_prefix(r"\\?\").unwrap_or(text);
+    let parts: Vec<_> = raw_segments.split('\\').collect();
+    if parts
+        .iter()
+        .skip(1)
+        .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+    {
+        return false;
+    }
+    let path = PathBuf::from(text);
+    path.is_absolute()
+        && matches!(path.components().next(), Some(Component::Prefix(p))
+            if matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
+        && path.file_name() == Some(std::ffi::OsStr::new("ProgramData"))
+        && !path.components().any(|c| matches!(c, Component::ParentDir))
+}
+
 /// Read the machine's actual Windows Known Folder ID for common ProgramData.
 /// No environment-variable fallback, no alternate directory, no writes.
 /// The returned PATH is not an authenticated/pinned directory HANDLE, and
@@ -70,16 +97,10 @@ pub fn resolve_os_program_data_path() -> io::Result<PathBuf> {
     // Safety: the first `len` UTF-16 units were read above and remain live.
     let text = String::from_utf16(unsafe { std::slice::from_raw_parts(raw, len) })
         .map_err(|_| invalid())?;
-    let path = PathBuf::from(text);
-    let drive = matches!(path.components().next(), Some(Component::Prefix(p))
-        if matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)));
-    if !path.is_absolute()
-        || !drive
-        || path.file_name() != Some(std::ffi::OsStr::new("ProgramData"))
-        || path.components().any(|c| matches!(c, Component::ParentDir))
-    {
+    if !valid_os_program_data_path(&text) {
         return Err(invalid());
     }
+    let path = PathBuf::from(text);
     Ok(path)
 }
 
@@ -94,6 +115,25 @@ mod tests {
         assert_eq!(path.file_name(), Some(std::ffi::OsStr::new("ProgramData")));
         assert!(path.is_dir());
         assert!(!path.starts_with(std::env::temp_dir()));
+    }
+
+    #[test]
+    fn rejects_noncanonical_dot_segments_and_ambiguous_separators() {
+        for path in [
+            r"C:\temp\.\ProgramData",
+            r"C:\temp\..\ProgramData",
+            r"C:\temp//ProgramData",
+            r"C:\temp\\ProgramData",
+            r"C:\temp/ProgramData",
+        ] {
+            assert!(!valid_os_program_data_path(path), "accepted: {path}");
+        }
+        assert!(valid_os_program_data_path(r"C:\ProgramData"));
+        assert!(valid_os_program_data_path(r"\\?\C:\ProgramData"));
+        assert!(!valid_os_program_data_path(
+            r"\\?\UNC\server\share\ProgramData"
+        ));
+        assert!(valid_os_program_data_path(r"D:\SystemData\ProgramData"));
     }
 
     #[test]
