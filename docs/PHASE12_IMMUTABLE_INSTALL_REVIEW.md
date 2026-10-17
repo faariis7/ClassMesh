@@ -1,3 +1,5 @@
+> 2026-10-18: [Independent Windows-volume authority experiment](PHASE12_SYSTEM_VOLUME_AUTHORITY_REVIEW.md) adds kernel/global-device cross-checks and protected NT-relative opens. It does not qualify the shared-ancestor ACLs, durable anchor or production integration.
+
 # Phase 12 immutable policy-first install ordering — isolated review
 
 **Status:** Portable contract and fault-injection tests only; not a Windows durable writer, not wired into Service, and not production-qualified.

@@ -1,3 +1,5 @@
+> 2026-10-18: [Independent Windows-volume authority experiment](PHASE12_SYSTEM_VOLUME_AUTHORITY_REVIEW.md) adds kernel/global-device cross-checks and protected NT-relative opens. It does not qualify the shared-ancestor ACLs, durable anchor or production integration.
+
 # Phase 12 — OS Known Folder ProgramData resolver (read-only)
 
 **Status:** experimental, Windows-only read-only discovery. No production installer/Service wiring; no filesystem mutation.
