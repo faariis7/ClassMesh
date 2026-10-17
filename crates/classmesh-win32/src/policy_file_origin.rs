@@ -467,7 +467,10 @@ mod tests {
             r"C:\ProgramData/ ClassMesh",
             r"C:\ProgramData\..\ClassMesh",
         ] {
-            assert_eq!(validate_app_root(Path::new(raw)).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(
+                validate_app_root(Path::new(raw)).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
         }
         assert!(validate_app_root(Path::new(r"C:\ProgramData\ClassMesh")).is_ok());
         assert!(validate_app_root(Path::new(r"\\?\C:\ProgramData\ClassMesh")).is_ok());
