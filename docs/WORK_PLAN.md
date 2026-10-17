@@ -1,3 +1,5 @@
+> **Phase12 HANDLE child alias follow-up (2026-10-18):** Reject Unicode control characters including DEL from expected immediate child basename, with native Windows RED/GREEN regression. This is defense-in-depth, not an OS root trust proof, durable anchor, or production activation.
+
 > **Phase12 Win32 HANDLE child alias follow-up (2026-10-18):** Expand fail-closed expected immediate-child basename validation to reject Win32 wildcard, metacharacter and ASCII control characters; local RED/GREEN VM1/VM2; experimental only, no OS volume root trust or production activation.
 
 > **Phase12 retained-HANDLE child-leaf hardening (2026-10-17):** Before attesting immediate adjacency of two retained handles, reject Win32 device names, colon/ADS, terminal dot/space, traversal and separator aliases in expected child leaf. Isolated fail-closed gate, no trusted OS root / production authorization. Native VM1/VM2 and hosted CI required before merge.
