@@ -363,7 +363,10 @@ fn attest_same_volume_distinct_file_ids(
 /// Reject alternate data streams, Win32 aliases and reserved device names
 /// before resolving the immediate child of a pinned parent HANDLE.
 fn safe_child_leaf(leaf: &str) -> bool {
-    if leaf.is_empty() || leaf == "." || leaf == ".." || leaf.contains(['/', '\\', ':', '\0'])
+    if leaf.is_empty()
+        || leaf == "."
+        || leaf == ".."
+        || leaf.contains(['/', '\\', ':', '\0'])
         || leaf.ends_with(['.', ' '])
     {
         return false;
@@ -372,7 +375,8 @@ fn safe_child_leaf(leaf: &str) -> bool {
     if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
         return false;
     }
-    if stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT"))
+    if stem.len() == 4
+        && (stem.starts_with("COM") || stem.starts_with("LPT"))
         && matches!(stem.as_bytes()[3], b'1'..=b'9')
     {
         return false;
@@ -498,7 +502,19 @@ mod tests {
 
     #[test]
     fn child_leaf_preflight_rejects_windows_aliases_and_streams() {
-        for leaf in ["", ".", "..", "state/child", "state\\child", "policy:stream", "name.", "name ", "CON", "NUL", "name\0x"] {
+        for leaf in [
+            "",
+            ".",
+            "..",
+            "state/child",
+            "state\\child",
+            "policy:stream",
+            "name.",
+            "name ",
+            "CON",
+            "NUL",
+            "name\0x",
+        ] {
             assert!(!safe_child_leaf(leaf), "accepted: {leaf:?}");
         }
         assert!(safe_child_leaf("authorization.json"));
