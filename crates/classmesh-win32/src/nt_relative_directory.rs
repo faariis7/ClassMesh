@@ -52,6 +52,35 @@ unsafe extern "system" {
     ) -> i32;
 }
 
+/// Compare the live OS volume and file IDs of two pinned directory objects.
+/// Equality is object identity, not proof that the objects are OS-trusted.
+fn same_native_file_identity(left: &File, right: &File) -> io::Result<bool> {
+    fn file_identity(file: &File) -> io::Result<(u32, u32, u32)> {
+        let mut info = BY_HANDLE_FILE_INFORMATION {
+            dwFileAttributes: 0,
+            ftCreationTime: Default::default(),
+            ftLastAccessTime: Default::default(),
+            ftLastWriteTime: Default::default(),
+            dwVolumeSerialNumber: 0,
+            nFileSizeHigh: 0,
+            nFileSizeLow: 0,
+            nNumberOfLinks: 0,
+            nFileIndexHigh: 0,
+            nFileIndexLow: 0,
+        };
+        // Safety: live owned HANDLE and initialized writable result storage.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        ))
+    }
+    Ok(file_identity(left)? == file_identity(right)?)
+}
+
 fn denied() -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
@@ -145,6 +174,34 @@ mod tests {
     use super::*;
     use std::fs::OpenOptions;
     use std::os::windows::fs::OpenOptionsExt;
+
+    #[test]
+    fn root_relative_walk_reaches_identical_os_programdata_directory() {
+        let path = crate::program_data_known_folder::resolve_os_program_data_path().unwrap();
+        let pathname_candidates =
+            crate::program_data_known_folder::pin_os_program_data_ancestor_candidates().unwrap();
+        let mut ancestors: Vec<_> = path.ancestors().filter(|p| p.is_absolute()).collect();
+        ancestors.reverse();
+        assert_eq!(pathname_candidates.len(), ancestors.len());
+        let mut rooted = vec![pathname_candidates[0].try_clone().unwrap()];
+        for ancestor in ancestors.iter().skip(1) {
+            let leaf = ancestor.file_name().unwrap().to_str().unwrap();
+            let child = open_relative_readonly_directory(rooted.last().unwrap(), leaf).unwrap();
+            crate::policy_file_origin::attest_immediate_child(rooted.last().unwrap(), &child, leaf)
+                .unwrap();
+            rooted.push(child);
+        }
+        assert!(
+            same_native_file_identity(rooted.last().unwrap(), pathname_candidates.last().unwrap())
+                .unwrap()
+        );
+        let independently_opened =
+            crate::program_data_known_folder::pin_os_program_data_candidate().unwrap();
+        assert!(same_native_file_identity(rooted.last().unwrap(), &independently_opened).unwrap());
+        assert!(
+            !same_native_file_identity(rooted.first().unwrap(), &independently_opened).unwrap()
+        );
+    }
 
     #[test]
     fn retained_parent_handle_survives_pathname_substitution() {
