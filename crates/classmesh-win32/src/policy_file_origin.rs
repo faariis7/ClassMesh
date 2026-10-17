@@ -1105,3 +1105,9 @@ pub(crate) fn open_protected_directory_for_bootstrap(path: &Path) -> io::Result<
 pub(crate) fn attest_bootstrap_child(parent: &File, child: &File) -> io::Result<()> {
     attest_immediate_child(parent, child, "ClassMesh")
 }
+
+/// Internal-only retained-HANDLE immediate state-child adjacency for isolated
+/// create-only bootstrap. Does not authenticate the OS ProgramData ancestry.
+pub(crate) fn attest_bootstrap_state_child(parent: &File, child: &File) -> io::Result<()> {
+    attest_immediate_child(parent, child, "state")
+}
