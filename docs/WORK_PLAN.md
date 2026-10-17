@@ -1,3 +1,5 @@
+> **Phase 12 adjacency diagnostic (2026-10-18):** enforce observed retained HANDLE parent-child identity (same volume, different file ID, immediate resolved basename), reject ambiguous raw local-root spellings, and test substitution by unrelated same-volume directory on VM1 and VM2. This remains experimental/read-only, not root-trusted nor NT-relative or race-free; exact-head CI + SCM required before merge.
+
 > **Phase12 Win32 device alias follow-up (2026-10-18):** Reject superscript digit ¹²³ aliases in COM/LPT reserved Win32 child names, even with extensions. Native Windows TDD RED/GREEN; this remains isolated defense-in-depth and not trusted root proof or production admission.
 
 > **Phase12 HANDLE child alias follow-up (2026-10-18):** Reject Unicode control characters including DEL from expected immediate child basename, with native Windows RED/GREEN regression. This is defense-in-depth, not an OS root trust proof, durable anchor, or production activation.

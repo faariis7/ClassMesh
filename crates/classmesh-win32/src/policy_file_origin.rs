@@ -385,7 +385,7 @@ fn safe_child_leaf(leaf: &str) -> bool {
     true
 }
 
-fn attest_immediate_child(parent: &File, child: &File, leaf: &str) -> io::Result<()> {
+pub(crate) fn attest_immediate_child(parent: &File, child: &File, leaf: &str) -> io::Result<()> {
     if !safe_child_leaf(leaf) {
         return Err(permission_denied());
     }
