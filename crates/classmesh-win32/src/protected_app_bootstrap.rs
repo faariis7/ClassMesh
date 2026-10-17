@@ -29,6 +29,22 @@ fn denied() -> io::Error {
 }
 
 fn valid_program_data_path(path: &Path) -> bool {
+    // Reject ambiguous raw components before Path::components() normalizes
+    // dot segments. This only qualifies spelling, not the OS trust root.
+    let Some(raw) = path.to_str() else {
+        return false;
+    };
+    if raw.contains('/') || raw.contains('\0') {
+        return false;
+    }
+    let segments = raw.strip_prefix(r"\\?\").unwrap_or(raw);
+    if segments
+        .split('\\')
+        .skip(1)
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return false;
+    }
     path.is_absolute()
         && matches!(path.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
         && path.file_name() == Some(std::ffi::OsStr::new("ProgramData"))
@@ -252,6 +268,9 @@ mod tests {
     fn refuses_non_programdata_ambiguous_and_remote_paths() {
         for path in [
             r"C:\ProgramData\..\ProgramData",
+            r"C:\Users\.\ProgramData",
+            r"C:\Users\\ProgramData",
+            r"C:\Users/ProgramData",
             r"\\host\share\ProgramData",
             r"C:\NotProgramData",
             "ProgramData",
