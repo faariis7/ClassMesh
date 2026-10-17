@@ -1,3 +1,5 @@
+> **Phase12 Win32 device alias follow-up (2026-10-18):** Reject superscript digit ¹²³ aliases in COM/LPT reserved Win32 child names, even with extensions. Native Windows TDD RED/GREEN; this remains isolated defense-in-depth and not trusted root proof or production admission.
+
 > **Phase12 HANDLE child alias follow-up (2026-10-18):** Reject Unicode control characters including DEL from expected immediate child basename, with native Windows RED/GREEN regression. This is defense-in-depth, not an OS root trust proof, durable anchor, or production activation.
 
 > **Phase12 Win32 HANDLE child alias follow-up (2026-10-18):** Expand fail-closed expected immediate-child basename validation to reject Win32 wildcard, metacharacter and ASCII control characters; local RED/GREEN VM1/VM2; experimental only, no OS volume root trust or production activation.

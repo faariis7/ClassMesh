@@ -376,9 +376,9 @@ fn safe_child_leaf(leaf: &str) -> bool {
     if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
         return false;
     }
-    if stem.len() == 4
+    if stem.chars().count() == 4
         && (stem.starts_with("COM") || stem.starts_with("LPT"))
-        && matches!(stem.as_bytes()[3], b'1'..=b'9')
+        && matches!(stem.chars().nth(3), Some('1'..='9' | '¹' | '²' | '³'))
     {
         return false;
     }
@@ -524,6 +524,9 @@ mod tests {
             "file\x1f",
             "file\u{7f}",
             "COM1.txt",
+            "COM¹",
+            "LPT².log",
+            "COM³.txt",
             "LPT9.cfg",
         ] {
             assert!(!safe_child_leaf(leaf), "accepted: {leaf:?}");
