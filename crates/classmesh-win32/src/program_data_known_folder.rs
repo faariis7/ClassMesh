@@ -147,9 +147,98 @@ pub fn pin_os_program_data_candidate() -> io::Result<std::fs::File> {
     Ok(held)
 }
 
+/// Diagnostic only: retain a HANDLE for each pathname ancestor, including
+/// the volume root. Refuses leaf reparse points or cross-volume changes.
+/// Opens remain pathname-based: this is NOT an atomic relative HANDLE chain.
+fn pin_nonreparse_ancestor_chain(path: &std::path::Path) -> io::Result<Vec<std::fs::File>> {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        GetFileInformationByHandle,
+    };
+    if !path.is_absolute() {
+        return Err(invalid());
+    }
+    let mut ancestors: Vec<_> = path.ancestors().filter(|p| p.is_absolute()).collect();
+    ancestors.reverse();
+    let mut held = Vec::with_capacity(ancestors.len());
+    let mut volume = None;
+    for ancestor in ancestors {
+        let file = OpenOptions::new()
+            .read(true)
+            .share_mode(0x0000_0001 | 0x0000_0002 | 0x0000_0004)
+            .custom_flags(0x0020_0000 | 0x0200_0000)
+            .open(ancestor)?;
+        let mut info = BY_HANDLE_FILE_INFORMATION {
+            dwFileAttributes: 0,
+            ftCreationTime: Default::default(),
+            ftLastAccessTime: Default::default(),
+            ftLastWriteTime: Default::default(),
+            dwVolumeSerialNumber: 0,
+            nFileSizeHigh: 0,
+            nFileSizeLow: 0,
+            nNumberOfLinks: 0,
+            nFileIndexHigh: 0,
+            nFileIndexLow: 0,
+        };
+        // Safety: file is owned and live; output is initialized/writable.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+            || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || volume.is_some_and(|v| v != info.dwVolumeSerialNumber)
+        {
+            return Err(invalid());
+        }
+        volume.get_or_insert(info.dwVolumeSerialNumber);
+        held.push(file);
+    }
+    if held.is_empty() {
+        return Err(invalid());
+    }
+    Ok(held)
+}
+
+/// Read-only ancestry diagnostic. Callers must not treat this vector of
+/// path-opened HANDLEs as a trusted bootstrapping or authorization chain.
+pub fn pin_os_program_data_ancestor_candidates() -> io::Result<Vec<std::fs::File>> {
+    pin_nonreparse_ancestor_chain(&resolve_os_program_data_path()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ancestor_walk_rejects_reparse_leaves_and_retains_regular_handles() {
+        let fixture =
+            std::env::temp_dir().join(format!("classmesh-programdata-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(fixture.join("regular")).unwrap();
+        let handles = pin_nonreparse_ancestor_chain(&fixture.join("regular")).unwrap();
+        assert!(!handles.is_empty());
+        assert!(handles.last().unwrap().metadata().unwrap().is_dir());
+        std::os::windows::fs::symlink_dir(fixture.join("regular"), fixture.join("redirect"))
+            .expect("elevated native Windows symlink fixture");
+        assert_eq!(
+            pin_nonreparse_ancestor_chain(&fixture.join("redirect"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        drop(handles);
+        std::fs::remove_dir_all(&fixture).unwrap();
+    }
+
+    #[test]
+    fn actual_os_known_folder_ancestor_candidates_are_live_directories() {
+        let held = pin_os_program_data_ancestor_candidates().expect("nonreparse OS path");
+        assert!(held.len() >= 2, "volume root and ProgramData must be held");
+        assert!(held.iter().all(|dir| dir.metadata().unwrap().is_dir()));
+    }
 
     #[test]
     fn held_os_known_folder_is_readonly_directory_candidate() {
