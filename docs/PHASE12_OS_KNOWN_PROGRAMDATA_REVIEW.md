@@ -20,3 +20,7 @@
 - Known Folders and COM initialization requirements: https://learn.microsoft.com/en-us/windows/win32/shell/known-folders
 
 **Next:** bind the OS-selected root to a pinned, no-reparse, identity-attested HANDLE and verify volume-root/ancestor chain before allowing any installer creation. No system-wide ACL changes.
+
+## Follow-up: raw path spelling validation (isolated)
+
+Before `PathBuf` parsing, reject dot and parent segments, duplicate/mixed separators and embedded NUL. This is a read-only defense against lexically ambiguous Known Folder text, not OS-backed root attestation. This additional hardening does not authorize real ProgramData writes or activation. Native Windows tests and exact-head CI remain required before merge.
