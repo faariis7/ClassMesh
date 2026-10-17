@@ -366,7 +366,8 @@ fn safe_child_leaf(leaf: &str) -> bool {
     if leaf.is_empty()
         || leaf == "."
         || leaf == ".."
-        || leaf.contains(['/', '\\', ':', '\0'])
+        || leaf.contains(['/', '\\', ':', '\0', '?', '*', '<', '>', '|', '"'])
+        || leaf.chars().any(|c| c <= '\u{1f}')
         || leaf.ends_with(['.', ' '])
     {
         return false;
@@ -514,6 +515,15 @@ mod tests {
             "CON",
             "NUL",
             "name\0x",
+            "file?",
+            "file*",
+            "file<",
+            "file>",
+            "file|",
+            "file\"",
+            "file\x1f",
+            "COM1.txt",
+            "LPT9.cfg",
         ] {
             assert!(!safe_child_leaf(leaf), "accepted: {leaf:?}");
         }
