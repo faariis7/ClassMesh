@@ -147,6 +147,48 @@ pub fn pin_os_program_data_candidate() -> io::Result<std::fs::File> {
     Ok(held)
 }
 
+/// Reject raw ambiguous or remote paths before std::path normalization.
+/// Still only a lexical preflight, never trusted root authorization.
+fn valid_local_ancestor_spelling(path: &std::path::Path) -> bool {
+    let Some(text) = path.to_str() else {
+        return false;
+    };
+    if text.contains('/') || text.contains('\0') {
+        return false;
+    }
+    let raw = text.strip_prefix(r"\\?\").unwrap_or(text);
+    if raw
+        .split('\\')
+        .skip(1)
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return false;
+    }
+    path.is_absolute()
+        && matches!(path.components().next(),
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
+}
+
+/// Check that every held child is the named immediate child of the held
+/// parent. This attests the identities *observed* by separately opened
+/// path HANDLEs; it does not make their creation atomic or establish a
+/// system-authoritative trust root.
+fn attest_ancestor_handle_chain(path: &std::path::Path, held: &[std::fs::File]) -> io::Result<()> {
+    let mut ancestors: Vec<_> = path.ancestors().filter(|p| p.is_absolute()).collect();
+    ancestors.reverse();
+    if held.len() != ancestors.len() || held.is_empty() {
+        return Err(invalid());
+    }
+    for idx in 1..held.len() {
+        let child_name = ancestors[idx]
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(invalid)?;
+        super::policy_file_origin::attest_immediate_child(&held[idx - 1], &held[idx], child_name)?;
+    }
+    Ok(())
+}
+
 /// Diagnostic only: retain a HANDLE for each pathname ancestor, including
 /// the volume root. Refuses leaf reparse points or cross-volume changes.
 /// Opens remain pathname-based: this is NOT an atomic relative HANDLE chain.
@@ -158,7 +200,7 @@ fn pin_nonreparse_ancestor_chain(path: &std::path::Path) -> io::Result<Vec<std::
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
         GetFileInformationByHandle,
     };
-    if !path.is_absolute() {
+    if !valid_local_ancestor_spelling(path) {
         return Err(invalid());
     }
     let mut ancestors: Vec<_> = path.ancestors().filter(|p| p.is_absolute()).collect();
@@ -199,6 +241,7 @@ fn pin_nonreparse_ancestor_chain(path: &std::path::Path) -> io::Result<Vec<std::
     if held.is_empty() {
         return Err(invalid());
     }
+    attest_ancestor_handle_chain(path, &held)?;
     Ok(held)
 }
 
@@ -218,6 +261,9 @@ mod tests {
             std::env::temp_dir().join(format!("classmesh-programdata-walk-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&fixture);
         std::fs::create_dir_all(fixture.join("regular")).unwrap();
+        // Hosted Windows temp roots may have legacy aliases; validate the
+        // identity chain against the OS-resolved absolute fixture path.
+        let fixture = std::fs::canonicalize(&fixture).unwrap();
         let handles = pin_nonreparse_ancestor_chain(&fixture.join("regular")).unwrap();
         assert!(!handles.is_empty());
         assert!(handles.last().unwrap().metadata().unwrap().is_dir());
@@ -230,6 +276,56 @@ mod tests {
             io::ErrorKind::PermissionDenied
         );
         drop(handles);
+        std::fs::remove_dir_all(&fixture).unwrap();
+    }
+
+    #[test]
+    fn generic_ancestor_walk_refuses_normalized_traversal_and_remote_roots() {
+        for raw in [
+            r"C:\sandbox\..\ProgramData",
+            r"C:\sandbox\.\ProgramData",
+            r"C:\sandbox\\ProgramData",
+            r"C:\sandbox/ProgramData",
+            r"\\server\share\ProgramData",
+            r"\\?\UNC\server\share\ProgramData",
+            r"C:ProgramData",
+        ] {
+            assert!(
+                !valid_local_ancestor_spelling(std::path::Path::new(raw)),
+                "accepted {raw}"
+            );
+        }
+        assert!(valid_local_ancestor_spelling(std::path::Path::new(
+            r"C:\ProgramData"
+        )));
+        assert!(valid_local_ancestor_spelling(std::path::Path::new(
+            r"\\?\C:\ProgramData"
+        )));
+    }
+
+    #[test]
+    fn ancestry_attestation_rejects_substituted_same_volume_child_handle() {
+        let fixture = std::env::temp_dir().join(format!(
+            "classmesh-ancestor-identity-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(fixture.join("expected")).unwrap();
+        std::fs::create_dir_all(fixture.join("decoy")).unwrap();
+        let fixture = std::fs::canonicalize(&fixture).unwrap();
+        let expected = fixture.join("expected");
+        let mut legitimate = pin_nonreparse_ancestor_chain(&expected).unwrap();
+        attest_ancestor_handle_chain(&expected, &legitimate).unwrap();
+        let decoy = pin_nonreparse_ancestor_chain(&fixture.join("decoy")).unwrap();
+        *legitimate.last_mut().unwrap() = decoy.last().unwrap().try_clone().unwrap();
+        assert_eq!(
+            attest_ancestor_handle_chain(&expected, &legitimate)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        drop(legitimate);
+        drop(decoy);
         std::fs::remove_dir_all(&fixture).unwrap();
     }
 
