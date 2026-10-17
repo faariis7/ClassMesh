@@ -269,6 +269,18 @@ fn open_protected_directory(path: &Path) -> io::Result<File> {
 /// connected to Service startup or policy reload until those trust gates and
 /// durable rollback / TOCTOU requirements have independent native proof.
 fn validate_app_root(app_root: &Path) -> io::Result<()> {
+    let raw = app_root.to_str().ok_or_else(permission_denied)?;
+    if raw.contains('/') || raw.contains('\0') {
+        return Err(permission_denied());
+    }
+    let components = raw.strip_prefix(r"\\?\").unwrap_or(raw);
+    if components
+        .split('\\')
+        .skip(1)
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(permission_denied());
+    }
     let absolute_local_drive = matches!(
         app_root.components().next(),
         Some(Component::Prefix(prefix))
@@ -445,6 +457,23 @@ mod tests {
         }
         assert!(safe_program_data_prefix(Path::new(r"C:\ProgramData")));
         assert!(safe_program_data_prefix(Path::new(r"\\?\C:\ProgramData")));
+    }
+
+    #[test]
+    fn candidate_app_root_rejects_raw_dot_and_duplicate_separators() {
+        for raw in [
+            r"C:\ProgramData\.\ClassMesh",
+            r"C:\ProgramData\\ClassMesh",
+            r"C:\ProgramData/ ClassMesh",
+            r"C:\ProgramData\..\ClassMesh",
+        ] {
+            assert_eq!(
+                validate_app_root(Path::new(raw)).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+        assert!(validate_app_root(Path::new(r"C:\ProgramData\ClassMesh")).is_ok());
+        assert!(validate_app_root(Path::new(r"\\?\C:\ProgramData\ClassMesh")).is_ok());
     }
 
     #[test]
