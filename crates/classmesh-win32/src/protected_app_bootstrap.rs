@@ -267,20 +267,33 @@ mod tests {
 
     #[test]
     fn create_only_state_child_is_protected_and_pinned_to_fresh_app_root() {
-        let fixture = std::env::temp_dir().join(format!(
-            "classmesh-bootstrap-state-{}", std::process::id()
-        ));
+        let fixture =
+            std::env::temp_dir().join(format!("classmesh-bootstrap-state-{}", std::process::id()));
         let program_data = fixture.join("ProgramData");
         fs::create_dir_all(&program_data).unwrap();
         let created = create_new_protected_classmesh_app_root(&program_data).unwrap();
         let state = create_new_protected_state_child(&created).unwrap();
         assert!(state.with_state(|f| f.metadata().unwrap().is_dir()));
         assert!(fs::rename(program_data.join("ClassMesh"), program_data.join("other")).is_err());
-        assert!(fs::rename(program_data.join("ClassMesh/state"), program_data.join("ClassMesh/other")).is_err());
+        assert!(
+            fs::rename(
+                program_data.join("ClassMesh/state"),
+                program_data.join("ClassMesh/other")
+            )
+            .is_err()
+        );
         drop(state);
-        assert_eq!(create_new_protected_state_child(&created).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            create_new_protected_state_child(&created)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
         let state_path = program_data.join("ClassMesh/state");
-        assert!(super::super::policy_file_origin::open_protected_directory_for_bootstrap(&state_path).is_ok());
+        assert!(
+            super::super::policy_file_origin::open_protected_directory_for_bootstrap(&state_path)
+                .is_ok()
+        );
         drop(created);
         fs::remove_dir_all(fixture).unwrap();
     }
@@ -288,7 +301,8 @@ mod tests {
     #[test]
     fn precreated_state_child_is_never_adopted_or_repaired() {
         let fixture = std::env::temp_dir().join(format!(
-            "classmesh-bootstrap-state-precreated-{}", std::process::id()
+            "classmesh-bootstrap-state-precreated-{}",
+            std::process::id()
         ));
         let program_data = fixture.join("ProgramData");
         fs::create_dir_all(&program_data).unwrap();
@@ -297,10 +311,14 @@ mod tests {
         fs::create_dir(&state_path).unwrap();
         let marker = state_path.join("untrusted.txt");
         fs::write(&marker, b"do-not-touch").unwrap();
-        assert_eq!(create_new_protected_state_child(&created).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            create_new_protected_state_child(&created)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
         assert_eq!(fs::read(&marker).unwrap(), b"do-not-touch");
         drop(created);
         fs::remove_dir_all(fixture).unwrap();
     }
-
 }
