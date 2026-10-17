@@ -10,6 +10,9 @@ pub use sensitive_pipe_name::{
 mod clipboard;
 #[cfg(windows)]
 mod input;
+// Inert Windows-only security qualification until trusted root attestation.
+#[cfg(all(windows, test))]
+mod nt_relative_directory;
 #[cfg(windows)]
 mod named_pipe;
 #[cfg(windows)]

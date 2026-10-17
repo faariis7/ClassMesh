@@ -362,7 +362,7 @@ fn attest_same_volume_distinct_file_ids(
 
 /// Reject alternate data streams, Win32 aliases and reserved device names
 /// before resolving the immediate child of a pinned parent HANDLE.
-fn safe_child_leaf(leaf: &str) -> bool {
+pub(crate) fn safe_child_leaf(leaf: &str) -> bool {
     if leaf.is_empty()
         || leaf == "."
         || leaf == ".."
