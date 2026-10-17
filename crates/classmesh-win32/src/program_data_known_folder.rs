@@ -261,6 +261,9 @@ mod tests {
             std::env::temp_dir().join(format!("classmesh-programdata-walk-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&fixture);
         std::fs::create_dir_all(fixture.join("regular")).unwrap();
+        // Hosted Windows temp roots may have legacy aliases; validate the
+        // identity chain against the OS-resolved absolute fixture path.
+        let fixture = std::fs::canonicalize(&fixture).unwrap();
         let handles = pin_nonreparse_ancestor_chain(&fixture.join("regular")).unwrap();
         assert!(!handles.is_empty());
         assert!(handles.last().unwrap().metadata().unwrap().is_dir());
@@ -309,6 +312,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&fixture);
         std::fs::create_dir_all(fixture.join("expected")).unwrap();
         std::fs::create_dir_all(fixture.join("decoy")).unwrap();
+        let fixture = std::fs::canonicalize(&fixture).unwrap();
         let expected = fixture.join("expected");
         let mut legitimate = pin_nonreparse_ancestor_chain(&expected).unwrap();
         attest_ancestor_handle_chain(&expected, &legitimate).unwrap();
