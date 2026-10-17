@@ -1,3 +1,5 @@
+> **Phase12 retained-HANDLE child-leaf hardening (2026-10-17):** Before attesting immediate adjacency of two retained handles, reject Win32 device names, colon/ADS, terminal dot/space, traversal and separator aliases in expected child leaf. Isolated fail-closed gate, no trusted OS root / production authorization. Native VM1/VM2 and hosted CI required before merge.
+
 > **Phase12 application-root lexical hardening (2026-10-17):** reject dot, duplicate or mixed raw separators before normalizing fixed protected ClassMesh app-root path; this is an isolated preflight, not an attested OS origin or production admission. Native Windows and CI qualification before merging.
 
 > **Phase12 policy-origin preflight (2026-10-17):** Harden the isolated ProgramData candidate opener against raw lexical dot/repeated/mixed separators before Windows normalisation. Unit RED/GREEN; no trusted volume HANDLE root, NT relative opener, durable anchor or production activation claim. Require exact-head hosted CI and native Windows before merge.

@@ -360,8 +360,28 @@ fn attest_same_volume_distinct_file_ids(
     Ok(())
 }
 
+/// Reject alternate data streams, Win32 aliases and reserved device names
+/// before resolving the immediate child of a pinned parent HANDLE.
+fn safe_child_leaf(leaf: &str) -> bool {
+    if leaf.is_empty() || leaf == "." || leaf == ".." || leaf.contains(['/', '\\', ':', '\0'])
+        || leaf.ends_with(['.', ' '])
+    {
+        return false;
+    }
+    let stem = leaf.split('.').next().unwrap_or("").to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        return false;
+    }
+    if stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT"))
+        && matches!(stem.as_bytes()[3], b'1'..=b'9')
+    {
+        return false;
+    }
+    true
+}
+
 fn attest_immediate_child(parent: &File, child: &File, leaf: &str) -> io::Result<()> {
-    if leaf.is_empty() || leaf.contains(['/', '\\']) || leaf == "." || leaf == ".." {
+    if !safe_child_leaf(leaf) {
         return Err(permission_denied());
     }
     let parent_info = information_from_handle(parent)?;
@@ -474,6 +494,15 @@ mod tests {
         }
         assert!(validate_app_root(Path::new(r"C:\ProgramData\ClassMesh")).is_ok());
         assert!(validate_app_root(Path::new(r"\\?\C:\ProgramData\ClassMesh")).is_ok());
+    }
+
+    #[test]
+    fn child_leaf_preflight_rejects_windows_aliases_and_streams() {
+        for leaf in ["", ".", "..", "state/child", "state\\child", "policy:stream", "name.", "name ", "CON", "NUL", "name\0x"] {
+            assert!(!safe_child_leaf(leaf), "accepted: {leaf:?}");
+        }
+        assert!(safe_child_leaf("authorization.json"));
+        assert!(safe_child_leaf("policy-checkpoint.v2"));
     }
 
     #[test]
