@@ -30,3 +30,7 @@ Graphify advisory resolved: raw lexical checks preserve Windows verbatim local-d
 ## Read-only HANDLE candidate follow-up
 
 `pin_os_program_data_candidate()` now opens the real OS Known Folder location as a retained, read-only directory HANDLE with normal Windows sharing and `FILE_FLAG_OPEN_REPARSE_POINT`. It rejects a non-directory or reparse-point leaf by HANDLE attributes. This is **not** a trusted ancestry proof: disk/volume root, intermediate junctions/mount points, redirected Known Folder identity, owner ACLs and TOCTOU require independent validation. Do not wire it to installer, policy admission, or production Service. No mutations to real ProgramData.
+
+## Read-only ancestor HANDLE diagnostic
+
+`pin_os_program_data_ancestor_candidates()` now retains read-only file HANDLEs for each absolute path ancestor from volume root to the OS-selected ProgramData directory and rejects reparse leaves, non-directories, and volume-serial changes. Native tests include an elevated symlink fixture and the real Known Folder. **Still not trusted for production**: the opens are separate pathname lookups, not NT relative opens under a verified parent; parent-child identity, actual OS/system-volume authority, registry redirection and TOCTOU remain unqualified. This diagnostic never writes to or alters ACLs on ProgramData.
