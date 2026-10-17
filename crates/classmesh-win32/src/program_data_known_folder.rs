@@ -104,9 +104,58 @@ pub fn resolve_os_program_data_path() -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Read-only candidate: pin the OS-selected ProgramData directory by HANDLE.
+/// Only the leaf reparse/directory attributes are checked here. This DOES NOT
+/// prove trusted volume-root ancestry or authorize production bootstrap.
+pub fn pin_os_program_data_candidate() -> io::Result<std::fs::File> {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        GetFileInformationByHandle,
+    };
+    let path = resolve_os_program_data_path()?;
+    // Open the reparse leaf itself. Keep normal OS sharing on the system-wide
+    // directory: never block other applications or assume exclusive ancestry.
+    let held = OpenOptions::new()
+        .read(true)
+        .share_mode(0x0000_0001 | 0x0000_0002 | 0x0000_0004)
+        .custom_flags(0x0020_0000 | 0x0200_0000)
+        .open(path)?;
+    let mut info = BY_HANDLE_FILE_INFORMATION {
+        dwFileAttributes: 0,
+        ftCreationTime: Default::default(),
+        ftLastAccessTime: Default::default(),
+        ftLastWriteTime: Default::default(),
+        dwVolumeSerialNumber: 0,
+        nFileSizeHigh: 0,
+        nFileSizeLow: 0,
+        nNumberOfLinks: 0,
+        nFileIndexHigh: 0,
+        nFileIndexLow: 0,
+    };
+    // Safety: retained valid owned File and initialized mutable OS output.
+    if unsafe { GetFileInformationByHandle(held.as_raw_handle(), &raw mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(invalid());
+    }
+    Ok(held)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_os_known_folder_is_readonly_directory_candidate() {
+        let held = pin_os_program_data_candidate().expect("must pin actual OS ProgramData");
+        assert!(held.metadata().unwrap().is_dir());
+    }
 
     #[test]
     fn os_known_folder_is_absolute_local_programdata_not_test_fixture() {

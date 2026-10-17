@@ -26,3 +26,7 @@
 Before `PathBuf` parsing, reject dot and parent segments, duplicate/mixed separators and embedded NUL. This is a read-only defense against lexically ambiguous Known Folder text, not OS-backed root attestation. This additional hardening does not authorize real ProgramData writes or activation. Native Windows tests and exact-head CI remain required before merge.
 
 Graphify advisory resolved: raw lexical checks preserve Windows verbatim local-drive paths (`\\?\C:\ProgramData`) while continuing to reject UNC and ambiguous descendant components.
+
+## Read-only HANDLE candidate follow-up
+
+`pin_os_program_data_candidate()` now opens the real OS Known Folder location as a retained, read-only directory HANDLE with normal Windows sharing and `FILE_FLAG_OPEN_REPARSE_POINT`. It rejects a non-directory or reparse-point leaf by HANDLE attributes. This is **not** a trusted ancestry proof: disk/volume root, intermediate junctions/mount points, redirected Known Folder identity, owner ACLs and TOCTOU require independent validation. Do not wire it to installer, policy admission, or production Service. No mutations to real ProgramData.
