@@ -6,7 +6,7 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
-use std::path::{Component, Path, Prefix};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Security::Authorization::{
@@ -84,6 +84,7 @@ impl Drop for Descriptor {
 /// ProgramData identity remain UNPROVEN; this is NOT a production trust token.
 #[derive(Debug)]
 pub struct CreatedAppRoot {
+    path: PathBuf,
     root: File,
     _parent: File,
 }
@@ -106,6 +107,19 @@ pub fn create_new_protected_classmesh_app_root(program_data: &Path) -> io::Resul
     }
     let parent = hold_non_reparse_directory(program_data)?;
     let path = program_data.join("ClassMesh");
+    create_new_restricted_directory(&path)?;
+    let root = super::policy_file_origin::open_protected_directory_for_bootstrap(&path)?;
+    super::policy_file_origin::attest_bootstrap_child(&parent, &root)?;
+    Ok(CreatedAppRoot {
+        path,
+        root,
+        _parent: parent,
+    })
+}
+
+/// Create-only SYSTEM/Administrators directory; never adopt or repair an
+/// existing entry, even if its current DACL appears protected.
+fn create_new_restricted_directory(path: &Path) -> io::Result<()> {
     // D:P disables parent ACL inheritance. O:BA sets Administrators as owner;
     // only SYSTEM and Administrators may access the directory or descendants.
     let sddl: Vec<u16> = std::ffi::OsStr::new("O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
@@ -141,13 +155,36 @@ pub fn create_new_protected_classmesh_app_root(program_data: &Path) -> io::Resul
     if unsafe { CreateDirectoryW(path_wide.as_ptr(), &raw const attributes) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    // The existing strict ACL verifier is used for post-create qualification.
-    // Parent and child HANDLEs are both retained, but parent trust is unproven.
-    let root = super::policy_file_origin::open_protected_directory_for_bootstrap(&path)?;
-    super::policy_file_origin::attest_bootstrap_child(&parent, &root)?;
-    Ok(CreatedAppRoot {
-        root,
-        _parent: parent,
+    Ok(())
+}
+
+/// Retain the original app-root HANDLE while the newly created state child is
+/// in use; neither HANDLE authenticates the OS ProgramData ancestry.
+#[derive(Debug)]
+pub struct CreatedStateChild<'a> {
+    state: File,
+    _root: &'a CreatedAppRoot,
+}
+
+impl CreatedStateChild<'_> {
+    pub fn with_state<T>(&self, action: impl FnOnce(&File) -> T) -> T {
+        action(&self.state)
+    }
+}
+
+/// Create state ONLY beneath the same newly created, pinned app root.
+/// Preexisting state is never adopted, replaced, removed, or repaired.
+/// The create-then-open race and untrusted ProgramData ancestor remain open.
+pub fn create_new_protected_state_child(
+    created_root: &CreatedAppRoot,
+) -> io::Result<CreatedStateChild<'_>> {
+    let path = created_root.path.join("state");
+    create_new_restricted_directory(&path)?;
+    let state = super::policy_file_origin::open_protected_directory_for_bootstrap(&path)?;
+    super::policy_file_origin::attest_bootstrap_state_child(&created_root.root, &state)?;
+    Ok(CreatedStateChild {
+        state,
+        _root: created_root,
     })
 }
 
@@ -226,5 +263,62 @@ mod tests {
                 io::ErrorKind::PermissionDenied
             );
         }
+    }
+
+    #[test]
+    fn create_only_state_child_is_protected_and_pinned_to_fresh_app_root() {
+        let fixture =
+            std::env::temp_dir().join(format!("classmesh-bootstrap-state-{}", std::process::id()));
+        let program_data = fixture.join("ProgramData");
+        fs::create_dir_all(&program_data).unwrap();
+        let created = create_new_protected_classmesh_app_root(&program_data).unwrap();
+        let state = create_new_protected_state_child(&created).unwrap();
+        assert!(state.with_state(|f| f.metadata().unwrap().is_dir()));
+        assert!(fs::rename(program_data.join("ClassMesh"), program_data.join("other")).is_err());
+        assert!(
+            fs::rename(
+                program_data.join("ClassMesh/state"),
+                program_data.join("ClassMesh/other")
+            )
+            .is_err()
+        );
+        drop(state);
+        assert_eq!(
+            create_new_protected_state_child(&created)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        let state_path = program_data.join("ClassMesh/state");
+        assert!(
+            super::super::policy_file_origin::open_protected_directory_for_bootstrap(&state_path)
+                .is_ok()
+        );
+        drop(created);
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn precreated_state_child_is_never_adopted_or_repaired() {
+        let fixture = std::env::temp_dir().join(format!(
+            "classmesh-bootstrap-state-precreated-{}",
+            std::process::id()
+        ));
+        let program_data = fixture.join("ProgramData");
+        fs::create_dir_all(&program_data).unwrap();
+        let created = create_new_protected_classmesh_app_root(&program_data).unwrap();
+        let state_path = program_data.join("ClassMesh/state");
+        fs::create_dir(&state_path).unwrap();
+        let marker = state_path.join("untrusted.txt");
+        fs::write(&marker, b"do-not-touch").unwrap();
+        assert_eq!(
+            create_new_protected_state_child(&created)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&marker).unwrap(), b"do-not-touch");
+        drop(created);
+        fs::remove_dir_all(fixture).unwrap();
     }
 }
