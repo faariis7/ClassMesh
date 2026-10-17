@@ -24,3 +24,5 @@
 ## Follow-up: raw path spelling validation (isolated)
 
 Before `PathBuf` parsing, reject dot and parent segments, duplicate/mixed separators and embedded NUL. This is a read-only defense against lexically ambiguous Known Folder text, not OS-backed root attestation. This additional hardening does not authorize real ProgramData writes or activation. Native Windows tests and exact-head CI remain required before merge.
+
+Graphify advisory resolved: raw lexical checks preserve Windows verbatim local-drive paths (`\\?\C:\ProgramData`) while continuing to reject UNC and ambiguous descendant components.

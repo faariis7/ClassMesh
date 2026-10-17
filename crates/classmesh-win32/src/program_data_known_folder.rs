@@ -41,7 +41,11 @@ fn valid_os_program_data_path(text: &str) -> bool {
     if text.contains('/') || text.contains('\0') || text.len() < 3 {
         return false;
     }
-    let parts: Vec<_> = text.split('\\').collect();
+    // Windows verbatim drive paths have a legitimate \\\\?\\ prefix.
+    // Validate the drive-rooted remainder without treating prefix delimiters
+    // as duplicate path separators. UNC verbatim paths still fail below.
+    let raw_segments = text.strip_prefix(r"\\?\").unwrap_or(text);
+    let parts: Vec<_> = raw_segments.split('\\').collect();
     if parts
         .iter()
         .skip(1)
@@ -125,6 +129,8 @@ mod tests {
             assert!(!valid_os_program_data_path(path), "accepted: {path}");
         }
         assert!(valid_os_program_data_path(r"C:\ProgramData"));
+        assert!(valid_os_program_data_path(r"\\?\C:\ProgramData"));
+        assert!(!valid_os_program_data_path(r"\\?\UNC\server\share\ProgramData"));
         assert!(valid_os_program_data_path(r"D:\SystemData\ProgramData"));
     }
 
