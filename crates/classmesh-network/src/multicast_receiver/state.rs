@@ -44,6 +44,11 @@ impl ProtectedMulticastReceiveState {
     }
 
     #[must_use]
+    pub const fn stats(&self) -> crate::protected_media_receive::ProtectedMediaReceiveStats {
+        self.inner.stats()
+    }
+
+    #[must_use]
     pub const fn dropped_frames(&self) -> u64 {
         self.inner.dropped_frames()
     }
