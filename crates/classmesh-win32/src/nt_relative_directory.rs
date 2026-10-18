@@ -428,6 +428,8 @@ mod tests {
                 String::from_utf8_lossy(&result.stderr)
             );
         };
+        // Remove any explicit creator ACE carried by the temporary directory.
+        acl(&path, &["/reset"]);
         acl(
             &path,
             &[
@@ -499,6 +501,7 @@ mod tests {
         let state = fixture.join("state");
         std::fs::create_dir(&state).unwrap();
         assert!(open_relative_protected_node(&parent, "state", true).is_err());
+        acl(&state, &["/reset"]);
         acl(
             &state,
             &[

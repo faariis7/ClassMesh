@@ -15,8 +15,6 @@ mod input;
 mod named_pipe;
 #[cfg(all(windows, test))]
 mod nt_relative_directory;
-#[cfg(all(windows, test))]
-mod system_volume;
 #[cfg(windows)]
 pub mod policy_file_origin;
 #[cfg(windows)]
@@ -31,6 +29,8 @@ mod sensitive_pipe_listener;
 mod session;
 #[cfg(windows)]
 mod session_process;
+#[cfg(all(windows, test))]
+mod system_volume;
 #[cfg(windows)]
 mod teacher_interaction;
 #[cfg(windows)]
