@@ -32,6 +32,7 @@ pub mod presentation_state;
 pub mod quic;
 pub mod receiver_telemetry;
 pub mod receiver_telemetry_ingress;
+pub mod receiver_telemetry_ingress;
 pub mod receiver_telemetry_transport;
 pub mod stream;
 pub mod system_action_execution;

@@ -1,9 +1,8 @@
-//! A passive byte-ingress boundary for independently verified Worker telemetry.
+//! Passive, byte-oriented receiver telemetry admission for a Service-verified Worker.
 //!
-//! The caller MUST verify the Worker IPC peer, active process/session/generation,
-//! presentation ownership and receive generation *before* `activate_verified`.
-//! This does not authenticate bytes, install an IPC handler or authorize
-//! adaptation: it only prevents decoded envelopes from selecting their owner.
+//! The caller owns authentication, peer process/session verification, and exact
+//! media binding activation. Parsing bytes is not proof of their origin.
+//! This adds no IPC message, threads, network sender or quality promotion.
 use std::time::Instant;
 
 use crate::receiver_telemetry::{
@@ -20,44 +19,45 @@ pub enum ReceiverTelemetryIngressError {
     Admission(ReceiverTelemetryError),
 }
 
+/// One bounded telemetry admission gate per independently verified Worker.
+/// A payload must never activate itself or change the bound identity.
 #[derive(Debug, Default)]
 pub struct ReceiverTelemetryIngress {
     gate: ReceiverTelemetryGate,
 }
 
 impl ReceiverTelemetryIngress {
-    /// Only the authoritative Service owner may call this after independently
-    /// verifying the actual Worker transport and current presentation lifecycle.
+    /// Must be called only after independent transport and lifecycle checks.
     pub fn activate_verified(
         &mut self,
-        binding: ReceiverTelemetryBinding,
+        verified_binding: ReceiverTelemetryBinding,
     ) -> Result<(), ReceiverTelemetryError> {
-        self.gate.activate(binding)
+        self.gate.activate(verified_binding)
     }
 
-    /// A stale lifecycle completion cannot clear a newer media binding.
-    pub fn clear_if_matches(&mut self, binding: ReceiverTelemetryBinding) -> bool {
-        self.gate.clear_if_matches(binding)
+    /// Exact binding revocation prevents a stale teardown from clearing a replacement.
+    pub fn clear_if_matches(&mut self, verified_binding: ReceiverTelemetryBinding) -> bool {
+        self.gate.clear_if_matches(verified_binding)
     }
 
-    /// Decodes a strict envelope, then checks its identity and replay/counter
-    /// continuity against a Service-activated binding. `received_at` must come
-    /// from the Service's monotonic clock, not from decoded Worker bytes.
+    /// Parse the strictly bounded diagnostic bytes, then apply current binding,
+    /// replay, interval, monotonic-clock and counter checks. Arrival time is
+    /// Service-owned, never supplied by the Worker.
     pub fn observe_verified(
         &mut self,
         bytes: &[u8],
-        received_at: Instant,
+        service_received_at: Instant,
     ) -> Result<ReceiverTelemetryDecision, ReceiverTelemetryIngressError> {
-        let sample = decode_receiver_telemetry(bytes).map_err(ReceiverTelemetryIngressError::Wire)?;
+        let snapshot = decode_receiver_telemetry(bytes)
+            .map_err(ReceiverTelemetryIngressError::Wire)?;
         self.gate
-            .observe(sample, received_at)
+            .observe(snapshot, service_received_at)
             .map_err(ReceiverTelemetryIngressError::Admission)
     }
 
-    /// Read-only report liveness; does not prove stream quality or authorize a
-    /// Teacher quality promotion. Must not bypass the external trust boundary.
+    /// Observability only, never sufficient for promoting quality.
     #[must_use]
-    pub fn has_fresh_report(&self, now: Instant) -> bool {
-        self.gate.has_fresh_report(now)
+    pub fn has_fresh_report(&self, service_now: Instant) -> bool {
+        self.gate.has_fresh_report(service_now)
     }
 }
