@@ -8,6 +8,20 @@ use std::time::{Duration, Instant};
 
 const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Only the single healthy receiver already verified against the active key
+/// binding may supply queue counters. `None` means absent, failed or mismatched.
+/// Never invent zero drops, nor prefer multicast when two paths conflict.
+#[must_use]
+pub const fn single_exact_receiver_queue_drops(
+    multicast: Option<u64>,
+    unicast: Option<u64>,
+) -> Option<u64> {
+    match (multicast, unicast) {
+        (Some(drops), None) | (None, Some(drops)) => Some(drops),
+        _ => None,
+    }
+}
+
 /// Counter snapshot for the *local* Worker playback path. Decoded output is
 /// distinct from frames successfully presented on screen or authenticated.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -277,6 +291,38 @@ mod tests {
                 .sample_sequence,
             1
         );
+    }
+
+    #[test]
+    fn telemetry_drops_only_come_from_exactly_one_verified_receiver() {
+        assert_eq!(
+            super::single_exact_receiver_queue_drops(Some(8), None),
+            Some(8)
+        );
+        assert_eq!(
+            super::single_exact_receiver_queue_drops(None, Some(13)),
+            Some(13)
+        );
+        // No active matched runtime cannot supply an invented zero-drop report.
+        assert_eq!(super::single_exact_receiver_queue_drops(None, None), None);
+        // Two simultaneously matching runtimes cannot arbitrarily pick one.
+        assert_eq!(
+            super::single_exact_receiver_queue_drops(Some(8), Some(13)),
+            None
+        );
+    }
+
+    #[test]
+    fn telemetry_drops_allow_zero_only_from_a_verified_receiver() {
+        assert_eq!(
+            super::single_exact_receiver_queue_drops(Some(0), None),
+            Some(0)
+        );
+        assert_eq!(
+            super::single_exact_receiver_queue_drops(None, Some(0)),
+            Some(0)
+        );
+        assert_eq!(super::single_exact_receiver_queue_drops(None, None), None);
     }
 
     #[test]

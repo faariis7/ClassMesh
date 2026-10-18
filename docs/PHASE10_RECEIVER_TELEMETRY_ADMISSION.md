@@ -44,3 +44,16 @@ privileged channel, Worker→Service delivery or quality promotion is introduced
 unauthorized bytes, wire errors, wrong epochs, replay, valid deltas and
 replacement/revocation. Native authenticated transport integration and VM2 or
 physical-machine qualification are still required before runtime use.
+
+## Worker-local exact receiver selection
+
+The existing Worker-local five-second playback diagnostic now reads `queue_drops`
+only from exactly one *healthy* multicast or unicast receive runtime whose
+presentation binding matches the currently installed key. A missing, failed,
+wrong-epoch, or ambiguous pair of receive runtimes is not misreported as a
+legitimate zero-drop observation, and there is no fallback to the first present
+receiver. This is an actual Worker runtime diagnostic guard, not a network
+sender or IPC authorization. Both receiver modes retain their existing keyframe
+recovery and teardown behavior. Tests cover zero drops, either mode, absent
+matching runtime and a conflicting pair. Host CI cannot substitute for the
+native two-host playback qualification.

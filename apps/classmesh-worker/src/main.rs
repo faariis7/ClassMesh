@@ -804,44 +804,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         // Local diagnostics only: do not send unauthenticated or unversioned
-        // counters across the privileged Service/Teacher IPC boundary.
-        if presentation_decode.is_some()
-            && (presentation_multicast.is_some() || presentation_unicast.is_some())
-        {
+        // counters across the privileged Service/Teacher IPC boundary. Queue
+        // drops must come only from ONE healthy receiver matching the key epoch;
+        // a stale, failed or conflicting receiver cannot publish statistics.
+        if presentation_decode.is_some() {
             if let (Some(binding), Some(authenticated)) = (
                 group_media_keys.binding(),
                 group_media_keys.authentication_stats(),
             ) {
-                let queue_drops = presentation_multicast
+                let multicast_drops = presentation_multicast
                     .as_ref()
-                    .map(|receiver| receiver.dropped_events())
-                    .or_else(|| {
-                        presentation_unicast
-                            .as_ref()
-                            .map(|receiver| receiver.dropped_events())
-                    })
-                    .unwrap_or(0);
-                if let Some(report) = presentation_delivery_telemetry.report_if_due(
-                    Instant::now(),
-                    binding,
-                    authenticated,
-                    queue_drops,
-                ) {
-                    eprintln!(
-                        "ClassMesh Worker local presentation playback: presentation={} stream={} epoch={} sample_sequence={} auth_opened={} auth_rejected={} decoded={} presented={} present_errors={} decode_errors={} waiting_for_keyframe={} queue_drop_events_total={}",
-                        binding.presentation_id,
-                        binding.stream_id,
-                        binding.epoch,
-                        report.sample_sequence,
-                        report.authenticated_frames,
-                        report.auth_rejected_frames,
-                        report.decoded_frames,
-                        report.presented_frames,
-                        report.present_errors,
-                        report.decode_errors,
-                        report.waiting_for_keyframe,
-                        report.receiver_queue_drops,
-                    );
+                    .filter(|receiver| !receiver.failed() && receiver.matches_key_binding(binding))
+                    .map(|receiver| receiver.dropped_events());
+                let unicast_drops = presentation_unicast
+                    .as_ref()
+                    .filter(|receiver| !receiver.failed() && receiver.matches_key_binding(binding))
+                    .map(|receiver| receiver.dropped_events());
+                if let Some(queue_drops) =
+                    classmesh_worker::presentation_delivery_telemetry::single_exact_receiver_queue_drops(
+                        multicast_drops,
+                        unicast_drops,
+                    )
+                {
+                    if let Some(report) = presentation_delivery_telemetry.report_if_due(
+                        Instant::now(),
+                        binding,
+                        authenticated,
+                        queue_drops,
+                    ) {
+                        eprintln!(
+                            "ClassMesh Worker local presentation playback: presentation={} stream={} epoch={} sample_sequence={} auth_opened={} auth_rejected={} decoded={} presented={} present_errors={} decode_errors={} waiting_for_keyframe={} queue_drop_events_total={}",
+                            binding.presentation_id,
+                            binding.stream_id,
+                            binding.epoch,
+                            report.sample_sequence,
+                            report.authenticated_frames,
+                            report.auth_rejected_frames,
+                            report.decoded_frames,
+                            report.presented_frames,
+                            report.present_errors,
+                            report.decode_errors,
+                            report.waiting_for_keyframe,
+                            report.receiver_queue_drops,
+                        );
+                    }
                 }
             }
         }
