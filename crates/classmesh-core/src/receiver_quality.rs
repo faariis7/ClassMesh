@@ -182,6 +182,20 @@ impl ReceiverQualityController {
         }
     }
 
+    /// Expire a previously accepted observation even when NO new telemetry
+    /// arrives. Idempotent once in Emergency; does not forge a sample/sequence.
+    /// The caller must drive this using the same monotonic clock as `observe`.
+    pub fn expire_if_stale(&mut self, now_us: u64) -> Option<FocusedProfileDecision> {
+        let last = self.last_observed_at_us?;
+        if now_us >= last && now_us - last <= self.quality_policy.max_sample_age_us {
+            return None;
+        }
+        if self.profile_controller.current()?.tier == QualityTier::Emergency {
+            return None;
+        }
+        Some(self.profile_controller.force_emergency_on_telemetry_loss())
+    }
+
     fn validate_observation(
         &self,
         sample: ReceiverQualitySample,
@@ -422,6 +436,72 @@ mod tests {
         let recovered = controller.observe(healthy_sample(7, 1_400_000), 1_400_000);
         assert_eq!(recovered.status, ReceiverQualitySampleStatus::Accepted);
         assert_eq!(recovered.decision.tier, QualityTier::High);
+    }
+
+    #[test]
+    fn missing_telemetry_expires_at_strict_boundary_and_is_idempotent() {
+        let mut controller = controller();
+        assert_eq!(
+            controller.expire_if_stale(99_000_000),
+            None,
+            "without any accepted sample there is nothing to age"
+        );
+        assert_eq!(
+            controller
+                .observe(healthy_sample(1, 1_000_000), 1_000_000)
+                .decision
+                .tier,
+            QualityTier::High
+        );
+        assert_eq!(
+            controller.expire_if_stale(3_000_000),
+            None,
+            "exact max age remains fresh"
+        );
+        let expired = controller.expire_if_stale(3_000_001).unwrap();
+        assert_eq!(expired.tier, QualityTier::Emergency);
+        assert!(
+            expired.changed,
+            "expired stream must immediately drop, no hysteresis wait"
+        );
+        assert_eq!(controller.last_sequence(), Some(1));
+        assert_eq!(controller.expire_if_stale(4_000_000), None);
+        for seq in 2..=3 {
+            assert_eq!(
+                controller
+                    .observe(
+                        healthy_sample(seq, 4_000_000 + seq * 100_000),
+                        4_000_000 + seq * 100_000
+                    )
+                    .decision
+                    .tier,
+                QualityTier::Emergency
+            );
+        }
+        assert_eq!(
+            controller
+                .observe(healthy_sample(4, 4_400_000), 4_400_000)
+                .decision
+                .tier,
+            QualityTier::High
+        );
+    }
+
+    #[test]
+    fn expiry_rejects_clock_regression_instead_of_retaining_high_quality() {
+        let mut controller = controller();
+        assert_eq!(
+            controller
+                .observe(healthy_sample(1, 1_000_000), 1_000_000)
+                .decision
+                .tier,
+            QualityTier::High
+        );
+        assert_eq!(
+            controller.expire_if_stale(999_999).unwrap().tier,
+            QualityTier::Emergency
+        );
+        assert_eq!(controller.expire_if_stale(1_000_000), None);
     }
 
     #[test]
