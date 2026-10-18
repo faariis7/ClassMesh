@@ -221,6 +221,92 @@ impl UdpReceiverStats {
     }
 }
 
+/// Measured changes in one receiver's cumulative counters across a monotonic
+/// time window. Sequence gaps are observations, not a definitive loss ratio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UdpReceiverInterval {
+    pub elapsed_us: u64,
+    pub datagrams_received: u64,
+    pub frames_completed: u64,
+    pub gap_events: u64,
+    pub missing_sequence_ids: u64,
+    pub reordered_or_duplicate: u64,
+}
+
+impl UdpReceiverInterval {
+    #[must_use]
+    pub fn frames_per_second(self) -> f64 {
+        (self.frames_completed as f64) * 1_000_000.0 / (self.elapsed_us as f64)
+    }
+
+    #[must_use]
+    pub fn datagrams_per_second(self) -> f64 {
+        (self.datagrams_received as f64) * 1_000_000.0 / (self.elapsed_us as f64)
+    }
+}
+
+/// Calculates bounded-work, observed per-interval metrics without storing
+/// individual packets. First call establishes a baseline; short intervals
+/// are combined. Counter reset or clock regression re-establishes baseline.
+#[derive(Debug, Default)]
+pub struct UdpReceiverIntervalSampler {
+    baseline: Option<(u64, UdpReceiverStats)>,
+}
+
+impl UdpReceiverIntervalSampler {
+    /// Returns measured values only after at least 100 ms of monotonic time.
+    /// The supplied counters must belong to one receiver instance.
+    pub fn observe(
+        &mut self,
+        now_us: u64,
+        counters: UdpReceiverStats,
+    ) -> Option<UdpReceiverInterval> {
+        let Some((last_us, previous)) = self.baseline else {
+            self.baseline = Some((now_us, counters));
+            return None;
+        };
+        if now_us < last_us {
+            self.baseline = Some((now_us, counters));
+            return None;
+        }
+        let elapsed_us = now_us - last_us;
+        if elapsed_us == 0 {
+            return None;
+        }
+        // Validate *all* counters before computing a sample. A reset in any
+        // counter would make a partial interval misleading.
+        let delta = (|| {
+            Some(UdpReceiverInterval {
+                elapsed_us,
+                datagrams_received: counters
+                    .datagrams_received
+                    .checked_sub(previous.datagrams_received)?,
+                frames_completed: counters
+                    .frames_completed
+                    .checked_sub(previous.frames_completed)?,
+                gap_events: counters
+                    .sequence_gaps_observed
+                    .checked_sub(previous.sequence_gaps_observed)?,
+                missing_sequence_ids: counters
+                    .missing_datagrams_observed
+                    .checked_sub(previous.missing_datagrams_observed)?,
+                reordered_or_duplicate: counters
+                    .reordered_or_duplicate
+                    .checked_sub(previous.reordered_or_duplicate)?,
+            })
+        })();
+        if delta.is_none() {
+            self.baseline = Some((now_us, counters));
+            return None;
+        }
+        if elapsed_us < 100_000 {
+            return None;
+        }
+        self.baseline = Some((now_us, counters));
+        delta
+    }
+}
+
 #[derive(Debug)]
 pub struct UdpReceiveBatch {
     pub source: SocketAddr,
@@ -353,6 +439,108 @@ mod tests {
     }
 
     #[test]
+    fn interval_sampler_reports_actual_rates_and_distinguishes_gaps_from_missing_ids() {
+        let mut sampler = UdpReceiverIntervalSampler::default();
+        let baseline = UdpReceiverStats {
+            datagrams_received: 10,
+            frames_completed: 2,
+            sequence_gaps_observed: 1,
+            missing_datagrams_observed: 3,
+            reordered_or_duplicate: 1,
+        };
+        assert_eq!(sampler.observe(5_000, baseline), None);
+        assert_eq!(sampler.observe(5_000, baseline), None);
+        let current = UdpReceiverStats {
+            datagrams_received: 101,
+            frames_completed: 32,
+            sequence_gaps_observed: 3,
+            missing_datagrams_observed: 10,
+            reordered_or_duplicate: 4,
+        };
+        let interval = sampler.observe(1_005_000, current).unwrap();
+        assert_eq!(interval.elapsed_us, 1_000_000);
+        assert_eq!(interval.datagrams_received, 91);
+        assert_eq!(interval.frames_completed, 30);
+        assert_eq!(interval.gap_events, 2);
+        assert_eq!(interval.missing_sequence_ids, 7);
+        assert_eq!(interval.reordered_or_duplicate, 3);
+        assert_eq!(interval.frames_per_second(), 30.0);
+        assert_eq!(interval.datagrams_per_second(), 91.0);
+        assert_eq!(sampler.observe(1_005_000, current), None);
+    }
+
+    #[test]
+    fn interval_sampler_rejects_counter_reset_and_rebases_without_underflow() {
+        let mut sampler = UdpReceiverIntervalSampler::default();
+        sampler.observe(
+            0,
+            UdpReceiverStats {
+                datagrams_received: 100,
+                frames_completed: 5,
+                ..UdpReceiverStats::default()
+            },
+        );
+        assert_eq!(
+            sampler.observe(1_000_000, UdpReceiverStats::default()),
+            None
+        );
+        let interval = sampler
+            .observe(
+                2_000_000,
+                UdpReceiverStats {
+                    datagrams_received: 15,
+                    frames_completed: 2,
+                    ..UdpReceiverStats::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(interval.datagrams_received, 15);
+        assert_eq!(interval.frames_completed, 2);
+        // Regressing clock must not compute an unsigned underflow or emit rates.
+        assert_eq!(sampler.observe(500_000, UdpReceiverStats::default()), None);
+        assert_eq!(
+            sampler
+                .observe(
+                    1_500_000,
+                    UdpReceiverStats {
+                        datagrams_received: 8,
+                        ..UdpReceiverStats::default()
+                    }
+                )
+                .unwrap()
+                .datagrams_received,
+            8
+        );
+    }
+
+    #[test]
+    fn interval_sampler_coalesces_short_reads_without_inventing_samples() {
+        let mut sampler = UdpReceiverIntervalSampler::default();
+        sampler.observe(0, UdpReceiverStats::default());
+        assert_eq!(
+            sampler.observe(
+                50_000,
+                UdpReceiverStats {
+                    datagrams_received: 20,
+                    ..UdpReceiverStats::default()
+                }
+            ),
+            None
+        );
+        let interval = sampler
+            .observe(
+                100_000,
+                UdpReceiverStats {
+                    datagrams_received: 30,
+                    ..UdpReceiverStats::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(interval.datagrams_received, 30);
+        assert_eq!(interval.datagrams_per_second(), 300.0);
+    }
+
+    #[test]
     fn udp_sender_uses_explicit_media_wire_version() {
         let receiver = UdpMediaSocket::bind(loopback_any()).expect("raw receiver binds");
         receiver
@@ -416,6 +604,33 @@ mod tests {
         assert_eq!(completed.data.as_slice(), original.data.as_ref());
         assert_eq!(sender.stats().frames_sent, 1);
         assert_eq!(receiver.stats().frames_completed, 1);
+    }
+
+    #[test]
+    fn measured_interval_uses_real_loopback_receive_counters() {
+        let mut receiver =
+            UdpFrameReceiver::bind(loopback_any(), ReceiverPolicy::default()).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut sender = UdpFrameSender::bind(
+            loopback_any(),
+            UdpSenderConfig::presentation(55, receiver.local_addr().unwrap()),
+        )
+        .unwrap();
+        let mut sampler = UdpReceiverIntervalSampler::default();
+        assert_eq!(sampler.observe(0, receiver.stats()), None);
+        let sent = sender.send_frame(0, &frame(1, 4_000)).unwrap();
+        assert!(sent.packets > 1);
+        for offset in 0..sent.packets {
+            receiver.receive_once(offset as u64).unwrap();
+        }
+        let interval = sampler.observe(1_000_000, receiver.stats()).unwrap();
+        assert_eq!(interval.datagrams_received, sent.packets as u64);
+        assert_eq!(interval.frames_completed, 1);
+        assert_eq!(interval.frames_per_second(), 1.0);
+        assert_eq!(interval.gap_events, 0);
+        assert_eq!(interval.missing_sequence_ids, 0);
     }
 
     #[test]
