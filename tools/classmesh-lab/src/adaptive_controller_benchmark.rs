@@ -37,6 +37,11 @@ pub struct AdaptiveControllerBenchmarkReport {
     pub receivers: usize,
     pub rounds: u32,
     pub healthy_high_after_weak_degrade: usize,
+    pub healthy_high_after_silence: usize,
+    pub silent_receiver_expired_tier: QualityTier,
+    pub silent_receiver_recovered_tier: QualityTier,
+    pub silence_timeout_route_changes: usize,
+    pub silence_repeated_timeout_changes: usize,
     pub weak_degraded_tier: QualityTier,
     pub weak_recovered_tier: QualityTier,
     pub noisy_receiver_tier_changes: u32,
@@ -189,6 +194,83 @@ pub fn run_adaptive_controller_benchmark(
         ));
     }
 
+    // Phase 10G deterministic timer trial: healthy receivers keep reporting;
+    // only the formerly weak receiver stops emitting quality telemetry.
+    // The real Service does not yet own a periodic cohort scheduler.
+    let silence_at_us = weak
+        .observed_at_us
+        .saturating_add(u64::from(hysteresis.recover_samples).saturating_mul(100_000))
+        .saturating_add(quality_policy.max_sample_age_us)
+        .saturating_add(400_000);
+    let peer_refresh_at_us = silence_at_us.saturating_sub(100_000);
+    for receiver in 1..config.receivers {
+        let observation = planner
+            .observe(
+                ReceiverId(receiver as u64),
+                healthy_sample(
+                    u64::from(config.rounds).saturating_add(10),
+                    peer_refresh_at_us,
+                ),
+                peer_refresh_at_us,
+            )
+            .map_err(|_| AdaptiveControllerBenchmarkError::Invariant("peer refresh"))?;
+        if observation.quality.status != ReceiverQualitySampleStatus::Accepted
+            || observation.quality.decision.tier != QualityTier::High
+        {
+            return Err(AdaptiveControllerBenchmarkError::Invariant(
+                "healthy peer could not refresh before silence tick",
+            ));
+        }
+    }
+    let expired = planner.expire_stale(silence_at_us);
+    let silence_timeout_route_changes = expired.len();
+    let silent_receiver_expired_tier = expired.first().map(|(_, route)| route.cohort.tier).ok_or(
+        AdaptiveControllerBenchmarkError::Invariant("silent receiver did not expire"),
+    )?;
+    let healthy_high_after_silence = planner.members(high).len();
+    if expired.len() != 1
+        || expired[0].0 != weak_id
+        || silent_receiver_expired_tier != QualityTier::Emergency
+        || healthy_high_after_silence != config.receivers - 1
+    {
+        return Err(AdaptiveControllerBenchmarkError::Invariant(
+            "silent receiver downgrade changed healthy peers",
+        ));
+    }
+    let silence_repeated_timeout_changes = planner.expire_stale(silence_at_us + 1).len();
+    if silence_repeated_timeout_changes != 0 {
+        return Err(AdaptiveControllerBenchmarkError::Invariant(
+            "repeated silence tick emitted duplicate route",
+        ));
+    }
+    let mut silent_receiver_recovered_tier = QualityTier::Emergency;
+    for offset in 1..=hysteresis.recover_samples {
+        let at_us = silence_at_us.saturating_add(u64::from(offset).saturating_mul(100_000));
+        let sequence = weak
+            .sample_sequence
+            .saturating_add(u64::from(hysteresis.recover_samples))
+            .saturating_add(u64::from(offset));
+        let observation = planner
+            .observe(weak_id, healthy_sample(sequence, at_us), at_us)
+            .map_err(|_| AdaptiveControllerBenchmarkError::Invariant("silence recovery sample"))?;
+        silent_receiver_recovered_tier = observation.quality.decision.tier;
+        if observation.quality.status != ReceiverQualitySampleStatus::Accepted
+            || (offset < hysteresis.recover_samples
+                && silent_receiver_recovered_tier != QualityTier::Emergency)
+        {
+            return Err(AdaptiveControllerBenchmarkError::Invariant(
+                "silence recovery skipped fresh-sample hysteresis",
+            ));
+        }
+    }
+    if silent_receiver_recovered_tier != QualityTier::High
+        || planner.members(high).len() != config.receivers
+    {
+        return Err(AdaptiveControllerBenchmarkError::Invariant(
+            "silent receiver did not rejoin its healthy cohort",
+        ));
+    }
+
     let fallback = MediaPath {
         transport: MediaTransport::ReliableFallback,
         topology: MediaTopology::Direct,
@@ -282,6 +364,11 @@ pub fn run_adaptive_controller_benchmark(
         receivers: config.receivers,
         rounds: config.rounds,
         healthy_high_after_weak_degrade,
+        healthy_high_after_silence,
+        silent_receiver_expired_tier,
+        silent_receiver_recovered_tier,
+        silence_timeout_route_changes,
+        silence_repeated_timeout_changes,
         weak_degraded_tier,
         weak_recovered_tier,
         noisy_receiver_tier_changes,
@@ -352,6 +439,22 @@ mod tests {
             assert_eq!(report.weak_degraded_tier, QualityTier::Emergency);
             assert_eq!(report.weak_recovered_tier, QualityTier::High);
             assert_eq!(report.max_routed_receivers, receivers);
+        }
+    }
+
+    #[test]
+    fn synthetic_tick_expires_only_silent_receiver_at_all_classroom_sizes() {
+        for receivers in ADAPTIVE_SCALE_POINTS {
+            let report = run_adaptive_controller_benchmark(AdaptiveControllerBenchmarkConfig {
+                receivers,
+                rounds: 30,
+            })
+            .unwrap();
+            assert_eq!(report.healthy_high_after_silence, receivers - 1);
+            assert_eq!(report.silent_receiver_expired_tier, QualityTier::Emergency);
+            assert_eq!(report.silence_timeout_route_changes, 1);
+            assert_eq!(report.silence_repeated_timeout_changes, 0);
+            assert_eq!(report.silent_receiver_recovered_tier, QualityTier::High);
         }
     }
 

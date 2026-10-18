@@ -51,6 +51,26 @@ fn run() -> Result<(), String> {
         report.healthy_high_after_weak_degrade
     );
     println!("weak_degraded_tier={:?}", report.weak_degraded_tier);
+    println!(
+        "healthy_high_after_silence={}",
+        report.healthy_high_after_silence
+    );
+    println!(
+        "silent_receiver_expired_tier={:?}",
+        report.silent_receiver_expired_tier
+    );
+    println!(
+        "silent_receiver_recovered_tier={:?}",
+        report.silent_receiver_recovered_tier
+    );
+    println!(
+        "silence_timeout_route_changes={}",
+        report.silence_timeout_route_changes
+    );
+    println!(
+        "silence_repeated_timeout_changes={}",
+        report.silence_repeated_timeout_changes
+    );
     println!("weak_recovered_tier={:?}", report.weak_recovered_tier);
     println!(
         "noisy_receiver_tier_changes={}",
