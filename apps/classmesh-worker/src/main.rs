@@ -105,6 +105,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     > = None;
     let mut presentation_keyframe_request_retry =
         classmesh_worker::presentation_keyframe_retry::PresentationKeyframeRetry::default();
+    let mut presentation_silence =
+        classmesh_worker::presentation_keyframe_retry::PresentationKeyframeSilence::default();
     let mut presentation_delivery_telemetry =
         classmesh_worker::presentation_delivery_telemetry::PresentationDeliveryTelemetry::default();
 
@@ -397,6 +399,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         presentation_unicast = None;
                         presentation_decode = None;
                         presentation_keyframe_request_retry.reset();
+                        presentation_silence.reset();
                         presentation_delivery_telemetry.reset();
                         match classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime::start(start) {
                             Ok(receiver) => {
@@ -473,6 +476,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         presentation_unicast = None;
                         presentation_decode = None;
                         presentation_keyframe_request_retry.reset();
+                        presentation_silence.reset();
                         presentation_delivery_telemetry.reset();
                         match classmesh_worker::presentation_unicast_receive::WorkerPresentationUnicastRuntime::start(start) {
                             Ok(receiver) => {
@@ -524,6 +528,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     presentation_unicast = None;
                     presentation_decode = None;
                     presentation_keyframe_request_retry.reset();
+                    presentation_silence.reset();
                     presentation_delivery_telemetry.reset();
                     eprintln!(
                         "ClassMesh Worker stopped presentation receive runtime with exact key clear"
@@ -668,6 +673,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let frame_id = frame.frame_id();
                                 match group_media_keys.open_access_unit(frame) {
                                     Ok(access_unit) => {
+                                        presentation_silence.note_authenticated_frame(
+                                            binding,
+                                            access_unit.frame_id,
+                                            Instant::now(),
+                                        );
                                         if access_unit.keyframe {
                                             presentation_keyframe_request_retry.reset();
                                         }
@@ -759,7 +769,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             presentation_unicast = None;
             presentation_decode = None;
             presentation_keyframe_request_retry.reset();
+            presentation_silence.reset();
             presentation_delivery_telemetry.reset();
+        }
+        // No packets may arrive while a decoder waits for its first/recovery
+        // IDR. The live event loop ticks even if receive queues are empty.
+        // Requests reuse the existing bound/authorized feedback channel, and
+        // the 2-second retry gate prevents a periodic recovery storm.
+        if let Some(decoder) = presentation_decode.as_ref() {
+            if let Some(binding) = group_media_keys.binding() {
+                let exact_receiver = presentation_multicast.as_ref().is_some_and(|receiver| {
+                    !receiver.failed() && receiver.matches_key_binding(binding)
+                }) ^ presentation_unicast.as_ref().is_some_and(|receiver| {
+                    !receiver.failed() && receiver.matches_key_binding(binding)
+                });
+                if exact_receiver {
+                    if let Some(after_frame_id) = presentation_silence.due(
+                        binding,
+                        Instant::now(),
+                        decoder.waiting_for_keyframe(),
+                    ) {
+                        request_worker_presentation_keyframe_limited(
+                            &pipe,
+                            std::process::id(),
+                            actual_session,
+                            binding,
+                            after_frame_id,
+                            &mut presentation_keyframe_request_retry,
+                        )?;
+                    }
+                }
+            }
         }
         // Local diagnostics only: do not send unauthenticated or unversioned
         // counters across the privileged Service/Teacher IPC boundary.
