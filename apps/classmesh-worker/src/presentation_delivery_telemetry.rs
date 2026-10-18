@@ -381,6 +381,93 @@ mod tests {
     }
 
     #[test]
+    fn real_worker_report_to_verified_service_admission_preserves_epoch_and_counters() {
+        use classmesh_control::receiver_telemetry::{
+            ReceiverTelemetryDecision, ReceiverTelemetryError,
+        };
+        use classmesh_control::receiver_telemetry_ingress::{
+            ReceiverTelemetryIngress, ReceiverTelemetryIngressError,
+        };
+        use classmesh_control::receiver_telemetry_transport::encode_receiver_telemetry;
+
+        let at = Instant::now();
+        let key = binding(1);
+        let owner = authorized_owner(1);
+        let mut reporter = PresentationDeliveryTelemetry::default();
+        let mut service = ReceiverTelemetryIngress::default();
+        let before = WorkerGroupMediaAuthenticationStats {
+            opened_frames: 10,
+            rejected_frames: 2,
+        };
+        assert!(reporter.report_if_due(at, key, before, 3).is_none());
+        let first = reporter
+            .report_if_due(at + Duration::from_secs(5), key, before, 3)
+            .unwrap();
+        let snapshot = first.snapshot_for_bound_key(owner, key).unwrap();
+        let wire = encode_receiver_telemetry(&snapshot).unwrap();
+        assert_eq!(
+            service.observe_verified(&wire, at + Duration::from_secs(5)),
+            Err(ReceiverTelemetryIngressError::Admission(
+                ReceiverTelemetryError::NoActiveBinding
+            ))
+        );
+        service.activate_verified(owner).unwrap();
+        assert_eq!(
+            service.observe_verified(&wire, at + Duration::from_secs(5)),
+            Ok(ReceiverTelemetryDecision::Baseline)
+        );
+
+        let after = WorkerGroupMediaAuthenticationStats {
+            opened_frames: 16,
+            rejected_frames: 4,
+        };
+        let second = reporter
+            .report_if_due(at + Duration::from_secs(10), key, after, 5)
+            .unwrap();
+        let wire =
+            encode_receiver_telemetry(&second.snapshot_for_bound_key(owner, key).unwrap()).unwrap();
+        let result = service
+            .observe_verified(&wire, at + Duration::from_secs(10))
+            .unwrap();
+        let ReceiverTelemetryDecision::Interval(interval) = result else {
+            panic!("contiguous real Worker reports must yield an interval");
+        };
+        assert_eq!(interval.elapsed, Duration::from_secs(5));
+        assert_eq!(interval.authenticated_frames, 6);
+        assert_eq!(interval.rejected_frames, 2);
+        assert_eq!(interval.queue_drops, 2);
+        // Authentication success does NOT claim decode or display success.
+        assert_eq!(interval.decoded_frames, 0);
+        assert_eq!(interval.presented_frames, 0);
+
+        let next_key = binding(2);
+        let next_owner = authorized_owner(2);
+        assert!(
+            second
+                .snapshot_for_bound_key(next_owner, next_key)
+                .is_none(),
+            "already emitted old-epoch report cannot be relabelled"
+        );
+        assert!(
+            reporter
+                .report_if_due(at + Duration::from_secs(11), next_key, after, 0)
+                .is_none()
+        );
+        service.activate_verified(next_owner).unwrap();
+        let fresh = reporter
+            .report_if_due(at + Duration::from_secs(16), next_key, after, 0)
+            .unwrap();
+        assert_eq!(fresh.sample_sequence, 1);
+        let wire =
+            encode_receiver_telemetry(&fresh.snapshot_for_bound_key(next_owner, next_key).unwrap())
+                .unwrap();
+        assert_eq!(
+            service.observe_verified(&wire, at + Duration::from_secs(16)),
+            Ok(ReceiverTelemetryDecision::Baseline)
+        );
+    }
+
+    #[test]
     fn trusted_opens_and_decode_outputs_stay_distinct() {
         let mut tracker = PresentationDeliveryTelemetry::default();
         let at = Instant::now();
