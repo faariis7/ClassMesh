@@ -2,8 +2,8 @@ use classmesh_control::receiver_telemetry::{
     ReceiverPlaybackCounters, ReceiverTelemetryBinding, ReceiverTelemetrySnapshot,
 };
 use classmesh_control::receiver_telemetry_transport::{
-    ReceiverTelemetryMailbox, ReceiverTelemetryWireError, decode_receiver_telemetry,
-    encode_receiver_telemetry, RECEIVER_TELEMETRY_WIRE_LEN,
+    RECEIVER_TELEMETRY_WIRE_LEN, ReceiverTelemetryMailbox, ReceiverTelemetryWireError,
+    decode_receiver_telemetry, encode_receiver_telemetry,
 };
 
 fn binding(epoch: u32) -> ReceiverTelemetryBinding {
