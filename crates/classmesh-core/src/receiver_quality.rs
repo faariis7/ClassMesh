@@ -204,7 +204,7 @@ impl ReceiverQualityController {
         }
         if self
             .last_observed_at_us
-            .is_some_and(|last| sample.observed_at_us < last)
+            .is_some_and(|last| sample.observed_at_us <= last)
         {
             return ReceiverQualitySampleStatus::NonMonotonicObservationTime;
         }
@@ -383,6 +383,45 @@ mod tests {
             ReceiverQualitySampleStatus::FutureObservation
         );
         assert_eq!(controller.last_sequence(), Some(1));
+    }
+
+    #[test]
+    fn repeated_observation_time_cannot_fake_three_fresh_recovery_samples() {
+        let mut controller = controller();
+        let mut severe = healthy_sample(1, 1_000_000);
+        severe.capability.renderer_healthy = false;
+        assert_eq!(
+            controller.observe(severe, 1_000_000).decision.tier,
+            QualityTier::Emergency
+        );
+
+        // Distinct sequence numbers cannot turn the same timestamp into
+        // three independent measurements and bypass recovery hysteresis.
+        let first = controller.observe(healthy_sample(2, 1_100_000), 1_100_000);
+        assert_eq!(first.status, ReceiverQualitySampleStatus::Accepted);
+        assert_eq!(first.decision.tier, QualityTier::Emergency);
+        for sequence in 3..=4 {
+            let replay = controller.observe(healthy_sample(sequence, 1_100_000), 1_100_000);
+            assert_eq!(
+                replay.status,
+                ReceiverQualitySampleStatus::NonMonotonicObservationTime
+            );
+            assert_eq!(replay.decision.tier, QualityTier::Emergency);
+        }
+        assert_eq!(controller.last_sequence(), Some(2));
+        assert_eq!(
+            controller
+                .observe(healthy_sample(5, 1_200_000), 1_200_000)
+                .decision
+                .tier,
+            QualityTier::Emergency
+        );
+        let second = controller.observe(healthy_sample(6, 1_300_000), 1_300_000);
+        assert_eq!(second.status, ReceiverQualitySampleStatus::Accepted);
+        assert_eq!(second.decision.tier, QualityTier::Emergency);
+        let recovered = controller.observe(healthy_sample(7, 1_400_000), 1_400_000);
+        assert_eq!(recovered.status, ReceiverQualitySampleStatus::Accepted);
+        assert_eq!(recovered.decision.tier, QualityTier::High);
     }
 
     #[test]
