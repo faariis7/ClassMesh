@@ -1,5 +1,6 @@
 //! Experimental shared-ancestor descriptor qualification; not production authority.
 //! This snapshot alone does not revoke preexisting HANDLE rights.
+#[cfg(test)]
 use std::os::windows::fs::OpenOptionsExt;
 use std::{fs::File, io};
 

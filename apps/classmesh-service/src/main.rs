@@ -37,6 +37,7 @@ mod windows_service_app {
         TeacherInteractionKind,
     };
     use classmesh_protocol::feedback::FeedbackMessage;
+    #[cfg(not(feature = "experimental-trusted-policy"))]
     use classmesh_security::persistence::DurableAuthorizationState;
     use classmesh_security::{CredentialFingerprint, PrincipalId};
     use classmesh_video::{Codec, EncoderClass, EncoderProbeResult};
@@ -77,6 +78,7 @@ mod windows_service_app {
     const STATE_DIRECTORY: &str = "ClassMesh\\state";
     const CONFIG_DIRECTORY: &str = "ClassMesh\\config";
     const MACHINE_IDENTITY_FILE: &str = "machine-identity.json";
+    #[cfg(not(feature = "experimental-trusted-policy"))]
     const AUTHORIZATION_FILE: &str = "authorization.json";
     const ENCODER_CAPABILITY_CACHE_FILE: &str = "encoder-capability.json";
     const CONTROL_RUNTIME_CONFIG_FILE: &str = "control-runtime.json";
@@ -1636,9 +1638,22 @@ mod windows_service_app {
             .map_err(|_| "system clock cannot be represented in milliseconds".to_owned())
     }
 
-    fn load_control_state() -> Result<ControlRuntimeState, String> {
+    #[cfg(feature = "experimental-trusted-policy")]
+    type PolicySessionLease = classmesh_win32::trusted_policy::TrustedPolicySession;
+    #[cfg(not(feature = "experimental-trusted-policy"))]
+    type PolicySessionLease = ();
+
+    fn load_control_state() -> Result<(ControlRuntimeState, PolicySessionLease), String> {
+        // Acquire the fixed Windows-rooted namespace before extracting policy.
+        // Errors do not enter the legacy path or repair/create missing state.
+        #[cfg(feature = "experimental-trusted-policy")]
+        let mut policy_lease = PolicySessionLease::open_installed()
+            .map_err(|error| format!("trusted policy startup rejected: {error}"))?;
+        #[cfg(not(feature = "experimental-trusted-policy"))]
+        let policy_lease = ();
         let state_dir = program_data_state_dir()?;
         let identity_path = state_dir.join(MACHINE_IDENTITY_FILE);
+        #[cfg(not(feature = "experimental-trusted-policy"))]
         let authorization_path = state_dir.join(AUTHORIZATION_FILE);
 
         let identity = DurableMachineIdentity::new(&identity_path)
@@ -1650,6 +1665,11 @@ mod windows_service_app {
                     identity_path.display()
                 )
             })?;
+        #[cfg(feature = "experimental-trusted-policy")]
+        let authorization = policy_lease
+            .take_authorization()
+            .map_err(|error| format!("trusted authorization extraction failed: {error}"))?;
+        #[cfg(not(feature = "experimental-trusted-policy"))]
         let authorization = DurableAuthorizationState::new(&authorization_path)
             .load()
             .map_err(|error| format!("authorization state rejected: {error}"))?
@@ -1694,11 +1714,14 @@ mod windows_service_app {
             );
         }
 
-        Ok(ControlRuntimeState {
-            identity,
-            authorization,
-            key,
-        })
+        Ok((
+            ControlRuntimeState {
+                identity,
+                authorization,
+                key,
+            },
+            policy_lease,
+        ))
     }
 
     fn load_control_config() -> Result<ControlRuntimeConfig, String> {
@@ -1747,7 +1770,9 @@ mod windows_service_app {
         };
 
         let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
-        let control_state = match load_control_state() {
+        // Declared before ControlRuntime: its Drop stops/joins the runtime
+        // before this exclusive install lease is released, including errors.
+        let (control_state, _policy_lease) = match load_control_state() {
             Ok(state) => state,
             Err(error) => {
                 eprintln!("ClassMesh control identity state failed closed: {error}");

@@ -19,15 +19,11 @@ impl PinnedPolicyReadCandidate {
         self,
         anchor: &crate::registry_epoch::RegistryAnchor,
     ) -> io::Result<classmesh_security::AuthorizationStore> {
-        anchor.with_record(|record| {
-            let epoch = u64::from_le_bytes(record[8..16].try_into().expect("validated fixed record"));
-            let state = self.directories.last().ok_or_else(denied)?;
-            let policy = open_relative_protected_node(state, &format!("policy-{epoch:016x}.json"), false)?;
-            let reader = policy.take((MAX_POLICY_BYTES + 1) as u64);
-            classmesh_security::persistence::DurableAuthorizationState::parse_bound_primary_from_readers(
-                record.as_slice(), reader, epoch,
-            ).map_err(|_| denied())
-        })
+        crate::trusted_policy::parse_registry_policy(
+            self.directories.last().ok_or_else(denied)?,
+            anchor,
+        )
+        .map(|(_, store)| store)
     }
 
     /// A parsed candidate, not a publication capability. The supplied expected
