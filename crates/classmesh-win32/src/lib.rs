@@ -29,6 +29,8 @@ mod sensitive_pipe_listener;
 mod session;
 #[cfg(windows)]
 mod session_process;
+#[cfg(all(windows, test))]
+mod system_volume;
 #[cfg(windows)]
 mod teacher_interaction;
 #[cfg(windows)]
