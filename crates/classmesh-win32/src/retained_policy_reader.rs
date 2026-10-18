@@ -15,6 +15,21 @@ struct PinnedPolicyReadCandidate {
 }
 
 impl PinnedPolicyReadCandidate {
+    fn parse_registry_candidate(
+        self,
+        anchor: &crate::registry_epoch::RegistryAnchor,
+    ) -> io::Result<classmesh_security::AuthorizationStore> {
+        anchor.with_record(|record| {
+            let epoch = u64::from_le_bytes(record[8..16].try_into().expect("validated fixed record"));
+            let state = self.directories.last().ok_or_else(denied)?;
+            let policy = open_relative_protected_node(state, &format!("policy-{epoch:016x}.json"), false)?;
+            let reader = policy.take((MAX_POLICY_BYTES + 1) as u64);
+            classmesh_security::persistence::DurableAuthorizationState::parse_bound_primary_from_readers(
+                record.as_slice(), reader, epoch,
+            ).map_err(|_| denied())
+        })
+    }
+
     /// A parsed candidate, not a publication capability. The supplied expected
     /// epoch has no independent durable authority in this qualification harness.
     fn parse_candidate(
@@ -95,25 +110,7 @@ fn independently_rooted_read_keeps_all_handles_and_bounds_bytes() {
         (&blob, b"bounded policy".as_slice()),
     ] {
         std::fs::write(file, bytes).unwrap();
-        for args in [
-            vec!["/reset"],
-            vec![
-                "/inheritance:r",
-                "/grant:r",
-                "*S-1-5-18:F",
-                "*S-1-5-32-544:F",
-            ],
-            vec!["/setowner", "*S-1-5-32-544"],
-        ] {
-            assert!(
-                std::process::Command::new("icacls.exe")
-                    .arg(file)
-                    .args(args)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
+        protect_fixture_leaf(file);
     }
     drop(state);
     drop(app);
@@ -244,6 +241,43 @@ fn independently_rooted_read_keeps_all_handles_and_bounds_bytes() {
             .parse_candidate(0)
             .is_err()
     );
+    // The independent Registry record selects and binds the policy. A local
+    // checkpoint and old blobs must not override that authority.
+    let anchor_scope = format!("ClassMesh-anchor-probe-reader-{}", std::process::id());
+    let anchor = crate::registry_epoch::RegistryAnchor::create(&anchor_scope, &record).unwrap();
+    std::fs::remove_file(&checkpoint).unwrap();
+    PinnedPolicyReadCandidate::open(&scope)
+        .unwrap()
+        .parse_registry_candidate(&anchor)
+        .expect("registry-rooted candidate");
+    std::fs::write(&blob, [valid.as_slice(), b" "].concat()).unwrap();
+    assert!(
+        PinnedPolicyReadCandidate::open(&scope)
+            .unwrap()
+            .parse_registry_candidate(&anchor)
+            .is_err()
+    );
+    std::fs::write(&blob, valid).unwrap();
+    let next = classmesh_security::policy_epoch::encode_bound_policy_checkpoint(9, valid).unwrap();
+    anchor.advance(&record, &next).unwrap();
+    // Epoch 7 still exists, but missing committed epoch 9 must never fall back.
+    assert!(
+        PinnedPolicyReadCandidate::open(&scope)
+            .unwrap()
+            .parse_registry_candidate(&anchor)
+            .is_err()
+    );
+    let newer_blob = state_path.join("policy-0000000000000009.json");
+    std::fs::write(&newer_blob, valid).unwrap();
+    protect_fixture_leaf(&newer_blob);
+    PinnedPolicyReadCandidate::open(&scope)
+        .unwrap()
+        .parse_registry_candidate(&anchor)
+        .unwrap();
+    assert!(anchor.advance(&next, &record).is_err());
+    drop(anchor);
+    crate::registry_epoch::remove_fixture(&anchor_scope);
+    std::fs::write(&checkpoint, record).unwrap();
     assert!(
         std::process::Command::new("icacls.exe")
             .arg(&blob)
@@ -260,4 +294,26 @@ fn independently_rooted_read_keeps_all_handles_and_bounds_bytes() {
     );
     drop(roots);
     std::fs::remove_dir_all(path).unwrap();
+}
+
+fn protect_fixture_leaf(file: &std::path::Path) {
+    for args in [
+        vec!["/reset"],
+        vec![
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:F",
+            "*S-1-5-32-544:F",
+        ],
+        vec!["/setowner", "*S-1-5-32-544"],
+    ] {
+        assert!(
+            std::process::Command::new("icacls.exe")
+                .arg(file)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
 }

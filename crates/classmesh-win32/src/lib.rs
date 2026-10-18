@@ -28,6 +28,8 @@ pub mod program_data_known_folder;
 #[cfg(windows)]
 pub mod protected_app_bootstrap;
 #[cfg(all(windows, test))]
+mod registry_epoch;
+#[cfg(all(windows, test))]
 mod retained_policy_reader;
 #[cfg(windows)]
 mod sensitive_pipe_listener;
