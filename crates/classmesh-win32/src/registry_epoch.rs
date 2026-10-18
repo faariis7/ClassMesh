@@ -450,6 +450,12 @@ fn registry_anchor_creates_without_adopting_existing_state() {
         anchor.advance(&record, &next).is_err(),
         "writer reservation must exclude competitor"
     );
+    let competitor = run_worker(&scope, "compete");
+    assert!(
+        competitor.status.success(),
+        "independent competing process failed: {}",
+        String::from_utf8_lossy(&competitor.stderr)
+    );
     pending.commit(&stale).unwrap();
     anchor.advance(&stale, &next).unwrap();
     assert_eq!(anchor.read().unwrap(), next);
@@ -473,16 +479,7 @@ fn registry_anchor_recovers_after_process_exit_before_and_after_commit() {
         classmesh_security::policy_epoch::encode_bound_policy_checkpoint(9, b"new policy").unwrap();
     let anchor = RegistryAnchor::create(&scope, &old).unwrap();
     for (mode, expected) in [("before", old), ("after", new)] {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "registry_epoch::registry_anchor_process_worker",
-                "--nocapture",
-            ])
-            .env("CLASSMESH_REGISTRY_PROBE_SCOPE", &scope)
-            .env("CLASSMESH_REGISTRY_PROBE_MODE", mode)
-            .output()
-            .unwrap();
+        let output = run_worker(&scope, mode);
         assert!(
             output.status.success(),
             "child failed: {}",
@@ -502,12 +499,20 @@ fn registry_anchor_process_worker() {
         return;
     };
     let mode = std::env::var("CLASSMESH_REGISTRY_PROBE_MODE").unwrap();
-    assert!(scope.starts_with("ClassMesh-anchor-probe-crash-"));
+    assert!(scope.starts_with("ClassMesh-anchor-probe-"));
     let old =
         classmesh_security::policy_epoch::encode_bound_policy_checkpoint(7, b"policy").unwrap();
     let new =
         classmesh_security::policy_epoch::encode_bound_policy_checkpoint(9, b"new policy").unwrap();
     let anchor = RegistryAnchor::open(&scope).unwrap();
+    if mode == "compete" {
+        assert!(
+            anchor.advance(&old, &new).is_err(),
+            "other process owns writer reservation"
+        );
+        assert_eq!(anchor.read().unwrap(), old);
+        return;
+    }
     let pending = anchor.begin(&old).unwrap();
     pending.stage(&new).unwrap();
     match mode.as_str() {
@@ -608,4 +613,85 @@ fn set_fixture_dacl(scope: &str, sddl: &str) {
         )
     })
     .unwrap();
+}
+
+fn run_worker(scope: &str, mode: &str) -> std::process::Output {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "registry_epoch::registry_anchor_process_worker",
+            "--nocapture",
+        ])
+        .env("CLASSMESH_REGISTRY_PROBE_SCOPE", scope)
+        .env("CLASSMESH_REGISTRY_PROBE_MODE", mode)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn registry_anchor_rejects_actual_registry_symbolic_link() {
+    let scope = format!("ClassMesh-anchor-probe-link-target-{}", std::process::id());
+    let alias = format!("ClassMesh-anchor-probe-link-alias-{}", std::process::id());
+    let record =
+        classmesh_security::policy_epoch::encode_bound_policy_checkpoint(7, b"policy").unwrap();
+    let anchor = RegistryAnchor::create(&scope, &record).unwrap();
+    let parent = machine_parent(&alias).unwrap();
+    let name = wide(&alias);
+    let mut raw = std::ptr::null_mut();
+    let mut disposition = 0;
+    // Safety: unique test-owned child; create an actual registry link object.
+    status(unsafe {
+        RegCreateKeyExW(
+            parent.0,
+            name.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_CREATE_LINK,
+            KEY_ALL_ACCESS | KEY_WOW64_64KEY,
+            std::ptr::null(),
+            &raw mut raw,
+            &raw mut disposition,
+        )
+    })
+    .unwrap();
+    let link = Key(raw);
+    assert_eq!(disposition, REG_CREATED_NEW_KEY);
+    let value = wide("SymbolicLinkValue");
+    let target: Vec<u16> = format!(r"\Registry\Machine\SOFTWARE\{scope}")
+        .encode_utf16()
+        .collect();
+    // Safety: UTF-16 link target bytes exclude NUL as required for REG_LINK.
+    status(unsafe {
+        RegSetValueExW(
+            link.0,
+            value.as_ptr(),
+            0,
+            REG_LINK,
+            target.as_ptr().cast(),
+            (target.len() * 2) as u32,
+        )
+    })
+    .unwrap();
+    assert!(RegistryAnchor::open(&alias).is_err());
+    let mut followed = std::ptr::null_mut();
+    // Safety: positive control intentionally follows only this test-owned link.
+    status(unsafe { RegOpenKeyExW(parent.0, name.as_ptr(), 0, ACCESS, &raw mut followed) })
+        .unwrap();
+    assert_eq!(read_record(&Key(followed)).unwrap(), record);
+    // RegDeleteKeyEx follows registry links even during deletion. Delete the
+    // already-open link object directly, never its target pathname.
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn NtDeleteKey(key: HKEY) -> i32;
+    }
+    // Safety: retained link HANDLE with DELETE from KEY_ALL_ACCESS; own fixture.
+    assert_eq!(unsafe { NtDeleteKey(link.0) }, 0);
+    drop(link);
+    assert_eq!(
+        anchor.read().unwrap(),
+        record,
+        "deleting alias must preserve target"
+    );
+    drop(anchor);
+    remove_fixture(&scope);
 }
