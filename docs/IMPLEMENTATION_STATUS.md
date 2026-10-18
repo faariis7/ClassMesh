@@ -1,5 +1,9 @@
 ## Active execution checkpoint — Astra 2026-10-18
 
+## Active execution checkpoint — retained bounded reader boundary (2026-10-18)
+
+Test-only PinnedPolicyReadCandidate acquires the independently rooted and ACL-checked chain, opens protected checkpoint/blob relative to retained state, then consumes itself through a bounded dyn Read callback. No File cloning/raw handle/path reopen interface. V2 ceilings preserve an extra byte for downstream oversize rejection. VM1 RED/GREEN, fmt/Clippy/87 tests and SCM 1/1 PASS; VM2 and hosted CI pending. This proves bounded acquisition/lifetime containment, not digest/epoch validation: the existing security parser is not invoked yet. Independent read-only review found no blocking defect.
+
 ## Active execution checkpoint — shared ancestor ACL qualification (2026-10-18)
 
 Test-only root traversal now requests READ_CONTROL and checks owner/DACL on every retained volume, Windows and ProgramData HANDLE. Separate predicate supports SYSTEM/Administrators/TrustedInstaller owners, ordinary shared-directory add-child/attribute rights, and inherit-only ACEs; rejects untrusted delete-child/delete/security-write rights, unknown ACE forms and null ACLs. Private subtree predicate is unchanged. VM1 RED/GREEN, fmt/Clippy/86 tests and SCM 2 ACL + 5 root tests PASS. VM2 full workspace fmt/Clippy/tests, 86 Win32 tests and SCM ACL 2 + root 5 PASS; hosted CI pending. This is a descriptor snapshot, not revocation of preexisting security-write handles, and does not enable production publication.

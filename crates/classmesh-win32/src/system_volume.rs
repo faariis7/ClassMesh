@@ -101,7 +101,7 @@ fn pin_system_windows_volume() -> io::Result<SystemVolumeCandidate> {
     })
 }
 
-fn pin_system_program_data() -> io::Result<Vec<File>> {
+pub(crate) fn pin_system_program_data() -> io::Result<Vec<File>> {
     let pinned = pin_system_windows_volume()?;
     let known = crate::program_data_known_folder::resolve_os_program_data_path()?;
     selected_components(&pinned.windows_path, known.to_str().ok_or_else(denied)?)?;
