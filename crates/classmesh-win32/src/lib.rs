@@ -6,6 +6,8 @@ pub use sensitive_pipe_name::{
     sensitive_worker_pipe_name,
 };
 
+#[cfg(all(windows, test))]
+mod ancestor_mutation;
 #[cfg(windows)]
 mod clipboard;
 #[cfg(windows)]

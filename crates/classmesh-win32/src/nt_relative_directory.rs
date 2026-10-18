@@ -186,7 +186,7 @@ pub(crate) fn open_native_readonly_directory(
     parent: Option<&File>,
     name: &str,
 ) -> io::Result<File> {
-    open_native_node(parent, name, true, false)
+    open_native_node(parent, name, true, false, None)
 }
 
 fn open_native_node(
@@ -194,6 +194,7 @@ fn open_native_node(
     name: &str,
     directory: bool,
     protected: bool,
+    creation: Option<&NewDirectoryDescriptor>,
 ) -> io::Result<File> {
     let mut utf16: Vec<u16> = name.encode_utf16().collect();
     if utf16.is_empty() || utf16.len() > 32766 || name.contains('\0') {
@@ -211,7 +212,7 @@ fn open_native_node(
         object_name: &raw mut name,
         // OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE
         attributes: 0x0040 | 0x1000,
-        security_descriptor: std::ptr::null_mut(),
+        security_descriptor: creation.map_or(std::ptr::null_mut(), |d| d.0),
         security_quality_of_service: std::ptr::null_mut(),
     };
     let mut status_block = NativeIoStatusBlock {
@@ -234,7 +235,7 @@ fn open_native_node(
             0,
             // Protected subtree refuses existing/future data writers or deleters.
             if protected { 1 } else { 7 },
-            1, // FILE_OPEN, never create/write
+            if creation.is_some() { 2 } else { 1 }, // FILE_CREATE or FILE_OPEN
             (if directory { 1 } else { 0x40 }) | 0x20 | 0x0020_0000, // type | synchronous | no-follow
             std::ptr::null_mut(),
             0,
@@ -252,6 +253,9 @@ fn open_native_node(
     }
     // Safety: successful NtCreateFile gave an owned real HANDLE exactly once.
     let file = unsafe { File::from_raw_handle(handle) };
+    if creation.is_some() && status_block.information != 2 {
+        return Err(denied()); // FILE_CREATED required; never adopt existing.
+    }
     let mut info = BY_HANDLE_FILE_INFORMATION {
         dwFileAttributes: 0,
         ftCreationTime: Default::default(),
@@ -295,7 +299,56 @@ pub(crate) fn open_relative_protected_node(
     if !crate::policy_file_origin::safe_child_leaf(leaf) || leaf.encode_utf16().count() > 255 {
         return Err(denied());
     }
-    open_native_node(Some(parent), leaf, directory, true)
+    open_native_node(Some(parent), leaf, directory, true, None)
+}
+
+struct NewDirectoryDescriptor(*mut c_void);
+
+impl NewDirectoryDescriptor {
+    fn new() -> io::Result<Self> {
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        let sddl: Vec<u16> = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)\0"
+            .encode_utf16()
+            .collect();
+        let mut raw = std::ptr::null_mut();
+        // Safety: fixed NUL-terminated SDDL and initialized writable output.
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &raw mut raw,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if raw.is_null() {
+            return Err(denied());
+        }
+        Ok(Self(raw))
+    }
+}
+
+impl Drop for NewDirectoryDescriptor {
+    fn drop(&mut self) {
+        // Safety: exactly one owner of the successful LocalAlloc result.
+        unsafe {
+            windows_sys::Win32::Foundation::LocalFree(self.0);
+        }
+    }
+}
+
+/// Experimental atomic create-only bootstrap beneath a retained parent.
+/// Parent authority and crash durability are separate, still-open gates.
+pub(crate) fn create_relative_protected_directory(parent: &File, leaf: &str) -> io::Result<File> {
+    if !crate::policy_file_origin::safe_child_leaf(leaf) || leaf.encode_utf16().count() > 255 {
+        return Err(denied());
+    }
+    let descriptor = NewDirectoryDescriptor::new()?;
+    open_native_node(Some(parent), leaf, true, true, Some(&descriptor))
 }
 
 #[cfg(test)]
