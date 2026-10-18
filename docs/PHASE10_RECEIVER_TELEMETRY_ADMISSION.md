@@ -81,3 +81,19 @@ queue drops. The per-presentation report sequence stays outside the counter
 struct, as required by the eventual exact owner/receiver binding envelope.
 This is local type alignment only; no new Worker→Service sender, IPC message,
 trusted owner assertion, or adaptive policy decision was enabled.
+
+## Thread-safe nonblocking telemetry handoff (pre-IPC)
+
+`ReceiverTelemetryConcurrentMailbox` shares one latest-only report slot via
+`Arc<Mutex<ReceiverTelemetryMailbox>>` with **`try_lock` only**. A Worker video
+producer never blocks behind another thread: contention returns `Busy` and a
+poisoned slot returns `Poisoned` (fail closed). Accepted reports coalesce in
+constant space and reject invalid/replayed/mismatched binding, while exact
+replacement/clear prevents stale senders from draining a successor. A future
+independent sender must take a copy, drop the lock, independently check the
+current authenticated Worker and receiver generation, then use nonblocking I/O
+or discard; **it must not write to the existing blocking Worker media loop**.
+This is the bounded producer/consumer seam, not an active transport, IPC
+message, credential, thread, or quality promotion. Unit tests exercise 10,000
+coalesced offers, deterministic contention, poisoned-lock failure and exact
+binding replacement without requiring a live Windows guest.
