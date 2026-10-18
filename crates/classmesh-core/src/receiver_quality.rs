@@ -190,10 +190,11 @@ impl ReceiverQualityController {
         if now_us >= last && now_us - last <= self.quality_policy.max_sample_age_us {
             return None;
         }
-        if self.profile_controller.current()?.tier == QualityTier::Emergency {
-            return None;
-        }
-        Some(self.profile_controller.force_emergency_on_telemetry_loss())
+        self.profile_controller.current()?;
+        let decision = self.profile_controller.force_emergency_on_telemetry_loss();
+        // Expiration must clear pending recovery even if already Emergency.
+        // Only actual tier changes are emitted as route changes.
+        decision.changed.then_some(decision)
     }
 
     fn validate_observation(
@@ -481,6 +482,50 @@ mod tests {
         assert_eq!(
             controller
                 .observe(healthy_sample(4, 4_400_000), 4_400_000)
+                .decision
+                .tier,
+            QualityTier::High
+        );
+    }
+
+    #[test]
+    fn telemetry_timeout_clears_partial_recovery_while_already_emergency() {
+        let mut controller = controller();
+        let mut unhealthy = healthy_sample(1, 1_000_000);
+        unhealthy.capability.decoder_healthy = false;
+        assert_eq!(
+            controller.observe(unhealthy, 1_000_000).decision.tier,
+            QualityTier::Emergency
+        );
+        for seq in 2..=3 {
+            let at = 1_000_000 + seq * 100_000;
+            assert_eq!(
+                controller
+                    .observe(healthy_sample(seq, at), at)
+                    .decision
+                    .tier,
+                QualityTier::Emergency
+            );
+        }
+        assert_eq!(
+            controller.expire_if_stale(3_300_001),
+            None,
+            "already Emergency, so expiration must not produce a duplicate route change"
+        );
+        for seq in 4..=5 {
+            let at = 3_000_000 + seq * 100_000;
+            assert_eq!(
+                controller
+                    .observe(healthy_sample(seq, at), at)
+                    .decision
+                    .tier,
+                QualityTier::Emergency,
+                "a fresh post-timeout recovery window is required"
+            );
+        }
+        assert_eq!(
+            controller
+                .observe(healthy_sample(6, 3_600_000), 3_600_000)
                 .decision
                 .tier,
             QualityTier::High

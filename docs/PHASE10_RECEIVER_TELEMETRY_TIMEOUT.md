@@ -13,3 +13,5 @@ This API **must be called periodically from the real owner of the cohort planner
 ## Tests and limits
 
 Native unit tests cover two healthy peers unaffected by a single expired receiver, exact age boundary, no duplicate routing, absent samples, clock rollback, post-expiry recovery, and the normal healthy and poor-network hysteresis behavior. VM1/VM2 targeted and full core suites plus Clippy and hosted Portable/Windows CI are gates. Physical weak-network/5-30 devices and scheduling the real periodic call remain separate acceptance tasks.
+
+Regression addendum: expiring an already-Emergency receiver must clear two accumulated healthy recovery samples without producing a redundant route change. Fresh recovery must restart at zero after telemetry silence. Timeout test uses last accepted observation 1,300,000us and expiry 3,300,001us (strictly past 2s policy).
