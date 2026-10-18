@@ -3,7 +3,9 @@ use crate::group_media_receive::WorkerGroupMediaAuthenticationStats;
 #[cfg(test)]
 use crate::presentation_decode_render::PresentationDecodeBatch;
 use crate::presentation_decode_render::PresentationDecodeStep;
-use classmesh_control::receiver_telemetry::ReceiverPlaybackCounters;
+use classmesh_control::receiver_telemetry::{
+    ReceiverPlaybackCounters, ReceiverTelemetryBinding, ReceiverTelemetrySnapshot,
+};
 use classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding;
 use std::time::{Duration, Instant};
 
@@ -41,6 +43,38 @@ pub struct PresentationDeliveryReport {
 }
 
 impl PresentationDeliveryReport {
+    /// Package actual Worker diagnostics only when the currently installed
+    /// media-key presentation identity matches the externally supplied
+    /// Service-owner envelope. This function verifies shared binding fields,
+    /// NOT the authority of process/session/worker or receiver generation.
+    ///
+    /// The caller MUST obtain the complete owner binding from the Service's
+    /// independently authenticated lifecycle; a Worker must never manufacture
+    /// ownership from its own media key or a report's untrusted fields.
+    /// No IPC or quality adaptation is activated by constructing this value.
+    #[must_use]
+    pub fn snapshot_for_bound_key(
+        self,
+        owner: ReceiverTelemetryBinding,
+        installed_key: PresentationKeyInstallBinding,
+    ) -> Option<ReceiverTelemetrySnapshot> {
+        if self.sample_sequence == 0
+            || !owner.is_valid()
+            || owner.control_session_id != installed_key.control_session_id
+            || owner.request_id != installed_key.request_id
+            || owner.presentation_id != installed_key.presentation_id
+            || owner.stream_id != installed_key.stream_id
+            || owner.epoch != installed_key.epoch
+        {
+            return None;
+        }
+        Some(ReceiverTelemetrySnapshot {
+            binding: owner,
+            sequence: self.sample_sequence,
+            counters: self.playback_counters(),
+        })
+    }
+
     /// Map the real Worker playback counters into the shared, transport-neutral
     /// Phase 10 contract without conflating AEAD opens with decoded/presented
     /// frames. This does not authorize or transmit a receiver report.
@@ -207,7 +241,9 @@ mod tests {
         assert_eq!(report.sample_sequence, 41);
     }
 
-    fn authorized_owner(epoch: u32) -> classmesh_control::receiver_telemetry::ReceiverTelemetryBinding {
+    fn authorized_owner(
+        epoch: u32,
+    ) -> classmesh_control::receiver_telemetry::ReceiverTelemetryBinding {
         classmesh_control::receiver_telemetry::ReceiverTelemetryBinding {
             process_id: 101,
             session_id: 5,
@@ -255,6 +291,24 @@ mod tests {
     }
 
     #[test]
+    fn local_worker_snapshot_round_trips_strict_wire_codec_without_losing_source_semantics() {
+        use classmesh_control::receiver_telemetry_transport::{
+            decode_receiver_telemetry, encode_receiver_telemetry,
+        };
+
+        let snapshot = diagnostic(21)
+            .snapshot_for_bound_key(authorized_owner(1), binding(1))
+            .unwrap();
+        let bytes = encode_receiver_telemetry(&snapshot).unwrap();
+        let read_back = decode_receiver_telemetry(&bytes).unwrap();
+        assert_eq!(read_back, snapshot);
+        assert_eq!(read_back.counters.authenticated_frames, 20);
+        assert_eq!(read_back.counters.decoded_frames, 17);
+        assert_eq!(read_back.counters.presented_frames, 16);
+        assert_eq!(read_back.sequence, 21);
+    }
+
+    #[test]
     fn no_local_snapshot_for_mismatched_control_request_presentation_stream_or_epoch() {
         let actual = binding(1);
         for mismatch in 0..5 {
@@ -279,10 +333,16 @@ mod tests {
     fn invalid_owner_or_missing_report_sequence_cannot_claim_valid_snapshot() {
         let mut claimed = authorized_owner(1);
         claimed.worker_generation = 0;
-        assert_eq!(diagnostic(1).snapshot_for_bound_key(claimed, binding(1)), None);
+        assert_eq!(
+            diagnostic(1).snapshot_for_bound_key(claimed, binding(1)),
+            None
+        );
         let mut claimed = authorized_owner(1);
         claimed.receiver_generation = 0;
-        assert_eq!(diagnostic(1).snapshot_for_bound_key(claimed, binding(1)), None);
+        assert_eq!(
+            diagnostic(1).snapshot_for_bound_key(claimed, binding(1)),
+            None
+        );
         assert_eq!(
             diagnostic(0).snapshot_for_bound_key(authorized_owner(1), binding(1)),
             None
