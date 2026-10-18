@@ -225,7 +225,6 @@ impl ReceiverTelemetryMailbox {
     }
 }
 
-
 /// A nonblocking, constant-space producer/consumer handoff for later Worker
 /// diagnostic IPC. The decode/render thread must NEVER wait on a mutex or pipe.
 /// No sender or authenticated transport is introduced by this wrapper.
@@ -329,7 +328,10 @@ mod concurrent_mailbox_tests {
         for seq in 1..=10_000 {
             assert_eq!(mail.try_offer(snapshot(1, seq)), Ok(seq != 1));
         }
-        assert_eq!(mail.try_take_matching(binding(1)), Ok(Some(snapshot(1, 10_000))));
+        assert_eq!(
+            mail.try_take_matching(binding(1)),
+            Ok(Some(snapshot(1, 10_000)))
+        );
         assert_eq!(mail.try_take_matching(binding(1)), Ok(None));
     }
 
@@ -338,9 +340,18 @@ mod concurrent_mailbox_tests {
         let mail = ReceiverTelemetryConcurrentMailbox::default();
         mail.try_activate(binding(1)).unwrap();
         let guard = mail.state.lock().unwrap();
-        assert_eq!(mail.try_offer(snapshot(1, 1)), Err(ReceiverTelemetryConcurrentError::Busy));
-        assert_eq!(mail.try_take_matching(binding(1)), Err(ReceiverTelemetryConcurrentError::Busy));
-        assert_eq!(mail.try_clear_if_matches(binding(1)), Err(ReceiverTelemetryConcurrentError::Busy));
+        assert_eq!(
+            mail.try_offer(snapshot(1, 1)),
+            Err(ReceiverTelemetryConcurrentError::Busy)
+        );
+        assert_eq!(
+            mail.try_take_matching(binding(1)),
+            Err(ReceiverTelemetryConcurrentError::Busy)
+        );
+        assert_eq!(
+            mail.try_clear_if_matches(binding(1)),
+            Err(ReceiverTelemetryConcurrentError::Busy)
+        );
         drop(guard);
         assert_eq!(mail.try_offer(snapshot(1, 1)), Ok(false));
     }
@@ -350,14 +361,22 @@ mod concurrent_mailbox_tests {
         let mail = ReceiverTelemetryConcurrentMailbox::default();
         mail.try_activate(binding(1)).unwrap();
         let clone = mail.clone();
-        assert!(std::thread::spawn(move || {
-            let _hold = clone.state.lock().unwrap();
-            panic!("intentional locked thread failure");
-        })
-        .join()
-        .is_err());
-        assert_eq!(mail.try_offer(snapshot(1, 1)), Err(ReceiverTelemetryConcurrentError::Poisoned));
-        assert_eq!(mail.try_take_matching(binding(1)), Err(ReceiverTelemetryConcurrentError::Poisoned));
+        assert!(
+            std::thread::spawn(move || {
+                let _hold = clone.state.lock().unwrap();
+                panic!("intentional locked thread failure");
+            })
+            .join()
+            .is_err()
+        );
+        assert_eq!(
+            mail.try_offer(snapshot(1, 1)),
+            Err(ReceiverTelemetryConcurrentError::Poisoned)
+        );
+        assert_eq!(
+            mail.try_take_matching(binding(1)),
+            Err(ReceiverTelemetryConcurrentError::Poisoned)
+        );
     }
 
     #[test]
