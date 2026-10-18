@@ -57,3 +57,15 @@ sender or IPC authorization. Both receiver modes retain their existing keyframe
 recovery and teardown behavior. Tests cover zero drops, either mode, absent
 matching runtime and a conflicting pair. Host CI cannot substitute for the
 native two-host playback qualification.
+
+## Local Worker counter continuity before eventual IPC
+
+The five-second Worker diagnostic additionally refuses to publish a subsequent
+report if its cumulative authenticated AEAD opens, rejected opens, or the exact
+receiver-runtime queue-drop counter decreases under the **same** key binding.
+The violation latches fail closed: a later increasing count cannot hide the
+reset and reestablish an apparently continuous report or consume sequence IDs.
+An explicit Worker presentation pipeline reset or new key binding establishes
+fresh sequence 1. This catches a same-binding receiver/auth counter restart at
+its source; it is not independent authentication or a replacement for the
+Service's exact receiver-generation admission, and it does not activate IPC.

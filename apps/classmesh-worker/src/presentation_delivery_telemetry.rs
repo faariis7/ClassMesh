@@ -44,6 +44,11 @@ pub struct PresentationDeliveryTelemetry {
     binding: Option<PresentationKeyInstallBinding>,
     last_report_at: Option<Instant>,
     report_sequence: u64,
+    /// Last successfully emitted cumulative counters, in the same receiver lifetime.
+    last_external: Option<(u64, u64, u64)>,
+    /// Once a source counter resets under the same binding, do not issue a new
+    /// sequence or pretend the measurement is continuous.
+    external_counter_regression: bool,
     decoded_frames: u64,
     presented_frames: u64,
     present_errors: u64,
@@ -102,10 +107,28 @@ impl PresentationDeliveryTelemetry {
         if now.checked_duration_since(last)? < REPORT_INTERVAL {
             return None;
         }
+        if self.external_counter_regression {
+            return None;
+        }
+        let external = (
+            authenticated.opened_frames,
+            authenticated.rejected_frames,
+            receiver_queue_drops,
+        );
+        if self.last_external.is_some_and(|before| {
+            external.0 < before.0 || external.1 < before.1 || external.2 < before.2
+        }) {
+            // A hidden receiver/authentication runtime replacement with the
+            // same key identity cannot replay sequence 1 or forge a delta.
+            // Require explicit pipeline reset or exact binding replacement.
+            self.external_counter_regression = true;
+            return None;
+        }
         // On exhaustion, fail closed rather than emitting a replayed sequence.
         let next_sequence = self.report_sequence.checked_add(1)?;
         self.report_sequence = next_sequence;
         self.last_report_at = Some(now);
+        self.last_external = Some(external);
         Some(PresentationDeliveryReport {
             sample_sequence: next_sequence,
             authenticated_frames: authenticated.opened_frames,
