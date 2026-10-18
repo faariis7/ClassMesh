@@ -536,11 +536,13 @@ mod concurrent_mailbox_tests {
 
     #[test]
     fn queued_report_expires_after_exact_thirty_second_diagnostic_limit() {
+        // Windows Instant precision can be coarser than 1ns; 1ms is a
+        // representable cross-platform instant strictly beyond the limit.
         let at = std::time::Instant::now();
         for (age, should_keep) in [
             (std::time::Duration::from_secs(30), true),
             (
-                std::time::Duration::from_secs(30) + std::time::Duration::from_nanos(1),
+                std::time::Duration::from_secs(30) + std::time::Duration::from_millis(1),
                 false,
             ),
         ] {
@@ -574,12 +576,12 @@ mod concurrent_mailbox_tests {
         assert_eq!(
             mail.try_lease_is_current_at(
                 &lease,
-                at + std::time::Duration::from_secs(30) + std::time::Duration::from_nanos(1)
+                at + std::time::Duration::from_secs(30) + std::time::Duration::from_millis(1)
             ),
             Ok(false)
         );
         assert_eq!(
-            mail.try_lease_is_current_at(&lease, at - std::time::Duration::from_nanos(1)),
+            mail.try_lease_is_current_at(&lease, at - std::time::Duration::from_millis(1)),
             Ok(false)
         );
         mail.try_offer_at(snapshot(1, 2), at + std::time::Duration::from_secs(31))
