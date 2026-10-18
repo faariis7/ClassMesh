@@ -128,3 +128,26 @@ Worker→Service channel MUST independently reject mismatched Worker ownership,
 receive generation, session and key epoch on arrival; it must not use this
 lease as authentication or authorization. No new IPC frame or live sending
 is enabled here; no adaptive-quality decisions are changed.
+
+## Bounded Worker-local freshness of queued and checked-out reports
+
+`ReceiverTelemetryConcurrentMailbox` now stamps only a **successfully offered**
+snapshot with `Instant::now()` on the producing machine. The time is private
+monotonic process-local evidence, **never** serialized from or controlled by a
+remote report. A queued report that ages beyond the existing
+`MAX_RECEIVER_TELEMETRY_GAP` (**30 seconds**) is discarded at checkout; a
+previously checked-out lease becomes invalid on the same strict boundary,
+even if no new sample has arrived. Exactly 30 seconds remains fresh; an
+instant beyond 30 seconds or a local clock regression fails closed. Invalid,
+replayed or regressing-clock offers cannot refresh the timestamp or advance
+the accepted sequence, and a new exact binding/revocation resets its age.
+The producer and sender remain nonblocking and use one report slot.
+
+This is an **upper bound for optional Worker diagnostic forwarding**, not a
+quality measurement freshness policy. `ReceiverQualityPolicy` still uses its
+**2-second** maximum sample age, while the existing Worker diagnostic cadence
+is **5 seconds**. Those are intentionally not equated; the metrics are still
+not eligible for adaptive-quality promotion until independent cadence and
+network-measurement validation, separately authenticated Service admission,
+transport backpressure tests and physical qualification are complete.
+No new IPC, transport sender or privileged authorization was enabled.
