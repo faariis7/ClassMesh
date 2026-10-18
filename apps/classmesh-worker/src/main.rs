@@ -828,10 +828,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     queue_drops,
                 ) {
                     eprintln!(
-                        "ClassMesh Worker local presentation playback: presentation={} stream={} epoch={} auth_opened={} auth_rejected={} decoded={} presented={} present_errors={} decode_errors={} waiting_for_keyframe={} queue_drop_events_total={}",
+                        "ClassMesh Worker local presentation playback: presentation={} stream={} epoch={} sample_sequence={} auth_opened={} auth_rejected={} decoded={} presented={} present_errors={} decode_errors={} waiting_for_keyframe={} queue_drop_events_total={}",
                         binding.presentation_id,
                         binding.stream_id,
                         binding.epoch,
+                        report.sample_sequence,
                         report.authenticated_frames,
                         report.auth_rejected_frames,
                         report.decoded_frames,
