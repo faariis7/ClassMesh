@@ -4,6 +4,9 @@ use crate::monitoring::MonitoringProfile;
 
 pub const DEFAULT_MAX_MONITORING_SOURCES: usize = 64;
 pub const DEFAULT_MONITORING_WORK_BUDGET: usize = 4;
+// When background work stays ready under continuous visible load, reserve one
+// opportunity on the fourth capacity-bearing poll. Promotions always take precedence.
+const MAX_BACKGROUND_SKIPPED_POLLS: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MonitoringSourceId(pub u64);
@@ -68,6 +71,7 @@ struct SourceState {
 pub struct MonitoringScheduler {
     config: MonitoringSchedulerConfig,
     sources: BTreeMap<MonitoringSourceId, SourceState>,
+    background_skipped_polls: u8,
 }
 
 impl MonitoringScheduler {
@@ -82,6 +86,7 @@ impl MonitoringScheduler {
         Ok(Self {
             config,
             sources: BTreeMap::new(),
+            background_skipped_polls: 0,
         })
     }
 
@@ -205,8 +210,31 @@ impl MonitoringScheduler {
             })
             .collect();
         due.sort_unstable();
+        let background_due = due.iter().any(|(rank, _, _)| *rank == 1);
+        // Reserve at most one action to guarantee bounded progress for a due
+        // background thumbnail. Priority still governs the other budget slots.
+        let reserved_background = if self.background_skipped_polls >= MAX_BACKGROUND_SKIPPED_POLLS {
+            due.iter()
+                .position(|(rank, _, _)| *rank == 1)
+                .map(|index| due.remove(index))
+        } else {
+            None
+        };
+        let mut selected = Vec::with_capacity(remaining);
+        if let Some(entry) = reserved_background {
+            selected.push(entry);
+        }
+        selected.extend(due.into_iter().take(remaining - selected.len()));
+        let background_selected = selected.iter().any(|(rank, _, _)| *rank == 1);
+        self.background_skipped_polls = if background_due && !background_selected {
+            self.background_skipped_polls
+                .saturating_add(1)
+                .min(MAX_BACKGROUND_SKIPPED_POLLS)
+        } else {
+            0
+        };
 
-        for (_, _, source_id) in due.into_iter().take(remaining) {
+        for (_, _, source_id) in selected {
             let Some(state) = self.sources.get_mut(&source_id) else {
                 continue;
             };
@@ -334,6 +362,163 @@ mod tests {
             scheduler.poll(1_000_000).as_slice(),
             [MonitoringScheduleAction::CaptureThumbnail { source_id, .. }] if *source_id == id
         ));
+    }
+
+    #[test]
+    fn perpetually_due_visible_thumbnail_cannot_starve_background_forever() {
+        let mut scheduler = MonitoringScheduler::new(MonitoringSchedulerConfig {
+            max_sources: 2,
+            max_actions_per_tick: 1,
+        })
+        .unwrap();
+        scheduler
+            .add_source(
+                MonitoringSourceId(1),
+                profile(2),
+                MonitoringPriority::Visible,
+            )
+            .unwrap();
+        scheduler
+            .add_source(
+                MonitoringSourceId(2),
+                profile(2),
+                MonitoringPriority::Background,
+            )
+            .unwrap();
+        let selected: Vec<_> = (0..4)
+            .map(|tick| source(scheduler.poll(tick * 500_000)[0]))
+            .collect();
+        assert_eq!(
+            selected[0],
+            MonitoringSourceId(1),
+            "visible must win initially"
+        );
+        assert!(
+            selected.contains(&MonitoringSourceId(2)),
+            "background must receive a bounded share despite continuous visible demand: {selected:?}"
+        );
+    }
+
+    #[test]
+    fn fair_background_allocation_rotates_among_multiple_due_sources() {
+        let mut scheduler = MonitoringScheduler::new(MonitoringSchedulerConfig {
+            max_sources: 4,
+            max_actions_per_tick: 1,
+        })
+        .unwrap();
+        scheduler
+            .add_source(
+                MonitoringSourceId(1),
+                profile(2),
+                MonitoringPriority::Visible,
+            )
+            .unwrap();
+        for id in 2..=4 {
+            scheduler
+                .add_source(
+                    MonitoringSourceId(id),
+                    profile(2),
+                    MonitoringPriority::Background,
+                )
+                .unwrap();
+        }
+        let selected: Vec<_> = (0..16)
+            .map(|tick| source(scheduler.poll(tick * 500_000)[0]))
+            .collect();
+        for id in 2..=4 {
+            assert!(
+                selected.contains(&MonitoringSourceId(id)),
+                "background source {id} must eventually run: {selected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_monitoring_grid_gets_bounded_background_progress_without_exceeding_work_budget() {
+        let mut scheduler = MonitoringScheduler::new(MonitoringSchedulerConfig {
+            max_sources: 40,
+            max_actions_per_tick: 4,
+        })
+        .unwrap();
+        for id in 1..=32 {
+            scheduler
+                .add_source(
+                    MonitoringSourceId(id),
+                    profile(2),
+                    MonitoringPriority::Visible,
+                )
+                .unwrap();
+        }
+        for id in 33..=40 {
+            scheduler
+                .add_source(
+                    MonitoringSourceId(id),
+                    profile(2),
+                    MonitoringPriority::Background,
+                )
+                .unwrap();
+        }
+        let mut visible_actions = 0;
+        let mut background_ids = std::collections::BTreeSet::new();
+        for tick in 0..40 {
+            let actions = scheduler.poll(tick * 500_000);
+            assert!(actions.len() <= 4);
+            for action in actions {
+                let id = source(action).0;
+                if id <= 32 {
+                    visible_actions += 1;
+                } else {
+                    background_ids.insert(id);
+                }
+            }
+        }
+        assert_eq!(background_ids, (33..=40).collect());
+        assert!(
+            visible_actions > 80,
+            "visible stream must keep most throughput"
+        );
+    }
+
+    #[test]
+    fn interactive_promotion_preempts_due_background_fairness_slot() {
+        let mut scheduler = MonitoringScheduler::new(MonitoringSchedulerConfig {
+            max_sources: 3,
+            max_actions_per_tick: 1,
+        })
+        .unwrap();
+        scheduler
+            .add_source(
+                MonitoringSourceId(1),
+                profile(2),
+                MonitoringPriority::Visible,
+            )
+            .unwrap();
+        scheduler
+            .add_source(
+                MonitoringSourceId(2),
+                profile(2),
+                MonitoringPriority::Background,
+            )
+            .unwrap();
+        scheduler
+            .add_source(
+                MonitoringSourceId(3),
+                profile(2),
+                MonitoringPriority::Visible,
+            )
+            .unwrap();
+        for tick in 0..3 {
+            assert_eq!(scheduler.poll(tick * 500_000).len(), 1);
+        }
+        scheduler
+            .request_interactive_promotion(MonitoringSourceId(3))
+            .unwrap();
+        assert_eq!(
+            scheduler.poll(1_500_000),
+            vec![MonitoringScheduleAction::PromoteInteractive {
+                source_id: MonitoringSourceId(3)
+            }]
+        );
     }
 
     #[test]
