@@ -148,6 +148,18 @@ impl ReceiverTelemetryGate {
         true
     }
 
+    /// Read-only Service-side report liveness. Do not infer stream quality
+    /// or create a synthetic observation from this value. Callers must still
+    /// check authorization, expiry policy and per-receiver quality evidence.
+    #[must_use]
+    pub fn has_fresh_report(&self, now: Instant) -> bool {
+        self.active.is_some()
+            && self.last.is_some_and(|(_, accepted_at)| {
+                now.checked_duration_since(accepted_at)
+                    .is_some_and(|age| age <= MAX_RECEIVER_TELEMETRY_GAP)
+            })
+    }
+
     /// Receive time MUST come from the Service monotonic clock, never from a
     /// Worker-controlled timestamp. Invalid observations do not advance state.
     pub fn observe(
