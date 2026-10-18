@@ -468,6 +468,76 @@ mod concurrent_mailbox_tests {
     }
 
     #[test]
+    fn queued_report_expires_after_exact_thirty_second_diagnostic_limit() {
+        let at = std::time::Instant::now();
+        for (age, should_keep) in [
+            (std::time::Duration::from_secs(30), true),
+            (std::time::Duration::from_secs(30) + std::time::Duration::from_nanos(1), false),
+        ] {
+            let mail = ReceiverTelemetryConcurrentMailbox::default();
+            mail.try_activate(binding(1)).unwrap();
+            mail.try_offer_at(snapshot(1, 1), at).unwrap();
+            let checked_out = mail.try_checkout_at(binding(1), at + age).unwrap();
+            assert_eq!(checked_out.is_some(), should_keep);
+            assert_eq!(mail.try_checkout_at(binding(1), at + age).unwrap(), None);
+            assert_eq!(
+                mail.try_offer_at(snapshot(1, 1), at + age),
+                Err(ReceiverTelemetryConcurrentError::Wire(
+                    ReceiverTelemetryWireError::NonmonotonicSequence
+                )),
+                "stale report cannot refresh or replay the old sequence"
+            );
+        }
+    }
+
+    #[test]
+    fn checked_out_report_expires_without_a_newer_offer() {
+        let at = std::time::Instant::now();
+        let mail = ReceiverTelemetryConcurrentMailbox::default();
+        mail.try_activate(binding(1)).unwrap();
+        mail.try_offer_at(snapshot(1, 1), at).unwrap();
+        let lease = mail.try_checkout_at(binding(1), at).unwrap().unwrap();
+        assert_eq!(mail.try_lease_is_current_at(&lease, at + std::time::Duration::from_secs(30)), Ok(true));
+        assert_eq!(mail.try_lease_is_current_at(&lease, at + std::time::Duration::from_secs(30) + std::time::Duration::from_nanos(1)), Ok(false));
+        assert_eq!(mail.try_lease_is_current_at(&lease, at - std::time::Duration::from_nanos(1)), Ok(false));
+        mail.try_offer_at(snapshot(1, 2), at + std::time::Duration::from_secs(31)).unwrap();
+        let fresh = mail.try_checkout_at(binding(1), at + std::time::Duration::from_secs(31)).unwrap().unwrap();
+        assert_eq!(mail.try_lease_is_current_at(&fresh, at + std::time::Duration::from_secs(31)), Ok(true));
+    }
+
+    #[test]
+    fn local_clock_regression_cannot_advance_sequence_or_refresh_pending_age() {
+        let at = std::time::Instant::now();
+        let mail = ReceiverTelemetryConcurrentMailbox::default();
+        mail.try_activate(binding(1)).unwrap();
+        mail.try_offer_at(snapshot(1, 1), at + std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            mail.try_offer_at(snapshot(1, 2), at + std::time::Duration::from_secs(4)),
+            Err(ReceiverTelemetryConcurrentError::Wire(
+                ReceiverTelemetryWireError::ClockRegression
+            ))
+        );
+        let still_original = mail.try_checkout_at(binding(1), at + std::time::Duration::from_secs(5)).unwrap().unwrap();
+        assert_eq!(still_original.snapshot(), snapshot(1, 1));
+        mail.try_offer_at(snapshot(1, 2), at + std::time::Duration::from_secs(6)).unwrap();
+        assert_eq!(mail.try_checkout_at(binding(1), at + std::time::Duration::from_secs(6)).unwrap().unwrap().snapshot(), snapshot(1, 2));
+    }
+
+    #[test]
+    fn new_exact_binding_resets_expired_report_clock_but_stale_clear_does_not() {
+        let at = std::time::Instant::now();
+        let mail = ReceiverTelemetryConcurrentMailbox::default();
+        mail.try_activate(binding(1)).unwrap();
+        mail.try_offer_at(snapshot(1, 1), at).unwrap();
+        mail.try_activate(binding(2)).unwrap();
+        assert_eq!(mail.try_clear_if_matches(binding(1)), Ok(false));
+        mail.try_offer_at(snapshot(2, 1), at + std::time::Duration::from_secs(35)).unwrap();
+        let lease = mail.try_checkout_at(binding(2), at + std::time::Duration::from_secs(36)).unwrap().unwrap();
+        assert_eq!(lease.snapshot(), snapshot(2, 1));
+        assert_eq!(mail.try_lease_is_current_at(&lease, at + std::time::Duration::from_secs(36)), Ok(true));
+    }
+
+    #[test]
     fn sender_thread_detects_revocation_and_same_identity_aba_after_checkout() {
         let mail = ReceiverTelemetryConcurrentMailbox::default();
         mail.try_activate(binding(1)).unwrap();
