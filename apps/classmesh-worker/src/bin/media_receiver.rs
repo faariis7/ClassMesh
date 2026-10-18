@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use classmesh_network::feedback::{MediaFeedback, UdpFeedbackSender};
 use classmesh_network::receiver::{ReceiverEvent, ReceiverPolicy};
-use classmesh_network::transport::UdpFrameReceiver;
+use classmesh_network::transport::{UdpFrameReceiver, UdpReceiverIntervalSampler};
 use classmesh_network::udp::DatagramError;
 use classmesh_worker::presentation_decode_render::{
     PresentationDecodeBatch as DecodeBatch, PresentationDecodeRuntime as DecodeProbe,
@@ -89,6 +89,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .checked_add(Duration::from_secs(seconds))
         .unwrap_or(started);
     let mut next_report = started;
+    let mut telemetry = UdpReceiverIntervalSampler::default();
+    telemetry.observe(0, receiver.stats());
     let mut counters = ReceiverCounters::default();
 
     while Instant::now() < deadline {
@@ -129,6 +131,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if Instant::now() >= next_report {
             let stats = receiver.stats();
+            if let Some(interval) = telemetry.observe(elapsed_us(started), stats) {
+                eprintln!(
+                    "receiver measured interval: elapsed_ms={} datagrams={} frames={} gap_events={} missing_sequence_ids={} reordered={} datagrams_per_sec={:.1} frames_per_sec={:.1}",
+                    interval.elapsed_us / 1_000,
+                    interval.datagrams_received,
+                    interval.frames_completed,
+                    interval.gap_events,
+                    interval.missing_sequence_ids,
+                    interval.reordered_or_duplicate,
+                    interval.datagrams_per_second(),
+                    interval.frames_per_second(),
+                );
+            }
             let recovery = decoder
                 .as_ref()
                 .map_or_else(RecoveryTelemetry::default, DecodeProbe::recovery_telemetry);
