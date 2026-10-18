@@ -207,7 +207,6 @@ fn invalid_identity_or_sequence_fail_closed() {
     );
 }
 
-
 #[test]
 fn freshness_liveness_requires_a_current_accepted_sample_and_revokes_on_clear() {
     let mut gate = ReceiverTelemetryGate::default();
