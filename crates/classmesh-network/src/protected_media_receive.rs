@@ -190,6 +190,16 @@ pub enum ProtectedMediaReceiveOutcome {
     Dropped(ProtectedMediaPacketDropReason),
 }
 
+/// Per-bound-stream *candidate* ciphertext reception, before key-based
+/// decryption and authentication. Never treat these as authenticated frames.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProtectedMediaReceiveStats {
+    pub candidate_datagrams: u64,
+    pub rejected_datagrams: u64,
+    pub assembled_ciphertext_frames: u64,
+    pub stale_frames_dropped: u64,
+}
+
 #[derive(Debug)]
 pub(crate) struct ProtectedMediaReceiveState {
     expected_sender: IpAddr,
@@ -197,6 +207,7 @@ pub(crate) struct ProtectedMediaReceiveState {
     receiver: ReceiverWindow,
     protocol_major: u8,
     protocol_minor: u8,
+    stats: ProtectedMediaReceiveStats,
 }
 
 impl ProtectedMediaReceiveState {
@@ -218,10 +229,30 @@ impl ProtectedMediaReceiveState {
             receiver: ReceiverWindow::new(ReceiverPolicy::default()),
             protocol_major,
             protocol_minor,
+            stats: ProtectedMediaReceiveStats::default(),
         })
     }
 
     pub(crate) fn push_packet(
+        &mut self,
+        now_us: u64,
+        packet: &MediaPacket,
+        source: SocketAddr,
+    ) -> ProtectedMediaReceiveOutcome {
+        let outcome = self.push_checked_packet(now_us, packet, source);
+        match &outcome {
+            ProtectedMediaReceiveOutcome::Dropped(_) => {
+                self.stats.rejected_datagrams = self.stats.rejected_datagrams.saturating_add(1);
+            }
+            ProtectedMediaReceiveOutcome::Events(batch) => {
+                self.stats.candidate_datagrams = self.stats.candidate_datagrams.saturating_add(1);
+                self.count_batch(batch);
+            }
+        }
+        outcome
+    }
+
+    fn push_checked_packet(
         &mut self,
         now_us: u64,
         packet: &MediaPacket,
@@ -273,7 +304,25 @@ impl ProtectedMediaReceiveState {
 
     #[must_use]
     pub(crate) fn tick(&mut self, now_us: u64) -> ProtectedMediaReceiveBatch {
-        ProtectedMediaReceiveBatch::from_receiver_events(self.receiver.tick(now_us))
+        let batch = ProtectedMediaReceiveBatch::from_receiver_events(self.receiver.tick(now_us));
+        self.count_batch(&batch);
+        batch
+    }
+
+    fn count_batch(&mut self, batch: &ProtectedMediaReceiveBatch) {
+        self.stats.assembled_ciphertext_frames = self
+            .stats
+            .assembled_ciphertext_frames
+            .saturating_add(u64::try_from(batch.frames.len()).unwrap_or(u64::MAX));
+        self.stats.stale_frames_dropped = self
+            .stats
+            .stale_frames_dropped
+            .saturating_add(u64::try_from(batch.dropped_stale_frames).unwrap_or(u64::MAX));
+    }
+
+    #[must_use]
+    pub(crate) const fn stats(&self) -> ProtectedMediaReceiveStats {
+        self.stats
     }
 
     #[must_use]

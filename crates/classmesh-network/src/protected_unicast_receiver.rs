@@ -5,7 +5,7 @@ use std::time::Duration;
 use crate::MediaPacket;
 use crate::protected_media_receive::{
     DatagramFailureDisposition, ProtectedMediaReceiveCoreError, ProtectedMediaReceiveState,
-    classify_datagram_failure,
+    ProtectedMediaReceiveStats, classify_datagram_failure,
 };
 use crate::udp::{DatagramError, UdpMediaSocket};
 
@@ -158,6 +158,11 @@ impl ProtectedUnicastReceiveState {
     }
 
     #[must_use]
+    pub const fn stats(&self) -> ProtectedMediaReceiveStats {
+        self.inner.stats()
+    }
+
+    #[must_use]
     pub const fn dropped_frames(&self) -> u64 {
         self.inner.dropped_frames()
     }
@@ -211,6 +216,11 @@ impl ProtectedUnicastFrameReceiver {
                 DatagramFailureDisposition::Fail => Err(error.into()),
             },
         }
+    }
+
+    #[must_use]
+    pub const fn stats(&self) -> ProtectedMediaReceiveStats {
+        self.state.stats()
     }
 
     #[must_use]
@@ -338,6 +348,35 @@ mod tests {
                 ProtectedUnicastPacketDropReason::RetransmitUnsupported
             )
         );
+    }
+
+    #[test]
+    fn protected_receive_counts_only_admitted_packets_for_the_bound_stream() {
+        let mut receiver = ProtectedUnicastReceiveState::new(ipv4_config(50_000)).unwrap();
+        let from_teacher = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 50_001);
+        let from_attacker = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), 50_001);
+        let mut wrong_stream = packets(1).remove(0);
+        wrong_stream.header.stream_id = STREAM_ID + 1;
+        assert!(matches!(
+            receiver.push_packet(0, &wrong_stream, from_teacher),
+            ProtectedUnicastReceiveOutcome::Dropped(_)
+        ));
+        assert!(matches!(
+            receiver.push_packet(0, &packets(1)[0], from_attacker),
+            ProtectedUnicastReceiveOutcome::Dropped(_)
+        ));
+        for (index, packet) in packets(1).iter().enumerate() {
+            receiver.push_packet(index as u64, packet, from_teacher);
+        }
+        assert_eq!(receiver.stats().candidate_datagrams, 3);
+        assert_eq!(receiver.stats().rejected_datagrams, 2);
+        assert_eq!(receiver.stats().assembled_ciphertext_frames, 1);
+        assert_eq!(receiver.stats().stale_frames_dropped, 0);
+        // Timed-out incomplete ciphertext frames are another receiver signal,
+        // not a claim of confirmed on-wire packet loss.
+        receiver.push_packet(100, &packets(2)[0], from_teacher);
+        let _ = receiver.tick(100_000);
+        assert_eq!(receiver.stats().stale_frames_dropped, 1);
     }
 
     #[test]

@@ -8,6 +8,8 @@ pub mod multicast_sender;
 mod protected_media;
 mod protected_media_receive;
 pub mod protected_unicast_receiver;
+// Counts are pre-decryption candidates, never authenticated quality metrics.
+pub use protected_media_receive::ProtectedMediaReceiveStats;
 pub mod protected_unicast_sender;
 pub mod receiver;
 pub mod reliability;
