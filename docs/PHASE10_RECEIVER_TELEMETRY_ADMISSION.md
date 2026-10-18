@@ -151,3 +151,26 @@ not eligible for adaptive-quality promotion until independent cadence and
 network-measurement validation, separately authenticated Service admission,
 transport backpressure tests and physical qualification are complete.
 No new IPC, transport sender or privileged authorization was enabled.
+
+## Portable pre-IPC Worker to Service handoff qualification
+
+The `receiver_telemetry_handoff_integration` test module exercises a simulated
+Worker sender and a separately Service-authorized ingress using the REAL
+fixed-width codec, bounded Worker mailbox and Service continuity gate. It
+covers admission only after independent exact identity activation; 5-second
+counter-delta continuity; a 4,000-report bounded coalescing sequence gap
+downgrading to a *baseline* rather than a healthy interval; Worker generation
+and receiver replacement with an already-copied old wire report; tampered
+packet rejection without poisoning the authorized sequence; and strict
+isolation of two simultaneous receiver mailboxes and Service cohorts.
+
+This is test-only local IPC *composition*, not a working Worker-to-Service
+transport. The test deliberately supplies Service identity activation from
+the harness, not bytes. An actual Service MUST verify the peer's authenticated
+OS process/session, Worker generation and active receiver lifetime on arrival,
+prioritize administrative control over best-effort telemetry, reject after
+revocation even if the sender passed a now-stale local lease check, and
+coordinate IPC message compatibility with the Phase 12 workstream.
+No synthetic RTT, packet-loss, remote quality score, or adaptive promotion
+is derived from these receiver playback diagnostics. Hosted Rust/Windows
+tests do not qualify native GPU behavior or two physical PCs.
