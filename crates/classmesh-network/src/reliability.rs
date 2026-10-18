@@ -32,15 +32,20 @@ impl SequenceTracker {
         let expected = highest.wrapping_add(1);
         if sequence == expected {
             self.highest = Some(sequence);
+            self.discard_outdated_gaps(sequence);
             return SequenceObservation::InOrder;
         }
 
         // Sequence numbers are compared in a half-range window so normal u32 wrapping is safe.
         let ahead = sequence.wrapping_sub(expected);
         if ahead < (u32::MAX / 2) {
+            // Gaps are a recovery window, not a lifetime ledger. Retain only
+            // the most recent MAX_TRACKED_GAP missing IDs, even after many
+            // separate loss bursts or a single enormous sequence jump.
+            self.discard_outdated_gaps(sequence);
             let tracked = ahead.min(MAX_TRACKED_GAP);
-            for offset in 0..tracked {
-                self.missing.insert(expected.wrapping_add(offset));
+            for age in 1..=tracked {
+                self.missing.insert(sequence.wrapping_sub(age));
             }
             self.highest = Some(sequence);
             return SequenceObservation::Gap { missing: ahead };
@@ -53,6 +58,13 @@ impl SequenceTracker {
 
         self.reordered_or_duplicate = self.reordered_or_duplicate.saturating_add(1);
         SequenceObservation::ReorderedOrDuplicate
+    }
+
+    fn discard_outdated_gaps(&mut self, newest: u32) {
+        self.missing.retain(|&sequence| {
+            let age = newest.wrapping_sub(sequence);
+            age > 0 && age <= MAX_TRACKED_GAP
+        });
     }
 
     #[must_use]
@@ -190,6 +202,77 @@ mod tests {
         let mut tracker = SequenceTracker::default();
         let _ = tracker.observe(u32::MAX);
         assert_eq!(tracker.observe(0), SequenceObservation::InOrder);
+    }
+
+    #[test]
+    fn loss_tracking_never_grows_beyond_one_recent_gap_window() {
+        let mut tracker = SequenceTracker::default();
+        assert_eq!(tracker.observe(0), SequenceObservation::First);
+        for jump in 1..=50 {
+            let at = jump * (MAX_TRACKED_GAP + 1);
+            assert_eq!(
+                tracker.observe(at),
+                SequenceObservation::Gap {
+                    missing: MAX_TRACKED_GAP
+                }
+            );
+            let missing = tracker.missing_sequences();
+            assert!(
+                missing.len() <= MAX_TRACKED_GAP as usize,
+                "unbounded missing IDs after jump {jump}: {}",
+                missing.len()
+            );
+            assert_eq!(missing.last().copied(), Some(at - 1));
+            assert_eq!(missing.first().copied(), Some(at - MAX_TRACKED_GAP));
+        }
+    }
+
+    #[test]
+    fn huge_gap_tracks_recent_missing_not_unrecoverable_old_packets() {
+        let mut tracker = SequenceTracker::default();
+        assert_eq!(tracker.observe(100), SequenceObservation::First);
+        assert_eq!(
+            tracker.observe(100 + MAX_TRACKED_GAP + 500),
+            SequenceObservation::Gap {
+                missing: MAX_TRACKED_GAP + 499
+            }
+        );
+        let missing = tracker.missing_sequences();
+        assert_eq!(missing.len(), MAX_TRACKED_GAP as usize);
+        assert_eq!(missing.first(), Some(&(600)));
+        assert_eq!(missing.last(), Some(&(100 + MAX_TRACKED_GAP + 499)));
+    }
+
+    #[test]
+    fn in_order_traffic_ages_out_old_missing_ids_without_a_new_gap() {
+        let mut tracker = SequenceTracker::default();
+        assert_eq!(tracker.observe(10), SequenceObservation::First);
+        assert_eq!(tracker.observe(13), SequenceObservation::Gap { missing: 2 });
+        for seq in 14..=(13 + MAX_TRACKED_GAP + 2) {
+            assert_eq!(tracker.observe(seq), SequenceObservation::InOrder);
+        }
+        assert!(tracker.missing_sequences().is_empty());
+        assert_eq!(
+            tracker.observe(11),
+            SequenceObservation::ReorderedOrDuplicate
+        );
+    }
+
+    #[test]
+    fn bounded_tracking_preserves_recent_late_recovery_across_u32_wrap() {
+        let mut tracker = SequenceTracker::default();
+        assert_eq!(tracker.observe(u32::MAX - 2), SequenceObservation::First);
+        assert_eq!(tracker.observe(2), SequenceObservation::Gap { missing: 4 });
+        assert_eq!(tracker.missing_sequences().len(), 4);
+        assert_eq!(
+            tracker.observe(u32::MAX),
+            SequenceObservation::ReorderedOrDuplicate
+        );
+        assert_eq!(
+            tracker.observe(0),
+            SequenceObservation::ReorderedOrDuplicate
+        );
+        assert_eq!(tracker.missing_sequences().len(), 2);
     }
 
     #[test]
