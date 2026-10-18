@@ -356,25 +356,35 @@ mod tests {
             opened_frames,
             rejected_frames,
         };
-        assert!(tracker.report_if_due(start, binding(1), auth(0, 0), 0).is_none());
+        assert!(
+            tracker
+                .report_if_due(start, binding(1), auth(0, 0), 0)
+                .is_none()
+        );
         let first = tracker
             .report_if_due(start + Duration::from_secs(5), binding(1), auth(7, 2), 4)
             .unwrap();
         assert_eq!(first.sample_sequence, 1);
-        assert!(tracker
-            .report_if_due(start + Duration::from_secs(10), binding(1), auth(6, 2), 5)
-            .is_none());
+        assert!(
+            tracker
+                .report_if_due(start + Duration::from_secs(10), binding(1), auth(6, 2), 5)
+                .is_none()
+        );
         assert_eq!(tracker.report_sequence, 1);
         // Larger later totals cannot conceal a reset of the same lifetime counters.
-        assert!(tracker
-            .report_if_due(start + Duration::from_secs(15), binding(1), auth(20, 4), 8)
-            .is_none());
+        assert!(
+            tracker
+                .report_if_due(start + Duration::from_secs(15), binding(1), auth(20, 4), 8)
+                .is_none()
+        );
         assert_eq!(tracker.report_sequence, 1);
         // Only an explicitly new key binding (or an existing runtime reset) can
         // establish a new sequence/baseline; no old sequence is replayed.
-        assert!(tracker
-            .report_if_due(start + Duration::from_secs(16), binding(2), auth(0, 0), 0)
-            .is_none());
+        assert!(
+            tracker
+                .report_if_due(start + Duration::from_secs(16), binding(2), auth(0, 0), 0)
+                .is_none()
+        );
         let fresh = tracker
             .report_if_due(start + Duration::from_secs(21), binding(2), auth(1, 0), 0)
             .unwrap();
@@ -390,13 +400,26 @@ mod tests {
                 opened_frames,
                 rejected_frames,
             };
-            assert!(tracker.report_if_due(start, binding(1), auth(0, 0), 0).is_none());
-            assert!(tracker
-                .report_if_due(start + Duration::from_secs(5), binding(1), auth(8, 4), 8)
-                .is_some());
-            assert!(tracker
-                .report_if_due(start + Duration::from_secs(10), binding(1), auth(opened, rejected), drops)
-                .is_none());
+            assert!(
+                tracker
+                    .report_if_due(start, binding(1), auth(0, 0), 0)
+                    .is_none()
+            );
+            assert!(
+                tracker
+                    .report_if_due(start + Duration::from_secs(5), binding(1), auth(8, 4), 8)
+                    .is_some()
+            );
+            assert!(
+                tracker
+                    .report_if_due(
+                        start + Duration::from_secs(10),
+                        binding(1),
+                        auth(opened, rejected),
+                        drops
+                    )
+                    .is_none()
+            );
             assert_eq!(tracker.report_sequence, 1);
         }
     }
