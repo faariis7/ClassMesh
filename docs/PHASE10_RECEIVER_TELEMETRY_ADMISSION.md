@@ -174,3 +174,23 @@ coordinate IPC message compatibility with the Phase 12 workstream.
 No synthetic RTT, packet-loss, remote quality score, or adaptive promotion
 is derived from these receiver playback diagnostics. Hosted Rust/Windows
 tests do not qualify native GPU behavior or two physical PCs.
+
+
+## Local Worker bound-key snapshot composition
+
+`PresentationDeliveryReport::snapshot_for_bound_key` converts actual Worker
+AEAD/decode/render/queue-drops counters into the portable
+`ReceiverTelemetrySnapshot` only when the separately provided complete owner
+binding is nonzero, its media identity exactly equals the **currently
+installed** protected presentation key binding (control-session, request,
+presentation, stream and key epoch), the **private source binding captured
+at report emission** also matches that installed key, and the local report
+sequence is nonzero. A delayed report issued under an old epoch cannot be
+relabelled by passing a matching new external owner and current key.
+The function carries external Worker/receiver generation identity unchanged
+and does **not** authenticate it, authorize transport, or self-activate the
+Service admission gate; those are independent Service-controlled lifecycles.
+Wrong epoch/request/session or invalid owner must fail without any serialized
+bytes. This helper remains passive, with no new privileged IPC or automatic
+adaptation/quality upgrade. Tests cover exact positive mapping and rejection
+of every mismatched protected media-key identity field.
