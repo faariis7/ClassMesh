@@ -5,9 +5,8 @@ use std::{
     io::{self, Read},
 };
 
-// Independent acquisition ceilings for the fixed V2 record; the existing
-// downstream security parser must validate framing, digest, epoch and its own
-// limits. This acquisition boundary does not invoke it or publish policy.
+// Independent acquisition ceilings for the fixed V2 record. parse_candidate
+// invokes the canonical parser inside these bounds; neither method publishes.
 const V2_CHECKPOINT_BYTES: u64 = 48;
 const MAX_POLICY_BYTES: usize = 4 * 1024 * 1024;
 
@@ -16,6 +15,20 @@ struct PinnedPolicyReadCandidate {
 }
 
 impl PinnedPolicyReadCandidate {
+    /// A parsed candidate, not a publication capability. The supplied expected
+    /// epoch has no independent durable authority in this qualification harness.
+    fn parse_candidate(
+        self,
+        expected_epoch: u64,
+    ) -> io::Result<classmesh_security::AuthorizationStore> {
+        self.read(expected_epoch, MAX_POLICY_BYTES, |checkpoint, policy| {
+            classmesh_security::persistence::DurableAuthorizationState::parse_bound_primary_from_readers(
+                checkpoint, policy, expected_epoch,
+            )
+        })?
+        .map_err(|_| denied())
+    }
+
     fn open(scope: &str) -> io::Result<Self> {
         if !crate::policy_file_origin::safe_child_leaf(scope) {
             return Err(denied());
@@ -153,6 +166,84 @@ fn independently_rooted_read_keeps_all_handles_and_bounds_bytes() {
             assert_eq!(bytes, b"bounded policy");
         })
         .unwrap();
+    // Exercise the canonical V2 digest and authorization parser through the
+    // opaque readers; an expected epoch is still NOT a durable authority.
+    let valid = br#"{"version":1,"principals":[]}"#;
+    let record =
+        classmesh_security::policy_epoch::encode_bound_policy_checkpoint(7, valid).unwrap();
+    std::fs::write(&checkpoint, record).unwrap();
+    std::fs::write(&blob, vec![0; MAX_POLICY_BYTES + 1]).unwrap();
+    assert!(
+        PinnedPolicyReadCandidate::open(&scope)
+            .unwrap()
+            .parse_candidate(7)
+            .is_err()
+    );
+    std::fs::write(&blob, valid).unwrap();
+    let parsed = PinnedPolicyReadCandidate::open(&scope)
+        .unwrap()
+        .parse_candidate(7)
+        .expect("canonical parser accepts exact bound candidate");
+    assert!(
+        parsed
+            .principal(classmesh_security::PrincipalId([0; 32]))
+            .is_none()
+    );
+    let candidate = PinnedPolicyReadCandidate::open(&scope).unwrap();
+    assert!(
+        std::panic::catch_unwind(|| {
+            let _ = candidate.read::<()>(7, 1024, |_, _| panic!("injected reader unwind"));
+        })
+        .is_err()
+    );
+    // An unwind must release the original leaf and state handles too.
+    std::fs::write(&blob, valid).unwrap();
+    std::fs::rename(&state_path, path.join("after-unwind")).unwrap();
+    std::fs::rename(path.join("after-unwind"), &state_path).unwrap();
+    for bad_record in [
+        record[..47].to_vec(),
+        [record.as_slice(), &[0]].concat(),
+        classmesh_security::policy_epoch::encode_bound_policy_checkpoint(8, valid)
+            .unwrap()
+            .to_vec(),
+    ] {
+        std::fs::write(&checkpoint, bad_record).unwrap();
+        assert!(
+            PinnedPolicyReadCandidate::open(&scope)
+                .unwrap()
+                .parse_candidate(7)
+                .is_err()
+        );
+    }
+    std::fs::write(&checkpoint, record).unwrap();
+    std::fs::write(&blob, [valid.as_slice(), b" "].concat()).unwrap();
+    assert!(
+        PinnedPolicyReadCandidate::open(&scope)
+            .unwrap()
+            .parse_candidate(7)
+            .is_err()
+    );
+    let malformed = b"invalid JSON";
+    std::fs::write(
+        &checkpoint,
+        classmesh_security::policy_epoch::encode_bound_policy_checkpoint(7, malformed).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(&blob, malformed).unwrap();
+    assert!(
+        PinnedPolicyReadCandidate::open(&scope)
+            .unwrap()
+            .parse_candidate(7)
+            .is_err()
+    );
+    std::fs::write(&checkpoint, record).unwrap();
+    std::fs::write(&blob, valid).unwrap();
+    assert!(
+        PinnedPolicyReadCandidate::open(&scope)
+            .unwrap()
+            .parse_candidate(0)
+            .is_err()
+    );
     assert!(
         std::process::Command::new("icacls.exe")
             .arg(&blob)

@@ -518,7 +518,9 @@ mod tests {
         // exclusion must reject it too, not just ordinary open writers.
         {
             use std::os::windows::io::OwnedHandle;
-            use windows_sys::Win32::System::Memory::{CreateFileMappingW, PAGE_READWRITE};
+            use windows_sys::Win32::System::Memory::{
+                CreateFileMappingW, FILE_MAP_WRITE, MapViewOfFile, PAGE_READWRITE, UnmapViewOfFile,
+            };
             let writer = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -544,7 +546,25 @@ mod tests {
                 open_relative_protected_node(&parent, "policy", false).is_err(),
                 "writable section must prevent policy admission"
             );
+            // A view also survives BOTH original handles being closed. Test
+            // this separately from merely retaining a section handle.
+            // Safety: owned live mapping; one writable byte inside the file.
+            let view = unsafe { MapViewOfFile(mapping.as_raw_handle(), FILE_MAP_WRITE, 0, 0, 1) };
+            assert!(!view.Value.is_null());
             drop(mapping);
+            // Safety: successful writable view still owns its mapping reference.
+            unsafe { view.Value.cast::<u8>().write_volatile(b'V') };
+            let view_only_open = open_relative_protected_node(&parent, "policy", false);
+            // Safety: the exact live view is released once, before assertions.
+            assert_ne!(unsafe { UnmapViewOfFile(view) }, 0);
+            assert!(
+                view_only_open.is_err(),
+                "view-only writable mapping must prevent admission"
+            );
+            assert!(
+                open_relative_protected_node(&parent, "policy", false).is_ok(),
+                "unmapping the last writable view restores admission"
+            );
         }
         std::fs::hard_link(&path, fixture.join("alias")).unwrap();
         assert!(open_relative_protected_node(&parent, "policy", false).is_err());
