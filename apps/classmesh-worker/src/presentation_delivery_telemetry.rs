@@ -12,6 +12,8 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 /// distinct from frames successfully presented on screen or authenticated.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PresentationDeliveryReport {
+    /// Monotonic per exact installed presentation binding; local only until IPC is qualified.
+    pub sample_sequence: u64,
     pub authenticated_frames: u64,
     pub auth_rejected_frames: u64,
     pub decoded_frames: u64,
@@ -27,6 +29,7 @@ pub struct PresentationDeliveryReport {
 pub struct PresentationDeliveryTelemetry {
     binding: Option<PresentationKeyInstallBinding>,
     last_report_at: Option<Instant>,
+    report_sequence: u64,
     decoded_frames: u64,
     presented_frames: u64,
     present_errors: u64,
@@ -85,8 +88,12 @@ impl PresentationDeliveryTelemetry {
         if now.checked_duration_since(last)? < REPORT_INTERVAL {
             return None;
         }
+        // On exhaustion, fail closed rather than emitting a replayed sequence.
+        let next_sequence = self.report_sequence.checked_add(1)?;
+        self.report_sequence = next_sequence;
         self.last_report_at = Some(now);
         Some(PresentationDeliveryReport {
+            sample_sequence: next_sequence,
             authenticated_frames: authenticated.opened_frames,
             auth_rejected_frames: authenticated.rejected_frames,
             decoded_frames: self.decoded_frames,
@@ -138,6 +145,7 @@ mod tests {
                 4,
             )
             .unwrap();
+        assert_eq!(report.sample_sequence, 1);
         assert_eq!(report.authenticated_frames, 6);
         assert_eq!(report.auth_rejected_frames, 2);
         assert_eq!(report.decoded_frames, 3);
@@ -191,6 +199,7 @@ mod tests {
                 0,
             )
             .unwrap();
+        assert_eq!(report.sample_sequence, 1);
         assert_eq!(report.decoded_frames, 0);
         assert_eq!(report.presented_frames, 0);
         assert_eq!(report.authenticated_frames, 2);
@@ -225,5 +234,69 @@ mod tests {
             .unwrap();
         assert_eq!((report.decoded_frames, report.presented_frames), (0, 0));
         assert_eq!(report.waiting_for_keyframe, 1);
+    }
+
+    #[test]
+    fn telemetry_sequence_advances_only_on_due_report_and_resets_per_epoch() {
+        let mut tracker = PresentationDeliveryTelemetry::default();
+        let at = Instant::now();
+        let auth = WorkerGroupMediaAuthenticationStats::default();
+        assert!(tracker.report_if_due(at, binding(1), auth, 0).is_none());
+        let first = tracker
+            .report_if_due(at + Duration::from_secs(5), binding(1), auth, 0)
+            .unwrap();
+        assert_eq!(first.sample_sequence, 1);
+        assert!(
+            tracker
+                .report_if_due(at + Duration::from_secs(6), binding(1), auth, 0)
+                .is_none()
+        );
+        let second = tracker
+            .report_if_due(at + Duration::from_secs(10), binding(1), auth, 0)
+            .unwrap();
+        assert_eq!(second.sample_sequence, 2);
+        assert!(
+            tracker
+                .report_if_due(at + Duration::from_secs(11), binding(2), auth, 0)
+                .is_none()
+        );
+        let replacement = tracker
+            .report_if_due(at + Duration::from_secs(16), binding(2), auth, 0)
+            .unwrap();
+        assert_eq!(replacement.sample_sequence, 1);
+        tracker.reset();
+        assert!(
+            tracker
+                .report_if_due(at + Duration::from_secs(17), binding(2), auth, 0)
+                .is_none()
+        );
+        assert_eq!(
+            tracker
+                .report_if_due(at + Duration::from_secs(22), binding(2), auth, 0)
+                .unwrap()
+                .sample_sequence,
+            1
+        );
+    }
+
+    #[test]
+    fn telemetry_sequence_overflow_stops_reporting_without_replaying_a_number() {
+        let mut tracker = PresentationDeliveryTelemetry::default();
+        let at = Instant::now();
+        let auth = WorkerGroupMediaAuthenticationStats::default();
+        assert!(tracker.report_if_due(at, binding(1), auth, 0).is_none());
+        tracker.report_sequence = u64::MAX - 1;
+        assert_eq!(
+            tracker
+                .report_if_due(at + Duration::from_secs(5), binding(1), auth, 0)
+                .unwrap()
+                .sample_sequence,
+            u64::MAX
+        );
+        assert!(
+            tracker
+                .report_if_due(at + Duration::from_secs(10), binding(1), auth, 0)
+                .is_none()
+        );
     }
 }
