@@ -103,7 +103,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut presentation_decode: Option<
         classmesh_worker::presentation_decode_render::PresentationDecodeRuntime,
     > = None;
-    let mut presentation_keyframe_request_pending = false;
+    let mut presentation_keyframe_request_retry =
+        classmesh_worker::presentation_keyframe_retry::PresentationKeyframeRetry::default();
     let mut presentation_delivery_telemetry =
         classmesh_worker::presentation_delivery_telemetry::PresentationDeliveryTelemetry::default();
 
@@ -395,7 +396,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         presentation_multicast = None;
                         presentation_unicast = None;
                         presentation_decode = None;
-                        presentation_keyframe_request_pending = false;
+                        presentation_keyframe_request_retry.reset();
                         presentation_delivery_telemetry.reset();
                         match classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime::start(start) {
                             Ok(receiver) => {
@@ -471,7 +472,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         presentation_multicast = None;
                         presentation_unicast = None;
                         presentation_decode = None;
-                        presentation_keyframe_request_pending = false;
+                        presentation_keyframe_request_retry.reset();
                         presentation_delivery_telemetry.reset();
                         match classmesh_worker::presentation_unicast_receive::WorkerPresentationUnicastRuntime::start(start) {
                             Ok(receiver) => {
@@ -522,7 +523,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     presentation_multicast = None;
                     presentation_unicast = None;
                     presentation_decode = None;
-                    presentation_keyframe_request_pending = false;
+                    presentation_keyframe_request_retry.reset();
                     presentation_delivery_telemetry.reset();
                     eprintln!(
                         "ClassMesh Worker stopped presentation receive runtime with exact key clear"
@@ -668,7 +669,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 match group_media_keys.open_access_unit(frame) {
                                     Ok(access_unit) => {
                                         if access_unit.keyframe {
-                                            presentation_keyframe_request_pending = false;
+                                            presentation_keyframe_request_retry.reset();
                                         }
                                         match decoder.submit(&access_unit) {
                                             Ok(classmesh_worker::presentation_decode_render::PresentationDecodeStep::Decoded(batch)) => {
@@ -683,16 +684,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     );
                                                 }
                                                 if decoder.waiting_for_keyframe() {
-                                                    request_worker_presentation_keyframe_once(
+                                                    request_worker_presentation_keyframe_limited(
                                                         &pipe,
                                                         std::process::id(),
                                                         actual_session,
                                                         binding,
                                                         access_unit.frame_id,
-                                                        &mut presentation_keyframe_request_pending,
+                                                        &mut presentation_keyframe_request_retry,
                                                     )?;
                                                 } else {
-                                                    presentation_keyframe_request_pending = false;
+                                                    presentation_keyframe_request_retry.reset();
                                                 }
                                             }
                                             Ok(classmesh_worker::presentation_decode_render::PresentationDecodeStep::WaitingForKeyframe) => {
@@ -700,13 +701,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     binding,
                                                     classmesh_worker::presentation_decode_render::PresentationDecodeStep::WaitingForKeyframe,
                                                 );
-                                                request_worker_presentation_keyframe_once(
+                                                request_worker_presentation_keyframe_limited(
                                                     &pipe,
                                                     std::process::id(),
                                                     actual_session,
                                                     binding,
                                                     access_unit.frame_id,
-                                                    &mut presentation_keyframe_request_pending,
+                                                    &mut presentation_keyframe_request_retry,
                                                 )?;
                                             }
                                             Err(error) => {
@@ -716,13 +717,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     access_unit.frame_id
                                                 );
                                                 decoder.recover_after_loss();
-                                                request_worker_presentation_keyframe_once(
+                                                request_worker_presentation_keyframe_limited(
                                                     &pipe,
                                                     std::process::id(),
                                                     actual_session,
                                                     binding,
                                                     access_unit.frame_id,
-                                                    &mut presentation_keyframe_request_pending,
+                                                    &mut presentation_keyframe_request_retry,
                                                 )?;
                                             }
                                         }
@@ -757,7 +758,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             presentation_multicast = None;
             presentation_unicast = None;
             presentation_decode = None;
-            presentation_keyframe_request_pending = false;
+            presentation_keyframe_request_retry.reset();
             presentation_delivery_telemetry.reset();
         }
         // Local diagnostics only: do not send unauthenticated or unversioned
@@ -1495,15 +1496,16 @@ fn publish_worker_presentation_unicast_start_result(
 }
 
 #[cfg(windows)]
-fn request_worker_presentation_keyframe_once(
+fn request_worker_presentation_keyframe_limited(
     pipe: &classmesh_win32::NamedPipeClient,
     process_id: u32,
     session_id: u32,
     binding: classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding,
     after_frame_id: u64,
-    pending: &mut bool,
+    retry: &mut classmesh_worker::presentation_keyframe_retry::PresentationKeyframeRetry,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if *pending {
+    let now = std::time::Instant::now();
+    if !retry.should_request(binding, now) {
         return Ok(());
     }
     publish_worker_presentation_feedback(
@@ -1516,7 +1518,7 @@ fn request_worker_presentation_keyframe_once(
             after_frame_id,
         },
     )?;
-    *pending = true;
+    retry.record_sent(binding, now);
     Ok(())
 }
 
