@@ -8,7 +8,7 @@ use classmesh_control::receiver_telemetry_ingress::{
     ReceiverTelemetryIngress, ReceiverTelemetryIngressError,
 };
 use classmesh_control::receiver_telemetry_transport::{
-    encode_receiver_telemetry, ReceiverTelemetryWireError,
+    ReceiverTelemetryWireError, encode_receiver_telemetry,
 };
 
 fn binding(epoch: u32) -> ReceiverTelemetryBinding {
@@ -59,7 +59,9 @@ fn invalid_wire_and_wrong_epoch_do_not_poison_authorized_continuity() {
     malformed[0] = b'X';
     assert_eq!(
         ingress.observe_verified(&malformed, now),
-        Err(ReceiverTelemetryIngressError::Wire(ReceiverTelemetryWireError::BadMagic))
+        Err(ReceiverTelemetryIngressError::Wire(
+            ReceiverTelemetryWireError::BadMagic
+        ))
     );
     assert_eq!(
         ingress.observe_verified(&frame(binding(2), 1, 1), now),
@@ -73,7 +75,9 @@ fn invalid_wire_and_wrong_epoch_do_not_poison_authorized_continuity() {
     );
     assert_eq!(
         ingress.observe_verified(&frame(binding(1), 1, 2), now + Duration::from_secs(1)),
-        Err(ReceiverTelemetryIngressError::Admission(ReceiverTelemetryError::Replay))
+        Err(ReceiverTelemetryIngressError::Admission(
+            ReceiverTelemetryError::Replay
+        ))
     );
     let accepted = ingress
         .observe_verified(&frame(binding(1), 2, 3), now + Duration::from_secs(2))
@@ -90,7 +94,9 @@ fn stale_revocation_cannot_remove_replacement_and_exact_revocation_clears() {
     let now = Instant::now();
     let mut ingress = ReceiverTelemetryIngress::default();
     ingress.activate_verified(binding(1)).unwrap();
-    ingress.observe_verified(&frame(binding(1), 1, 1), now).unwrap();
+    ingress
+        .observe_verified(&frame(binding(1), 1, 1), now)
+        .unwrap();
     ingress.activate_verified(binding(2)).unwrap();
     assert!(!ingress.clear_if_matches(binding(1)));
     assert_eq!(

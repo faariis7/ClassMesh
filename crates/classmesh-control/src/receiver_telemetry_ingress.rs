@@ -9,9 +9,7 @@ use crate::receiver_telemetry::{
     ReceiverTelemetryBinding, ReceiverTelemetryDecision, ReceiverTelemetryError,
     ReceiverTelemetryGate,
 };
-use crate::receiver_telemetry_transport::{
-    ReceiverTelemetryWireError, decode_receiver_telemetry,
-};
+use crate::receiver_telemetry_transport::{ReceiverTelemetryWireError, decode_receiver_telemetry};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiverTelemetryIngressError {
