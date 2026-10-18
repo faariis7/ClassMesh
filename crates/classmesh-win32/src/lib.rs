@@ -11,6 +11,8 @@ mod ancestor_mutation;
 #[cfg(windows)]
 mod clipboard;
 #[cfg(windows)]
+mod file_security_descriptor;
+#[cfg(windows)]
 mod input;
 // Inert Windows-only security qualification until trusted root attestation.
 #[cfg(windows)]
@@ -31,6 +33,8 @@ mod sensitive_pipe_listener;
 mod session;
 #[cfg(windows)]
 mod session_process;
+#[cfg(all(windows, test))]
+mod shared_ancestor_acl;
 #[cfg(all(windows, test))]
 mod system_volume;
 #[cfg(windows)]
