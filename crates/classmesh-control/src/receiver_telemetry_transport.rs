@@ -4,6 +4,8 @@
 //! a separately authenticated and authorized Worker channel, pin the current
 //! owner + receiver binding, and revalidate before forwarding or adaptation.
 //! This module adds no transport, threads, IPC message ID or privileges.
+use std::sync::{Arc, Mutex, TryLockError};
+
 use crate::receiver_telemetry::{
     ReceiverPlaybackCounters, ReceiverTelemetryBinding, ReceiverTelemetrySnapshot,
 };
@@ -220,6 +222,77 @@ impl ReceiverTelemetryMailbox {
         (self.active == Some(binding))
             .then(|| self.pending.take())
             .flatten()
+    }
+}
+
+
+/// A nonblocking, constant-space producer/consumer handoff for later Worker
+/// diagnostic IPC. The decode/render thread must NEVER wait on a mutex or pipe.
+/// No sender or authenticated transport is introduced by this wrapper.
+#[derive(Debug, Clone, Default)]
+pub struct ReceiverTelemetryConcurrentMailbox {
+    state: Arc<Mutex<ReceiverTelemetryMailbox>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverTelemetryConcurrentError {
+    /// The consumer or lifecycle owner currently holds the bounded slot.
+    Busy,
+    /// A writer panic invalidated the slot; do not recover untrusted state.
+    Poisoned,
+    Wire(ReceiverTelemetryWireError),
+}
+
+impl ReceiverTelemetryConcurrentMailbox {
+    fn try_access<R>(
+        &self,
+        access: impl FnOnce(&mut ReceiverTelemetryMailbox) -> Result<R, ReceiverTelemetryWireError>,
+    ) -> Result<R, ReceiverTelemetryConcurrentError> {
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::WouldBlock) => return Err(ReceiverTelemetryConcurrentError::Busy),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(ReceiverTelemetryConcurrentError::Poisoned);
+            }
+        };
+        access(&mut state).map_err(ReceiverTelemetryConcurrentError::Wire)
+    }
+
+    /// Only an independent trusted owner may activate an exact Worker binding;
+    /// report bytes never acquire ownership of this slot.
+    pub fn try_activate(
+        &self,
+        binding: ReceiverTelemetryBinding,
+    ) -> Result<(), ReceiverTelemetryConcurrentError> {
+        self.try_access(|state| state.activate(binding))
+    }
+
+    /// Publish by copy only, without waiting for a pipe, blocking lock or
+    /// consumer. `true` means an older unsent sample was replaced, not loss.
+    pub fn try_offer(
+        &self,
+        report: ReceiverTelemetrySnapshot,
+    ) -> Result<bool, ReceiverTelemetryConcurrentError> {
+        self.try_access(|state| state.offer(report))
+    }
+
+    /// Remove an exact binding without revoking a newer replacement.
+    pub fn try_clear_if_matches(
+        &self,
+        binding: ReceiverTelemetryBinding,
+    ) -> Result<bool, ReceiverTelemetryConcurrentError> {
+        self.try_access(|state| Ok(state.clear_if_matches(binding)))
+    }
+
+    /// A dedicated sender may copy and consume the latest report, then perform
+    /// nonblocking I/O OUTSIDE the lock. Must revalidate the real authorized
+    /// Worker/receiver generation before any eventual send: a copied report
+    /// can become stale after its slot is revoked.
+    pub fn try_take_matching(
+        &self,
+        binding: ReceiverTelemetryBinding,
+    ) -> Result<Option<ReceiverTelemetrySnapshot>, ReceiverTelemetryConcurrentError> {
+        self.try_access(|state| Ok(state.take_matching(binding)))
     }
 }
 
