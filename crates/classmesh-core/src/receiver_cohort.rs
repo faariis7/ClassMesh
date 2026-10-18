@@ -295,6 +295,89 @@ mod tests {
     }
 
     #[test]
+    fn per_receiver_packet_loss_and_rtt_do_not_downgrade_healthy_cohort_members() {
+        let mut planner = planner(3);
+        for id in 1..=3 {
+            planner
+                .register(ReceiverId(id), MediaTransport::UdpUnicast)
+                .unwrap();
+            let initial = planner
+                .observe(ReceiverId(id), sample(1, 1_000_000), 1_000_000)
+                .unwrap();
+            assert_eq!(initial.quality.decision.tier, QualityTier::High);
+        }
+        let high = CohortKey {
+            kind: CohortKind::DirectUnicast,
+            tier: QualityTier::High,
+        };
+        let emergency = CohortKey {
+            kind: CohortKind::DirectUnicast,
+            tier: QualityTier::Emergency,
+        };
+        let mut weak = sample(2, 1_100_000);
+        weak.network.packet_loss = 0.15;
+        weak.network.rtt_ms = 250.0;
+        assert_eq!(
+            planner
+                .observe(ReceiverId(3), weak, 1_100_000)
+                .unwrap()
+                .quality
+                .decision
+                .tier,
+            QualityTier::High,
+            "first bad sample must respect degradation hysteresis"
+        );
+        weak.sample_sequence = 3;
+        weak.observed_at_us = 1_200_000;
+        assert_eq!(
+            planner
+                .observe(ReceiverId(3), weak, 1_200_000)
+                .unwrap()
+                .quality
+                .decision
+                .tier,
+            QualityTier::Emergency
+        );
+        assert_eq!(planner.members(high), vec![ReceiverId(1), ReceiverId(2)]);
+        assert_eq!(planner.members(emergency), vec![ReceiverId(3)]);
+        // Reusing timestamp 1_200_000 cannot recover the weak receiver.
+        for seq in 4..=6 {
+            let replay = planner
+                .observe(ReceiverId(3), sample(seq, 1_200_000), 1_200_000)
+                .unwrap();
+            assert_eq!(
+                replay.quality.status,
+                ReceiverQualitySampleStatus::NonMonotonicObservationTime
+            );
+            assert_eq!(replay.quality.decision.tier, QualityTier::Emergency);
+        }
+        for seq in 7..=8 {
+            let good = planner
+                .observe(
+                    ReceiverId(3),
+                    sample(seq, 1_200_000 + (seq - 6) * 100_000),
+                    1_200_000 + (seq - 6) * 100_000,
+                )
+                .unwrap();
+            assert_eq!(good.quality.decision.tier, QualityTier::Emergency);
+            assert_eq!(planner.members(high), vec![ReceiverId(1), ReceiverId(2)]);
+        }
+        assert_eq!(
+            planner
+                .observe(ReceiverId(3), sample(9, 1_500_000), 1_500_000)
+                .unwrap()
+                .quality
+                .decision
+                .tier,
+            QualityTier::High
+        );
+        assert_eq!(
+            planner.members(high),
+            vec![ReceiverId(1), ReceiverId(2), ReceiverId(3)]
+        );
+    }
+
+    #[test]
     fn transport_is_caller_owned_in_phase_10c() {
         let mut planner = planner(2);
         planner
