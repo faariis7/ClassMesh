@@ -158,6 +158,36 @@ mod tests {
     }
 
     #[test]
+    fn published_worker_report_maps_into_distinct_shared_playback_counters() {
+        let report = PresentationDeliveryReport {
+            sample_sequence: 41,
+            authenticated_frames: 13,
+            auth_rejected_frames: 3,
+            decoded_frames: 10,
+            presented_frames: 8,
+            present_errors: 2,
+            decode_errors: 1,
+            waiting_for_keyframe: 4,
+            receiver_queue_drops: 6,
+        };
+        let counters = report.playback_counters();
+        assert_eq!(
+            counters,
+            classmesh_control::receiver_telemetry::ReceiverPlaybackCounters {
+                authenticated_frames: 13,
+                rejected_frames: 3,
+                decoded_frames: 10,
+                presented_frames: 8,
+                present_errors: 2,
+                decode_errors: 1,
+                keyframe_waits: 4,
+                queue_drops: 6,
+            }
+        );
+        assert_eq!(report.sample_sequence, 41);
+    }
+
+    #[test]
     fn trusted_opens_and_decode_outputs_stay_distinct() {
         let mut tracker = PresentationDeliveryTelemetry::default();
         let at = Instant::now();
