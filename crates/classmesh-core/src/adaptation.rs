@@ -248,6 +248,21 @@ impl FocusedProfileController {
         self.observe_tier(self.policy.quality_tier(metrics))
     }
 
+    /// Telemetry loss is a missing-observation fault, not another ordinary
+    /// quality sample. Immediately drop to Emergency and clear any pending
+    /// recovery; only independent fresh observations can restore the tier.
+    pub(crate) fn force_emergency_on_telemetry_loss(&mut self) -> FocusedProfileDecision {
+        let changed = self.current_tier != Some(QualityTier::Emergency);
+        self.current_tier = Some(QualityTier::Emergency);
+        self.pending_tier = None;
+        self.pending_tier_samples = 0;
+        FocusedProfileDecision {
+            profile: profile_for(self.kind, QualityTier::Emergency),
+            tier: QualityTier::Emergency,
+            changed,
+        }
+    }
+
     pub(crate) fn observe_tier(&mut self, candidate: QualityTier) -> FocusedProfileDecision {
         let Some(current) = self.current_tier else {
             self.current_tier = Some(candidate);

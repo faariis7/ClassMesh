@@ -126,6 +126,28 @@ impl ReceiverCohortPlanner {
         Ok(ReceiverCohortObservation { quality, route })
     }
 
+    /// Expire only receivers whose latest accepted telemetry is overdue.
+    /// Call periodically even if no network samples arrive; never changes a
+    /// healthy peer's route, and never fabricates a route for an unobserved peer.
+    /// Returns only actual route changes, so repeated ticks are idempotent.
+    pub fn expire_stale(&mut self, now_us: u64) -> Vec<(ReceiverId, ReceiverRoute)> {
+        self.receivers
+            .iter_mut()
+            .filter_map(|(&receiver, state)| {
+                let decision = state.quality.expire_if_stale(now_us)?;
+                let route = self.router.update(
+                    receiver,
+                    StreamDecision {
+                        transport: state.transport,
+                        profile: decision.profile,
+                        tier: decision.tier,
+                    },
+                );
+                Some((receiver, route))
+            })
+            .collect()
+    }
+
     pub fn remove(&mut self, receiver: ReceiverId) -> bool {
         let removed = self.receivers.remove(&receiver).is_some();
         let _ = self.router.remove(receiver);
@@ -375,6 +397,84 @@ mod tests {
             planner.members(high),
             vec![ReceiverId(1), ReceiverId(2), ReceiverId(3)]
         );
+    }
+
+    #[test]
+    fn absent_telemetry_expires_only_the_affected_receiver_and_preserves_other_routes() {
+        let mut planner = planner(3);
+        for id in 1..=3 {
+            planner
+                .register(ReceiverId(id), MediaTransport::UdpUnicast)
+                .unwrap();
+        }
+        for id in 1..=3 {
+            planner
+                .observe(ReceiverId(id), sample(1, 1_000_000), 1_000_000)
+                .unwrap();
+        }
+        // Refresh two peers; leave receiver 3 silent past the 2s max age.
+        for id in 1..=2 {
+            planner
+                .observe(ReceiverId(id), sample(2, 3_000_000), 3_000_000)
+                .unwrap();
+        }
+        let high = CohortKey {
+            kind: CohortKind::DirectUnicast,
+            tier: QualityTier::High,
+        };
+        let emergency = CohortKey {
+            kind: CohortKind::DirectUnicast,
+            tier: QualityTier::Emergency,
+        };
+        assert!(
+            planner.expire_stale(3_000_000).is_empty(),
+            "exact age boundary stays fresh"
+        );
+        let expired = planner.expire_stale(3_000_001);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].0, ReceiverId(3));
+        assert_eq!(planner.members(high), vec![ReceiverId(1), ReceiverId(2)]);
+        assert_eq!(planner.members(emergency), vec![ReceiverId(3)]);
+        assert!(
+            planner.expire_stale(3_500_000).is_empty(),
+            "repeated timeout is idempotent"
+        );
+        // Three genuinely fresh observations are still needed for recovery.
+        for seq in 3..=4 {
+            let at = 3_500_000 + seq * 100_000;
+            assert_eq!(
+                planner
+                    .observe(ReceiverId(3), sample(seq, at), at)
+                    .unwrap()
+                    .quality
+                    .decision
+                    .tier,
+                QualityTier::Emergency
+            );
+        }
+        assert_eq!(
+            planner
+                .observe(ReceiverId(3), sample(5, 4_000_000), 4_000_000)
+                .unwrap()
+                .quality
+                .decision
+                .tier,
+            QualityTier::High
+        );
+        assert_eq!(
+            planner.members(high),
+            vec![ReceiverId(1), ReceiverId(2), ReceiverId(3)]
+        );
+    }
+
+    #[test]
+    fn never_observed_receivers_are_not_fabricated_into_expired_routes() {
+        let mut planner = planner(2);
+        planner
+            .register(ReceiverId(1), MediaTransport::UdpUnicast)
+            .unwrap();
+        assert!(planner.expire_stale(10_000_000).is_empty());
+        assert_eq!(planner.route(ReceiverId(1)), None);
     }
 
     #[test]

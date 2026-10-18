@@ -182,6 +182,21 @@ impl ReceiverQualityController {
         }
     }
 
+    /// Expire a previously accepted observation even when NO new telemetry
+    /// arrives. Idempotent once in Emergency; does not forge a sample/sequence.
+    /// The caller must drive this using the same monotonic clock as `observe`.
+    pub fn expire_if_stale(&mut self, now_us: u64) -> Option<FocusedProfileDecision> {
+        let last = self.last_observed_at_us?;
+        if now_us >= last && now_us - last <= self.quality_policy.max_sample_age_us {
+            return None;
+        }
+        self.profile_controller.current()?;
+        let decision = self.profile_controller.force_emergency_on_telemetry_loss();
+        // Expiration must clear pending recovery even if already Emergency.
+        // Only actual tier changes are emitted as route changes.
+        decision.changed.then_some(decision)
+    }
+
     fn validate_observation(
         &self,
         sample: ReceiverQualitySample,
@@ -422,6 +437,116 @@ mod tests {
         let recovered = controller.observe(healthy_sample(7, 1_400_000), 1_400_000);
         assert_eq!(recovered.status, ReceiverQualitySampleStatus::Accepted);
         assert_eq!(recovered.decision.tier, QualityTier::High);
+    }
+
+    #[test]
+    fn missing_telemetry_expires_at_strict_boundary_and_is_idempotent() {
+        let mut controller = controller();
+        assert_eq!(
+            controller.expire_if_stale(99_000_000),
+            None,
+            "without any accepted sample there is nothing to age"
+        );
+        assert_eq!(
+            controller
+                .observe(healthy_sample(1, 1_000_000), 1_000_000)
+                .decision
+                .tier,
+            QualityTier::High
+        );
+        assert_eq!(
+            controller.expire_if_stale(3_000_000),
+            None,
+            "exact max age remains fresh"
+        );
+        let expired = controller.expire_if_stale(3_000_001).unwrap();
+        assert_eq!(expired.tier, QualityTier::Emergency);
+        assert!(
+            expired.changed,
+            "expired stream must immediately drop, no hysteresis wait"
+        );
+        assert_eq!(controller.last_sequence(), Some(1));
+        assert_eq!(controller.expire_if_stale(4_000_000), None);
+        for seq in 2..=3 {
+            assert_eq!(
+                controller
+                    .observe(
+                        healthy_sample(seq, 4_000_000 + seq * 100_000),
+                        4_000_000 + seq * 100_000
+                    )
+                    .decision
+                    .tier,
+                QualityTier::Emergency
+            );
+        }
+        assert_eq!(
+            controller
+                .observe(healthy_sample(4, 4_400_000), 4_400_000)
+                .decision
+                .tier,
+            QualityTier::High
+        );
+    }
+
+    #[test]
+    fn telemetry_timeout_clears_partial_recovery_while_already_emergency() {
+        let mut controller = controller();
+        let mut unhealthy = healthy_sample(1, 1_000_000);
+        unhealthy.capability.decoder_healthy = false;
+        assert_eq!(
+            controller.observe(unhealthy, 1_000_000).decision.tier,
+            QualityTier::Emergency
+        );
+        for seq in 2..=3 {
+            let at = 1_000_000 + seq * 100_000;
+            assert_eq!(
+                controller
+                    .observe(healthy_sample(seq, at), at)
+                    .decision
+                    .tier,
+                QualityTier::Emergency
+            );
+        }
+        assert_eq!(
+            controller.expire_if_stale(3_300_001),
+            None,
+            "already Emergency, so expiration must not produce a duplicate route change"
+        );
+        for seq in 4..=5 {
+            let at = 3_000_000 + seq * 100_000;
+            assert_eq!(
+                controller
+                    .observe(healthy_sample(seq, at), at)
+                    .decision
+                    .tier,
+                QualityTier::Emergency,
+                "a fresh post-timeout recovery window is required"
+            );
+        }
+        assert_eq!(
+            controller
+                .observe(healthy_sample(6, 3_600_000), 3_600_000)
+                .decision
+                .tier,
+            QualityTier::High
+        );
+    }
+
+    #[test]
+    fn expiry_rejects_clock_regression_instead_of_retaining_high_quality() {
+        let mut controller = controller();
+        assert_eq!(
+            controller
+                .observe(healthy_sample(1, 1_000_000), 1_000_000)
+                .decision
+                .tier,
+            QualityTier::High
+        );
+        assert_eq!(
+            controller.expire_if_stale(999_999).unwrap().tier,
+            QualityTier::Emergency
+        );
+        assert_eq!(controller.expire_if_stale(1_000_000), None);
     }
 
     #[test]
