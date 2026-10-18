@@ -4,7 +4,7 @@
 //! a separately authenticated and authorized Worker channel, pin the current
 //! owner + receiver binding, and revalidate before forwarding or adaptation.
 //! This module adds no transport, threads, IPC message ID or privileges.
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Mutex, TryLockError, Weak};
 
 use crate::receiver_telemetry::{
     ReceiverPlaybackCounters, ReceiverTelemetryBinding, ReceiverTelemetrySnapshot,
@@ -240,11 +240,24 @@ struct ReceiverTelemetryConcurrentState {
 
 /// A diagnostic sample checked out of the bounded mailbox for a *potential*
 /// future sender. It is not a Worker credential or Service authorization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ReceiverTelemetrySendLease {
     report: ReceiverTelemetrySnapshot,
     incarnation: u64,
+    // Weak lifetime pins the originating mailbox allocation identity, but
+    // does not keep a revoked Worker state alive just for a queued report.
+    owner: Weak<Mutex<ReceiverTelemetryConcurrentState>>,
 }
+
+impl PartialEq for ReceiverTelemetrySendLease {
+    fn eq(&self, other: &Self) -> bool {
+        self.report == other.report
+            && self.incarnation == other.incarnation
+            && Weak::ptr_eq(&self.owner, &other.owner)
+    }
+}
+
+impl Eq for ReceiverTelemetrySendLease {}
 
 impl ReceiverTelemetrySendLease {
     #[must_use]
@@ -330,6 +343,7 @@ impl ReceiverTelemetryConcurrentMailbox {
         &self,
         binding: ReceiverTelemetryBinding,
     ) -> Result<Option<ReceiverTelemetrySendLease>, ReceiverTelemetryConcurrentError> {
+        let owner = Arc::downgrade(&self.state);
         self.try_access(|state| {
             Ok(state
                 .mailbox
@@ -337,6 +351,7 @@ impl ReceiverTelemetryConcurrentMailbox {
                 .map(|report| ReceiverTelemetrySendLease {
                     report,
                     incarnation: state.incarnation,
+                    owner,
                 }))
         })
     }
@@ -350,6 +365,11 @@ impl ReceiverTelemetryConcurrentMailbox {
         &self,
         lease: &ReceiverTelemetrySendLease,
     ) -> Result<bool, ReceiverTelemetryConcurrentError> {
+        // Another mailbox can have the same binding, incarnation and sequence.
+        // Reject that lookalike before consulting local state.
+        if !Weak::ptr_eq(&lease.owner, &Arc::downgrade(&self.state)) {
+            return Ok(false);
+        }
         self.try_access(|state| {
             Ok(state.mailbox.active == Some(lease.report.binding)
                 && state.incarnation == lease.incarnation
@@ -445,6 +465,46 @@ mod concurrent_mailbox_tests {
             drain(&mail, binding(1)),
             Err(ReceiverTelemetryConcurrentError::Poisoned)
         );
+    }
+
+    #[test]
+    fn sender_thread_detects_revocation_and_same_identity_aba_after_checkout() {
+        let mail = ReceiverTelemetryConcurrentMailbox::default();
+        mail.try_activate(binding(1)).unwrap();
+        mail.try_offer(snapshot(1, 1)).unwrap();
+
+        let sender = mail.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let task = std::thread::spawn(move || {
+            let lease = sender.try_checkout_matching(binding(1)).unwrap().unwrap();
+            ready_tx.send(lease.snapshot()).unwrap();
+            resume_rx.recv().unwrap();
+            sender.try_lease_is_current(&lease)
+        });
+        assert_eq!(ready_rx.recv().unwrap(), snapshot(1, 1));
+        assert_eq!(mail.try_clear_if_matches(binding(1)), Ok(true));
+        mail.try_activate(binding(1)).unwrap();
+        mail.try_offer(snapshot(1, 1)).unwrap();
+        resume_tx.send(()).unwrap();
+        assert_eq!(task.join().unwrap(), Ok(false));
+        let fresh = mail.try_checkout_matching(binding(1)).unwrap().unwrap();
+        assert_eq!(mail.try_lease_is_current(&fresh), Ok(true));
+    }
+
+    #[test]
+    fn checked_out_lease_does_not_keep_abandoned_mailbox_alive() {
+        let lease = {
+            let mail = ReceiverTelemetryConcurrentMailbox::default();
+            mail.try_activate(binding(1)).unwrap();
+            mail.try_offer(snapshot(1, 1)).unwrap();
+            mail.try_checkout_matching(binding(1)).unwrap().unwrap()
+        };
+        assert!(lease.owner.upgrade().is_none());
+        let replacement = ReceiverTelemetryConcurrentMailbox::default();
+        replacement.try_activate(binding(1)).unwrap();
+        replacement.try_offer(snapshot(1, 1)).unwrap();
+        assert_eq!(replacement.try_lease_is_current(&lease), Ok(false));
     }
 
     #[test]

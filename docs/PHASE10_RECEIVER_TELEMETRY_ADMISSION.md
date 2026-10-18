@@ -97,3 +97,34 @@ This is the bounded producer/consumer seam, not an active transport, IPC
 message, credential, thread, or quality promotion. Unit tests exercise 10,000
 coalesced offers, deterministic contention, poisoned-lock failure and exact
 binding replacement without requiring a live Windows guest.
+
+## Revocation-aware sender checkout lease (pre-IPC)
+
+The concurrent mailbox now issues an **opaque local checkout lease** rather
+than giving an eventual sender an untracked raw sample. Each lease binds the
+full sample and sequence to a strictly increasing mailbox lifecycle
+incarnation and a **weak reference to its originating mailbox allocation**.
+The weak identity prevents one receiver mailbox from accepting a lookalike
+lease from another even if their process/session, presentation, epoch and
+sequence fields happen to match. A lease does not retain the mailbox after
+shutdown. Clear + reactivation with the same binding consumes a new
+incarnation, so an old checkout cannot reappear as current (ABA). Exhausted
+incarnation counters reject reactivation without wrapping. A newer offered
+sample invalidates an older checkout, including if the newer report is itself
+later drained. Identical trusted activation leaves legitimate leases intact.
+
+`try_checkout_matching` and `try_lease_is_current` return `Busy` instead of
+waiting for another thread, or `Poisoned` if the underlying lock was poisoned.
+The former raw-drain method on the **concurrent** wrapper is intentionally
+removed to avoid bypassing the lease; the lower-level nonconcurrent mailbox
+still supports its existing internal tests. Thread-ordered regressions test
+revocation after checkout, same-ID lifecycle reuse, cross-mailbox isolation,
+congestion, latest-only sequence invalidation, lock failures and overflow.
+
+**Critical trust limitation:** the local lease validation is advisory and
+not atomic with network or pipe I/O. A revocation may race immediately after
+any pre-send check. A future *separately authenticated and authorized*
+Worker→Service channel MUST independently reject mismatched Worker ownership,
+receive generation, session and key epoch on arrival; it must not use this
+lease as authentication or authorization. No new IPC frame or live sending
+is enabled here; no adaptive-quality decisions are changed.
