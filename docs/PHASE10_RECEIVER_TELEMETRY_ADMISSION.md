@@ -27,3 +27,20 @@ The pure Service-side `ReceiverTelemetryGate::has_fresh_report(service_now)` che
 `cargo test -p classmesh-control --test receiver_telemetry_admission` covers exact binding, stale Worker/runtime generations, replay, non-monotonic clocks, nonregressing counters, duplicate activation, revocation, too-frequent reporting, missing sequences, stale gaps and independently recorded authenticated/decoded/presented deltas.
 
 The Remote Desktop Commander monthly limit prevented an **independent current-turn Windows VM2 rerun**. Prior tests for the earlier Worker watch dog do not validate this module. Require Rustfmt, all-targets warnings-denied Clippy, exact-head Portable Rust and Windows Build hosted CI. Preserve separate physical two-PC and classroom-congestion qualification gates. Do not treat hosted CI as physical evidence.
+
+## Passive byte ingress, still not an authenticated pipe
+
+`ReceiverTelemetryIngress` composes the strict decoder and admission gate at a
+single read-only boundary. The Service must call `activate_verified` using a
+binding derived **independently** from its authenticated Worker IPC peer,
+process/session/Worker generation, accepted presentation and currently active
+receive-runtime generation. Decoded payload bytes never activate the gate.
+Malformed, replayed, mismatched-epoch and counter-regressing frames cannot
+advance its baseline. Exact lifecycle revocation clears the binding; stale
+revocation cannot clear a replacement. No new message ID, live producer,
+privileged channel, Worker→Service delivery or quality promotion is introduced.
+
+`cargo test -p classmesh-control --test receiver_telemetry_ingress` checks
+unauthorized bytes, wire errors, wrong epochs, replay, valid deltas and
+replacement/revocation. Native authenticated transport integration and VM2 or
+physical-machine qualification are still required before runtime use.
