@@ -1,9 +1,9 @@
 //! Local, per-session playback diagnostics. No IPC or network reports are sent.
 use crate::group_media_receive::WorkerGroupMediaAuthenticationStats;
-use classmesh_control::receiver_telemetry::ReceiverPlaybackCounters;
 #[cfg(test)]
 use crate::presentation_decode_render::PresentationDecodeBatch;
 use crate::presentation_decode_render::PresentationDecodeStep;
+use classmesh_control::receiver_telemetry::ReceiverPlaybackCounters;
 use classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding;
 use std::time::{Duration, Instant};
 
