@@ -5,9 +5,11 @@
 //! owner + receiver binding, and revalidate before forwarding or adaptation.
 //! This module adds no transport, threads, IPC message ID or privileges.
 use std::sync::{Arc, Mutex, TryLockError, Weak};
+use std::time::Instant;
 
 use crate::receiver_telemetry::{
-    ReceiverPlaybackCounters, ReceiverTelemetryBinding, ReceiverTelemetrySnapshot,
+    MAX_RECEIVER_TELEMETRY_GAP, ReceiverPlaybackCounters, ReceiverTelemetryBinding,
+    ReceiverTelemetrySnapshot,
 };
 
 pub const RECEIVER_TELEMETRY_WIRE_VERSION: u16 = 1;
@@ -27,6 +29,8 @@ pub enum ReceiverTelemetryWireError {
     NonmonotonicSequence,
     /// Never wrap a lifetime/incarnation number to recreate a revoked lease.
     LifecycleExhausted,
+    /// A Worker-local monotonic timestamp moved backward; never refresh age.
+    ClockRegression,
 }
 
 fn write_u32(output: &mut [u8; RECEIVER_TELEMETRY_WIRE_LEN], offset: &mut usize, value: u32) {
@@ -236,6 +240,16 @@ struct ReceiverTelemetryConcurrentState {
     // Strictly increasing on any new activation, even the same identity after
     // clear. Never reset on revocation or reuse after overflow.
     incarnation: u64,
+    /// Worker-local acceptance time; never serialized or supplied by a peer.
+    last_offered_at: Option<Instant>,
+}
+
+impl ReceiverTelemetryConcurrentState {
+    fn fresh_at(&self, now: Instant) -> bool {
+        self.last_offered_at
+            .and_then(|accepted| now.checked_duration_since(accepted))
+            .is_some_and(|age| age <= MAX_RECEIVER_TELEMETRY_GAP)
+    }
 }
 
 /// A diagnostic sample checked out of the bounded mailbox for a *potential*
@@ -314,6 +328,7 @@ impl ReceiverTelemetryConcurrentMailbox {
                     .ok_or(ReceiverTelemetryWireError::LifecycleExhausted)?;
                 state.mailbox.activate(binding)?;
                 state.incarnation = next;
+                state.last_offered_at = None;
             }
             Ok(())
         })
@@ -325,7 +340,27 @@ impl ReceiverTelemetryConcurrentMailbox {
         &self,
         report: ReceiverTelemetrySnapshot,
     ) -> Result<bool, ReceiverTelemetryConcurrentError> {
-        self.try_access(|state| state.mailbox.offer(report))
+        self.try_offer_at(report, Instant::now())
+    }
+
+    /// Keep clock injection private; a report or remote Worker must not be
+    /// able to set its own admission timestamp to fake freshness.
+    fn try_offer_at(
+        &self,
+        report: ReceiverTelemetrySnapshot,
+        offered_at: Instant,
+    ) -> Result<bool, ReceiverTelemetryConcurrentError> {
+        self.try_access(|state| {
+            if state
+                .last_offered_at
+                .is_some_and(|previous| offered_at.checked_duration_since(previous).is_none())
+            {
+                return Err(ReceiverTelemetryWireError::ClockRegression);
+            }
+            let replaced = state.mailbox.offer(report)?;
+            state.last_offered_at = Some(offered_at);
+            Ok(replaced)
+        })
     }
 
     /// Remove an exact binding without revoking a newer replacement.
@@ -333,7 +368,13 @@ impl ReceiverTelemetryConcurrentMailbox {
         &self,
         binding: ReceiverTelemetryBinding,
     ) -> Result<bool, ReceiverTelemetryConcurrentError> {
-        self.try_access(|state| Ok(state.mailbox.clear_if_matches(binding)))
+        self.try_access(|state| {
+            let cleared = state.mailbox.clear_if_matches(binding);
+            if cleared {
+                state.last_offered_at = None;
+            }
+            Ok(cleared)
+        })
     }
 
     /// Check out the latest report for a hypothetical asynchronous sender.
@@ -343,8 +384,25 @@ impl ReceiverTelemetryConcurrentMailbox {
         &self,
         binding: ReceiverTelemetryBinding,
     ) -> Result<Option<ReceiverTelemetrySendLease>, ReceiverTelemetryConcurrentError> {
+        self.try_checkout_at(binding, Instant::now())
+    }
+
+    fn try_checkout_at(
+        &self,
+        binding: ReceiverTelemetryBinding,
+        now: Instant,
+    ) -> Result<Option<ReceiverTelemetrySendLease>, ReceiverTelemetryConcurrentError> {
         let owner = Arc::downgrade(&self.state);
         self.try_access(|state| {
+            if state.mailbox.active != Some(binding) {
+                return Ok(None);
+            }
+            if !state.fresh_at(now) {
+                // Drop old pending bytes but retain last_sequence so replay
+                // cannot refresh their monotonic admission history.
+                state.mailbox.pending = None;
+                return Ok(None);
+            }
             Ok(state
                 .mailbox
                 .take_matching(binding)
@@ -365,6 +423,14 @@ impl ReceiverTelemetryConcurrentMailbox {
         &self,
         lease: &ReceiverTelemetrySendLease,
     ) -> Result<bool, ReceiverTelemetryConcurrentError> {
+        self.try_lease_is_current_at(lease, Instant::now())
+    }
+
+    fn try_lease_is_current_at(
+        &self,
+        lease: &ReceiverTelemetrySendLease,
+        now: Instant,
+    ) -> Result<bool, ReceiverTelemetryConcurrentError> {
         // Another mailbox can have the same binding, incarnation and sequence.
         // Reject that lookalike before consulting local state.
         if !Weak::ptr_eq(&lease.owner, &Arc::downgrade(&self.state)) {
@@ -373,7 +439,8 @@ impl ReceiverTelemetryConcurrentMailbox {
         self.try_access(|state| {
             Ok(state.mailbox.active == Some(lease.report.binding)
                 && state.incarnation == lease.incarnation
-                && state.mailbox.last_sequence == Some(lease.report.sequence))
+                && state.mailbox.last_sequence == Some(lease.report.sequence)
+                && state.fresh_at(now))
         })
     }
 }
@@ -472,7 +539,10 @@ mod concurrent_mailbox_tests {
         let at = std::time::Instant::now();
         for (age, should_keep) in [
             (std::time::Duration::from_secs(30), true),
-            (std::time::Duration::from_secs(30) + std::time::Duration::from_nanos(1), false),
+            (
+                std::time::Duration::from_secs(30) + std::time::Duration::from_nanos(1),
+                false,
+            ),
         ] {
             let mail = ReceiverTelemetryConcurrentMailbox::default();
             mail.try_activate(binding(1)).unwrap();
@@ -497,12 +567,31 @@ mod concurrent_mailbox_tests {
         mail.try_activate(binding(1)).unwrap();
         mail.try_offer_at(snapshot(1, 1), at).unwrap();
         let lease = mail.try_checkout_at(binding(1), at).unwrap().unwrap();
-        assert_eq!(mail.try_lease_is_current_at(&lease, at + std::time::Duration::from_secs(30)), Ok(true));
-        assert_eq!(mail.try_lease_is_current_at(&lease, at + std::time::Duration::from_secs(30) + std::time::Duration::from_nanos(1)), Ok(false));
-        assert_eq!(mail.try_lease_is_current_at(&lease, at - std::time::Duration::from_nanos(1)), Ok(false));
-        mail.try_offer_at(snapshot(1, 2), at + std::time::Duration::from_secs(31)).unwrap();
-        let fresh = mail.try_checkout_at(binding(1), at + std::time::Duration::from_secs(31)).unwrap().unwrap();
-        assert_eq!(mail.try_lease_is_current_at(&fresh, at + std::time::Duration::from_secs(31)), Ok(true));
+        assert_eq!(
+            mail.try_lease_is_current_at(&lease, at + std::time::Duration::from_secs(30)),
+            Ok(true)
+        );
+        assert_eq!(
+            mail.try_lease_is_current_at(
+                &lease,
+                at + std::time::Duration::from_secs(30) + std::time::Duration::from_nanos(1)
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            mail.try_lease_is_current_at(&lease, at - std::time::Duration::from_nanos(1)),
+            Ok(false)
+        );
+        mail.try_offer_at(snapshot(1, 2), at + std::time::Duration::from_secs(31))
+            .unwrap();
+        let fresh = mail
+            .try_checkout_at(binding(1), at + std::time::Duration::from_secs(31))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            mail.try_lease_is_current_at(&fresh, at + std::time::Duration::from_secs(31)),
+            Ok(true)
+        );
     }
 
     #[test]
@@ -510,17 +599,45 @@ mod concurrent_mailbox_tests {
         let at = std::time::Instant::now();
         let mail = ReceiverTelemetryConcurrentMailbox::default();
         mail.try_activate(binding(1)).unwrap();
-        mail.try_offer_at(snapshot(1, 1), at + std::time::Duration::from_secs(5)).unwrap();
+        mail.try_offer_at(snapshot(1, 1), at + std::time::Duration::from_secs(5))
+            .unwrap();
         assert_eq!(
             mail.try_offer_at(snapshot(1, 2), at + std::time::Duration::from_secs(4)),
             Err(ReceiverTelemetryConcurrentError::Wire(
                 ReceiverTelemetryWireError::ClockRegression
             ))
         );
-        let still_original = mail.try_checkout_at(binding(1), at + std::time::Duration::from_secs(5)).unwrap().unwrap();
+        let still_original = mail
+            .try_checkout_at(binding(1), at + std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
         assert_eq!(still_original.snapshot(), snapshot(1, 1));
-        mail.try_offer_at(snapshot(1, 2), at + std::time::Duration::from_secs(6)).unwrap();
-        assert_eq!(mail.try_checkout_at(binding(1), at + std::time::Duration::from_secs(6)).unwrap().unwrap().snapshot(), snapshot(1, 2));
+        mail.try_offer_at(snapshot(1, 2), at + std::time::Duration::from_secs(6))
+            .unwrap();
+        assert_eq!(
+            mail.try_checkout_at(binding(1), at + std::time::Duration::from_secs(6))
+                .unwrap()
+                .unwrap()
+                .snapshot(),
+            snapshot(1, 2)
+        );
+    }
+
+    #[test]
+    fn rejected_replay_cannot_refresh_an_expired_checked_out_lease() {
+        let at = std::time::Instant::now();
+        let mail = ReceiverTelemetryConcurrentMailbox::default();
+        mail.try_activate(binding(1)).unwrap();
+        mail.try_offer_at(snapshot(1, 1), at).unwrap();
+        let lease = mail.try_checkout_at(binding(1), at).unwrap().unwrap();
+        let expired = at + std::time::Duration::from_secs(31);
+        assert_eq!(
+            mail.try_offer_at(snapshot(1, 1), expired),
+            Err(ReceiverTelemetryConcurrentError::Wire(
+                ReceiverTelemetryWireError::NonmonotonicSequence
+            ))
+        );
+        assert_eq!(mail.try_lease_is_current_at(&lease, expired), Ok(false));
     }
 
     #[test]
@@ -531,10 +648,17 @@ mod concurrent_mailbox_tests {
         mail.try_offer_at(snapshot(1, 1), at).unwrap();
         mail.try_activate(binding(2)).unwrap();
         assert_eq!(mail.try_clear_if_matches(binding(1)), Ok(false));
-        mail.try_offer_at(snapshot(2, 1), at + std::time::Duration::from_secs(35)).unwrap();
-        let lease = mail.try_checkout_at(binding(2), at + std::time::Duration::from_secs(36)).unwrap().unwrap();
+        mail.try_offer_at(snapshot(2, 1), at + std::time::Duration::from_secs(35))
+            .unwrap();
+        let lease = mail
+            .try_checkout_at(binding(2), at + std::time::Duration::from_secs(36))
+            .unwrap()
+            .unwrap();
         assert_eq!(lease.snapshot(), snapshot(2, 1));
-        assert_eq!(mail.try_lease_is_current_at(&lease, at + std::time::Duration::from_secs(36)), Ok(true));
+        assert_eq!(
+            mail.try_lease_is_current_at(&lease, at + std::time::Duration::from_secs(36)),
+            Ok(true)
+        );
     }
 
     #[test]
