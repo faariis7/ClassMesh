@@ -73,9 +73,18 @@ impl std::fmt::Debug for InstalledWorkerGroupMediaKey {
     }
 }
 
+/// Key-epoch-scoped cryptographically authenticated frame counters.
+/// These are not decoded or rendered frame counts.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerGroupMediaAuthenticationStats {
+    pub opened_frames: u64,
+    pub rejected_frames: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct WorkerGroupMediaKeyState {
     installed: Option<InstalledWorkerGroupMediaKey>,
+    authentication_stats: WorkerGroupMediaAuthenticationStats,
 }
 
 impl WorkerGroupMediaKeyState {
@@ -87,6 +96,12 @@ impl WorkerGroupMediaKeyState {
     #[must_use]
     pub fn is_installed(&self) -> bool {
         self.installed.is_some()
+    }
+
+    /// A snapshot belongs only to the currently installed media key epoch.
+    #[must_use]
+    pub fn authentication_stats(&self) -> Option<WorkerGroupMediaAuthenticationStats> {
+        self.installed.as_ref().map(|_| self.authentication_stats)
     }
 
     pub fn install(
@@ -115,10 +130,31 @@ impl WorkerGroupMediaKeyState {
         let receiver = GroupMediaReceiver::with_default_replay_tolerance(epoch, &key_material)?;
 
         self.installed = Some(InstalledWorkerGroupMediaKey { binding, receiver });
+        self.authentication_stats = WorkerGroupMediaAuthenticationStats::default();
         Ok(binding)
     }
 
     pub fn open_frame(
+        &mut self,
+        frame: &ReceivedGroupMediaCiphertext,
+    ) -> Result<Vec<u8>, WorkerGroupMediaKeyError> {
+        let result = self.open_frame_checked(frame);
+        if self.installed.is_some() {
+            match &result {
+                Ok(_) => {
+                    self.authentication_stats.opened_frames =
+                        self.authentication_stats.opened_frames.saturating_add(1);
+                }
+                Err(_) => {
+                    self.authentication_stats.rejected_frames =
+                        self.authentication_stats.rejected_frames.saturating_add(1);
+                }
+            }
+        }
+        result
+    }
+
+    fn open_frame_checked(
         &mut self,
         frame: &ReceivedGroupMediaCiphertext,
     ) -> Result<Vec<u8>, WorkerGroupMediaKeyError> {
@@ -179,7 +215,11 @@ impl WorkerGroupMediaKeyState {
         {
             return false;
         }
-        self.installed.take().is_some()
+        let cleared = self.installed.take().is_some();
+        if cleared {
+            self.authentication_stats = WorkerGroupMediaAuthenticationStats::default();
+        }
+        cleared
     }
 }
 
@@ -334,6 +374,80 @@ mod tests {
             state.open_frame(&frame).expect("authenticated frame"),
             b"worker-presentation-frame"
         );
+    }
+
+    #[test]
+    fn authenticated_telemetry_counts_verified_frames_and_failed_opens_only() {
+        let mut state = WorkerGroupMediaKeyState::default();
+        assert_eq!(state.authentication_stats(), None);
+        state
+            .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x53))
+            .unwrap();
+        let mut real_key = vec![0x53; GROUP_MEDIA_KEY_BYTES];
+        let real_material = GroupMediaKeyMaterial::import_received_wire(&mut real_key).unwrap();
+        let mut real_sender =
+            GroupMediaSender::new(GroupMediaEpoch::new(3).unwrap(), &real_material).unwrap();
+        let binding = |frame_id, time, keyframe| {
+            GroupMediaFrameBinding::new(
+                PRESENTATION_ID,
+                STREAM_ID,
+                GroupMediaEpoch::new(3).unwrap(),
+                frame_id,
+                time,
+                keyframe,
+            )
+            .unwrap()
+        };
+        let good = real_sender
+            .seal_bound_frame(b"authenticated-media", binding(91, 123_456, true))
+            .unwrap();
+        assert_eq!(
+            state.open_frame(&received(&good)).unwrap(),
+            b"authenticated-media"
+        );
+        assert_eq!(state.authentication_stats().unwrap().opened_frames, 1);
+        assert!(
+            state.open_frame(&received(&good)).is_err(),
+            "replay cannot increment verified count"
+        );
+        let mut wrong_key_bytes = vec![0x54; GROUP_MEDIA_KEY_BYTES];
+        let wrong_material =
+            GroupMediaKeyMaterial::import_received_wire(&mut wrong_key_bytes).unwrap();
+        let mut wrong_sender =
+            GroupMediaSender::new(GroupMediaEpoch::new(3).unwrap(), &wrong_material).unwrap();
+        // Advance the invalid sender's nonce past the verified frame to reach
+        // decryption and tag verification, rather than simply triggering Replay.
+        let _ = wrong_sender
+            .seal_bound_frame(b"unused", binding(90, 123_455, false))
+            .unwrap();
+        let wrong_key = wrong_sender
+            .seal_bound_frame(b"not-authenticated", binding(92, 123_457, false))
+            .unwrap();
+        assert!(state.open_frame(&received(&wrong_key)).is_err());
+        assert_eq!(state.authentication_stats().unwrap().opened_frames, 1);
+        assert_eq!(state.authentication_stats().unwrap().rejected_frames, 2);
+        let later = real_sender
+            .seal_bound_frame(b"verified-later", binding(93, 123_458, false))
+            .unwrap();
+        assert_eq!(
+            state.open_frame(&received(&later)).unwrap(),
+            b"verified-later"
+        );
+        assert_eq!(state.authentication_stats().unwrap().opened_frames, 2);
+        // Key rotation represents a new verified cryptographic measurement epoch.
+        state
+            .install(sensitive(77, 45, PRESENTATION_ID, STREAM_ID, 4, 0x55))
+            .unwrap();
+        assert_eq!(state.authentication_stats().unwrap().opened_frames, 0);
+        assert_eq!(state.authentication_stats().unwrap().rejected_frames, 0);
+        assert!(state.clear_if_matches(ServicePresentationKeyClear {
+            control_session_id: 77,
+            request_id: 45,
+            presentation_id: PRESENTATION_ID,
+            stream_id: STREAM_ID,
+            epoch: 4,
+        }));
+        assert_eq!(state.authentication_stats(), None);
     }
 
     #[test]
