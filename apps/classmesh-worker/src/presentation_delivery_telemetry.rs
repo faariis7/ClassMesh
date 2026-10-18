@@ -1,5 +1,6 @@
 //! Local, per-session playback diagnostics. No IPC or network reports are sent.
 use crate::group_media_receive::WorkerGroupMediaAuthenticationStats;
+use classmesh_control::receiver_telemetry::ReceiverPlaybackCounters;
 #[cfg(test)]
 use crate::presentation_decode_render::PresentationDecodeBatch;
 use crate::presentation_decode_render::PresentationDecodeStep;
@@ -37,6 +38,25 @@ pub struct PresentationDeliveryReport {
     pub waiting_for_keyframe: u64,
     /// Queue drops from the receiver runtime's own lifetime counter.
     pub receiver_queue_drops: u64,
+}
+
+impl PresentationDeliveryReport {
+    /// Map the real Worker playback counters into the shared, transport-neutral
+    /// Phase 10 contract without conflating AEAD opens with decoded/presented
+    /// frames. This does not authorize or transmit a receiver report.
+    #[must_use]
+    pub const fn playback_counters(self) -> ReceiverPlaybackCounters {
+        ReceiverPlaybackCounters {
+            authenticated_frames: self.authenticated_frames,
+            rejected_frames: self.auth_rejected_frames,
+            decoded_frames: self.decoded_frames,
+            presented_frames: self.presented_frames,
+            present_errors: self.present_errors,
+            decode_errors: self.decode_errors,
+            keyframe_waits: self.waiting_for_keyframe,
+            queue_drops: self.receiver_queue_drops,
+        }
+    }
 }
 
 #[derive(Debug, Default)]

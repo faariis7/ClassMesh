@@ -832,20 +832,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         authenticated,
                         queue_drops,
                     ) {
+                        let counters = report.playback_counters();
                         eprintln!(
                             "ClassMesh Worker local presentation playback: presentation={} stream={} epoch={} sample_sequence={} auth_opened={} auth_rejected={} decoded={} presented={} present_errors={} decode_errors={} waiting_for_keyframe={} queue_drop_events_total={}",
                             binding.presentation_id,
                             binding.stream_id,
                             binding.epoch,
                             report.sample_sequence,
-                            report.authenticated_frames,
-                            report.auth_rejected_frames,
-                            report.decoded_frames,
-                            report.presented_frames,
-                            report.present_errors,
-                            report.decode_errors,
-                            report.waiting_for_keyframe,
-                            report.receiver_queue_drops,
+                            counters.authenticated_frames,
+                            counters.rejected_frames,
+                            counters.decoded_frames,
+                            counters.presented_frames,
+                            counters.present_errors,
+                            counters.decode_errors,
+                            counters.keyframe_waits,
+                            counters.queue_drops,
                         );
                     }
                 }
