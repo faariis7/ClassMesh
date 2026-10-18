@@ -191,6 +191,18 @@ impl DurableAuthorizationState {
         policy: File,
         trusted_epoch: u64,
     ) -> Result<AuthorizationStore, PersistenceError> {
+        Self::parse_bound_primary_from_readers(checkpoint, policy, trusted_epoch)
+    }
+
+    /// Parse exact digest-bound bytes without exposing cloneable native handles.
+    /// The caller must retain and qualify the complete OS chain for both readers
+    /// throughout this call and independently authenticate `trusted_epoch`.
+    /// A successful parse alone never authorizes production publication.
+    pub fn parse_bound_primary_from_readers(
+        checkpoint: impl Read,
+        policy: impl Read,
+        trusted_epoch: u64,
+    ) -> Result<AuthorizationStore, PersistenceError> {
         let verified = verify_bound_policy_checkpoint(checkpoint, policy, MAX_STATE_BYTES)
             .map_err(|_| PersistenceError::UntrustedPolicyBinding)?;
         verify_startup_policy_epoch(trusted_epoch, verified.epoch())
@@ -575,6 +587,76 @@ mod tests {
         ));
         fs::create_dir_all(&directory).expect("test directory");
         directory.join("authorization.json")
+    }
+
+    #[test]
+    fn bounded_reader_parser_rejects_epoch_binding_format_and_io_failures() {
+        use crate::policy_epoch::encode_bound_policy_checkpoint;
+        let valid = br#"{"version":1,"principals":[]}"#;
+        let record = encode_bound_policy_checkpoint(7, valid).unwrap();
+        let parse = |header: &[u8], body: &[u8], epoch| {
+            let mut header = header;
+            let mut body = body;
+            DurableAuthorizationState::parse_bound_primary_from_readers(
+                &mut header as &mut dyn Read,
+                &mut body as &mut dyn Read,
+                epoch,
+            )
+        };
+        assert!(parse(&record, valid, 7).is_ok());
+        for epoch in [0, 6, 8] {
+            assert!(matches!(
+                parse(&record, valid, epoch),
+                Err(PersistenceError::UntrustedPolicyBinding)
+            ));
+        }
+        assert!(matches!(
+            parse(&record[..47], valid, 7),
+            Err(PersistenceError::UntrustedPolicyBinding)
+        ));
+        assert!(matches!(
+            parse(&[record.as_slice(), &[0]].concat(), valid, 7),
+            Err(PersistenceError::UntrustedPolicyBinding)
+        ));
+        assert!(matches!(
+            parse(&record, &[valid.as_slice(), b" "].concat(), 7),
+            Err(PersistenceError::UntrustedPolicyBinding)
+        ));
+        assert!(matches!(
+            parse(&record, &vec![0; MAX_STATE_BYTES + 1], 7),
+            Err(PersistenceError::UntrustedPolicyBinding)
+        ));
+        let invalid_json = b"invalid JSON";
+        assert!(matches!(
+            parse(
+                &encode_bound_policy_checkpoint(7, invalid_json).unwrap(),
+                invalid_json,
+                7
+            ),
+            Err(PersistenceError::Json(_))
+        ));
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("injected read failure"))
+            }
+        }
+        assert!(matches!(
+            DurableAuthorizationState::parse_bound_primary_from_readers(
+                Broken,
+                valid.as_slice(),
+                7
+            ),
+            Err(PersistenceError::UntrustedPolicyBinding)
+        ));
+        assert!(matches!(
+            DurableAuthorizationState::parse_bound_primary_from_readers(
+                record.as_slice(),
+                Broken,
+                7
+            ),
+            Err(PersistenceError::UntrustedPolicyBinding)
+        ));
     }
 
     #[test]
