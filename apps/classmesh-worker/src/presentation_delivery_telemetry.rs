@@ -12,6 +12,8 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 /// distinct from frames successfully presented on screen or authenticated.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PresentationDeliveryReport {
+    /// Monotonic per exact installed presentation binding; local only until IPC is qualified.
+    pub sample_sequence: u64,
     pub authenticated_frames: u64,
     pub auth_rejected_frames: u64,
     pub decoded_frames: u64,
@@ -27,6 +29,7 @@ pub struct PresentationDeliveryReport {
 pub struct PresentationDeliveryTelemetry {
     binding: Option<PresentationKeyInstallBinding>,
     last_report_at: Option<Instant>,
+    report_sequence: u64,
     decoded_frames: u64,
     presented_frames: u64,
     present_errors: u64,
@@ -85,8 +88,12 @@ impl PresentationDeliveryTelemetry {
         if now.checked_duration_since(last)? < REPORT_INTERVAL {
             return None;
         }
+        // On exhaustion, fail closed rather than emitting a replayed sequence.
+        let next_sequence = self.report_sequence.checked_add(1)?;
+        self.report_sequence = next_sequence;
         self.last_report_at = Some(now);
         Some(PresentationDeliveryReport {
+            sample_sequence: next_sequence,
             authenticated_frames: authenticated.opened_frames,
             auth_rejected_frames: authenticated.rejected_frames,
             decoded_frames: self.decoded_frames,
