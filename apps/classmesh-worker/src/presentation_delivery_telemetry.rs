@@ -207,6 +207,88 @@ mod tests {
         assert_eq!(report.sample_sequence, 41);
     }
 
+    fn authorized_owner(epoch: u32) -> classmesh_control::receiver_telemetry::ReceiverTelemetryBinding {
+        classmesh_control::receiver_telemetry::ReceiverTelemetryBinding {
+            process_id: 101,
+            session_id: 5,
+            worker_generation: 10,
+            control_session_id: 7,
+            request_id: 9,
+            presentation_id: 11,
+            stream_id: 13,
+            epoch,
+            receiver_generation: 20,
+        }
+    }
+
+    fn diagnostic(sequence: u64) -> PresentationDeliveryReport {
+        PresentationDeliveryReport {
+            sample_sequence: sequence,
+            authenticated_frames: 20,
+            auth_rejected_frames: 2,
+            decoded_frames: 17,
+            presented_frames: 16,
+            present_errors: 1,
+            decode_errors: 2,
+            waiting_for_keyframe: 3,
+            receiver_queue_drops: 4,
+        }
+    }
+
+    #[test]
+    fn local_snapshot_requires_exact_externally_supplied_owner_and_installed_key() {
+        let media = binding(1);
+        let verified = authorized_owner(1);
+        let snapshot = diagnostic(7)
+            .snapshot_for_bound_key(verified, media)
+            .expect("complete bound owner");
+        assert_eq!(snapshot.binding, verified);
+        assert_eq!(snapshot.sequence, 7);
+        assert_eq!(snapshot.counters.authenticated_frames, 20);
+        assert_eq!(snapshot.counters.rejected_frames, 2);
+        assert_eq!(snapshot.counters.decoded_frames, 17);
+        assert_eq!(snapshot.counters.presented_frames, 16);
+        assert_eq!(snapshot.counters.present_errors, 1);
+        assert_eq!(snapshot.counters.decode_errors, 2);
+        assert_eq!(snapshot.counters.keyframe_waits, 3);
+        assert_eq!(snapshot.counters.queue_drops, 4);
+    }
+
+    #[test]
+    fn no_local_snapshot_for_mismatched_control_request_presentation_stream_or_epoch() {
+        let actual = binding(1);
+        for mismatch in 0..5 {
+            let mut claimed = authorized_owner(1);
+            match mismatch {
+                0 => claimed.control_session_id += 1,
+                1 => claimed.request_id += 1,
+                2 => claimed.presentation_id += 1,
+                3 => claimed.stream_id += 1,
+                4 => claimed.epoch += 1,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                diagnostic(1).snapshot_for_bound_key(claimed, actual),
+                None,
+                "field mismatch must reject diagnostic snapshot"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_owner_or_missing_report_sequence_cannot_claim_valid_snapshot() {
+        let mut claimed = authorized_owner(1);
+        claimed.worker_generation = 0;
+        assert_eq!(diagnostic(1).snapshot_for_bound_key(claimed, binding(1)), None);
+        let mut claimed = authorized_owner(1);
+        claimed.receiver_generation = 0;
+        assert_eq!(diagnostic(1).snapshot_for_bound_key(claimed, binding(1)), None);
+        assert_eq!(
+            diagnostic(0).snapshot_for_bound_key(authorized_owner(1), binding(1)),
+            None
+        );
+    }
+
     #[test]
     fn trusted_opens_and_decode_outputs_stay_distinct() {
         let mut tracker = PresentationDeliveryTelemetry::default();
