@@ -380,6 +380,74 @@ mod concurrent_mailbox_tests {
     }
 
     #[test]
+    fn checked_out_sample_is_revoked_on_exact_clear_and_same_binding_reactivation() {
+        let mail = ReceiverTelemetryConcurrentMailbox::default();
+        mail.try_activate(binding(1)).unwrap();
+        mail.try_offer(snapshot(1, 1)).unwrap();
+        let prior = mail.try_checkout_matching(binding(1)).unwrap().unwrap();
+        assert_eq!(prior.snapshot(), snapshot(1, 1));
+        assert_eq!(mail.try_lease_is_current(&prior), Ok(true));
+        assert_eq!(mail.try_clear_if_matches(binding(1)), Ok(true));
+        assert_eq!(mail.try_lease_is_current(&prior), Ok(false));
+        mail.try_activate(binding(1)).unwrap();
+        mail.try_offer(snapshot(1, 1)).unwrap();
+        assert_eq!(mail.try_lease_is_current(&prior), Ok(false));
+        let fresh = mail.try_checkout_matching(binding(1)).unwrap().unwrap();
+        assert_eq!(fresh.snapshot(), prior.snapshot());
+        assert_ne!(fresh, prior, "same binding and sequence must not resurrect a revoked lease");
+        assert_eq!(mail.try_lease_is_current(&fresh), Ok(true));
+    }
+
+    #[test]
+    fn old_send_lease_is_invalidated_by_any_newer_coalesced_sample() {
+        let mail = ReceiverTelemetryConcurrentMailbox::default();
+        mail.try_activate(binding(1)).unwrap();
+        mail.try_offer(snapshot(1, 1)).unwrap();
+        let prior = mail.try_checkout_matching(binding(1)).unwrap().unwrap();
+        mail.try_activate(binding(1)).unwrap();
+        assert_eq!(mail.try_lease_is_current(&prior), Ok(true), "identical activation is not revocation");
+        assert_eq!(mail.try_offer(snapshot(1, 2)), Ok(false));
+        assert_eq!(mail.try_lease_is_current(&prior), Ok(false));
+        let newer = mail.try_checkout_matching(binding(1)).unwrap().unwrap();
+        assert_eq!(newer.snapshot(), snapshot(1, 2));
+        assert_eq!(mail.try_lease_is_current(&newer), Ok(true));
+        assert_eq!(mail.try_offer(snapshot(1, 1)), Err(ReceiverTelemetryConcurrentError::Wire(ReceiverTelemetryWireError::NonmonotonicSequence)));
+    }
+
+    #[test]
+    fn lease_validation_is_nonblocking_and_fails_closed_if_lock_is_poisoned() {
+        let mail = ReceiverTelemetryConcurrentMailbox::default();
+        mail.try_activate(binding(1)).unwrap();
+        mail.try_offer(snapshot(1, 1)).unwrap();
+        let lease = mail.try_checkout_matching(binding(1)).unwrap().unwrap();
+        let clone = mail.clone();
+        let guard = mail.state.lock().unwrap();
+        assert_eq!(clone.try_lease_is_current(&lease), Err(ReceiverTelemetryConcurrentError::Busy));
+        drop(guard);
+        assert_eq!(clone.try_lease_is_current(&lease), Ok(true));
+        assert!(std::thread::spawn(move || {
+            let _guard = clone.state.lock().unwrap();
+            panic!("intentional poison");
+        }).join().is_err());
+        assert_eq!(mail.try_lease_is_current(&lease), Err(ReceiverTelemetryConcurrentError::Poisoned));
+    }
+
+    #[test]
+    fn exhausted_lease_incarnation_rejects_reactivation_without_overflow() {
+        let mail = ReceiverTelemetryConcurrentMailbox::default();
+        mail.try_activate(binding(1)).unwrap();
+        mail.state.lock().unwrap().incarnation = u64::MAX;
+        assert_eq!(mail.try_clear_if_matches(binding(1)), Ok(true));
+        assert_eq!(
+            mail.try_activate(binding(1)),
+            Err(ReceiverTelemetryConcurrentError::Wire(
+                ReceiverTelemetryWireError::LifecycleExhausted
+            ))
+        );
+        assert_eq!(mail.try_offer(snapshot(1, 1)), Err(ReceiverTelemetryConcurrentError::Wire(ReceiverTelemetryWireError::Inactive)));
+    }
+
+    #[test]
     fn replaced_binding_cannot_drain_or_revoke_new_epoch() {
         let mail = ReceiverTelemetryConcurrentMailbox::default();
         mail.try_activate(binding(1)).unwrap();
