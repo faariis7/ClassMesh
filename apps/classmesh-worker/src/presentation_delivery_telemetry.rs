@@ -309,6 +309,29 @@ mod tests {
     }
 
     #[test]
+    fn emitted_old_epoch_report_cannot_be_relabelled_with_matching_new_owner_and_key() {
+        let at = Instant::now();
+        let mut source = PresentationDeliveryTelemetry::default();
+        let auth = WorkerGroupMediaAuthenticationStats {
+            opened_frames: 10,
+            rejected_frames: 0,
+        };
+        assert!(source.report_if_due(at, binding(1), auth, 0).is_none());
+        let old = source
+            .report_if_due(at + Duration::from_secs(5), binding(1), auth, 0)
+            .unwrap();
+        // Owner and supplied key agree with each other, but the actual report
+        // was emitted by the *old* protected key epoch.
+        assert_eq!(
+            old.snapshot_for_bound_key(authorized_owner(2), binding(2)),
+            None
+        );
+        assert!(old
+            .snapshot_for_bound_key(authorized_owner(1), binding(1))
+            .is_some());
+    }
+
+    #[test]
     fn no_local_snapshot_for_mismatched_control_request_presentation_stream_or_epoch() {
         let actual = binding(1);
         for mismatch in 0..5 {
