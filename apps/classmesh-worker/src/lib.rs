@@ -11,6 +11,7 @@ pub mod monitoring;
 #[cfg(windows)]
 pub mod presentation;
 pub mod presentation_decode_render;
+pub mod presentation_delivery_telemetry;
 #[cfg(windows)]
 pub mod presentation_fanout;
 pub mod presentation_multicast_receive;

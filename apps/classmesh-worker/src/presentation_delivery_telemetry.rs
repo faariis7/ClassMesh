@@ -1,0 +1,229 @@
+//! Local, per-session playback diagnostics. No IPC or network reports are sent.
+use crate::group_media_receive::WorkerGroupMediaAuthenticationStats;
+#[cfg(test)]
+use crate::presentation_decode_render::PresentationDecodeBatch;
+use crate::presentation_decode_render::PresentationDecodeStep;
+use classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding;
+use std::time::{Duration, Instant};
+
+const REPORT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Counter snapshot for the *local* Worker playback path. Decoded output is
+/// distinct from frames successfully presented on screen or authenticated.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PresentationDeliveryReport {
+    pub authenticated_frames: u64,
+    pub auth_rejected_frames: u64,
+    pub decoded_frames: u64,
+    pub presented_frames: u64,
+    pub present_errors: u64,
+    pub decode_errors: u64,
+    pub waiting_for_keyframe: u64,
+    /// Queue drops from the receiver runtime's own lifetime counter.
+    pub receiver_queue_drops: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct PresentationDeliveryTelemetry {
+    binding: Option<PresentationKeyInstallBinding>,
+    last_report_at: Option<Instant>,
+    decoded_frames: u64,
+    presented_frames: u64,
+    present_errors: u64,
+    decode_errors: u64,
+    waiting_for_keyframe: u64,
+}
+
+impl PresentationDeliveryTelemetry {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn track_binding(&mut self, binding: PresentationKeyInstallBinding, now: Instant) {
+        if self.binding != Some(binding) {
+            self.reset();
+            self.binding = Some(binding);
+            self.last_report_at = Some(now);
+        }
+    }
+
+    pub fn accept_decoded(
+        &mut self,
+        binding: PresentationKeyInstallBinding,
+        outcome: PresentationDecodeStep,
+    ) {
+        self.track_binding(binding, Instant::now());
+        match outcome {
+            PresentationDecodeStep::Decoded(batch) => {
+                self.decoded_frames = self.decoded_frames.saturating_add(batch.decoded as u64);
+                self.presented_frames =
+                    self.presented_frames.saturating_add(batch.presented as u64);
+                self.present_errors = self
+                    .present_errors
+                    .saturating_add(batch.present_errors as u64);
+            }
+            PresentationDecodeStep::WaitingForKeyframe => {
+                self.waiting_for_keyframe = self.waiting_for_keyframe.saturating_add(1);
+            }
+        }
+    }
+
+    pub fn accept_decode_error(&mut self, binding: PresentationKeyInstallBinding) {
+        self.track_binding(binding, Instant::now());
+        self.decode_errors = self.decode_errors.saturating_add(1);
+    }
+
+    pub fn report_if_due(
+        &mut self,
+        now: Instant,
+        binding: PresentationKeyInstallBinding,
+        authenticated: WorkerGroupMediaAuthenticationStats,
+        receiver_queue_drops: u64,
+    ) -> Option<PresentationDeliveryReport> {
+        self.track_binding(binding, now);
+        let last = self.last_report_at?;
+        if now.checked_duration_since(last)? < REPORT_INTERVAL {
+            return None;
+        }
+        self.last_report_at = Some(now);
+        Some(PresentationDeliveryReport {
+            authenticated_frames: authenticated.opened_frames,
+            auth_rejected_frames: authenticated.rejected_frames,
+            decoded_frames: self.decoded_frames,
+            presented_frames: self.presented_frames,
+            present_errors: self.present_errors,
+            decode_errors: self.decode_errors,
+            waiting_for_keyframe: self.waiting_for_keyframe,
+            receiver_queue_drops,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binding(epoch: u32) -> PresentationKeyInstallBinding {
+        PresentationKeyInstallBinding {
+            control_session_id: 7,
+            request_id: 9,
+            presentation_id: 11,
+            stream_id: 13,
+            epoch,
+        }
+    }
+
+    #[test]
+    fn trusted_opens_and_decode_outputs_stay_distinct() {
+        let mut tracker = PresentationDeliveryTelemetry::default();
+        let at = Instant::now();
+        tracker.accept_decoded(
+            binding(1),
+            PresentationDecodeStep::Decoded(PresentationDecodeBatch {
+                decoded: 3,
+                presented: 2,
+                present_errors: 1,
+            }),
+        );
+        tracker.accept_decoded(binding(1), PresentationDecodeStep::WaitingForKeyframe);
+        tracker.accept_decode_error(binding(1));
+        let report = tracker
+            .report_if_due(
+                at + Duration::from_secs(6),
+                binding(1),
+                WorkerGroupMediaAuthenticationStats {
+                    opened_frames: 6,
+                    rejected_frames: 2,
+                },
+                4,
+            )
+            .unwrap();
+        assert_eq!(report.authenticated_frames, 6);
+        assert_eq!(report.auth_rejected_frames, 2);
+        assert_eq!(report.decoded_frames, 3);
+        assert_eq!(report.presented_frames, 2);
+        assert_eq!(report.present_errors, 1);
+        assert_eq!(report.waiting_for_keyframe, 1);
+        assert_eq!(report.decode_errors, 1);
+        assert_eq!(report.receiver_queue_drops, 4);
+        assert!(
+            tracker
+                .report_if_due(
+                    at + Duration::from_secs(7),
+                    binding(1),
+                    WorkerGroupMediaAuthenticationStats::default(),
+                    4
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn epoch_change_restarts_all_delivery_counts_and_cadence() {
+        let mut tracker = PresentationDeliveryTelemetry::default();
+        let at = Instant::now();
+        tracker.accept_decoded(
+            binding(1),
+            PresentationDecodeStep::Decoded(PresentationDecodeBatch {
+                decoded: 7,
+                presented: 6,
+                present_errors: 0,
+            }),
+        );
+        assert!(
+            tracker
+                .report_if_due(
+                    at + Duration::from_secs(1),
+                    binding(2),
+                    WorkerGroupMediaAuthenticationStats::default(),
+                    0
+                )
+                .is_none()
+        );
+        let report = tracker
+            .report_if_due(
+                at + Duration::from_secs(7),
+                binding(2),
+                WorkerGroupMediaAuthenticationStats {
+                    opened_frames: 2,
+                    rejected_frames: 0,
+                },
+                0,
+            )
+            .unwrap();
+        assert_eq!(report.decoded_frames, 0);
+        assert_eq!(report.presented_frames, 0);
+        assert_eq!(report.authenticated_frames, 2);
+        tracker.reset();
+        assert!(
+            tracker
+                .report_if_due(
+                    at + Duration::from_secs(30),
+                    binding(3),
+                    WorkerGroupMediaAuthenticationStats::default(),
+                    0
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn bounded_reporting_never_claims_decryption_or_presentation_on_wait() {
+        let mut tracker = PresentationDeliveryTelemetry::default();
+        let at = Instant::now();
+        tracker.accept_decoded(binding(1), PresentationDecodeStep::WaitingForKeyframe);
+        let report = tracker
+            .report_if_due(
+                at + Duration::from_secs(6),
+                binding(1),
+                WorkerGroupMediaAuthenticationStats {
+                    opened_frames: 1,
+                    rejected_frames: 1,
+                },
+                3,
+            )
+            .unwrap();
+        assert_eq!((report.decoded_frames, report.presented_frames), (0, 0));
+        assert_eq!(report.waiting_for_keyframe, 1);
+    }
+}
