@@ -88,9 +88,11 @@ fn pin_system_windows_volume() -> io::Result<SystemVolumeCandidate> {
     let global_target = query_object_link(&format!("\\GLOBAL??\\{}:", char::from(drive)))?;
     let root_name = qualified_device_root(&system_target, &global_target, &components)?;
     let root = open_native_readonly_directory(None, &root_name)?;
+    crate::shared_ancestor_acl::attest_shared_ancestor_acl(&root)?;
     let mut held = vec![root];
     for component in components {
         let child = open_relative_readonly_directory(held.last().ok_or_else(denied)?, component)?;
+        crate::shared_ancestor_acl::attest_shared_ancestor_acl(&child)?;
         held.push(child);
     }
     Ok(SystemVolumeCandidate {
@@ -107,6 +109,7 @@ fn pin_system_program_data() -> io::Result<Vec<File>> {
     // Windows and ProgramData are independently rooted at the SAME retained
     // volume handle. Never reopen either ancestry using a mutable DOS path.
     let program_data = open_relative_readonly_directory(&held[0], "ProgramData")?;
+    crate::shared_ancestor_acl::attest_shared_ancestor_acl(&program_data)?;
     held.push(program_data);
     Ok(held)
 }

@@ -1,5 +1,9 @@
 ## Active execution checkpoint — Astra 2026-10-18
 
+## Active execution checkpoint — shared ancestor ACL qualification (2026-10-18)
+
+Test-only root traversal now requests READ_CONTROL and checks owner/DACL on every retained volume, Windows and ProgramData HANDLE. Separate predicate supports SYSTEM/Administrators/TrustedInstaller owners, ordinary shared-directory add-child/attribute rights, and inherit-only ACEs; rejects untrusted delete-child/delete/security-write rights, unknown ACE forms and null ACLs. Private subtree predicate is unchanged. VM1 RED/GREEN, fmt/Clippy/86 tests and SCM 2 ACL + 5 root tests PASS. VM2 full workspace fmt/Clippy/tests, 86 Win32 tests and SCM ACL 2 + root 5 PASS; hosted CI pending. This is a descriptor snapshot, not revocation of preexisting security-write handles, and does not enable production publication.
+
 ## Active execution checkpoint — atomic relative bootstrap follow-up (2026-10-18)
 
 PR #536 qualifies independent OS-volume discovery and protected relative opens; still inert. Follow-up closes create-then-reopen substitution in a test-only primitive: NtCreateFile FILE_CREATE applies protected SYSTEM/Administrators SDDL and returns the original new-directory HANDLE in one operation. Never adopts or repairs an existing entry. Actual preexisting attribute-writer junction mutation is refused by retained-parent traversal (VM1 native status 0xc0000280), with an ordinary-path positive control. VM1 fmt/package Clippy, 84 unit tests, and LocalSystem 2-test harness PASS; VM2 full workspace fmt/Clippy/tests, 84 Win32 tests and LocalSystem 2/2 PASS; hosted CI pending. Ancestor ACL authority, crash durability, epoch anchor, service activation and physical qualification remain open. See ASTRA WORK HANDOFF for continuation.

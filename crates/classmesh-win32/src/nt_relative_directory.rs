@@ -228,7 +228,7 @@ fn open_native_node(
             // Protected directories need LIST_DIRECTORY (same bit as READ_DATA)
             // so Windows enforces sharing against rename/delete opens. Metadata-only
             // directory handles do not provide that sharing exclusion.
-            0x0010_0080 | if protected { 0x0002_0001 } else { 0 },
+            0x0012_0080 | if protected { 0x0000_0001 } else { 0 },
             &raw mut object,
             &raw mut status_block,
             std::ptr::null_mut(),
