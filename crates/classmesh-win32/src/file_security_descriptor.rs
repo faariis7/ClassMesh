@@ -21,9 +21,31 @@ fn permission_denied() -> io::Error {
 }
 
 pub(crate) fn read_allowed_descriptor(file: &File) -> io::Result<DescriptorSnapshot> {
+    read_allowed_object_descriptor(
+        file.as_raw_handle(),
+        windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT,
+    )
+}
+
+/// # Safety
+/// The caller must retain a valid registry key with READ_CONTROL for this call.
+#[cfg(test)]
+pub(crate) unsafe fn read_allowed_registry_descriptor(
+    key: windows_sys::Win32::System::Registry::HKEY,
+) -> io::Result<DescriptorSnapshot> {
+    read_allowed_object_descriptor(
+        key,
+        windows_sys::Win32::Security::Authorization::SE_REGISTRY_KEY,
+    )
+}
+
+fn read_allowed_object_descriptor(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    object_type: windows_sys::Win32::Security::Authorization::SE_OBJECT_TYPE,
+) -> io::Result<DescriptorSnapshot> {
     use std::ffi::c_void;
     use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
     use windows_sys::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, GetAce, GetLengthSid,
         IsValidAcl, IsValidSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
@@ -74,12 +96,12 @@ pub(crate) fn read_allowed_descriptor(file: &File) -> io::Result<DescriptorSnaps
     let mut owner: PSID = std::ptr::null_mut();
     let mut dacl: *mut ACL = std::ptr::null_mut();
     let mut descriptor = Descriptor(std::ptr::null_mut());
-    // Safety: the File is open and held through all checks; output pointers are
+    // Safety: the wrapper retains a valid object through all checks; output pointers are
     // writable; GetSecurityInfo returns descriptor-owned owner and DACL pointers.
     let status = unsafe {
         GetSecurityInfo(
-            file.as_raw_handle(),
-            SE_FILE_OBJECT,
+            handle,
+            object_type,
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             &raw mut owner,
             std::ptr::null_mut(),
