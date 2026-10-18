@@ -1102,6 +1102,16 @@ impl FocusedAdaptationState {
         }
     }
 
+    /// A feedback frame cannot create or switch its own stream authority.
+    /// Bind only after an interactive StreamOffer was accepted by the media owner.
+    fn bind_stream(&mut self, stream_id: u64) {
+        if self.stream_id != Some(stream_id) {
+            self.stream_id = Some(stream_id);
+            self.last_feedback_at = None;
+            self.controller = focused_profile_controller();
+        }
+    }
+
     fn observe(
         &mut self,
         feedback: &ReceiverFeedback,
@@ -1117,6 +1127,9 @@ impl FocusedAdaptationState {
         if feedback.stream_id == 0 {
             return Err("control.feedback.invalid_stream");
         }
+        if self.stream_id != Some(feedback.stream_id) {
+            return Err("control.feedback.stream_not_accepted");
+        }
         let metrics =
             receiver_feedback_metrics(feedback).ok_or("control.feedback.invalid_metrics")?;
 
@@ -1127,15 +1140,7 @@ impl FocusedAdaptationState {
         // control heartbeat. On the first return, emit Emergency immediately
         // through the existing authorized request/reply channel. This avoids
         // inventing unqualified unsolicited reconfigure wire messages.
-        let expired = if self.stream_id == Some(feedback.stream_id) {
-            self.expire_at(received_at)
-        } else {
-            None
-        };
-        if self.stream_id != Some(feedback.stream_id) {
-            self.stream_id = Some(feedback.stream_id);
-            self.controller = focused_profile_controller();
-        }
+        let expired = self.expire_at(received_at);
         self.last_feedback_at = Some(received_at);
         if expired.is_some() {
             return Ok(expired);
@@ -2328,6 +2333,11 @@ async fn run_established_session(
                         },
                     }
                 };
+                // A peer-supplied feedback ID is never its own stream binding.
+                // Only the Service-accepted focused stream may influence adaptation.
+                if !presentation_offer && answer.accepted {
+                    focused_adaptation.bind_stream(offer.stream_id);
+                }
                 let Some(next_sequence) = outbound_sequence.checked_add(1) else {
                     eprintln!("ClassMesh control session closed: control.sequence.exhausted");
                     connection.close(0_u32.into(), b"control sequence exhausted");
@@ -2379,6 +2389,13 @@ async fn run_established_session(
                         "ClassMesh receiver feedback rejected: control.command.controller_busy"
                     );
                     connection.close(0_u32.into(), b"interactive controller busy");
+                    return;
+                }
+                if !media.is_owner(session.control_session_id) {
+                    eprintln!(
+                        "ClassMesh receiver feedback rejected: control.media.focused_not_owner"
+                    );
+                    connection.close(0_u32.into(), b"focused media not owned");
                     return;
                 }
 
@@ -4383,6 +4400,7 @@ mod tests {
     #[test]
     fn focused_feedback_emits_profile_only_reconfigure_after_hysteresis() {
         let mut adaptation = FocusedAdaptationState::new();
+        adaptation.bind_stream(7);
         let healthy = healthy_receiver_feedback(7);
         assert!(
             adaptation
@@ -4419,8 +4437,42 @@ mod tests {
     }
 
     #[test]
+    fn focused_feedback_cannot_adapt_an_unaccepted_or_different_stream() {
+        let mut state = FocusedAdaptationState::new();
+        let sample = healthy_receiver_feedback(7);
+        assert_eq!(
+            state.observe(&sample),
+            Err("control.feedback.stream_not_accepted")
+        );
+        state.bind_stream(7);
+        assert!(state.observe(&sample).unwrap().is_none());
+        let mut mismatch = healthy_receiver_feedback(8);
+        mismatch.packet_loss = 0.4;
+        assert_eq!(
+            state.observe(&mismatch),
+            Err("control.feedback.stream_not_accepted")
+        );
+        assert_eq!(state.stream_id, Some(7));
+        assert!(
+            state
+                .controller
+                .current()
+                .is_some_and(|d| d.tier == QualityTier::High)
+        );
+        state.bind_stream(8);
+        assert!(
+            state
+                .observe(&healthy_receiver_feedback(8))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(state.stream_id, Some(8));
+    }
+
+    #[test]
     fn focused_feedback_timeout_downgrades_once_and_requires_fresh_recovery() {
         let mut adaptation = FocusedAdaptationState::new();
+        adaptation.bind_stream(7);
         let at = Instant::now();
         assert!(adaptation.expire_at(at + Duration::from_secs(60)).is_none());
         let feedback = healthy_receiver_feedback(7);
@@ -4457,6 +4509,7 @@ mod tests {
     #[test]
     fn first_valid_feedback_after_silence_downgrades_before_any_recovery() {
         let mut adaptation = FocusedAdaptationState::new();
+        adaptation.bind_stream(7);
         let at = Instant::now();
         let healthy = healthy_receiver_feedback(7);
         assert!(adaptation.observe_at(&healthy, at).unwrap().is_none());
@@ -4490,10 +4543,12 @@ mod tests {
     #[test]
     fn new_stream_feedback_after_long_gap_never_reconfigures_previous_stream() {
         let mut adaptation = FocusedAdaptationState::new();
+        adaptation.bind_stream(7);
         let at = Instant::now();
         adaptation
             .observe_at(&healthy_receiver_feedback(7), at)
             .unwrap();
+        adaptation.bind_stream(8);
         let resumed = adaptation
             .observe_at(
                 &healthy_receiver_feedback(8),
@@ -4509,6 +4564,7 @@ mod tests {
     #[test]
     fn invalid_feedback_never_refreshes_or_replaces_active_timeout_state() {
         let mut adaptation = FocusedAdaptationState::new();
+        adaptation.bind_stream(7);
         let at = Instant::now();
         assert!(
             adaptation
@@ -4516,7 +4572,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let mut invalid = healthy_receiver_feedback(8);
+        let mut invalid = healthy_receiver_feedback(7);
         invalid.rtt_ms = f32::NAN;
         assert_eq!(
             adaptation
@@ -4528,6 +4584,7 @@ mod tests {
             .expire_at(at + FOCUSED_FEEDBACK_MAX_SILENCE + Duration::from_micros(1))
             .expect("invalid sample cannot prolong healthy profile");
         assert_eq!(expired.stream_id, 7);
+        adaptation.bind_stream(9);
         assert!(
             adaptation
                 .observe_at(&healthy_receiver_feedback(9), at + Duration::from_secs(90))
@@ -4548,12 +4605,14 @@ mod tests {
     #[test]
     fn focused_feedback_rejects_invalid_stream_and_metrics() {
         let mut adaptation = FocusedAdaptationState::new();
+        adaptation.bind_stream(7);
         let invalid_stream = healthy_receiver_feedback(0);
         assert_eq!(
             adaptation.observe(&invalid_stream),
             Err("control.feedback.invalid_stream")
         );
 
+        adaptation.bind_stream(8);
         let mut invalid_metrics = healthy_receiver_feedback(8);
         invalid_metrics.packet_loss = f32::NAN;
         assert_eq!(
