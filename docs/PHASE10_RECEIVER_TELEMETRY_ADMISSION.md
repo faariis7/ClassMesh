@@ -69,3 +69,15 @@ An explicit Worker presentation pipeline reset or new key binding establishes
 fresh sequence 1. This catches a same-binding receiver/auth counter restart at
 its source; it is not independent authentication or a replacement for the
 Service's exact receiver-generation admission, and it does not activate IPC.
+
+## Real Worker counter type alignment, without implicit authority
+
+`PresentationDeliveryReport::playback_counters` now maps actual Worker
+five-second playback telemetry to the shared `ReceiverPlaybackCounters` type,
+used by the passive Phase 10 byte codec/admission gate. The existing Worker
+runtime log reads that typed result. AEAD authentication counters remain
+separate from decoded, presented, errors, keyframe waits and receiver-local
+queue drops. The per-presentation report sequence stays outside the counter
+struct, as required by the eventual exact owner/receiver binding envelope.
+This is local type alignment only; no new Worker→Service sender, IPC message,
+trusted owner assertion, or adaptive policy decision was enabled.

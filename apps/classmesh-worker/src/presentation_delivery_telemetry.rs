@@ -3,6 +3,7 @@ use crate::group_media_receive::WorkerGroupMediaAuthenticationStats;
 #[cfg(test)]
 use crate::presentation_decode_render::PresentationDecodeBatch;
 use crate::presentation_decode_render::PresentationDecodeStep;
+use classmesh_control::receiver_telemetry::ReceiverPlaybackCounters;
 use classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding;
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,25 @@ pub struct PresentationDeliveryReport {
     pub waiting_for_keyframe: u64,
     /// Queue drops from the receiver runtime's own lifetime counter.
     pub receiver_queue_drops: u64,
+}
+
+impl PresentationDeliveryReport {
+    /// Map the real Worker playback counters into the shared, transport-neutral
+    /// Phase 10 contract without conflating AEAD opens with decoded/presented
+    /// frames. This does not authorize or transmit a receiver report.
+    #[must_use]
+    pub const fn playback_counters(self) -> ReceiverPlaybackCounters {
+        ReceiverPlaybackCounters {
+            authenticated_frames: self.authenticated_frames,
+            rejected_frames: self.auth_rejected_frames,
+            decoded_frames: self.decoded_frames,
+            presented_frames: self.presented_frames,
+            present_errors: self.present_errors,
+            decode_errors: self.decode_errors,
+            keyframe_waits: self.waiting_for_keyframe,
+            queue_drops: self.receiver_queue_drops,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -155,6 +175,36 @@ mod tests {
             stream_id: 13,
             epoch,
         }
+    }
+
+    #[test]
+    fn published_worker_report_maps_into_distinct_shared_playback_counters() {
+        let report = PresentationDeliveryReport {
+            sample_sequence: 41,
+            authenticated_frames: 13,
+            auth_rejected_frames: 3,
+            decoded_frames: 10,
+            presented_frames: 8,
+            present_errors: 2,
+            decode_errors: 1,
+            waiting_for_keyframe: 4,
+            receiver_queue_drops: 6,
+        };
+        let counters = report.playback_counters();
+        assert_eq!(
+            counters,
+            classmesh_control::receiver_telemetry::ReceiverPlaybackCounters {
+                authenticated_frames: 13,
+                rejected_frames: 3,
+                decoded_frames: 10,
+                presented_frames: 8,
+                present_errors: 2,
+                decode_errors: 1,
+                keyframe_waits: 4,
+                queue_drops: 6,
+            }
+        );
+        assert_eq!(report.sample_sequence, 41);
     }
 
     #[test]
