@@ -30,6 +30,7 @@ pub mod presentation_recovery;
 pub mod presentation_sender_plan;
 pub mod presentation_state;
 pub mod quic;
+pub mod receiver_telemetry;
 pub mod stream;
 pub mod system_action_execution;
 pub mod x509_issuance;
