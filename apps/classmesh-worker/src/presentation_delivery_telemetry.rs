@@ -246,24 +246,30 @@ mod tests {
             .report_if_due(at + Duration::from_secs(5), binding(1), auth, 0)
             .unwrap();
         assert_eq!(first.sample_sequence, 1);
-        assert!(tracker
-            .report_if_due(at + Duration::from_secs(6), binding(1), auth, 0)
-            .is_none());
+        assert!(
+            tracker
+                .report_if_due(at + Duration::from_secs(6), binding(1), auth, 0)
+                .is_none()
+        );
         let second = tracker
             .report_if_due(at + Duration::from_secs(10), binding(1), auth, 0)
             .unwrap();
         assert_eq!(second.sample_sequence, 2);
-        assert!(tracker
-            .report_if_due(at + Duration::from_secs(11), binding(2), auth, 0)
-            .is_none());
+        assert!(
+            tracker
+                .report_if_due(at + Duration::from_secs(11), binding(2), auth, 0)
+                .is_none()
+        );
         let replacement = tracker
             .report_if_due(at + Duration::from_secs(16), binding(2), auth, 0)
             .unwrap();
         assert_eq!(replacement.sample_sequence, 1);
         tracker.reset();
-        assert!(tracker
-            .report_if_due(at + Duration::from_secs(17), binding(2), auth, 0)
-            .is_none());
+        assert!(
+            tracker
+                .report_if_due(at + Duration::from_secs(17), binding(2), auth, 0)
+                .is_none()
+        );
         assert_eq!(
             tracker
                 .report_if_due(at + Duration::from_secs(22), binding(2), auth, 0)
@@ -287,8 +293,10 @@ mod tests {
                 .sample_sequence,
             u64::MAX
         );
-        assert!(tracker
-            .report_if_due(at + Duration::from_secs(10), binding(1), auth, 0)
-            .is_none());
+        assert!(
+            tracker
+                .report_if_due(at + Duration::from_secs(10), binding(1), auth, 0)
+                .is_none()
+        );
     }
 }
