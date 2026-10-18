@@ -194,3 +194,21 @@ Wrong epoch/request/session or invalid owner must fail without any serialized
 bytes. This helper remains passive, with no new privileged IPC or automatic
 adaptation/quality upgrade. Tests cover exact positive mapping and rejection
 of every mismatched protected media-key identity field.
+
+
+## Real Worker diagnostic through the portable Service gate
+
+A Worker-library cross-layer qualification test drives the **real**
+`PresentationDeliveryTelemetry::report_if_due` through the
+`snapshot_for_bound_key` consistency guard, fixed-width wire encoder and
+`ReceiverTelemetryIngress` Service gate. Before independent Service
+activation the report is rejected. Exactly timed contiguous local diagnostics
+yield AEAD-open, AEAD-reject and queue-drop **intervals** but do not claim
+decoded or presented frames in the absence of actual decoder outcomes. A new
+protected key epoch resets the reporter sequence, requires a new independently
+activated Service receiver identity and cannot relabel old reports.
+
+The test is strictly an in-process composition with a simulated Service
+authority: it does not create, authenticate, prioritize, negotiate or exercise
+real Windows IPC, and cannot substitute for native Windows VM and physical
+two-host GPU/decode qualification. It makes no adaptive-quality decision.
