@@ -77,3 +77,6 @@ pub use teacher_interaction::{
 };
 #[cfg(windows)]
 pub use workstation::{Win32WorkstationLocker, WorkstationLockError, WorkstationLocker};
+
+#[cfg(all(windows, test))]
+mod trusted_policy;

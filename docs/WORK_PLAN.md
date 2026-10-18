@@ -518,3 +518,7 @@ Current control-plane research baseline:
 Quality-tooling changes should stay in small independent PRs so they do not block or obscure Phase implementation diffs.
 
 Each merged Phase PR updates this file and `docs/IMPLEMENTATION_STATUS.md`.
+
+## Phase 12 native install and Service boundary — 2026-10-19
+
+#553 merged at 0ff3a2662b003545201ecb8818d857af62870c42 after CI39148646332 both jobs PASS. Next coherent batch: create-only NT-relative protected policy files with same-handle flush/readback before Registry commit; a protected exclusive authority file spanning install/startup/runtime to exclude concurrent writers; optional (default-off) Service startup integration with no legacy policy fallback. Acceptance: native provision/update/rollback/orphan/missing-current/active-runtime exclusion tests, feature and default Clippy/tests on both VMs and hosted CI. Do not modify Phase 10 control_runtime or activate the new path on installed machines. Stop/install/restart is the initial serialized lifecycle; hot reload remains separate.
