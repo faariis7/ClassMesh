@@ -789,14 +789,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Instant::now(),
                         decoder.waiting_for_keyframe(),
                     ) {
-                        request_worker_presentation_keyframe_limited(
+                        if request_worker_presentation_keyframe_limited(
                             &pipe,
                             std::process::id(),
                             actual_session,
                             binding,
                             after_frame_id,
                             &mut presentation_keyframe_request_retry,
-                        )?;
+                        )? {
+                            presentation_silence.note_request_sent(binding);
+                        }
                     }
                 }
             }
@@ -1543,10 +1545,10 @@ fn request_worker_presentation_keyframe_limited(
     binding: classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding,
     after_frame_id: u64,
     retry: &mut classmesh_worker::presentation_keyframe_retry::PresentationKeyframeRetry,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     let now = std::time::Instant::now();
     if !retry.should_request(binding, now) {
-        return Ok(());
+        return Ok(false);
     }
     publish_worker_presentation_feedback(
         pipe,
@@ -1559,7 +1561,7 @@ fn request_worker_presentation_keyframe_limited(
         },
     )?;
     retry.record_sent(binding, now);
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(windows)]

@@ -5,6 +5,9 @@ use std::time::{Duration, Instant};
 /// Bounded per-session retry when the decoder is still waiting for a keyframe.
 /// The Teacher-side recovery coordinator independently limits global IDR rate.
 const KEYFRAME_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+// Limit unanswered idle-only recovery attempts for paused or disconnected streams.
+// A newly authenticated frame/epoch gives the session a fresh chance to recover.
+const MAX_SILENCE_RECOVERY_REQUESTS: u8 = 3;
 
 #[derive(Debug, Default)]
 pub struct PresentationKeyframeRetry {
@@ -40,6 +43,8 @@ pub struct PresentationKeyframeSilence {
     binding: Option<PresentationKeyInstallBinding>,
     last_authenticated_at: Option<Instant>,
     last_authenticated_frame_id: u64,
+    has_authenticated_frame: bool,
+    sent_recovery_requests: u8,
 }
 
 impl PresentationKeyframeSilence {
@@ -57,14 +62,28 @@ impl PresentationKeyframeSilence {
             self.binding = Some(binding);
             self.last_authenticated_at = Some(now);
             self.last_authenticated_frame_id = frame_id;
+            self.has_authenticated_frame = true;
+            self.sent_recovery_requests = 0;
         } else if self.last_authenticated_at.is_none_or(|last| now >= last) {
             self.last_authenticated_at = Some(now);
             self.last_authenticated_frame_id = frame_id;
+            self.has_authenticated_frame = true;
+            self.sent_recovery_requests = 0;
         }
     }
 
-    /// Returns the last authenticated frame ID, or 0 before any authenticated
-    /// frame, only if a live decoder is still waiting for its first valid IDR.
+    /// Counts only successfully dispatched recovery requests. Suppressed
+    /// attempts or a failed send must not consume the silence budget.
+    pub fn note_request_sent(&mut self, binding: PresentationKeyInstallBinding) {
+        if self.binding == Some(binding) {
+            self.sent_recovery_requests = self.sent_recovery_requests.saturating_add(1);
+        }
+    }
+
+    /// Returns the last authenticated frame ID (or 0 before any verified frame)
+    /// after the inactivity threshold. An initial stream that is not waiting
+    /// for a keyframe is not considered stalled; an already-playing stream
+    /// can freeze even while the decoder retains a healthy reference frame.
     /// First invocation arms the inactivity clock, avoiding immediate request
     /// storms when starting a fresh receiver with no video yet.
     pub fn due(
@@ -77,9 +96,14 @@ impl PresentationKeyframeSilence {
             self.binding = Some(binding);
             self.last_authenticated_at = Some(now);
             self.last_authenticated_frame_id = 0;
+            self.has_authenticated_frame = false;
+            self.sent_recovery_requests = 0;
             return None;
         }
-        if !waiting_for_keyframe {
+        if self.sent_recovery_requests >= MAX_SILENCE_RECOVERY_REQUESTS {
+            return None;
+        }
+        if !waiting_for_keyframe && !self.has_authenticated_frame {
             return None;
         }
         let last = self.last_authenticated_at?;
@@ -99,6 +123,63 @@ mod tests {
             stream_id: 7,
             epoch,
         }
+    }
+
+    #[test]
+    fn previously_playing_stream_freeze_requests_recovery_even_if_decoder_is_not_waiting() {
+        let start = Instant::now();
+        let mut watch = PresentationKeyframeSilence::default();
+        // A receiver that has never accepted a frame and whose decoder isn't
+        // waiting must not trigger speculative unsolicited requests.
+        assert_eq!(watch.due(binding(1), start, false), None);
+        assert_eq!(
+            watch.due(binding(1), start + Duration::from_secs(10), false),
+            None
+        );
+        watch.note_authenticated_frame(binding(1), 75, start + Duration::from_secs(11));
+        assert_eq!(
+            watch.due(binding(1), start + Duration::from_secs(12), false),
+            None
+        );
+        assert_eq!(
+            watch.due(binding(1), start + Duration::from_secs(13), false),
+            Some(75)
+        );
+        // Progress under authenticated media keeps resetting the freeze clock.
+        watch.note_authenticated_frame(binding(1), 76, start + Duration::from_secs(14));
+        assert_eq!(
+            watch.due(binding(1), start + Duration::from_secs(15), false),
+            None
+        );
+        assert_eq!(
+            watch.due(binding(1), start + Duration::from_secs(16), false),
+            Some(76)
+        );
+    }
+
+    #[test]
+    fn healthy_freeze_state_cannot_survive_stream_rotation_or_clear() {
+        let start = Instant::now();
+        let mut watch = PresentationKeyframeSilence::default();
+        watch.note_authenticated_frame(binding(1), 88, start);
+        assert_eq!(
+            watch.due(binding(2), start + Duration::from_secs(9), false),
+            None
+        );
+        assert_eq!(
+            watch.due(binding(2), start + Duration::from_secs(12), false),
+            None
+        );
+        watch.note_authenticated_frame(binding(2), 2, start + Duration::from_secs(13));
+        assert_eq!(
+            watch.due(binding(2), start + Duration::from_secs(15), false),
+            Some(2)
+        );
+        watch.reset();
+        assert_eq!(
+            watch.due(binding(2), start + Duration::from_secs(40), false),
+            None
+        );
     }
 
     #[test]
@@ -175,13 +256,64 @@ mod tests {
         assert_eq!(watch.due(binding(1), start, true), None);
         assert_eq!(
             watch.due(binding(1), start + Duration::from_secs(20), false),
-            None
+            Some(17)
         );
         // Refuse an old observation attempting to replace current cursor.
         watch.note_authenticated_frame(binding(1), 1, start);
         assert_eq!(
             watch.due(binding(1), start + Duration::from_secs(12), true),
             Some(17)
+        );
+    }
+
+    #[test]
+    fn fully_silent_stream_stops_after_three_sent_recovery_requests() {
+        let start = Instant::now();
+        let mut watch = PresentationKeyframeSilence::default();
+        assert_eq!(watch.due(binding(1), start, true), None);
+        for attempt in 1..=3 {
+            let at = start + Duration::from_secs(attempt * 2);
+            assert_eq!(watch.due(binding(1), at, true), Some(0));
+            watch.note_request_sent(binding(1));
+        }
+        assert_eq!(
+            watch.due(binding(1), start + Duration::from_secs(30), true),
+            None
+        );
+        assert_eq!(
+            watch.due(binding(1), start + Duration::from_secs(30), false),
+            None
+        );
+        watch.note_authenticated_frame(binding(1), 25, start + Duration::from_secs(31));
+        assert_eq!(
+            watch.due(binding(1), start + Duration::from_secs(32), false),
+            None
+        );
+        assert_eq!(
+            watch.due(binding(1), start + Duration::from_secs(33), false),
+            Some(25)
+        );
+    }
+
+    #[test]
+    fn suppressed_or_failed_send_does_not_consume_silence_recovery_budget() {
+        let start = Instant::now();
+        let mut watch = PresentationKeyframeSilence::default();
+        assert_eq!(watch.due(binding(1), start, true), None);
+        for offset in 2..20 {
+            assert_eq!(
+                watch.due(binding(1), start + Duration::from_secs(offset), true),
+                Some(0)
+            );
+        }
+        watch.note_request_sent(binding(1));
+        assert_eq!(
+            watch.due(binding(2), start + Duration::from_secs(20), true),
+            None
+        );
+        assert_eq!(
+            watch.due(binding(2), start + Duration::from_secs(22), true),
+            Some(0)
         );
     }
 
