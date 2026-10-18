@@ -104,6 +104,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         classmesh_worker::presentation_decode_render::PresentationDecodeRuntime,
     > = None;
     let mut presentation_keyframe_request_pending = false;
+    let mut presentation_delivery_telemetry =
+        classmesh_worker::presentation_delivery_telemetry::PresentationDeliveryTelemetry::default();
 
     loop {
         let now = Instant::now();
@@ -394,6 +396,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         presentation_unicast = None;
                         presentation_decode = None;
                         presentation_keyframe_request_pending = false;
+                        presentation_delivery_telemetry.reset();
                         match classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime::start(start) {
                             Ok(receiver) => {
                                 match classmesh_worker::presentation_decode_render::PresentationDecodeRuntime::new(
@@ -469,6 +472,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         presentation_unicast = None;
                         presentation_decode = None;
                         presentation_keyframe_request_pending = false;
+                        presentation_delivery_telemetry.reset();
                         match classmesh_worker::presentation_unicast_receive::WorkerPresentationUnicastRuntime::start(start) {
                             Ok(receiver) => {
                                 match classmesh_worker::presentation_decode_render::PresentationDecodeRuntime::new(
@@ -519,6 +523,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     presentation_unicast = None;
                     presentation_decode = None;
                     presentation_keyframe_request_pending = false;
+                    presentation_delivery_telemetry.reset();
                     eprintln!(
                         "ClassMesh Worker stopped presentation receive runtime with exact key clear"
                     );
@@ -667,6 +672,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                         match decoder.submit(&access_unit) {
                                             Ok(classmesh_worker::presentation_decode_render::PresentationDecodeStep::Decoded(batch)) => {
+                                                presentation_delivery_telemetry.accept_decoded(
+                                                    binding,
+                                                    classmesh_worker::presentation_decode_render::PresentationDecodeStep::Decoded(batch),
+                                                );
                                                 if batch.present_errors > 0 {
                                                     eprintln!(
                                                         "ClassMesh Worker presentation render reported {} media-local errors",
@@ -687,6 +696,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 }
                                             }
                                             Ok(classmesh_worker::presentation_decode_render::PresentationDecodeStep::WaitingForKeyframe) => {
+                                                presentation_delivery_telemetry.accept_decoded(
+                                                    binding,
+                                                    classmesh_worker::presentation_decode_render::PresentationDecodeStep::WaitingForKeyframe,
+                                                );
                                                 request_worker_presentation_keyframe_once(
                                                     &pipe,
                                                     std::process::id(),
@@ -697,6 +710,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 )?;
                                             }
                                             Err(error) => {
+                                                presentation_delivery_telemetry.accept_decode_error(binding);
                                                 eprintln!(
                                                     "ClassMesh Worker presentation decode failed on frame={}: {error}; waiting for a new keyframe",
                                                     access_unit.frame_id
@@ -744,6 +758,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             presentation_unicast = None;
             presentation_decode = None;
             presentation_keyframe_request_pending = false;
+            presentation_delivery_telemetry.reset();
+        }
+        // Local diagnostics only: do not send unauthenticated or unversioned
+        // counters across the privileged Service/Teacher IPC boundary.
+        if presentation_decode.is_some()
+            && (presentation_multicast.is_some() || presentation_unicast.is_some())
+        {
+            if let (Some(binding), Some(authenticated)) = (
+                group_media_keys.binding(),
+                group_media_keys.authentication_stats(),
+            ) {
+                let queue_drops = presentation_multicast
+                    .as_ref()
+                    .map(|receiver| receiver.dropped_events())
+                    .or_else(|| {
+                        presentation_unicast
+                            .as_ref()
+                            .map(|receiver| receiver.dropped_events())
+                    })
+                    .unwrap_or(0);
+                if let Some(report) = presentation_delivery_telemetry.report_if_due(
+                    Instant::now(),
+                    binding,
+                    authenticated,
+                    queue_drops,
+                ) {
+                    eprintln!(
+                        "ClassMesh Worker local presentation playback: presentation={} stream={} epoch={} auth_opened={} auth_rejected={} decoded={} presented={} present_errors={} decode_errors={} waiting_for_keyframe={} queue_drop_events_total={}",
+                        binding.presentation_id,
+                        binding.stream_id,
+                        binding.epoch,
+                        report.authenticated_frames,
+                        report.auth_rejected_frames,
+                        report.decoded_frames,
+                        report.presented_frames,
+                        report.present_errors,
+                        report.decode_errors,
+                        report.waiting_for_keyframe,
+                        report.receiver_queue_drops,
+                    );
+                }
+            }
         }
 
         if capture.is_none() && capture_restart.is_due(Instant::now()) {
