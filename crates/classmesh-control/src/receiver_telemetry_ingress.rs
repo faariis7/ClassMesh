@@ -46,8 +46,8 @@ impl ReceiverTelemetryIngress {
         bytes: &[u8],
         service_received_at: Instant,
     ) -> Result<ReceiverTelemetryDecision, ReceiverTelemetryIngressError> {
-        let snapshot = decode_receiver_telemetry(bytes)
-            .map_err(ReceiverTelemetryIngressError::Wire)?;
+        let snapshot =
+            decode_receiver_telemetry(bytes).map_err(ReceiverTelemetryIngressError::Wire)?;
         self.gate
             .observe(snapshot, service_received_at)
             .map_err(ReceiverTelemetryIngressError::Admission)
