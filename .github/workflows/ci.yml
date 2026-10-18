@@ -98,11 +98,14 @@ jobs:
       - name: Build adaptive controller benchmark
         run: cargo build -p classmesh-lab --bin classmesh-adaptive-controller-benchmark --release
 
-      - name: Qualify opt-in trusted policy Service build
-        run: |
-          cargo clippy -p classmesh-service -p classmesh-win32 --all-targets --features experimental-trusted-policy -- -D warnings
-          cargo test -p classmesh-win32 --features experimental-trusted-policy
-          cargo build -p classmesh-service --features experimental-trusted-policy
+      - name: Clippy opt-in trusted policy Service
+        run: cargo clippy -p classmesh-service -p classmesh-win32 --all-targets --features experimental-trusted-policy -- -D warnings
+
+      - name: Test opt-in trusted policy store
+        run: cargo test -p classmesh-win32 --features experimental-trusted-policy
+
+      - name: Build opt-in trusted policy Service
+        run: cargo build -p classmesh-service --features experimental-trusted-policy
 
       - name: Build Phase 12B4 Service qualification binary
         run: cargo build -p classmesh-service --release
