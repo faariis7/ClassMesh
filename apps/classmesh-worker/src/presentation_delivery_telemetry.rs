@@ -295,18 +295,33 @@ mod tests {
 
     #[test]
     fn telemetry_drops_only_come_from_exactly_one_verified_receiver() {
-        assert_eq!(super::single_exact_receiver_queue_drops(Some(8), None), Some(8));
-        assert_eq!(super::single_exact_receiver_queue_drops(None, Some(13)), Some(13));
+        assert_eq!(
+            super::single_exact_receiver_queue_drops(Some(8), None),
+            Some(8)
+        );
+        assert_eq!(
+            super::single_exact_receiver_queue_drops(None, Some(13)),
+            Some(13)
+        );
         // No active matched runtime cannot supply an invented zero-drop report.
         assert_eq!(super::single_exact_receiver_queue_drops(None, None), None);
         // Two simultaneously matching runtimes cannot arbitrarily pick one.
-        assert_eq!(super::single_exact_receiver_queue_drops(Some(8), Some(13)), None);
+        assert_eq!(
+            super::single_exact_receiver_queue_drops(Some(8), Some(13)),
+            None
+        );
     }
 
     #[test]
     fn telemetry_drops_allow_zero_only_from_a_verified_receiver() {
-        assert_eq!(super::single_exact_receiver_queue_drops(Some(0), None), Some(0));
-        assert_eq!(super::single_exact_receiver_queue_drops(None, Some(0)), Some(0));
+        assert_eq!(
+            super::single_exact_receiver_queue_drops(Some(0), None),
+            Some(0)
+        );
+        assert_eq!(
+            super::single_exact_receiver_queue_drops(None, Some(0)),
+            Some(0)
+        );
         assert_eq!(super::single_exact_receiver_queue_drops(None, None), None);
     }
 
