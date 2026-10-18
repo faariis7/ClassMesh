@@ -271,7 +271,10 @@ mod tests {
     }
     #[test]
     fn native_install_recovers_process_crash_without_adopting_orphans() {
-        let scope = format!("ClassMesh-anchor-probe-crash-{}", std::process::id());
+        let scope = format!(
+            "ClassMesh-anchor-probe-install-crash-{}",
+            std::process::id()
+        );
         provision_at(&scope, 1, VALID).unwrap();
         worker(&scope, "staged-exit");
         assert_eq!(open_at(&scope).unwrap().epoch(), 1);
@@ -293,6 +296,17 @@ mod tests {
         let Ok(scope) = std::env::var("CLASSMESH_INSTALL_SCOPE") else {
             return;
         };
+        assert!(
+            [
+                "ClassMesh-anchor-probe-install-",
+                "ClassMesh-anchor-probe-install-crash-"
+            ]
+            .iter()
+            .any(|prefix| scope
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.parse::<u32>().is_ok())),
+            "worker accepts only disposable install fixture names"
+        );
         let mode = std::env::var("CLASSMESH_INSTALL_MODE").unwrap();
         match mode.as_str() {
             "compete" => {
