@@ -385,4 +385,30 @@ mod tests {
 
         let _ = fs::remove_dir_all(path.parent().expect("test parent"));
     }
+    #[test]
+    fn retained_identity_reader_is_bounded_and_validates_the_same_bytes() {
+        let expected = bundle();
+        let bytes = serde_json::to_vec(&PersistedMachineIdentity::from_bundle(&expected)).unwrap();
+        struct ShortReads<'a>(&'a [u8]);
+        impl Read for ShortReads<'_> {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                let count = output.len().min(3).min(self.0.len());
+                output[..count].copy_from_slice(&self.0[..count]);
+                self.0 = &self.0[count..];
+                Ok(count)
+            }
+        }
+        assert_eq!(DurableMachineIdentity::parse_from_reader(ShortReads(&bytes)).unwrap(), expected);
+        assert!(DurableMachineIdentity::parse_from_reader(&bytes[..bytes.len()-1]).is_err());
+        let mut invalid = PersistedMachineIdentity::from_bundle(&bundle());
+        invalid.cng_key_name.push('\0');
+        assert!(matches!(DurableMachineIdentity::parse_from_reader(serde_json::to_vec(&invalid).unwrap().as_slice()), Err(MachineIdentityStateError::InvalidKeyName)));
+        assert!(matches!(DurableMachineIdentity::parse_from_reader(std::io::repeat(b' ')), Err(MachineIdentityStateError::StateTooLarge { .. })));
+        struct FailedRead;
+        impl Read for FailedRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> { Err(std::io::Error::other("injected IO failure")) }
+        }
+        assert!(matches!(DurableMachineIdentity::parse_from_reader(FailedRead), Err(MachineIdentityStateError::Io(_))));
+    }
+
 }
