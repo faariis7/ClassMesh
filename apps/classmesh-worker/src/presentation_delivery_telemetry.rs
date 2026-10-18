@@ -44,6 +44,11 @@ pub struct PresentationDeliveryTelemetry {
     binding: Option<PresentationKeyInstallBinding>,
     last_report_at: Option<Instant>,
     report_sequence: u64,
+    /// Last successfully emitted cumulative counters, in the same receiver lifetime.
+    last_external: Option<(u64, u64, u64)>,
+    /// Once a source counter resets under the same binding, do not issue a new
+    /// sequence or pretend the measurement is continuous.
+    external_counter_regression: bool,
     decoded_frames: u64,
     presented_frames: u64,
     present_errors: u64,
@@ -102,10 +107,28 @@ impl PresentationDeliveryTelemetry {
         if now.checked_duration_since(last)? < REPORT_INTERVAL {
             return None;
         }
+        if self.external_counter_regression {
+            return None;
+        }
+        let external = (
+            authenticated.opened_frames,
+            authenticated.rejected_frames,
+            receiver_queue_drops,
+        );
+        if self.last_external.is_some_and(|before| {
+            external.0 < before.0 || external.1 < before.1 || external.2 < before.2
+        }) {
+            // A hidden receiver/authentication runtime replacement with the
+            // same key identity cannot replay sequence 1 or forge a delta.
+            // Require explicit pipeline reset or exact binding replacement.
+            self.external_counter_regression = true;
+            return None;
+        }
         // On exhaustion, fail closed rather than emitting a replayed sequence.
         let next_sequence = self.report_sequence.checked_add(1)?;
         self.report_sequence = next_sequence;
         self.last_report_at = Some(now);
+        self.last_external = Some(external);
         Some(PresentationDeliveryReport {
             sample_sequence: next_sequence,
             authenticated_frames: authenticated.opened_frames,
@@ -323,6 +346,82 @@ mod tests {
             Some(0)
         );
         assert_eq!(super::single_exact_receiver_queue_drops(None, None), None);
+    }
+
+    #[test]
+    fn external_auth_counter_reset_latches_fail_closed_until_binding_changes() {
+        let mut tracker = PresentationDeliveryTelemetry::default();
+        let start = Instant::now();
+        let auth = |opened_frames, rejected_frames| WorkerGroupMediaAuthenticationStats {
+            opened_frames,
+            rejected_frames,
+        };
+        assert!(
+            tracker
+                .report_if_due(start, binding(1), auth(0, 0), 0)
+                .is_none()
+        );
+        let first = tracker
+            .report_if_due(start + Duration::from_secs(5), binding(1), auth(7, 2), 4)
+            .unwrap();
+        assert_eq!(first.sample_sequence, 1);
+        assert!(
+            tracker
+                .report_if_due(start + Duration::from_secs(10), binding(1), auth(6, 2), 5)
+                .is_none()
+        );
+        assert_eq!(tracker.report_sequence, 1);
+        // Larger later totals cannot conceal a reset of the same lifetime counters.
+        assert!(
+            tracker
+                .report_if_due(start + Duration::from_secs(15), binding(1), auth(20, 4), 8)
+                .is_none()
+        );
+        assert_eq!(tracker.report_sequence, 1);
+        // Only an explicitly new key binding (or an existing runtime reset) can
+        // establish a new sequence/baseline; no old sequence is replayed.
+        assert!(
+            tracker
+                .report_if_due(start + Duration::from_secs(16), binding(2), auth(0, 0), 0)
+                .is_none()
+        );
+        let fresh = tracker
+            .report_if_due(start + Duration::from_secs(21), binding(2), auth(1, 0), 0)
+            .unwrap();
+        assert_eq!(fresh.sample_sequence, 1);
+    }
+
+    #[test]
+    fn rejected_auth_and_receiver_drop_counter_resets_also_fail_closed() {
+        let start = Instant::now();
+        for (opened, rejected, drops) in [(9, 2, 8), (9, 4, 7)] {
+            let mut tracker = PresentationDeliveryTelemetry::default();
+            let auth = |opened_frames, rejected_frames| WorkerGroupMediaAuthenticationStats {
+                opened_frames,
+                rejected_frames,
+            };
+            assert!(
+                tracker
+                    .report_if_due(start, binding(1), auth(0, 0), 0)
+                    .is_none()
+            );
+            assert!(
+                tracker
+                    .report_if_due(start + Duration::from_secs(5), binding(1), auth(8, 4), 8)
+                    .is_some()
+            );
+            assert!(
+                tracker
+                    .report_if_due(
+                        start + Duration::from_secs(10),
+                        binding(1),
+                        auth(opened, rejected),
+                        drops
+                    )
+                    .is_none()
+            );
+            assert_eq!(tracker.report_sequence, 1);
+        }
     }
 
     #[test]
