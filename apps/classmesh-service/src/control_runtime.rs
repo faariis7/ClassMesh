@@ -82,6 +82,8 @@ const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const PRESENTATION_KEY_INSTALL_TIMEOUT: Duration = Duration::from_secs(1);
 const PRESENTATION_START_TIMEOUT: Duration = Duration::from_secs(1);
+// An accepted focused feedback sample expires independently of control heartbeat.
+const FOCUSED_FEEDBACK_MAX_SILENCE: Duration = Duration::from_secs(2);
 const SYSTEM_ACTION_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const TEACHER_INTERACTION_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const CLIPBOARD_READ_REPLY_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1087,6 +1089,7 @@ impl PresentationDispatchState {
 #[derive(Debug)]
 struct FocusedAdaptationState {
     stream_id: Option<u64>,
+    last_feedback_at: Option<Instant>,
     controller: FocusedProfileController,
 }
 
@@ -1094,6 +1097,7 @@ impl FocusedAdaptationState {
     fn new() -> Self {
         Self {
             stream_id: None,
+            last_feedback_at: None,
             controller: focused_profile_controller(),
         }
     }
@@ -1102,15 +1106,39 @@ impl FocusedAdaptationState {
         &mut self,
         feedback: &ReceiverFeedback,
     ) -> Result<Option<StreamReconfigure>, &'static str> {
+        self.observe_at(feedback, Instant::now())
+    }
+
+    fn observe_at(
+        &mut self,
+        feedback: &ReceiverFeedback,
+        received_at: Instant,
+    ) -> Result<Option<StreamReconfigure>, &'static str> {
         if feedback.stream_id == 0 {
             return Err("control.feedback.invalid_stream");
         }
         let metrics =
             receiver_feedback_metrics(feedback).ok_or("control.feedback.invalid_metrics")?;
 
+        if self.last_feedback_at.is_some_and(|last| received_at < last) {
+            return Err("control.feedback.clock_regressed");
+        }
+        // Timeouts are evaluated from the previously accepted feedback, not
+        // control heartbeat. On the first return, emit Emergency immediately
+        // through the existing authorized request/reply channel. This avoids
+        // inventing unqualified unsolicited reconfigure wire messages.
+        let expired = if self.stream_id == Some(feedback.stream_id) {
+            self.expire_at(received_at)
+        } else {
+            None
+        };
         if self.stream_id != Some(feedback.stream_id) {
             self.stream_id = Some(feedback.stream_id);
             self.controller = focused_profile_controller();
+        }
+        self.last_feedback_at = Some(received_at);
+        if expired.is_some() {
+            return Ok(expired);
         }
 
         let decision = self.controller.observe(metrics);
@@ -1118,12 +1146,49 @@ impl FocusedAdaptationState {
             return Ok(None);
         }
 
-        Ok(Some(StreamReconfigure {
-            stream_id: feedback.stream_id,
-            profile: Some(stream_profile_to_wire(decision.profile)),
+        Ok(Some(Self::profile_only_reconfigure(
+            feedback.stream_id,
+            decision.profile,
+        )))
+    }
+
+    fn expire_at(&mut self, now: Instant) -> Option<StreamReconfigure> {
+        let last = self.last_feedback_at?;
+        if now.checked_duration_since(last)? <= FOCUSED_FEEDBACK_MAX_SILENCE {
+            return None;
+        }
+        // Clearing the pending recovery window is as important as lowering
+        // the tier; no old healthy samples may survive an inactive interval.
+        self.last_feedback_at = None;
+        let prior = self.controller.current()?.tier;
+        self.controller = FocusedProfileController::with_initial_tier(
+            StreamKind::Interactive,
+            AdaptationPolicy::default(),
+            HysteresisConfig::default(),
+            QualityTier::Emergency,
+        );
+        (prior != QualityTier::Emergency).then(|| {
+            Self::profile_only_reconfigure(
+                self.stream_id
+                    .expect("accepted feedback has valid stream id"),
+                self.controller
+                    .current()
+                    .expect("initialized emergency tier")
+                    .profile,
+            )
+        })
+    }
+
+    fn profile_only_reconfigure(
+        stream_id: u64,
+        profile: classmesh_core::adaptation::StreamProfile,
+    ) -> StreamReconfigure {
+        StreamReconfigure {
+            stream_id,
+            profile: Some(stream_profile_to_wire(profile)),
             transport: WireMediaTransport::Unspecified as i32,
             transport_parameters: Vec::new(),
-        }))
+        }
     }
 }
 
@@ -4351,6 +4416,133 @@ mod tests {
             WireMediaTransport::Unspecified as i32
         );
         assert!(reconfigure.transport_parameters.is_empty());
+    }
+
+    #[test]
+    fn focused_feedback_timeout_downgrades_once_and_requires_fresh_recovery() {
+        let mut adaptation = FocusedAdaptationState::new();
+        let at = Instant::now();
+        assert!(adaptation.expire_at(at + Duration::from_secs(60)).is_none());
+        let feedback = healthy_receiver_feedback(7);
+        assert!(adaptation.observe_at(&feedback, at).unwrap().is_none());
+        assert!(
+            adaptation
+                .expire_at(at + FOCUSED_FEEDBACK_MAX_SILENCE)
+                .is_none()
+        );
+        let event = adaptation
+            .expire_at(at + FOCUSED_FEEDBACK_MAX_SILENCE + Duration::from_micros(1))
+            .expect("feedback silence must downgrade the media profile");
+        assert_eq!(event.stream_id, 7);
+        let profile = event.profile.unwrap();
+        assert_eq!((profile.width, profile.height, profile.fps), (640, 360, 20));
+        assert_eq!(event.transport, WireMediaTransport::Unspecified as i32);
+        assert!(event.transport_parameters.is_empty());
+        assert!(adaptation.expire_at(at + Duration::from_secs(30)).is_none());
+        // Hysteresis must be fresh after timeout, never carry recovered credit.
+        for index in 1..HysteresisConfig::default().recover_samples {
+            let next =
+                at + FOCUSED_FEEDBACK_MAX_SILENCE + Duration::from_secs(u64::from(index) + 1);
+            assert!(adaptation.observe_at(&feedback, next).unwrap().is_none());
+        }
+        let next = at + FOCUSED_FEEDBACK_MAX_SILENCE + Duration::from_secs(6);
+        let recovered = adaptation.observe_at(&feedback, next).unwrap().unwrap();
+        let profile = recovered.profile.unwrap();
+        assert_eq!(
+            (profile.width, profile.height, profile.fps),
+            (1920, 1080, 30)
+        );
+    }
+
+    #[test]
+    fn first_valid_feedback_after_silence_downgrades_before_any_recovery() {
+        let mut adaptation = FocusedAdaptationState::new();
+        let at = Instant::now();
+        let healthy = healthy_receiver_feedback(7);
+        assert!(adaptation.observe_at(&healthy, at).unwrap().is_none());
+        let after_gap = at + FOCUSED_FEEDBACK_MAX_SILENCE + Duration::from_millis(1);
+        let emergency = adaptation.observe_at(&healthy, after_gap).unwrap().unwrap();
+        let emergency_profile = emergency.profile.unwrap();
+        assert_eq!(
+            (emergency_profile.width, emergency_profile.height),
+            (640, 360)
+        );
+        // Returning data did not provide five independent fresh measurements yet.
+        for count in 1..HysteresisConfig::default().recover_samples {
+            assert!(
+                adaptation
+                    .observe_at(
+                        &healthy,
+                        after_gap + Duration::from_millis(u64::from(count) * 100)
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let recovered = adaptation
+            .observe_at(&healthy, after_gap + Duration::from_millis(500))
+            .unwrap()
+            .unwrap();
+        let profile = recovered.profile.unwrap();
+        assert_eq!((profile.width, profile.height), (1920, 1080));
+    }
+
+    #[test]
+    fn new_stream_feedback_after_long_gap_never_reconfigures_previous_stream() {
+        let mut adaptation = FocusedAdaptationState::new();
+        let at = Instant::now();
+        adaptation
+            .observe_at(&healthy_receiver_feedback(7), at)
+            .unwrap();
+        let resumed = adaptation
+            .observe_at(
+                &healthy_receiver_feedback(8),
+                at + FOCUSED_FEEDBACK_MAX_SILENCE + Duration::from_millis(1),
+            )
+            .unwrap();
+        assert!(
+            resumed.is_none(),
+            "new stream must have fresh initial quality"
+        );
+    }
+
+    #[test]
+    fn invalid_feedback_never_refreshes_or_replaces_active_timeout_state() {
+        let mut adaptation = FocusedAdaptationState::new();
+        let at = Instant::now();
+        assert!(
+            adaptation
+                .observe_at(&healthy_receiver_feedback(7), at)
+                .unwrap()
+                .is_none()
+        );
+        let mut invalid = healthy_receiver_feedback(8);
+        invalid.rtt_ms = f32::NAN;
+        assert_eq!(
+            adaptation
+                .observe_at(&invalid, at + FOCUSED_FEEDBACK_MAX_SILENCE)
+                .unwrap_err(),
+            "control.feedback.invalid_metrics"
+        );
+        let expired = adaptation
+            .expire_at(at + FOCUSED_FEEDBACK_MAX_SILENCE + Duration::from_micros(1))
+            .expect("invalid sample cannot prolong healthy profile");
+        assert_eq!(expired.stream_id, 7);
+        assert!(
+            adaptation
+                .observe_at(&healthy_receiver_feedback(9), at + Duration::from_secs(90))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            adaptation
+                .expire_at(
+                    at + Duration::from_secs(90)
+                        + FOCUSED_FEEDBACK_MAX_SILENCE
+                        + Duration::from_micros(1)
+                )
+                .is_some()
+        );
     }
 
     #[test]
