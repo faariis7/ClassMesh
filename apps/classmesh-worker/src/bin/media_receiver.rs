@@ -133,12 +133,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .as_ref()
                 .map_or_else(RecoveryTelemetry::default, DecodeProbe::recovery_telemetry);
             eprintln!(
-                "receiver stats: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} feedback_sent={} feedback_errors={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={} forced_gpu_recoveries={} last_gpu_recovery_ms={:.2} longest_gpu_recovery_ms={:.2}",
+                "receiver stats: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} sequence_missing_packets={} reordered={} nack_requests={} keyframe_requests={} feedback_sent={} feedback_errors={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={} forced_gpu_recoveries={} last_gpu_recovery_ms={:.2} longest_gpu_recovery_ms={:.2}",
                 stats.datagrams_received,
                 counters.frames,
                 counters.bytes,
                 counters.keyframes,
                 stats.sequence_gaps_observed,
+                stats.missing_datagrams_observed,
                 stats.reordered_or_duplicate,
                 counters.nack_requests,
                 counters.keyframe_requests,
@@ -179,12 +180,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .map_or_else(RecoveryTelemetry::default, DecodeProbe::recovery_telemetry);
     eprintln!(
-        "ClassMesh media receiver complete: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} reordered={} nack_requests={} keyframe_requests={} feedback_sent={} feedback_errors={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={} forced_gpu_recoveries={} last_gpu_recovery_ms={:.2} longest_gpu_recovery_ms={:.2} elapsed={:.2}s",
+        "ClassMesh media receiver complete: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} sequence_missing_packets={} reordered={} nack_requests={} keyframe_requests={} feedback_sent={} feedback_errors={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={} forced_gpu_recoveries={} last_gpu_recovery_ms={:.2} longest_gpu_recovery_ms={:.2} elapsed={:.2}s",
         stats.datagrams_received,
         counters.frames,
         counters.bytes,
         counters.keyframes,
         stats.sequence_gaps_observed,
+        stats.missing_datagrams_observed,
         stats.reordered_or_duplicate,
         counters.nack_requests,
         counters.keyframe_requests,

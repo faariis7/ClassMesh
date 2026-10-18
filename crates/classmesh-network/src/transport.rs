@@ -198,7 +198,27 @@ pub struct UdpReceiverStats {
     pub datagrams_received: u64,
     pub frames_completed: u64,
     pub sequence_gaps_observed: u64,
+    /// Number of sequence IDs skipped across gap events. Historical observed
+    /// jumps, NOT net packet loss (late packets may later arrive).
+    pub missing_datagrams_observed: u64,
     pub reordered_or_duplicate: u64,
+}
+
+impl UdpReceiverStats {
+    fn record_sequence_observation(&mut self, observation: SequenceObservation) {
+        match observation {
+            SequenceObservation::Gap { missing } => {
+                self.sequence_gaps_observed = self.sequence_gaps_observed.saturating_add(1);
+                self.missing_datagrams_observed = self
+                    .missing_datagrams_observed
+                    .saturating_add(u64::from(missing));
+            }
+            SequenceObservation::ReorderedOrDuplicate => {
+                self.reordered_or_duplicate = self.reordered_or_duplicate.saturating_add(1);
+            }
+            SequenceObservation::First | SequenceObservation::InOrder => {}
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -241,17 +261,7 @@ impl UdpFrameReceiver {
         let (packet, source) = self.socket.receive_packet()?;
         let observation = self.sequence.observe(packet.header.sequence);
         self.stats.datagrams_received = self.stats.datagrams_received.saturating_add(1);
-        match observation {
-            SequenceObservation::Gap { .. } => {
-                self.stats.sequence_gaps_observed =
-                    self.stats.sequence_gaps_observed.saturating_add(1);
-            }
-            SequenceObservation::ReorderedOrDuplicate => {
-                self.stats.reordered_or_duplicate =
-                    self.stats.reordered_or_duplicate.saturating_add(1);
-            }
-            SequenceObservation::First | SequenceObservation::InOrder => {}
-        }
+        self.stats.record_sequence_observation(observation);
 
         let events = self.window.push(now_us, &packet).map_err(|error| {
             DatagramError::Io(io::Error::new(
@@ -313,6 +323,33 @@ mod tests {
             Codec::H264,
             (0_u8..=250).cycle().take(bytes).collect(),
         )
+    }
+
+    #[test]
+    fn receiver_stats_distinguish_gap_events_from_observed_missing_packets() {
+        let mut stats = UdpReceiverStats::default();
+        stats.record_sequence_observation(SequenceObservation::First);
+        stats.record_sequence_observation(SequenceObservation::Gap { missing: 4 });
+        stats.record_sequence_observation(SequenceObservation::Gap { missing: 2 });
+        stats.record_sequence_observation(SequenceObservation::ReorderedOrDuplicate);
+        stats.record_sequence_observation(SequenceObservation::InOrder);
+        assert_eq!(stats.sequence_gaps_observed, 2);
+        assert_eq!(stats.missing_datagrams_observed, 6);
+        assert_eq!(stats.reordered_or_duplicate, 1);
+        // Observed missing sequence increments are historical. A late packet
+        // cannot retroactively erase an already observed sequence jump.
+        stats.record_sequence_observation(SequenceObservation::ReorderedOrDuplicate);
+        assert_eq!(stats.missing_datagrams_observed, 6);
+    }
+
+    #[test]
+    fn receiver_missing_packet_counter_saturates_on_large_loss_burst() {
+        let mut stats = UdpReceiverStats {
+            missing_datagrams_observed: u64::MAX - 1,
+            ..UdpReceiverStats::default()
+        };
+        stats.record_sequence_observation(SequenceObservation::Gap { missing: 20 });
+        assert_eq!(stats.missing_datagrams_observed, u64::MAX);
     }
 
     #[test]
