@@ -29,6 +29,9 @@ pub const fn single_exact_receiver_queue_drops(
 /// distinct from frames successfully presented on screen or authenticated.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PresentationDeliveryReport {
+    /// Source key binding captured when this report was emitted. Private so a
+    /// delayed report cannot be relabelled as a different active presentation.
+    source_binding: Option<PresentationKeyInstallBinding>,
     /// Monotonic per exact installed presentation binding; local only until IPC is qualified.
     pub sample_sequence: u64,
     pub authenticated_frames: u64,
@@ -59,6 +62,7 @@ impl PresentationDeliveryReport {
         installed_key: PresentationKeyInstallBinding,
     ) -> Option<ReceiverTelemetrySnapshot> {
         if self.sample_sequence == 0
+            || self.source_binding != Some(installed_key)
             || !owner.is_valid()
             || owner.control_session_id != installed_key.control_session_id
             || owner.request_id != installed_key.request_id
@@ -184,6 +188,7 @@ impl PresentationDeliveryTelemetry {
         self.last_report_at = Some(now);
         self.last_external = Some(external);
         Some(PresentationDeliveryReport {
+            source_binding: Some(binding),
             sample_sequence: next_sequence,
             authenticated_frames: authenticated.opened_frames,
             auth_rejected_frames: authenticated.rejected_frames,
@@ -214,6 +219,7 @@ mod tests {
     #[test]
     fn published_worker_report_maps_into_distinct_shared_playback_counters() {
         let report = PresentationDeliveryReport {
+            source_binding: Some(binding(1)),
             sample_sequence: 41,
             authenticated_frames: 13,
             auth_rejected_frames: 3,
@@ -259,6 +265,7 @@ mod tests {
 
     fn diagnostic(sequence: u64) -> PresentationDeliveryReport {
         PresentationDeliveryReport {
+            source_binding: Some(binding(1)),
             sample_sequence: sequence,
             authenticated_frames: 20,
             auth_rejected_frames: 2,
@@ -326,9 +333,10 @@ mod tests {
             old.snapshot_for_bound_key(authorized_owner(2), binding(2)),
             None
         );
-        assert!(old
-            .snapshot_for_bound_key(authorized_owner(1), binding(1))
-            .is_some());
+        assert!(
+            old.snapshot_for_bound_key(authorized_owner(1), binding(1))
+                .is_some()
+        );
     }
 
     #[test]

@@ -183,7 +183,10 @@ AEAD/decode/render/queue-drops counters into the portable
 `ReceiverTelemetrySnapshot` only when the separately provided complete owner
 binding is nonzero, its media identity exactly equals the **currently
 installed** protected presentation key binding (control-session, request,
-presentation, stream and key epoch), and the local report sequence is nonzero.
+presentation, stream and key epoch), the **private source binding captured
+at report emission** also matches that installed key, and the local report
+sequence is nonzero. A delayed report issued under an old epoch cannot be
+relabelled by passing a matching new external owner and current key.
 The function carries external Worker/receiver generation identity unchanged
 and does **not** authenticate it, authorize transport, or self-activate the
 Service admission gate; those are independent Service-controlled lifecycles.
