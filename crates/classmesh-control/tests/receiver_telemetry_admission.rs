@@ -206,3 +206,42 @@ fn invalid_identity_or_sequence_fail_closed() {
         Err(ReceiverTelemetryError::InvalidSequence)
     );
 }
+
+
+#[test]
+fn freshness_liveness_requires_a_current_accepted_sample_and_revokes_on_clear() {
+    let mut gate = ReceiverTelemetryGate::default();
+    let now = Instant::now();
+    assert!(!gate.has_fresh_report(now));
+    gate.activate(binding(1)).unwrap();
+    assert!(!gate.has_fresh_report(now));
+    gate.observe(sample(binding(1), 1, 10), now).unwrap();
+    assert!(gate.has_fresh_report(now));
+    assert!(gate.has_fresh_report(now + Duration::from_secs(30)));
+    assert!(!gate.has_fresh_report(now + Duration::from_secs(31)));
+    assert!(!gate.has_fresh_report(now - Duration::from_secs(1)));
+    assert_eq!(
+        gate.observe(sample(binding(1), 2, 11), now + Duration::from_secs(31)),
+        Ok(ReceiverTelemetryDecision::Baseline)
+    );
+    assert!(gate.has_fresh_report(now + Duration::from_secs(31)));
+    assert!(!gate.clear_if_matches(binding(2)));
+    assert!(gate.has_fresh_report(now + Duration::from_secs(31)));
+    assert!(gate.clear_if_matches(binding(1)));
+    assert!(!gate.has_fresh_report(now + Duration::from_secs(31)));
+    gate.activate(binding(2)).unwrap();
+    assert!(!gate.has_fresh_report(now + Duration::from_secs(31)));
+}
+
+#[test]
+fn invalid_replay_cannot_extend_report_liveness() {
+    let mut gate = ReceiverTelemetryGate::default();
+    let now = Instant::now();
+    gate.activate(binding(1)).unwrap();
+    gate.observe(sample(binding(1), 1, 10), now).unwrap();
+    assert_eq!(
+        gate.observe(sample(binding(1), 1, 12), now + Duration::from_secs(29)),
+        Err(ReceiverTelemetryError::Replay)
+    );
+    assert!(!gate.has_fresh_report(now + Duration::from_secs(31)));
+}
