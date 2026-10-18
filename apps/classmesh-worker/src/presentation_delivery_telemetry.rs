@@ -326,6 +326,59 @@ mod tests {
     }
 
     #[test]
+    fn external_auth_counter_reset_latches_fail_closed_until_binding_changes() {
+        let mut tracker = PresentationDeliveryTelemetry::default();
+        let start = Instant::now();
+        let auth = |opened_frames, rejected_frames| WorkerGroupMediaAuthenticationStats {
+            opened_frames,
+            rejected_frames,
+        };
+        assert!(tracker.report_if_due(start, binding(1), auth(0, 0), 0).is_none());
+        let first = tracker
+            .report_if_due(start + Duration::from_secs(5), binding(1), auth(7, 2), 4)
+            .unwrap();
+        assert_eq!(first.sample_sequence, 1);
+        assert!(tracker
+            .report_if_due(start + Duration::from_secs(10), binding(1), auth(6, 2), 5)
+            .is_none());
+        assert_eq!(tracker.report_sequence, 1);
+        // Larger later totals cannot conceal a reset of the same lifetime counters.
+        assert!(tracker
+            .report_if_due(start + Duration::from_secs(15), binding(1), auth(20, 4), 8)
+            .is_none());
+        assert_eq!(tracker.report_sequence, 1);
+        // Only an explicitly new key binding (or an existing runtime reset) can
+        // establish a new sequence/baseline; no old sequence is replayed.
+        assert!(tracker
+            .report_if_due(start + Duration::from_secs(16), binding(2), auth(0, 0), 0)
+            .is_none());
+        let fresh = tracker
+            .report_if_due(start + Duration::from_secs(21), binding(2), auth(1, 0), 0)
+            .unwrap();
+        assert_eq!(fresh.sample_sequence, 1);
+    }
+
+    #[test]
+    fn rejected_auth_and_receiver_drop_counter_resets_also_fail_closed() {
+        let start = Instant::now();
+        for (opened, rejected, drops) in [(9, 2, 8), (9, 4, 7)] {
+            let mut tracker = PresentationDeliveryTelemetry::default();
+            let auth = |opened_frames, rejected_frames| WorkerGroupMediaAuthenticationStats {
+                opened_frames,
+                rejected_frames,
+            };
+            assert!(tracker.report_if_due(start, binding(1), auth(0, 0), 0).is_none());
+            assert!(tracker
+                .report_if_due(start + Duration::from_secs(5), binding(1), auth(8, 4), 8)
+                .is_some());
+            assert!(tracker
+                .report_if_due(start + Duration::from_secs(10), binding(1), auth(opened, rejected), drops)
+                .is_none());
+            assert_eq!(tracker.report_sequence, 1);
+        }
+    }
+
+    #[test]
     fn telemetry_sequence_overflow_stops_reporting_without_replaying_a_number() {
         let mut tracker = PresentationDeliveryTelemetry::default();
         let at = Instant::now();
