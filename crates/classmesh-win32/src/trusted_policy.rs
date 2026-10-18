@@ -155,6 +155,12 @@ pub(crate) fn parse_registry_policy(
         Ok((epoch, authorization))
     })
 }
+fn read_identity_under<T>(_: &File, _: &str, _: impl FnOnce(&mut dyn Read) -> T) -> io::Result<T> {
+    Err(io::Error::other(
+        "RED: rooted machine identity read missing",
+    ))
+}
+
 fn open_at(scope: &str) -> io::Result<TrustedPolicySession> {
     let directories = pin(scope, false)?;
     let lock = open_relative_exclusive_file(state(&directories)?, LOCK_NAME)?;
@@ -326,5 +332,60 @@ mod tests {
             }
             _ => panic!("unknown private fixture mode"),
         }
+    }
+    #[test]
+    fn rooted_identity_keeps_handles_through_canonical_parser_and_has_no_backup_fallback() {
+        let scope = format!("ClassMesh-anchor-probe-identity-{}", std::process::id());
+        provision_at(&scope, 1, VALID).unwrap();
+        let dirs = pin(&scope, false).unwrap();
+        let parent = &dirs[dirs.len() - 3]; // ProgramData before app/state.
+        let state_handle = super::state(&dirs).unwrap();
+        let bytes = format!(r#"{{"version":1,"principal_id":[{}],"cng_key_name":"ClassMesh-test","certificate_chain_der":[[48,1,0]],"trust_roots_der":[[48,1,1]],"not_after_unix_ms":999999}}"#, ["7"; 32].join(",")).into_bytes();
+        let root = crate::program_data_known_folder::resolve_os_program_data_path()
+            .unwrap()
+            .join(&scope);
+        let identity = root.join("state").join("machine-identity.json");
+        let mut original =
+            create_relative_protected_file(state_handle, "machine-identity.json").unwrap();
+        original.write_all(&bytes).unwrap();
+        original.sync_all().unwrap();
+        drop(original);
+        let parsed = read_identity_under(parent, &scope, |reader| {
+            assert!(std::fs::write(&identity, b"changed roots").is_err());
+            assert!(std::fs::rename(&identity, identity.with_extension("moved")).is_err());
+            classmesh_identity_win::DurableMachineIdentity::parse_from_reader(reader)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(parsed.principal_id, [7; 32]);
+        assert_eq!(parsed.trust_roots_der, vec![vec![48, 1, 1]]);
+        std::fs::write(&identity, vec![b' '; 1024 * 1024 + 1]).unwrap();
+        assert!(
+            read_identity_under(parent, &scope, |reader| {
+                classmesh_identity_win::DurableMachineIdentity::parse_from_reader(reader)
+            })
+            .unwrap()
+            .is_err()
+        );
+        std::fs::write(&identity, &bytes).unwrap();
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _ = read_identity_under(parent, &scope, |_| panic!("identity read unwind"));
+            })
+            .is_err()
+        );
+        let backup = identity.with_extension("json.bak");
+        std::fs::rename(&identity, &backup).unwrap();
+        assert!(
+            read_identity_under(parent, &scope, |_| ()).is_err(),
+            "trusted identity never uses .bak"
+        );
+        std::fs::rename(&backup, &identity).unwrap();
+        let alias = identity.with_extension("hardlink");
+        std::fs::hard_link(&identity, &alias).unwrap();
+        assert!(read_identity_under(parent, &scope, |_| ()).is_err());
+        drop(dirs);
+        crate::registry_epoch::remove_fixture(&scope);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

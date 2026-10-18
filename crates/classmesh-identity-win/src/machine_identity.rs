@@ -135,18 +135,26 @@ impl DurableMachineIdentity {
             return Ok(None);
         };
 
-        let metadata = fs::metadata(source)?;
-        let declared = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+        let file = File::open(source)?;
+        let declared = usize::try_from(file.metadata()?.len()).unwrap_or(usize::MAX);
         if declared > MAX_STATE_BYTES {
             return Err(MachineIdentityStateError::StateTooLarge {
                 bytes: declared,
                 maximum: MAX_STATE_BYTES,
             });
         }
+        Self::parse_from_reader(file).map(Some)
+    }
 
-        let file = File::open(source)?;
-        let mut bytes = Vec::with_capacity(declared.min(MAX_STATE_BYTES));
-        file.take(u64::try_from(MAX_STATE_BYTES + 1).expect("state bound fits u64"))
+    /// Parse from the caller's retained, independently attested reader. This
+    /// establishes syntax/bounds only, not OS provenance or rollback authority.
+    /// Never opens a pathname or falls back to a backup.
+    pub fn parse_from_reader(
+        reader: impl Read,
+    ) -> Result<MachineIdentityBundle, MachineIdentityStateError> {
+        let mut bytes = Vec::new();
+        reader
+            .take((MAX_STATE_BYTES + 1) as u64)
             .read_to_end(&mut bytes)?;
         if bytes.len() > MAX_STATE_BYTES {
             return Err(MachineIdentityStateError::StateTooLarge {
@@ -154,7 +162,6 @@ impl DurableMachineIdentity {
                 maximum: MAX_STATE_BYTES,
             });
         }
-
         PersistedMachineIdentity::decode(&bytes)
     }
 
@@ -225,7 +232,7 @@ impl PersistedMachineIdentity {
         }
     }
 
-    fn decode(bytes: &[u8]) -> Result<Option<MachineIdentityBundle>, MachineIdentityStateError> {
+    fn decode(bytes: &[u8]) -> Result<MachineIdentityBundle, MachineIdentityStateError> {
         let persisted: Self = serde_json::from_slice(bytes)?;
         if persisted.version != STATE_VERSION {
             return Err(MachineIdentityStateError::UnsupportedVersion(
@@ -240,7 +247,7 @@ impl PersistedMachineIdentity {
             not_after_unix_ms: persisted.not_after_unix_ms,
         };
         validate_bundle(&bundle)?;
-        Ok(Some(bundle))
+        Ok(bundle)
     }
 }
 
@@ -398,17 +405,32 @@ mod tests {
                 Ok(count)
             }
         }
-        assert_eq!(DurableMachineIdentity::parse_from_reader(ShortReads(&bytes)).unwrap(), expected);
-        assert!(DurableMachineIdentity::parse_from_reader(&bytes[..bytes.len()-1]).is_err());
+        assert_eq!(
+            DurableMachineIdentity::parse_from_reader(ShortReads(&bytes)).unwrap(),
+            expected
+        );
+        assert!(DurableMachineIdentity::parse_from_reader(&bytes[..bytes.len() - 1]).is_err());
         let mut invalid = PersistedMachineIdentity::from_bundle(&bundle());
         invalid.cng_key_name.push('\0');
-        assert!(matches!(DurableMachineIdentity::parse_from_reader(serde_json::to_vec(&invalid).unwrap().as_slice()), Err(MachineIdentityStateError::InvalidKeyName)));
-        assert!(matches!(DurableMachineIdentity::parse_from_reader(std::io::repeat(b' ')), Err(MachineIdentityStateError::StateTooLarge { .. })));
+        assert!(matches!(
+            DurableMachineIdentity::parse_from_reader(
+                serde_json::to_vec(&invalid).unwrap().as_slice()
+            ),
+            Err(MachineIdentityStateError::InvalidKeyName)
+        ));
+        assert!(matches!(
+            DurableMachineIdentity::parse_from_reader(std::io::repeat(b' ')),
+            Err(MachineIdentityStateError::StateTooLarge { .. })
+        ));
         struct FailedRead;
         impl Read for FailedRead {
-            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> { Err(std::io::Error::other("injected IO failure")) }
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("injected IO failure"))
+            }
         }
-        assert!(matches!(DurableMachineIdentity::parse_from_reader(FailedRead), Err(MachineIdentityStateError::Io(_))));
+        assert!(matches!(
+            DurableMachineIdentity::parse_from_reader(FailedRead),
+            Err(MachineIdentityStateError::Io(_))
+        ));
     }
-
 }
