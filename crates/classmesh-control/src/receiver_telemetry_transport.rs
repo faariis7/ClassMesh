@@ -25,6 +25,8 @@ pub enum ReceiverTelemetryWireError {
     Inactive,
     BindingMismatch,
     NonmonotonicSequence,
+    /// Never wrap a lifetime/incarnation number to recreate a revoked lease.
+    LifecycleExhausted,
 }
 
 fn write_u32(output: &mut [u8; RECEIVER_TELEMETRY_WIRE_LEN], offset: &mut usize, value: u32) {
@@ -228,9 +230,32 @@ impl ReceiverTelemetryMailbox {
 /// A nonblocking, constant-space producer/consumer handoff for later Worker
 /// diagnostic IPC. The decode/render thread must NEVER wait on a mutex or pipe.
 /// No sender or authenticated transport is introduced by this wrapper.
+#[derive(Debug, Default)]
+struct ReceiverTelemetryConcurrentState {
+    mailbox: ReceiverTelemetryMailbox,
+    // Strictly increasing on any new activation, even the same identity after
+    // clear. Never reset on revocation or reuse after overflow.
+    incarnation: u64,
+}
+
+/// A diagnostic sample checked out of the bounded mailbox for a *potential*
+/// future sender. It is not a Worker credential or Service authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiverTelemetrySendLease {
+    report: ReceiverTelemetrySnapshot,
+    incarnation: u64,
+}
+
+impl ReceiverTelemetrySendLease {
+    #[must_use]
+    pub const fn snapshot(&self) -> ReceiverTelemetrySnapshot {
+        self.report
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ReceiverTelemetryConcurrentMailbox {
-    state: Arc<Mutex<ReceiverTelemetryMailbox>>,
+    state: Arc<Mutex<ReceiverTelemetryConcurrentState>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,7 +270,9 @@ pub enum ReceiverTelemetryConcurrentError {
 impl ReceiverTelemetryConcurrentMailbox {
     fn try_access<R>(
         &self,
-        access: impl FnOnce(&mut ReceiverTelemetryMailbox) -> Result<R, ReceiverTelemetryWireError>,
+        access: impl FnOnce(
+            &mut ReceiverTelemetryConcurrentState,
+        ) -> Result<R, ReceiverTelemetryWireError>,
     ) -> Result<R, ReceiverTelemetryConcurrentError> {
         let mut state = match self.state.try_lock() {
             Ok(state) => state,
@@ -263,7 +290,20 @@ impl ReceiverTelemetryConcurrentMailbox {
         &self,
         binding: ReceiverTelemetryBinding,
     ) -> Result<(), ReceiverTelemetryConcurrentError> {
-        self.try_access(|state| state.activate(binding))
+        self.try_access(|state| {
+            if !binding.is_valid() {
+                return Err(ReceiverTelemetryWireError::InvalidBinding);
+            }
+            if state.mailbox.active != Some(binding) {
+                let next = state
+                    .incarnation
+                    .checked_add(1)
+                    .ok_or(ReceiverTelemetryWireError::LifecycleExhausted)?;
+                state.mailbox.activate(binding)?;
+                state.incarnation = next;
+            }
+            Ok(())
+        })
     }
 
     /// Publish by copy only, without waiting for a pipe, blocking lock or
@@ -272,7 +312,7 @@ impl ReceiverTelemetryConcurrentMailbox {
         &self,
         report: ReceiverTelemetrySnapshot,
     ) -> Result<bool, ReceiverTelemetryConcurrentError> {
-        self.try_access(|state| state.offer(report))
+        self.try_access(|state| state.mailbox.offer(report))
     }
 
     /// Remove an exact binding without revoking a newer replacement.
@@ -280,18 +320,41 @@ impl ReceiverTelemetryConcurrentMailbox {
         &self,
         binding: ReceiverTelemetryBinding,
     ) -> Result<bool, ReceiverTelemetryConcurrentError> {
-        self.try_access(|state| Ok(state.clear_if_matches(binding)))
+        self.try_access(|state| Ok(state.mailbox.clear_if_matches(binding)))
     }
 
-    /// A dedicated sender may copy and consume the latest report, then perform
-    /// nonblocking I/O OUTSIDE the lock. Must revalidate the real authorized
-    /// Worker/receiver generation before any eventual send: a copied report
-    /// can become stale after its slot is revoked.
-    pub fn try_take_matching(
+    /// Check out the latest report for a hypothetical asynchronous sender.
+    /// The lease tracks the exact incarnation as well as the report sequence;
+    /// it MUST be checked again before future I/O outside this lock.
+    pub fn try_checkout_matching(
         &self,
         binding: ReceiverTelemetryBinding,
-    ) -> Result<Option<ReceiverTelemetrySnapshot>, ReceiverTelemetryConcurrentError> {
-        self.try_access(|state| Ok(state.take_matching(binding)))
+    ) -> Result<Option<ReceiverTelemetrySendLease>, ReceiverTelemetryConcurrentError> {
+        self.try_access(|state| {
+            Ok(state
+                .mailbox
+                .take_matching(binding)
+                .map(|report| ReceiverTelemetrySendLease {
+                    report,
+                    incarnation: state.incarnation,
+                }))
+        })
+    }
+
+    /// Short, nonblocking local invalidation check. A clear+reactivate of the
+    /// SAME binding rejects the old lease (no ABA); a newer offered sample
+    /// also invalidates the old checkout. This is NOT atomic with I/O and is
+    /// NOT authentication. Future senders must additionally recheck the real
+    /// authenticated Worker+receiver authority at the transport boundary.
+    pub fn try_lease_is_current(
+        &self,
+        lease: &ReceiverTelemetrySendLease,
+    ) -> Result<bool, ReceiverTelemetryConcurrentError> {
+        self.try_access(|state| {
+            Ok(state.mailbox.active == Some(lease.report.binding)
+                && state.incarnation == lease.incarnation
+                && state.mailbox.last_sequence == Some(lease.report.sequence))
+        })
     }
 }
 
@@ -321,6 +384,14 @@ mod concurrent_mailbox_tests {
         }
     }
 
+    fn drain(
+        mail: &ReceiverTelemetryConcurrentMailbox,
+        binding: ReceiverTelemetryBinding,
+    ) -> Result<Option<ReceiverTelemetrySnapshot>, ReceiverTelemetryConcurrentError> {
+        mail.try_checkout_matching(binding)
+            .map(|lease| lease.map(|value| value.snapshot()))
+    }
+
     #[test]
     fn try_lock_publisher_coalesces_ten_thousand_reports_in_one_slot() {
         let mail = ReceiverTelemetryConcurrentMailbox::default();
@@ -328,11 +399,8 @@ mod concurrent_mailbox_tests {
         for seq in 1..=10_000 {
             assert_eq!(mail.try_offer(snapshot(1, seq)), Ok(seq != 1));
         }
-        assert_eq!(
-            mail.try_take_matching(binding(1)),
-            Ok(Some(snapshot(1, 10_000)))
-        );
-        assert_eq!(mail.try_take_matching(binding(1)), Ok(None));
+        assert_eq!(drain(&mail, binding(1)), Ok(Some(snapshot(1, 10_000))));
+        assert_eq!(drain(&mail, binding(1)), Ok(None));
     }
 
     #[test]
@@ -345,7 +413,7 @@ mod concurrent_mailbox_tests {
             Err(ReceiverTelemetryConcurrentError::Busy)
         );
         assert_eq!(
-            mail.try_take_matching(binding(1)),
+            drain(&mail, binding(1)),
             Err(ReceiverTelemetryConcurrentError::Busy)
         );
         assert_eq!(
@@ -374,9 +442,23 @@ mod concurrent_mailbox_tests {
             Err(ReceiverTelemetryConcurrentError::Poisoned)
         );
         assert_eq!(
-            mail.try_take_matching(binding(1)),
+            drain(&mail, binding(1)),
             Err(ReceiverTelemetryConcurrentError::Poisoned)
         );
+    }
+
+    #[test]
+    fn identical_mailbox_identities_are_not_interchangeable_across_instances() {
+        let first = ReceiverTelemetryConcurrentMailbox::default();
+        let second = ReceiverTelemetryConcurrentMailbox::default();
+        for mail in [&first, &second] {
+            mail.try_activate(binding(1)).unwrap();
+            mail.try_offer(snapshot(1, 1)).unwrap();
+        }
+        let lease = first.try_checkout_matching(binding(1)).unwrap().unwrap();
+        assert_eq!(first.try_lease_is_current(&lease), Ok(true));
+        assert_eq!(first.clone().try_lease_is_current(&lease), Ok(true));
+        assert_eq!(second.try_lease_is_current(&lease), Ok(false));
     }
 
     #[test]
@@ -394,7 +476,10 @@ mod concurrent_mailbox_tests {
         assert_eq!(mail.try_lease_is_current(&prior), Ok(false));
         let fresh = mail.try_checkout_matching(binding(1)).unwrap().unwrap();
         assert_eq!(fresh.snapshot(), prior.snapshot());
-        assert_ne!(fresh, prior, "same binding and sequence must not resurrect a revoked lease");
+        assert_ne!(
+            fresh, prior,
+            "same binding and sequence must not resurrect a revoked lease"
+        );
         assert_eq!(mail.try_lease_is_current(&fresh), Ok(true));
     }
 
@@ -405,13 +490,22 @@ mod concurrent_mailbox_tests {
         mail.try_offer(snapshot(1, 1)).unwrap();
         let prior = mail.try_checkout_matching(binding(1)).unwrap().unwrap();
         mail.try_activate(binding(1)).unwrap();
-        assert_eq!(mail.try_lease_is_current(&prior), Ok(true), "identical activation is not revocation");
+        assert_eq!(
+            mail.try_lease_is_current(&prior),
+            Ok(true),
+            "identical activation is not revocation"
+        );
         assert_eq!(mail.try_offer(snapshot(1, 2)), Ok(false));
         assert_eq!(mail.try_lease_is_current(&prior), Ok(false));
         let newer = mail.try_checkout_matching(binding(1)).unwrap().unwrap();
         assert_eq!(newer.snapshot(), snapshot(1, 2));
         assert_eq!(mail.try_lease_is_current(&newer), Ok(true));
-        assert_eq!(mail.try_offer(snapshot(1, 1)), Err(ReceiverTelemetryConcurrentError::Wire(ReceiverTelemetryWireError::NonmonotonicSequence)));
+        assert_eq!(
+            mail.try_offer(snapshot(1, 1)),
+            Err(ReceiverTelemetryConcurrentError::Wire(
+                ReceiverTelemetryWireError::NonmonotonicSequence
+            ))
+        );
     }
 
     #[test]
@@ -422,14 +516,24 @@ mod concurrent_mailbox_tests {
         let lease = mail.try_checkout_matching(binding(1)).unwrap().unwrap();
         let clone = mail.clone();
         let guard = mail.state.lock().unwrap();
-        assert_eq!(clone.try_lease_is_current(&lease), Err(ReceiverTelemetryConcurrentError::Busy));
+        assert_eq!(
+            clone.try_lease_is_current(&lease),
+            Err(ReceiverTelemetryConcurrentError::Busy)
+        );
         drop(guard);
         assert_eq!(clone.try_lease_is_current(&lease), Ok(true));
-        assert!(std::thread::spawn(move || {
-            let _guard = clone.state.lock().unwrap();
-            panic!("intentional poison");
-        }).join().is_err());
-        assert_eq!(mail.try_lease_is_current(&lease), Err(ReceiverTelemetryConcurrentError::Poisoned));
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = clone.state.lock().unwrap();
+                panic!("intentional poison");
+            })
+            .join()
+            .is_err()
+        );
+        assert_eq!(
+            mail.try_lease_is_current(&lease),
+            Err(ReceiverTelemetryConcurrentError::Poisoned)
+        );
     }
 
     #[test]
@@ -444,7 +548,12 @@ mod concurrent_mailbox_tests {
                 ReceiverTelemetryWireError::LifecycleExhausted
             ))
         );
-        assert_eq!(mail.try_offer(snapshot(1, 1)), Err(ReceiverTelemetryConcurrentError::Wire(ReceiverTelemetryWireError::Inactive)));
+        assert_eq!(
+            mail.try_offer(snapshot(1, 1)),
+            Err(ReceiverTelemetryConcurrentError::Wire(
+                ReceiverTelemetryWireError::Inactive
+            ))
+        );
     }
 
     #[test]
@@ -454,7 +563,7 @@ mod concurrent_mailbox_tests {
         mail.try_offer(snapshot(1, 1)).unwrap();
         mail.try_activate(binding(2)).unwrap();
         assert_eq!(mail.try_clear_if_matches(binding(1)), Ok(false));
-        assert_eq!(mail.try_take_matching(binding(1)), Ok(None));
+        assert_eq!(drain(&mail, binding(1)), Ok(None));
         assert_eq!(
             mail.try_offer(snapshot(1, 2)),
             Err(ReceiverTelemetryConcurrentError::Wire(
@@ -462,6 +571,6 @@ mod concurrent_mailbox_tests {
             ))
         );
         assert_eq!(mail.try_offer(snapshot(2, 1)), Ok(false));
-        assert_eq!(mail.try_take_matching(binding(2)), Ok(Some(snapshot(2, 1))));
+        assert_eq!(drain(&mail, binding(2)), Ok(Some(snapshot(2, 1))));
     }
 }
