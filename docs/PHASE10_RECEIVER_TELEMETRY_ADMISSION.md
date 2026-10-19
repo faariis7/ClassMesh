@@ -178,20 +178,23 @@ tests do not qualify native GPU behavior or two physical PCs.
 
 ## Local Worker bound-key snapshot composition
 
-`PresentationDeliveryReport::snapshot_for_bound_key` converts actual Worker
-AEAD/decode/render/queue-drops counters into the portable
-`ReceiverTelemetrySnapshot` only when the separately provided complete owner
-binding is nonzero, its media identity exactly equals the **currently
-installed** protected presentation key binding (control-session, request,
-presentation, stream and key epoch), the **private source binding captured
-at report emission** also matches that installed key, and the local report
-sequence is nonzero. A delayed report issued under an old epoch cannot be
+`PresentationDeliveryReport::snapshot_for_authorized_start` maps actual
+Worker AEAD/decode/render/queue-drop counters into a portable
+`ReceiverTelemetrySnapshot` only when the separately Service-authorized
+media-start request ID matches the complete Service-minted receiver owner
+and the **private source binding captured at report emission** exactly
+matches the installed protected key grant (including its independently
+issued **grant request ID**). Both share control-session, presentation, stream and
+key epoch. The local report sequence and all required identities must be
+nonzero. A delayed report issued under an old epoch cannot be
 relabelled by passing a matching new external owner and current key.
 The function carries external Worker/receiver generation identity unchanged
 and does **not** authenticate it, authorize transport, or self-activate the
 Service admission gate; those are independent Service-controlled lifecycles.
-Wrong epoch/request/session or invalid owner must fail without any serialized
-bytes. This helper remains passive, with no new privileged IPC or automatic
+Wrong epoch, grant request, independently authorized media-start request,
+session or invalid owner must fail without any serialized bytes. The Worker
+must not mint its own start or receiver-generation authorization and must
+not repurpose the grant request ID as the media start ID. This helper remains passive, with no new privileged IPC or automatic
 adaptation/quality upgrade. Tests cover exact positive mapping and rejection
 of every mismatched protected media-key identity field.
 
@@ -200,7 +203,7 @@ of every mismatched protected media-key identity field.
 
 A Worker-library cross-layer qualification test drives the **real**
 `PresentationDeliveryTelemetry::report_if_due` through the
-`snapshot_for_bound_key` consistency guard, fixed-width wire encoder and
+`snapshot_for_authorized_start` consistency guard, fixed-width wire encoder and
 `ReceiverTelemetryIngress` Service gate. Before independent Service
 activation the report is rejected. Exactly timed contiguous local diagnostics
 yield AEAD-open, AEAD-reject and queue-drop **intervals** but do not claim
@@ -350,3 +353,18 @@ an independently authenticated, low-priority, nonblocking channel that
 rechecks the current Worker/receiver owner on arrival; coordinate shared IPC
 changes with the separate Phase 12 owner. Physical two-Windows-host/GPU/scale
 gates remain OPEN.
+
+### Distinct key-grant and media-start identity regression
+
+The Worker cross-layer contract test now uses the actual
+`ReceiverTelemetryServiceRuntime`'s confirmed protected grant (request 9)
+and independently authorized, successfully acknowledged media start
+(request 91), rather than pretending these request IDs are the same. It
+binds real five-second local diagnostics to the **Service-minted** runtime,
+passes the strict fixed-length codec and current-Worker Service ingress,
+then confirms an exact protected grant revocation rejects those same bytes.
+This does **not** create live IPC, provide authority to the Worker or
+qualify adaptive feedback / physical streaming. A pending async report
+must still be bound to the exact Service-issued receiver generation **at
+the moment it was emitted**; swapping a new owner onto old same-key bytes
+is unsafe and cannot be authorized by the key-only report binding.
