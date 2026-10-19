@@ -97,6 +97,9 @@ jobs:
       - name: Test opt-in trusted policy store
         run: cargo test -p classmesh-win32 --features experimental-trusted-policy
 
+      - name: Test opt-in trusted Service config parser
+        run: cargo test -p classmesh-service --features experimental-trusted-policy trusted_config_parser_matches_existing_version_one_contract
+
       - name: Build opt-in trusted policy Service
         run: cargo build -p classmesh-service --features experimental-trusted-policy
 

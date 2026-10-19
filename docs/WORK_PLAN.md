@@ -1,6 +1,12 @@
-## Active execution checkpoint — independent Registry anchor and rooted reader (2026-10-18)
+## Active execution checkpoint — rooted Service startup inputs (2026-10-19)
 
-## Active execution checkpoint — native installation and opt-in Service startup (2026-10-19)
+PR #569 merged at `c02d40fef66174bcea4951439bab996459ffd3ec` after hosted CI `39204535126` Portable Rust + Windows Build PASS. Its protected immutable installation and default-off Service policy loading are present on main alongside independent Phase 10 #570/#572. VM1 default/feature qualification and SCM LocalSystem tests passed; VM2 full run was interrupted by guest disk exhaustion and is not a pass.
+
+PR #571 `feat/phase12-trusted-startup-identity` moves primary machine identity and control config acquisition onto the retained OS-rooted ProgramData HANDLE chain under the existing policy lease. No environment path, backup, or untrusted primary is used by the opt-in startup path. Native VM1 identity/config negatives and the Service parser differential test passed; the identity test passed again under SCM LocalSystem. Feature Clippy and portable identity tests passed. Windows CI now explicitly runs the feature-gated Service config test. It has been rebased onto current main; require exact-head hosted CI before Squash. Dependent PR #573 adds fresh protected identity/config provisioning. Default activation, real installed Service lifecycle, authorized reload/revocation, power interruption and physical qualification remain open.
+
+## Historical checkpoint — independent Registry anchor and rooted reader (2026-10-18)
+
+## Historical checkpoint — native installation and opt-in Service startup (2026-10-19)
 
 Registry/reader #553 merged at `0ff3a2662b003545201ecb8818d857af62870c42`, CI `39148646332` Portable Rust + Windows Build PASS. New batch `feat/phase12-trusted-policy-install-runtime`, code `1932805`: native protected create-only, exclusive, write-through policy file; same-HANDLE flush/bounded digest+JSON readback before Registry commit. Fixed `ClassMesh-Policy-v2` namespace; stable protected `authority.lock` retained from before epoch acquisition through Service runtime shutdown. Updates require stop/install/restart; no lock recreation, old-file fallback or orphan adoption.
 

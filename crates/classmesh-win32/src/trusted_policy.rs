@@ -40,6 +40,38 @@ impl TrustedPolicySession {
     pub fn open_installed() -> io::Result<Self> {
         open_at(INSTALLED_SCOPE)
     }
+    /// Read the fixed primary machine identity in the existing protected
+    /// ClassMesh/state tree. The opaque reader and all ancestors remain pinned
+    /// through parsing; a missing primary never consults its backup.
+    pub fn read_machine_identity<T>(
+        &self,
+        parse: impl FnOnce(&mut dyn Read) -> T,
+    ) -> io::Result<T> {
+        let index = self._directories.len().checked_sub(3).ok_or_else(denied)?;
+        let program_data = self._directories.get(index).ok_or_else(denied)?;
+        read_trusted_primary(
+            program_data,
+            "ClassMesh",
+            "state",
+            "machine-identity.json",
+            1024 * 1024,
+            parse,
+        )
+    }
+    /// Read only the fixed protected ClassMesh/config primary through the same
+    /// trusted ProgramData HANDLE. No environment path or backup fallback.
+    pub fn read_control_config<T>(&self, parse: impl FnOnce(&mut dyn Read) -> T) -> io::Result<T> {
+        let index = self._directories.len().checked_sub(3).ok_or_else(denied)?;
+        let program_data = self._directories.get(index).ok_or_else(denied)?;
+        read_trusted_primary(
+            program_data,
+            "ClassMesh",
+            "config",
+            "control-runtime.json",
+            64 * 1024,
+            parse,
+        )
+    }
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -155,6 +187,27 @@ pub(crate) fn parse_registry_policy(
         Ok((epoch, authorization))
     })
 }
+fn read_trusted_primary<T>(
+    program_data: &File,
+    scope: &str,
+    directory: &str,
+    leaf: &str,
+    maximum: u64,
+    parse: impl FnOnce(&mut dyn Read) -> T,
+) -> io::Result<T> {
+    let fixture = scope
+        .strip_prefix("ClassMesh-anchor-probe-identity-")
+        .is_some_and(|suffix| suffix.parse::<u32>().is_ok());
+    if scope != "ClassMesh" && !(cfg!(test) && fixture) {
+        return Err(denied());
+    }
+    let app = open_relative_protected_node(program_data, scope, true)?;
+    let child = open_relative_protected_node(&app, directory, true)?;
+    let primary = open_relative_protected_node(&child, leaf, false)?;
+    let mut bounded = primary.take(maximum + 1);
+    Ok(parse(&mut bounded))
+}
+
 fn open_at(scope: &str) -> io::Result<TrustedPolicySession> {
     let directories = pin(scope, false)?;
     let lock = open_relative_exclusive_file(state(&directories)?, LOCK_NAME)?;
@@ -326,5 +379,157 @@ mod tests {
             }
             _ => panic!("unknown private fixture mode"),
         }
+    }
+    #[test]
+    fn rooted_identity_keeps_handles_through_canonical_parser_and_has_no_backup_fallback() {
+        let scope = format!("ClassMesh-anchor-probe-identity-{}", std::process::id());
+        provision_at(&scope, 1, VALID).unwrap();
+        let dirs = pin(&scope, false).unwrap();
+        let roots = crate::system_volume::pin_system_program_data().unwrap();
+        let parent = roots.last().unwrap();
+        let state_handle = super::state(&dirs).unwrap();
+        let bytes = format!(r#"{{"version":1,"principal_id":[{}],"cng_key_name":"ClassMesh-test","certificate_chain_der":[[48,1,0]],"trust_roots_der":[[48,1,1]],"not_after_unix_ms":999999}}"#, ["7"; 32].join(",")).into_bytes();
+        let root = crate::program_data_known_folder::resolve_os_program_data_path()
+            .unwrap()
+            .join(&scope);
+        let identity = root.join("state").join("machine-identity.json");
+        let mut original =
+            create_relative_protected_file(state_handle, "machine-identity.json").unwrap();
+        original.write_all(&bytes).unwrap();
+        original.sync_all().unwrap();
+        drop(original);
+        let app = &dirs[dirs.len() - 2];
+        let config_directory = create_relative_protected_directory(app, "config").unwrap();
+        let config_bytes =
+            br#"{"version":1,"bind_address":"127.0.0.1:52000","multicast_interface":null}"#;
+        let mut config_file =
+            create_relative_protected_file(&config_directory, "control-runtime.json").unwrap();
+        config_file.write_all(config_bytes).unwrap();
+        config_file.sync_all().unwrap();
+        drop(config_file);
+        drop(config_directory);
+        drop(dirs);
+        let config_read = read_trusted_primary(
+            parent,
+            &scope,
+            "config",
+            "control-runtime.json",
+            64 * 1024,
+            |reader| {
+                let config_path = root.join("config").join("control-runtime.json");
+                assert!(std::fs::write(config_path, b"replacement").is_err());
+                let mut bytes = Vec::new();
+                reader.read_to_end(&mut bytes).unwrap();
+                bytes
+            },
+        )
+        .unwrap();
+        assert_eq!(config_read, config_bytes);
+        let parsed = read_trusted_primary(
+            parent,
+            &scope,
+            "state",
+            "machine-identity.json",
+            1024 * 1024,
+            |reader| {
+                assert!(std::fs::write(&identity, b"changed roots").is_err());
+                assert!(std::fs::rename(&identity, identity.with_extension("moved")).is_err());
+                classmesh_identity_win::DurableMachineIdentity::parse_from_reader(reader)
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(parsed.principal_id, [7; 32]);
+        assert_eq!(parsed.trust_roots_der, vec![vec![48, 1, 1]]);
+        std::fs::write(&identity, vec![b' '; 1024 * 1024 + 1]).unwrap();
+        assert!(
+            read_trusted_primary(
+                parent,
+                &scope,
+                "state",
+                "machine-identity.json",
+                1024 * 1024,
+                |reader| {
+                    classmesh_identity_win::DurableMachineIdentity::parse_from_reader(reader)
+                }
+            )
+            .unwrap()
+            .is_err()
+        );
+        std::fs::write(&identity, &bytes).unwrap();
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _ = read_trusted_primary(
+                    parent,
+                    &scope,
+                    "state",
+                    "machine-identity.json",
+                    1024 * 1024,
+                    |_| panic!("identity read unwind"),
+                );
+            })
+            .is_err()
+        );
+        let config_path = root.join("config").join("control-runtime.json");
+        std::fs::write(&config_path, vec![b' '; 64 * 1024 + 1]).unwrap();
+        assert_eq!(
+            read_trusted_primary(
+                parent,
+                &scope,
+                "config",
+                "control-runtime.json",
+                64 * 1024,
+                |reader| {
+                    let mut bytes = Vec::new();
+                    reader.read_to_end(&mut bytes).unwrap();
+                    bytes.len()
+                }
+            )
+            .unwrap(),
+            64 * 1024 + 1
+        );
+        std::fs::remove_file(&config_path).unwrap();
+        assert!(
+            read_trusted_primary(
+                parent,
+                &scope,
+                "config",
+                "control-runtime.json",
+                64 * 1024,
+                |_| ()
+            )
+            .is_err()
+        );
+        let backup = identity.with_extension("json.bak");
+        std::fs::rename(&identity, &backup).unwrap();
+        assert!(
+            read_trusted_primary(
+                parent,
+                &scope,
+                "state",
+                "machine-identity.json",
+                1024 * 1024,
+                |_| ()
+            )
+            .is_err(),
+            "trusted identity never uses .bak"
+        );
+        std::fs::rename(&backup, &identity).unwrap();
+        let alias = identity.with_extension("hardlink");
+        std::fs::hard_link(&identity, &alias).unwrap();
+        assert!(
+            read_trusted_primary(
+                parent,
+                &scope,
+                "state",
+                "machine-identity.json",
+                1024 * 1024,
+                |_| ()
+            )
+            .is_err()
+        );
+        drop(roots);
+        crate::registry_epoch::remove_fixture(&scope);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

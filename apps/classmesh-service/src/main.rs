@@ -13,6 +13,8 @@ mod system_action_power;
 mod windows_service_app {
     use std::ffi::OsString;
     use std::fs;
+    #[cfg(feature = "experimental-trusted-policy")]
+    use std::io::Read;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
     use std::sync::{Arc, mpsc};
@@ -80,11 +82,14 @@ mod windows_service_app {
     const SERVICE_NAME: &str = "ClassMeshService";
     const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
     const STATE_DIRECTORY: &str = "ClassMesh\\state";
+    #[cfg(not(feature = "experimental-trusted-policy"))]
     const CONFIG_DIRECTORY: &str = "ClassMesh\\config";
+    #[cfg(not(feature = "experimental-trusted-policy"))]
     const MACHINE_IDENTITY_FILE: &str = "machine-identity.json";
     #[cfg(not(feature = "experimental-trusted-policy"))]
     const AUTHORIZATION_FILE: &str = "authorization.json";
     const ENCODER_CAPABILITY_CACHE_FILE: &str = "encoder-capability.json";
+    #[cfg(not(feature = "experimental-trusted-policy"))]
     const CONTROL_RUNTIME_CONFIG_FILE: &str = "control-runtime.json";
     const FILE_INBOX_DIRECTORY: &str = "file-inbox";
     const FILE_OUTBOX_DIRECTORY: &str = "file-outbox";
@@ -1687,11 +1692,19 @@ mod windows_service_app {
             .map_err(|error| format!("trusted policy startup rejected: {error}"))?;
         #[cfg(not(feature = "experimental-trusted-policy"))]
         let policy_lease = ();
+        #[cfg(not(feature = "experimental-trusted-policy"))]
         let state_dir = program_data_state_dir()?;
+        #[cfg(not(feature = "experimental-trusted-policy"))]
         let identity_path = state_dir.join(MACHINE_IDENTITY_FILE);
         #[cfg(not(feature = "experimental-trusted-policy"))]
         let authorization_path = state_dir.join(AUTHORIZATION_FILE);
 
+        #[cfg(feature = "experimental-trusted-policy")]
+        let identity = policy_lease
+            .read_machine_identity(|reader| DurableMachineIdentity::parse_from_reader(reader))
+            .map_err(|error| format!("trusted machine identity acquisition rejected: {error}"))?
+            .map_err(|error| format!("machine identity state rejected: {error}"))?;
+        #[cfg(not(feature = "experimental-trusted-policy"))]
         let identity = DurableMachineIdentity::new(&identity_path)
             .load()
             .map_err(|error| format!("machine identity state rejected: {error}"))?
@@ -1760,17 +1773,111 @@ mod windows_service_app {
         ))
     }
 
-    fn load_control_config() -> Result<ControlRuntimeConfig, String> {
-        let program_data = std::env::var_os("ProgramData")
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                "ProgramData is unavailable; refusing to start control runtime".to_owned()
-            })?;
-        let path = PathBuf::from(program_data)
-            .join(CONFIG_DIRECTORY)
-            .join(CONTROL_RUNTIME_CONFIG_FILE);
-        ControlRuntimeConfig::load(&path)
-            .map_err(|error| format!("control runtime config rejected: {error}"))
+    fn load_control_config(
+        _policy_lease: &PolicySessionLease,
+    ) -> Result<ControlRuntimeConfig, String> {
+        #[cfg(feature = "experimental-trusted-policy")]
+        return _policy_lease
+            .read_control_config(parse_trusted_control_config)
+            .map_err(|error| format!("trusted control config acquisition rejected: {error}"))?;
+
+        #[cfg(not(feature = "experimental-trusted-policy"))]
+        {
+            let program_data = std::env::var_os("ProgramData")
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    "ProgramData is unavailable; refusing to start control runtime".to_owned()
+                })?;
+            let path = PathBuf::from(program_data)
+                .join(CONFIG_DIRECTORY)
+                .join(CONTROL_RUNTIME_CONFIG_FILE);
+            ControlRuntimeConfig::load(&path)
+                .map_err(|error| format!("control runtime config rejected: {error}"))
+        }
+    }
+
+    /// Version 1 config validation mirrors ControlRuntimeConfig::load without
+    /// opening a pathname. The bounded reader comes from the OS-rooted chain;
+    /// the test compares these rules with the legacy canonical loader.
+    #[cfg(feature = "experimental-trusted-policy")]
+    fn parse_trusted_control_config(
+        reader: &mut dyn std::io::Read,
+    ) -> Result<ControlRuntimeConfig, String> {
+        // Keep the legacy loader compiled for the differential contract test
+        // without opening any path in the trusted startup path.
+        let _legacy_contract = ControlRuntimeConfig::load
+            as fn(&std::path::Path) -> Result<ControlRuntimeConfig, String>;
+        use serde::Deserialize;
+        use std::net::{Ipv4Addr, SocketAddr};
+        #[derive(Deserialize)]
+        struct Persisted {
+            version: u32,
+            bind_address: String,
+            multicast_interface: Option<String>,
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::take(reader, 64 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("control runtime config read failed: {error}"))?;
+        if bytes.len() > 64 * 1024 {
+            return Err("control runtime config exceeds 65536 bytes".to_owned());
+        }
+        let persisted: Persisted = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("control runtime config JSON failed: {error}"))?;
+        if persisted.version != 1 {
+            return Err(format!(
+                "unsupported control runtime config version {}",
+                persisted.version
+            ));
+        }
+        let bind_address = persisted
+            .bind_address
+            .parse::<SocketAddr>()
+            .map_err(|_| "control runtime bind_address must be a socket address".to_owned())?;
+        if bind_address.port() == 0 {
+            return Err("control runtime bind port must be non-zero".to_owned());
+        }
+        let multicast_interface = persisted
+            .multicast_interface
+            .map(|value| {
+                value.parse::<Ipv4Addr>().map_err(|_| {
+                    "control runtime multicast_interface must be an IPv4 address".to_owned()
+                })
+            })
+            .transpose()?;
+        Ok(ControlRuntimeConfig {
+            bind_address,
+            multicast_interface,
+        })
+    }
+
+    #[cfg(all(test, feature = "experimental-trusted-policy"))]
+    #[test]
+    fn trusted_config_parser_matches_existing_version_one_contract() {
+        use std::io::Cursor;
+        let path = std::env::temp_dir().join(format!(
+            "classmesh-trusted-config-{}.json",
+            std::process::id()
+        ));
+        for bytes in [
+            br#"{"version":1,"bind_address":"127.0.0.1:52000","multicast_interface":null}"#
+                .as_slice(),
+            br#"{"version":1,"bind_address":"0.0.0.0:5151","multicast_interface":"192.0.2.9"}"#,
+            br#"{"version":2,"bind_address":"127.0.0.1:52000","multicast_interface":null}"#,
+            br#"{"version":1,"bind_address":"127.0.0.1:0","multicast_interface":null}"#,
+            br#"{"version":1,"bind_address":"127.0.0.1:52000","multicast_interface":"bad"}"#,
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            let existing = ControlRuntimeConfig::load(&path);
+            let trusted = parse_trusted_control_config(&mut Cursor::new(bytes));
+            assert_eq!(existing.is_ok(), trusted.is_ok());
+            if let (Ok(existing), Ok(trusted)) = (existing, trusted) {
+                assert_eq!(existing.bind_address, trusted.bind_address);
+                assert_eq!(existing.multicast_interface, trusted.multicast_interface);
+            }
+        }
+        std::fs::remove_file(path).unwrap();
+        assert!(parse_trusted_control_config(&mut Cursor::new(vec![b' '; 64 * 1024 + 1])).is_err());
     }
 
     pub fn run() -> windows_service::Result<()> {
@@ -1816,7 +1923,7 @@ mod windows_service_app {
                 return Ok(());
             }
         };
-        let control_config = match load_control_config() {
+        let control_config = match load_control_config(&_policy_lease) {
             Ok(config) => config,
             Err(error) => {
                 eprintln!("ClassMesh control runtime configuration failed: {error}");
