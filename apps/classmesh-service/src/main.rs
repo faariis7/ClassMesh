@@ -13,8 +13,6 @@ mod system_action_power;
 mod windows_service_app {
     use std::ffi::OsString;
     use std::fs;
-    #[cfg(feature = "experimental-trusted-policy")]
-    use std::io::Read;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
     use std::sync::{Arc, mpsc};
@@ -1796,9 +1794,8 @@ mod windows_service_app {
         }
     }
 
-    /// Version 1 config validation mirrors ControlRuntimeConfig::load without
-    /// opening a pathname. The bounded reader comes from the OS-rooted chain;
-    /// the test compares these rules with the legacy canonical loader.
+    /// Parse the same bounded v1 shape used during protected provisioning.
+    /// The reader comes from the retained OS-rooted HANDLE chain.
     #[cfg(feature = "experimental-trusted-policy")]
     fn parse_trusted_control_config(
         reader: &mut dyn std::io::Read,
@@ -1807,47 +1804,11 @@ mod windows_service_app {
         // without opening any path in the trusted startup path.
         let _legacy_contract = ControlRuntimeConfig::load
             as fn(&std::path::Path) -> Result<ControlRuntimeConfig, String>;
-        use serde::Deserialize;
-        use std::net::{Ipv4Addr, SocketAddr};
-        #[derive(Deserialize)]
-        struct Persisted {
-            version: u32,
-            bind_address: String,
-            multicast_interface: Option<String>,
-        }
-        let mut bytes = Vec::new();
-        std::io::Read::take(reader, 64 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|error| format!("control runtime config read failed: {error}"))?;
-        if bytes.len() > 64 * 1024 {
-            return Err("control runtime config exceeds 65536 bytes".to_owned());
-        }
-        let persisted: Persisted = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("control runtime config JSON failed: {error}"))?;
-        if persisted.version != 1 {
-            return Err(format!(
-                "unsupported control runtime config version {}",
-                persisted.version
-            ));
-        }
-        let bind_address = persisted
-            .bind_address
-            .parse::<SocketAddr>()
-            .map_err(|_| "control runtime bind_address must be a socket address".to_owned())?;
-        if bind_address.port() == 0 {
-            return Err("control runtime bind port must be non-zero".to_owned());
-        }
-        let multicast_interface = persisted
-            .multicast_interface
-            .map(|value| {
-                value.parse::<Ipv4Addr>().map_err(|_| {
-                    "control runtime multicast_interface must be an IPv4 address".to_owned()
-                })
-            })
-            .transpose()?;
+        let parsed = classmesh_win32::trusted_policy::parse_control_config(reader)
+            .map_err(|error| format!("control runtime config rejected: {error}"))?;
         Ok(ControlRuntimeConfig {
-            bind_address,
-            multicast_interface,
+            bind_address: parsed.bind_address,
+            multicast_interface: parsed.multicast_interface,
         })
     }
 

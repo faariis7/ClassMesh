@@ -1,4 +1,10 @@
-## Active execution checkpoint — rooted Service startup inputs (2026-10-19)
+## Active execution checkpoint — protected fresh startup provisioning (2026-10-19)
+
+PR #569 (`a39e092`, CI `39204535126`) and dependent PR #571 (`c6ea908`, CI `39204785961`) are open; each portable job passed and their Windows jobs are running. #569 removes only a repeatedly hanging optional hosted Cargo cache step; all quality gates remain. Merge #569 before #571, then rebase the next branch onto their merged main.
+
+The next coherent batch `feat/phase12-protected-startup-provision` creates only a fresh, fixed protected `ClassMesh` identity/config tree under the Windows-rooted ProgramData HANDLE. It validates both bounded inputs before side effects, serializes only recognized fields, creates every directory/file relative to its held parent, flushes and reads back the original exclusive file HANDLEs, and refuses existing or partial roots. It shares the config parser with the opt-in Service reader. Native VM1 test first exposed persistence of ignored secret fields, then passed after canonical encoding; disposable SCM LocalSystem and default/feature package gates passed. This is no migration or actual installed Service activation. Next: final diff/security review, one stacked PR, exact-head hosted CI, then qualified install/Service lifecycle and revocation work.
+
+## Historical checkpoint — rooted Service startup inputs (2026-10-19)
 
 PR #569 merged at `c02d40fef66174bcea4951439bab996459ffd3ec` after hosted CI `39204535126` Portable Rust + Windows Build PASS. Its protected immutable installation and default-off Service policy loading are present on main alongside independent Phase 10 #570/#572. VM1 default/feature qualification and SCM LocalSystem tests passed; VM2 full run was interrupted by guest disk exhaustion and is not a pass.
 

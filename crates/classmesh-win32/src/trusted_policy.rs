@@ -16,14 +16,77 @@ use classmesh_security::{
     AuthorizationStore, persistence::DurableAuthorizationState,
     policy_epoch::encode_bound_policy_checkpoint,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
+    net::{Ipv4Addr, SocketAddr},
 };
 
 const INSTALLED_SCOPE: &str = "ClassMesh-Policy-v2";
 const MAX_POLICY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_IDENTITY_BYTES: usize = 1024 * 1024;
+const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const LOCK_NAME: &str = "authority.lock";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrustedControlConfig {
+    pub bind_address: SocketAddr,
+    pub multicast_interface: Option<Ipv4Addr>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct PersistedControlConfig {
+    version: u32,
+    bind_address: String,
+    multicast_interface: Option<String>,
+}
+
+/// The single bounded v1 parser used before protected provisioning and after
+/// trusted HANDLE acquisition. The caller must establish the reader's origin.
+pub fn parse_control_config(reader: impl Read) -> io::Result<TrustedControlConfig> {
+    let mut bytes = Vec::new();
+    reader
+        .take((MAX_CONFIG_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return Err(denied());
+    }
+    let persisted: PersistedControlConfig = serde_json::from_slice(&bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if persisted.version != 1 {
+        return Err(denied());
+    }
+    let bind_address = persisted
+        .bind_address
+        .parse::<SocketAddr>()
+        .map_err(|_| denied())?;
+    if bind_address.port() == 0 {
+        return Err(denied());
+    }
+    let multicast_interface = persisted
+        .multicast_interface
+        .map(|value| value.parse::<Ipv4Addr>().map_err(|_| denied()))
+        .transpose()?;
+    Ok(TrustedControlConfig {
+        bind_address,
+        multicast_interface,
+    })
+}
+
+fn encode_control_config(config: TrustedControlConfig) -> io::Result<Vec<u8>> {
+    let persisted = PersistedControlConfig {
+        version: 1,
+        bind_address: config.bind_address.to_string(),
+        multicast_interface: config.multicast_interface.map(|value| value.to_string()),
+    };
+    let bytes = serde_json::to_vec(&persisted)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return Err(denied());
+    }
+    Ok(bytes)
+}
 
 /// Keep alive until every runtime using the extracted policy has stopped/joined.
 /// No raw handles, paths or clone operation escape this lease.
@@ -54,7 +117,7 @@ impl TrustedPolicySession {
             "ClassMesh",
             "state",
             "machine-identity.json",
-            1024 * 1024,
+            MAX_IDENTITY_BYTES as u64,
             parse,
         )
     }
@@ -68,7 +131,7 @@ impl TrustedPolicySession {
             "ClassMesh",
             "config",
             "control-runtime.json",
-            64 * 1024,
+            MAX_CONFIG_BYTES as u64,
             parse,
         )
     }
@@ -86,6 +149,12 @@ impl TrustedPolicySession {
 pub fn provision_installed(epoch: u64, bytes: &[u8]) -> io::Result<()> {
     provision_at(INSTALLED_SCOPE, epoch, bytes)
 }
+/// Fresh-install-only identity/config seed under fixed protected `ClassMesh`.
+/// It refuses an existing root and never migrates or adopts legacy state.
+/// A crash may leave a partial root that must be inspected before retrying.
+pub fn provision_startup_inputs(identity: &[u8], config: &[u8]) -> io::Result<()> {
+    provision_inputs_at("ClassMesh", identity, config)
+}
 /// Service must first stop. Refuse active runtime, stale epoch and existing blob.
 /// An error after commit can leave the newer epoch durable but unacknowledged;
 /// recovery must reopen the anchor, never retry with the old expected record.
@@ -97,6 +166,69 @@ fn denied() -> io::Error {
         io::ErrorKind::PermissionDenied,
         "trusted policy state rejected",
     )
+}
+fn startup_scope_allowed(scope: &str) -> bool {
+    scope == "ClassMesh"
+        || (cfg!(test)
+            && scope
+                .strip_prefix("ClassMesh-anchor-probe-provision-")
+                .is_some_and(|suffix| suffix.parse::<u32>().is_ok()))
+}
+
+fn stage_startup_input(
+    parent: &File,
+    leaf: &str,
+    bytes: &[u8],
+    maximum: usize,
+) -> io::Result<File> {
+    if bytes.is_empty() || bytes.len() > maximum {
+        return Err(denied());
+    }
+    let mut file = create_relative_protected_file(parent, leaf)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut readback = Vec::new();
+    Read::by_ref(&mut file)
+        .take((maximum + 1) as u64)
+        .read_to_end(&mut readback)?;
+    if readback != bytes {
+        return Err(denied());
+    }
+    Ok(file)
+}
+
+fn provision_inputs_at(scope: &str, identity: &[u8], config: &[u8]) -> io::Result<()> {
+    if !startup_scope_allowed(scope) {
+        return Err(denied());
+    }
+    let identity_bundle =
+        classmesh_identity_win::DurableMachineIdentity::parse_from_reader(identity)
+            .map_err(|_| denied())?;
+    let identity_bytes =
+        classmesh_identity_win::DurableMachineIdentity::encode_canonical(&identity_bundle)
+            .map_err(|_| denied())?;
+    let config_bytes = encode_control_config(parse_control_config(config)?)?;
+    // All validation precedes any filesystem side effect. Every creation is
+    // relative to its retained OS-rooted parent and refuses preexisting state.
+    let roots = crate::system_volume::pin_system_program_data()?;
+    let program_data = roots.last().ok_or_else(denied)?;
+    let app = create_relative_protected_directory(program_data, scope)?;
+    let state = create_relative_protected_directory(&app, "state")?;
+    let config_dir = create_relative_protected_directory(&app, "config")?;
+    let _identity = stage_startup_input(
+        &state,
+        "machine-identity.json",
+        &identity_bytes,
+        MAX_IDENTITY_BYTES,
+    )?;
+    let _config = stage_startup_input(
+        &config_dir,
+        "control-runtime.json",
+        &config_bytes,
+        MAX_CONFIG_BYTES,
+    )?;
+    Ok(())
 }
 fn validate(epoch: u64, bytes: &[u8]) -> io::Result<[u8; 48]> {
     if bytes.is_empty() || bytes.len() > MAX_POLICY_BYTES {
@@ -195,9 +327,16 @@ fn read_trusted_primary<T>(
     maximum: u64,
     parse: impl FnOnce(&mut dyn Read) -> T,
 ) -> io::Result<T> {
-    let fixture = scope
-        .strip_prefix("ClassMesh-anchor-probe-identity-")
-        .is_some_and(|suffix| suffix.parse::<u32>().is_ok());
+    let fixture = [
+        "ClassMesh-anchor-probe-identity-",
+        "ClassMesh-anchor-probe-provision-",
+    ]
+    .into_iter()
+    .any(|prefix| {
+        scope
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.parse::<u32>().is_ok())
+    });
     if scope != "ClassMesh" && !(cfg!(test) && fixture) {
         return Err(denied());
     }
@@ -539,15 +678,33 @@ mod tests {
         let root = crate::program_data_known_folder::resolve_os_program_data_path()
             .unwrap()
             .join(&scope);
-        let identity = format!(r#"{{"version":1,"principal_id":[{}],"cng_key_name":"ClassMesh-test","certificate_chain_der":[[48,1,0]],"trust_roots_der":[[48,1,1]],"not_after_unix_ms":999999}}"#, ["7"; 32].join(",")).into_bytes();
-        let config =
-            br#"{"version":1,"bind_address":"127.0.0.1:52000","multicast_interface":null}"#;
+        let identity = format!(r#"{{"version":1,"principal_id":[{}],"cng_key_name":"ClassMesh-test","certificate_chain_der":[[48,1,0]],"trust_roots_der":[[48,1,1]],"not_after_unix_ms":999999,"private_key":"MUST_NOT_STORE"}}"#, ["7"; 32].join(",")).into_bytes();
+        let config = br#"{"version":1,"bind_address":"127.0.0.1:52000","multicast_interface":null,"unrecognized_secret":"MUST_NOT_STORE"}"#;
         assert!(provision_inputs_at(&scope, b"invalid identity", config).is_err());
-        assert!(!root.exists(), "invalid identity has no filesystem side effect");
+        assert!(
+            !root.exists(),
+            "invalid identity has no filesystem side effect"
+        );
         assert!(provision_inputs_at(&scope, &identity, b"invalid config").is_err());
-        assert!(!root.exists(), "invalid config has no filesystem side effect");
+        assert!(
+            !root.exists(),
+            "invalid config has no filesystem side effect"
+        );
         provision_inputs_at(&scope, &identity, config).unwrap();
         assert!(provision_inputs_at(&scope, &identity, config).is_err());
+        assert!(
+            !String::from_utf8_lossy(
+                &std::fs::read(root.join("state").join("machine-identity.json")).unwrap()
+            )
+            .contains("MUST_NOT_STORE"),
+            "a tolerated extra input field must not become persisted key material"
+        );
+        assert!(
+            !String::from_utf8_lossy(
+                &std::fs::read(root.join("config").join("control-runtime.json")).unwrap()
+            )
+            .contains("MUST_NOT_STORE")
+        );
         let roots = crate::system_volume::pin_system_program_data().unwrap();
         let parent = roots.last().unwrap();
         let decoded = read_trusted_primary(
@@ -556,7 +713,7 @@ mod tests {
             "state",
             "machine-identity.json",
             1024 * 1024,
-            classmesh_identity_win::DurableMachineIdentity::parse_from_reader,
+            |reader| classmesh_identity_win::DurableMachineIdentity::parse_from_reader(reader),
         )
         .unwrap()
         .unwrap();
@@ -574,8 +731,22 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(installed_config, config);
+        assert_eq!(
+            parse_control_config(installed_config.as_slice()).unwrap(),
+            parse_control_config(config.as_slice()).unwrap()
+        );
         drop(roots);
+        std::fs::remove_dir_all(&root).unwrap();
+
+        // A process exit after creating only the protected root is an orphan,
+        // not a reason to adopt or silently repair it on a later call.
+        let roots = crate::system_volume::pin_system_program_data().unwrap();
+        let partial = create_relative_protected_directory(roots.last().unwrap(), &scope).unwrap();
+        drop(partial);
+        drop(roots);
+        assert!(provision_inputs_at(&scope, &identity, config).is_err());
+        assert!(!root.join("state").exists());
+        assert!(!root.join("config").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

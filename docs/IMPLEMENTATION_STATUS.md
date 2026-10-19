@@ -1,4 +1,8 @@
-## Active execution checkpoint — Phase 12 trusted startup inputs (2026-10-19)
+## Active execution checkpoint — protected fresh startup provisioning (2026-10-19)
+
+PR #569 (`a39e092`) and dependent #571 (`c6ea908`) remain open with portable CI PASS and hosted Windows jobs in progress. Local branch `feat/phase12-protected-startup-provision` adds a fixed, create-only protected `ClassMesh/state` and `ClassMesh/config` seed API for new installs. It validates identity/config before any write, serializes recognized fields only, and retains the NT-relative parent and original file HANDLEs through flush and exact readback. Existing or partial roots are never adopted. Service opt-in config parsing now uses the same bounded v1 parser as provisioning; default loaders are unchanged. Native VM1 adversarial test, SCM LocalSystem Session0 test with cleanup, feature config test/Clippy and default identity/Win32/Service Clippy+tests passed. Hosted exact-head CI for this branch remains pending; no existing installation was touched.
+
+## Historical checkpoint — Phase 12 trusted startup inputs (2026-10-19)
 
 PR #569 merged at `c02d40fef66174bcea4951439bab996459ffd3ec`; hosted CI `39204535126` Portable Rust + Windows Build PASS. VM1 default/feature gates plus genuine SCM LocalSystem tests passed. VM2 final full run aborted at disk capacity and is not qualified. Its opt-in Service policy load remains default-off.
 
