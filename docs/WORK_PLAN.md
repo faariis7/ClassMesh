@@ -1,4 +1,10 @@
-## Active execution checkpoint — independent Registry anchor and rooted reader (2026-10-18)
+## Active execution checkpoint — rooted Service startup inputs (2026-10-19)
+
+PR #569 is open at `d975dd8` for protected immutable installation and default-off Service policy loading. Hosted CI attempt 2 has portable PASS; Windows Build is running. VM1 default/feature qualification and SCM LocalSystem tests passed; VM2 full run was interrupted by guest disk exhaustion and is not a pass. Keep #569 unmerged until both hosted jobs pass.
+
+The stacked `feat/phase12-trusted-startup-identity` batch moves primary machine identity and control config acquisition onto the retained OS-rooted ProgramData HANDLE chain under the existing policy lease. No environment path, backup, or untrusted primary is used by the opt-in startup path. Native VM1 identity/config negatives and the Service parser differential test passed; the identity test passed again under SCM LocalSystem. Feature Clippy and portable identity tests passed. Windows CI now explicitly runs the feature-gated Service config test. Merge this batch only after #569, rebasing only its own commits, then exact-head hosted CI. Default activation, real installed Service lifecycle, authorized reload/revocation, power interruption and physical qualification remain open.
+
+## Historical active execution checkpoint — independent Registry anchor and rooted reader (2026-10-18)
 
 ## Active execution checkpoint — native installation and opt-in Service startup (2026-10-19)
 

@@ -1,4 +1,10 @@
-## Active execution checkpoint — independent Registry anchor and rooted reader (2026-10-18)
+## Active execution checkpoint — Phase 12 trusted startup inputs (2026-10-19)
+
+PR #569 (`d975dd8`) remains open; Portable Rust passed and hosted Windows Build attempt 2 is running. VM1 default/feature gates plus genuine SCM LocalSystem tests passed. VM2 final full run aborted at disk capacity and is not qualified. Its opt-in Service policy load remains default-off.
+
+Stacked local branch `feat/phase12-trusted-startup-identity` adds bounded canonical machine-identity parsing from the retained trusted HANDLE, protected primary-only `ClassMesh/state/machine-identity.json` and `ClassMesh/config/control-runtime.json` reads, and opt-in Service startup integration. No identity `.bak` recovery or `ProgramData` environment path exists in that feature path. Disposable VM1 native test proves in-flight write/rename denial, hardlink and missing-primary rejection, size limits and unwind cleanup; one Service config differential test passed. VM1 feature Clippy, portable identity tests and genuine SCM LocalSystem identity test passed. Hosted exact-head CI remains required after #569 merges. No installed Service runtime, actual power-loss or physical-device proof is claimed.
+
+## Historical active execution checkpoint — independent Registry anchor and rooted reader (2026-10-18)
 
 ## Active execution checkpoint — native installation and opt-in Service startup (2026-10-19)
 
