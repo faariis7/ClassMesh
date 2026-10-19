@@ -212,3 +212,26 @@ The test is strictly an in-process composition with a simulated Service
 authority: it does not create, authenticate, prioritize, negotiate or exercise
 real Windows IPC, and cannot substitute for native Windows VM and physical
 two-host GPU/decode qualification. It makes no adaptive-quality decision.
+
+## Recheck live Service owner before passive report decode
+
+A newly available **optional, stricter** Service-side entry point,
+`ReceiverTelemetryIngress::observe_for_current_owner`, requires the Service to
+provide its independently verified **currently active** process/session,
+Worker generation, accepted presentation/key epoch and receiver-runtime
+generation with **every received report**, and refuses mismatches, absent
+bindings or invalid owner identities **before decoding report bytes**. The
+companion `has_fresh_for_current_owner` refuses to display stale gate liveness
+under a different current owner. This closes an in-process stale-owner
+notification gap: simply retaining the prior activated binding is not
+sufficient evidence that it remains the current authorized Worker.
+
+The old passive `observe_verified` method remains for existing callers and
+compatibility; new Service integration should use the owner-aware method.
+Neither method authenticates the caller-supplied current owner, pins an OS
+process/pipe generation across concurrent replacement, nor establishes a
+Worker→Service transport. Actual Service receive code must obtain the owner
+from **independent OS peer credentials and an authoritative lifecycle**, hold
+that authorization across admission, revalidate on arrival/revocation, and
+never use report contents to select it. No Phase 12 IPC/message/version or
+adaptive-quality behavior changes were introduced.

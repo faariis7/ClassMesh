@@ -138,6 +138,26 @@ impl ReceiverTelemetryGate {
         Ok(())
     }
 
+    /// Recheck the Service's independently verified *current* Worker and
+    /// receiver-runtime lifetime before considering an individual report.
+    /// Never derive this binding from the payload; this is only a comparison,
+    /// not a peer credential or authorization grant.
+    pub fn verify_current_owner(
+        &self,
+        service_current_owner: ReceiverTelemetryBinding,
+    ) -> Result<(), ReceiverTelemetryError> {
+        if !service_current_owner.is_valid() {
+            return Err(ReceiverTelemetryError::InvalidBinding);
+        }
+        match self.active {
+            None => Err(ReceiverTelemetryError::NoActiveBinding),
+            Some(active) if active != service_current_owner => {
+                Err(ReceiverTelemetryError::BindingMismatch)
+            }
+            Some(_) => Ok(()),
+        }
+    }
+
     /// A stale clear cannot revoke the replacement presentation/epoch.
     pub fn clear_if_matches(&mut self, binding: ReceiverTelemetryBinding) -> bool {
         if self.active != Some(binding) {

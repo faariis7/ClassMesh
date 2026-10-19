@@ -53,6 +53,40 @@ impl ReceiverTelemetryIngress {
             .map_err(ReceiverTelemetryIngressError::Admission)
     }
 
+    /// Prefer this per-report guard when a Service has separately and
+    /// synchronously authenticated its actual current Worker, session and
+    /// receiver-runtime generation. It fails closed BEFORE parsing bytes if
+    /// the formerly activated gate does not match that live authority.
+    ///
+    /// This comparison does not authenticate its argument, pin a concurrent
+    /// process lifetime or add any transport; the Service must retain the
+    /// independently verified owner across the entire receive operation.
+    pub fn observe_for_current_owner(
+        &mut self,
+        service_current_owner: ReceiverTelemetryBinding,
+        bytes: &[u8],
+        service_received_at: Instant,
+    ) -> Result<ReceiverTelemetryDecision, ReceiverTelemetryIngressError> {
+        self.gate
+            .verify_current_owner(service_current_owner)
+            .map_err(ReceiverTelemetryIngressError::Admission)?;
+        self.observe_verified(bytes, service_received_at)
+    }
+
+    /// Read-only diagnostic liveness is meaningful only for a still-current
+    /// independently verified Service owner, never for a stale gate binding.
+    #[must_use]
+    pub fn has_fresh_for_current_owner(
+        &self,
+        service_current_owner: ReceiverTelemetryBinding,
+        service_now: Instant,
+    ) -> bool {
+        self.gate
+            .verify_current_owner(service_current_owner)
+            .is_ok()
+            && self.gate.has_fresh_report(service_now)
+    }
+
     /// Observability only, never sufficient for promoting quality.
     #[must_use]
     pub fn has_fresh_report(&self, service_now: Instant) -> bool {
