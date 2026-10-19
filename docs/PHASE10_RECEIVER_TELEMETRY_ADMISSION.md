@@ -484,3 +484,26 @@ state, never copy it from the decoded frame, and MUST independently enforce
 Service peer authentication and revocation on every received message. No IPC
 version, registration, transport, Worker outbox activation or Teacher feed is
 introduced by this change.
+
+
+## Worker permit construction is closed to downstream callers
+
+The passive `WorkerReceiverTelemetryAuthorization` now has private fields
+and read-only accessors. Integration callers cannot assemble a plausible
+receiver identity, key-install binding and start request into a permit with
+a struct literal; they must go through `from_service_grant` using an
+in-process Service-minted grant and matching Worker-installed key. Compile-fail
+doctest confirms external literal construction is rejected, and runtime tests
+mint real generations through the correlated Service key/start lifecycle,
+including stale-receiver, invalid installed key, revocation and bounded
+outbox behavior. Malformed internal permits remain covered by a module-local
+unit test.
+
+**Not a security boundary by itself:** A Rust caller can instantiate a
+separate `ReceiverTelemetryServiceRuntime` in process and produce a
+locally consistent record; neither these types nor their constructors
+authenticate the Windows OS peer. A future privileged transport must
+independently authenticate and pin the live Service's exact Worker/receiver
+generation and revoke it at every key/receiver/Worker transition. This
+change does not register IPC messages, enable telemetry sending or qualify
+physical multi-host operation.
