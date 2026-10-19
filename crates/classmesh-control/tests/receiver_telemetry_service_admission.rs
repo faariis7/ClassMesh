@@ -13,6 +13,7 @@ use classmesh_control::receiver_telemetry_service_lifecycle::{
     ReceiverTelemetryCurrentWorker, ReceiverTelemetryServiceLifecycleError, ReceiverTelemetryStart,
     ReceiverTelemetryStartAck, ReceiverTelemetryStartAckStatus,
 };
+use classmesh_control::receiver_telemetry_transport::ReceiverTelemetryWireError;
 use classmesh_control::receiver_telemetry_transport::encode_receiver_telemetry;
 
 fn pending() -> ReceiverTelemetryStart {
@@ -189,4 +190,31 @@ fn rejected_or_stale_start_reply_cannot_revoke_existing_runtime() {
         Ok(ReceiverTelemetryDecision::Baseline)
     );
     assert!(service.has_fresh_for_verified_peer(peer(), at));
+}
+
+#[test]
+fn malformed_report_from_correct_peer_cannot_poison_baseline_or_freshness() {
+    let at = Instant::now();
+    let mut service = ReceiverTelemetryServiceAdmission::default();
+    let owner = service
+        .activate_after_correlated_reply(pending(), peer(), acknowledged())
+        .unwrap();
+    assert_eq!(
+        service.observe_after_verified_peer(peer(), b"malformed frame", at),
+        Err(ReceiverTelemetryServiceAdmissionError::Ingress(
+            ReceiverTelemetryIngressError::Wire(ReceiverTelemetryWireError::InvalidLength)
+        ))
+    );
+    assert!(!service.has_fresh_for_verified_peer(peer(), at));
+    assert_eq!(
+        service.observe_after_verified_peer(peer(), &report(owner, 1), at),
+        Ok(ReceiverTelemetryDecision::Baseline)
+    );
+    assert_eq!(
+        service.observe_after_verified_peer(peer(), &report(owner, 1), at + Duration::from_secs(1)),
+        Err(ReceiverTelemetryServiceAdmissionError::Ingress(
+            ReceiverTelemetryIngressError::Admission(ReceiverTelemetryError::Replay)
+        ))
+    );
+    assert!(service.has_fresh_for_verified_peer(peer(), at + Duration::from_secs(1)));
 }
