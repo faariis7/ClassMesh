@@ -368,3 +368,43 @@ qualify adaptive feedback / physical streaming. A pending async report
 must still be bound to the exact Service-issued receiver generation **at
 the moment it was emitted**; swapping a new owner onto old same-key bytes
 is unsafe and cannot be authorized by the key-only report binding.
+
+
+## Worker report stamped at emission in a bounded outbox
+
+`PresentationDeliveryPublisher` is a new, **inactive** Worker-library
+component that owns local `PresentationDeliveryTelemetry` counters and a
+single-slot `ReceiverTelemetryConcurrentMailbox`. An independently
+authenticated **Service→Worker** lifetime grant must supply
+`WorkerReceiverTelemetryAuthorization`: exact Service-minted
+PID/session/Worker generation, control-session, media **start request**,
+presentation, stream, key epoch, receiver-runtime generation, plus the
+distinct installed key **grant request** and separately authorized start
+request ID. The Worker cannot create this grant from local key material or
+from a report. Such an authenticated grant channel is **not implemented** by
+this PR.
+
+When that authorization is externally supplied, `offer_if_due` calls
+the actual five-second Worker local diagnostics and stamps the full
+Service-issued owner *at emission time*, before placing the immutable
+snapshot in a one-slot, nonblocking `try_lock` mailbox. An eventual
+sender may check out only that current owner, must validate the send lease
+again and MUST independently confirm current OS-authenticated Service and
+receiver authorization at the I/O boundary. Neither a stale checkout nor
+an old report can be relabelled with a successor receiver generation.
+A same-key retry with a new Service-issued receiver generation clears
+the prior emission sequence/replay state, while stale or mismatched
+authorization cannot displace the active owner. Exact revocation disables
+checkout immediately, even if nonblocking mailbox cleanup reports
+contention; receiver-generation high-watermark never resets.
+
+This is **not an authenticated telemetry transport**, not integrated
+with the production Worker loop, does not create a new IPC message/version,
+perform asynchronous pipe writes, promote diagnostics into quality, or
+claim two-host/GPU qualification. The eventual end-to-end channel still
+needs a versioned Service-to-Worker authorization grant and an independently
+authenticated Worker-to-Service bounded, low-priority, cancellation-aware
+sender. Its control-channel priority, backpressure and revocation races
+must be tested on native Windows. Five-second cumulative diagnostics remain
+distinct from two-second independently fresh network/decoder/adaptive
+measurements.
