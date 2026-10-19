@@ -10,6 +10,10 @@
 //! A real sender MUST independently recheck live Service authorization
 //! immediately before I/O; this helper alone is not authentication.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Instant;
 
 use classmesh_control::receiver_telemetry::ReceiverTelemetryBinding;
@@ -122,6 +126,53 @@ pub enum PresentationDeliveryPublisherError {
     Mailbox(ReceiverTelemetryConcurrentError),
 }
 
+/// Read-only, cloneable checkout side of the one-slot diagnostic outbox.
+/// A low-priority sender may own this handle on a different thread without
+/// locking the Worker decode/render publisher or acquiring an ability to
+/// activate, offer, clear or rebind a receiver.
+///
+/// The atomic generation invalidates handles immediately on revocation,
+/// replacement (including failed replacement), and publisher destruction,
+/// even when the mailbox mutex is busy. It is NOT an authenticated Service
+/// peer or an authorization token: the eventual sender must independently
+/// verify its live OS peer and Service-issued receiver identity before I/O.
+#[derive(Debug, Clone)]
+pub struct PresentationDeliveryReadonlySender {
+    mailbox: ReceiverTelemetryConcurrentMailbox,
+    active_generation: Arc<AtomicU64>,
+}
+
+impl PresentationDeliveryReadonlySender {
+    pub fn try_checkout_matching(
+        &self,
+        receiver: ReceiverTelemetryBinding,
+    ) -> Result<Option<ReceiverTelemetrySendLease>, ReceiverTelemetryConcurrentError> {
+        let generation = receiver.receiver_generation;
+        if generation == 0 || self.active_generation.load(Ordering::Acquire) != generation {
+            return Ok(None);
+        }
+        let lease = self.mailbox.try_checkout_matching(receiver)?;
+        if self.active_generation.load(Ordering::Acquire) != generation {
+            return Ok(None);
+        }
+        Ok(lease)
+    }
+
+    /// Check again immediately before a nonblocking write; this still does
+    /// not prevent a revocation race with I/O or authenticate a remote peer.
+    pub fn lease_is_current(
+        &self,
+        lease: &ReceiverTelemetrySendLease,
+    ) -> Result<bool, ReceiverTelemetryConcurrentError> {
+        let generation = lease.snapshot().binding.receiver_generation;
+        if generation == 0 || self.active_generation.load(Ordering::Acquire) != generation {
+            return Ok(false);
+        }
+        let valid = self.mailbox.try_lease_is_current(lease)?;
+        Ok(valid && self.active_generation.load(Ordering::Acquire) == generation)
+    }
+}
+
 /// One owner of playback counters and a constant-size outbound diagnostic
 /// mailbox. It intentionally has no OS pipe or network socket to block.
 #[derive(Debug, Default)]
@@ -130,9 +181,28 @@ pub struct PresentationDeliveryPublisher {
     highest_receiver_generation: u64,
     tracker: PresentationDeliveryTelemetry,
     mailbox: ReceiverTelemetryConcurrentMailbox,
+    active_generation: Arc<AtomicU64>,
+}
+
+impl Drop for PresentationDeliveryPublisher {
+    fn drop(&mut self) {
+        // A detached sender must never retain usable authority after its
+        // originating publisher has been destroyed.
+        self.active_generation.store(0, Ordering::Release);
+    }
 }
 
 impl PresentationDeliveryPublisher {
+    /// Issue a read-only, shareable handle for future low-priority diagnostic
+    /// dispatch. This neither authenticates a sender nor creates an IPC path.
+    #[must_use]
+    pub fn readonly_sender(&self) -> PresentationDeliveryReadonlySender {
+        PresentationDeliveryReadonlySender {
+            mailbox: self.mailbox.clone(),
+            active_generation: Arc::clone(&self.active_generation),
+        }
+    }
+
     /// Only the authorized Service-to-Worker lifecycle controller may call
     /// this after authenticated handoff. Do NOT synthesize authorizations
     /// from Worker media keys, local process state or report bytes.
@@ -153,6 +223,7 @@ impl PresentationDeliveryPublisher {
         // A valid replacement must retire local report authority immediately.
         // If try_lock is busy, no old checked-out lease passes our local
         // lease_is_current check while the caller retries activation.
+        self.active_generation.store(0, Ordering::Release);
         self.active = None;
         self.tracker.reset();
         self.mailbox
@@ -160,6 +231,8 @@ impl PresentationDeliveryPublisher {
             .map_err(PresentationDeliveryPublisherError::Mailbox)?;
         self.highest_receiver_generation = permit.owner.receiver_generation;
         self.active = Some(permit);
+        self.active_generation
+            .store(permit.owner.receiver_generation, Ordering::Release);
         Ok(())
     }
 
@@ -269,6 +342,7 @@ impl PresentationDeliveryPublisher {
         if self.active.map(|permit| permit.owner) != Some(owner) {
             return Ok(false);
         }
+        self.active_generation.store(0, Ordering::Release);
         self.active = None;
         self.tracker.reset();
         self.mailbox

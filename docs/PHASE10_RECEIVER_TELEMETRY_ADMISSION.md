@@ -507,3 +507,27 @@ independently authenticate and pin the live Service's exact Worker/receiver
 generation and revoke it at every key/receiver/Worker transition. This
 change does not register IPC messages, enable telemetry sending or qualify
 physical multi-host operation.
+
+
+## Detached read-only Worker telemetry checkout boundary
+
+`PresentationDeliveryPublisher::readonly_sender` issues a cloneable
+`PresentationDeliveryReadonlySender` suitable for a future independent
+low-priority sending thread. It permits only `try_checkout_matching` and
+`lease_is_current`, never receiver activation, report publishing, key
+installation or revocation. The Worker-owned publisher remains the sole
+writer of the one-slot bounded diagnostic mailbox. An atomic active receiver
+generation is shared with the reader and cleared before revocation, any
+replacement attempt, and publisher destruction, invalidating detached reads
+even if mailbox cleanup is contended. A reader compares the generation both
+before/after checkout and when checking its send lease; the mailbox still
+enforces the entire exact binding, sequence and expiration.
+
+Integration tests exercise an actual separate thread checking out a bound
+immutable report, replacement to a Service-minted receiver generation,
+stale-lease invalidation, exact revocation and publisher destruction while
+a new report is queued. This is a **passive in-process boundary only**,
+not Windows peer authentication or an IPC/pipe sender. Any eventual sender
+must independently verify the Service's currently authenticated OS peer and
+current Worker/receiver generation immediately before nonblocking I/O.
+No Phase 12 IPC changes, adaptive-quality claim or physical qualification.
