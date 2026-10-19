@@ -290,3 +290,74 @@ fn independent_receiver_sessions_never_share_consumer_state() {
         Ok(ReceiverTelemetryDecision::Baseline)
     );
 }
+
+#[test]
+fn diagnostic_liveness_boundary_never_authorizes_adaptive_freshness() {
+    use classmesh_core::receiver_quality::ReceiverQualityPolicy;
+
+    let now = Instant::now();
+    let id = binding(4, 5);
+    let mut service = ReceiverTelemetryIngress::default();
+    service.activate_verified(id).unwrap();
+    let first = encode_receiver_telemetry(&report(id, 1, 10)).unwrap();
+    assert_eq!(
+        service.observe_verified(&first, now),
+        Ok(ReceiverTelemetryDecision::Baseline)
+    );
+
+    let adaptive_ttl = Duration::from_micros(ReceiverQualityPolicy::default().max_sample_age_us);
+    assert_eq!(adaptive_ttl, Duration::from_secs(2));
+    assert!(
+        service.has_fresh_report(now + Duration::from_secs(5)),
+        "diagnostic liveness is deliberately longer than adaptive sample TTL"
+    );
+    assert!(service.has_fresh_report(now + Duration::from_secs(30)));
+    assert!(!service.has_fresh_report(now + Duration::from_secs(30) + Duration::from_millis(1)));
+
+    // Replaying old bytes cannot extend the diagnostic liveness window.
+    assert_eq!(
+        service.observe_verified(&first, now + Duration::from_secs(31)),
+        Err(ReceiverTelemetryIngressError::Admission(
+            ReceiverTelemetryError::Replay
+        ))
+    );
+    assert!(!service.has_fresh_report(now + Duration::from_secs(31)));
+
+    // A legitimate new sequence after a long pause is only a baseline,
+    // not an interval eligible to fabricate adaptive-quality recovery.
+    let next = encode_receiver_telemetry(&report(id, 2, 16)).unwrap();
+    assert_eq!(
+        service.observe_verified(&next, now + Duration::from_secs(31)),
+        Ok(ReceiverTelemetryDecision::Baseline)
+    );
+    assert!(service.has_fresh_report(now + Duration::from_secs(31)));
+}
+
+#[test]
+fn service_binding_reactivation_does_not_erase_replay_protection() {
+    let now = Instant::now();
+    let id = binding(4, 5);
+    let mut service = ReceiverTelemetryIngress::default();
+    service.activate_verified(id).unwrap();
+    let first = encode_receiver_telemetry(&report(id, 1, 10)).unwrap();
+    assert_eq!(
+        service.observe_verified(&first, now),
+        Ok(ReceiverTelemetryDecision::Baseline)
+    );
+    // A redundant owner refresh is not a new Worker generation.
+    service.activate_verified(id).unwrap();
+    assert_eq!(
+        service.observe_verified(&first, now + Duration::from_secs(5)),
+        Err(ReceiverTelemetryIngressError::Admission(
+            ReceiverTelemetryError::Replay
+        ))
+    );
+    assert!(service.clear_if_matches(id));
+    assert!(!service.has_fresh_report(now + Duration::from_secs(5)));
+    assert_eq!(
+        service.observe_verified(&first, now + Duration::from_secs(10)),
+        Err(ReceiverTelemetryIngressError::Admission(
+            ReceiverTelemetryError::NoActiveBinding
+        ))
+    );
+}
