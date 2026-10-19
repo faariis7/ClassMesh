@@ -267,3 +267,25 @@ ingress must revalidate live peer authority on receipt, and no Worker-created
 generation is allowed. There is **no IPC message or channel**, no telemetry
 sender, no adaptive-quality promotion, no new privilege or Phase12 change.
 Physical two-host and GPU/scale gates remain open.
+
+
+## Service-owned start-result correlation guard
+
+The additional pure `activate_after_correlated_reply` gate can compare
+three **separately acquired** records before minting any runtime generation:
+(1) the Service-owned pending, *authorized* protected presentation/key
+binding; (2) the independently OS-authenticated current Worker
+PID/session plus Service Worker generation; and (3) a successfully parsed
+Worker multicast/unicast start acknowledgement. The untrusted ACK must
+match PID, session, control-session ID, request, presentation and stream;
+its rejected status is not a start. The ACK lacks key epoch and Worker
+generation, so **only the current Service authorization/grant** may supply
+those fields. A failed correlation must not spend a generation or clear
+the current receiver. A stale Worker reply after replacement fails closed.
+
+This is a testable *guard*, not an attested proof by itself: it cannot
+authenticate the caller-supplied records, prove the OS peer or prevent a
+separate concurrent Service replacement after the comparison. The live
+Service must own/pin/revalidate all three inputs within its serialized
+lifecycle event processing, and route start/revoke events before attempting
+telemetry ingress. No existing IPC frame/version or Phase12 file is edited.

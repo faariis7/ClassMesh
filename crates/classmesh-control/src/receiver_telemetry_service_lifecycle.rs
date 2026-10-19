@@ -37,9 +37,40 @@ impl ReceiverTelemetryStart {
     }
 }
 
+/// Current Service-observed, authenticated Worker runtime, not the Worker
+/// reply's untrusted claim. Caller must derive this from Windows pipe peer
+/// identity plus the live Service-managed Worker generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiverTelemetryCurrentWorker {
+    pub process_id: u32,
+    pub session_id: u32,
+    pub worker_generation: u64,
+}
+
+/// Mirrored subset of the existing protected multicast/unicast Worker start
+/// reply. Epoch/Worker generation are intentionally absent from this reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverTelemetryStartAckStatus {
+    Started,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiverTelemetryStartAck {
+    pub process_id: u32,
+    pub session_id: u32,
+    pub control_session_id: u64,
+    pub request_id: u64,
+    pub presentation_id: u64,
+    pub stream_id: u32,
+    pub status: ReceiverTelemetryStartAckStatus,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiverTelemetryServiceLifecycleError {
     InvalidBinding,
+    UncorrelatedStart,
+    RejectedStart,
     GenerationExhausted,
 }
 
@@ -81,6 +112,38 @@ impl ReceiverTelemetryServiceLifecycle {
         self.last_issued_generation = next;
         self.active = Some(binding);
         Ok(binding)
+    }
+
+    /// Verify an acknowledged start against Service-owned pending/authorized
+    /// media state AND a separately OS-authenticated current Worker runtime.
+    /// Only then allocate a receiver generation. The protected key epoch
+    /// comes from the Service's authorized pending grant (not from the ACK).
+    /// This is an in-process guard, NOT an OS credential or an IPC receiver.
+    pub fn activate_after_correlated_reply(
+        &mut self,
+        pending: ReceiverTelemetryStart,
+        current_worker: ReceiverTelemetryCurrentWorker,
+        reply: ReceiverTelemetryStartAck,
+    ) -> Result<ReceiverTelemetryBinding, ReceiverTelemetryServiceLifecycleError> {
+        if !pending.is_valid() {
+            return Err(ReceiverTelemetryServiceLifecycleError::InvalidBinding);
+        }
+        if current_worker.process_id != pending.process_id
+            || current_worker.session_id != pending.session_id
+            || current_worker.worker_generation != pending.worker_generation
+            || reply.process_id != pending.process_id
+            || reply.session_id != pending.session_id
+            || reply.control_session_id != pending.control_session_id
+            || reply.request_id != pending.request_id
+            || reply.presentation_id != pending.presentation_id
+            || reply.stream_id != pending.stream_id
+        {
+            return Err(ReceiverTelemetryServiceLifecycleError::UncorrelatedStart);
+        }
+        if reply.status != ReceiverTelemetryStartAckStatus::Started {
+            return Err(ReceiverTelemetryServiceLifecycleError::RejectedStart);
+        }
+        self.activate_after_verified_start(pending)
     }
 
     /// Read-only snapshot; callers MUST still check the live authenticated

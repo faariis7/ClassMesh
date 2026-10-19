@@ -1,7 +1,8 @@
 use classmesh_control::receiver_telemetry::ReceiverTelemetryBinding;
 use classmesh_control::receiver_telemetry_service_lifecycle::{
-    ReceiverTelemetryServiceLifecycle, ReceiverTelemetryServiceLifecycleError,
-    ReceiverTelemetryStart,
+    ReceiverTelemetryCurrentWorker, ReceiverTelemetryServiceLifecycle,
+    ReceiverTelemetryServiceLifecycleError, ReceiverTelemetryStart, ReceiverTelemetryStartAck,
+    ReceiverTelemetryStartAckStatus,
 };
 
 fn started() -> ReceiverTelemetryStart {
@@ -200,4 +201,125 @@ fn service_owned_runtime_replacement_invalidates_old_bytes_without_reusing_key_e
     assert!(service.clear_if_matches(next));
     assert!(service.current().is_none());
     assert!(!service.is_current_after_verified_peer(next));
+}
+
+fn active_peer() -> ReceiverTelemetryCurrentWorker {
+    ReceiverTelemetryCurrentWorker {
+        process_id: 501,
+        session_id: 3,
+        worker_generation: 7,
+    }
+}
+
+fn started_ack() -> ReceiverTelemetryStartAck {
+    ReceiverTelemetryStartAck {
+        process_id: 501,
+        session_id: 3,
+        control_session_id: 11,
+        request_id: 13,
+        presentation_id: 17,
+        stream_id: 19,
+        status: ReceiverTelemetryStartAckStatus::Started,
+    }
+}
+
+#[test]
+fn correlated_live_os_peer_and_exact_started_reply_can_activate_new_generation() {
+    let mut ledger = ReceiverTelemetryServiceLifecycle::default();
+    let first = ledger
+        .activate_after_correlated_reply(started(), active_peer(), started_ack())
+        .unwrap();
+    assert_eq!(first.receiver_generation, 1);
+    let next = ledger
+        .activate_after_correlated_reply(started(), active_peer(), started_ack())
+        .unwrap();
+    assert_eq!(next.receiver_generation, 2);
+    assert!(!ledger.is_current_after_verified_peer(first));
+}
+
+#[test]
+fn uncorrelated_or_rejected_reply_never_spends_a_generation() {
+    let mut ledger = ReceiverTelemetryServiceLifecycle::default();
+    let trusted = started();
+    let peer = active_peer();
+    let ack = started_ack();
+    let mut cases = Vec::new();
+
+    let mut stale = peer;
+    stale.process_id += 1;
+    cases.push((stale, ack));
+    let mut stale = peer;
+    stale.session_id += 1;
+    cases.push((stale, ack));
+    let mut stale = peer;
+    stale.worker_generation += 1;
+    cases.push((stale, ack));
+
+    let mut reply = ack;
+    reply.process_id += 1;
+    cases.push((peer, reply));
+    let mut reply = ack;
+    reply.session_id += 1;
+    cases.push((peer, reply));
+    let mut reply = ack;
+    reply.control_session_id += 1;
+    cases.push((peer, reply));
+    let mut reply = ack;
+    reply.request_id += 1;
+    cases.push((peer, reply));
+    let mut reply = ack;
+    reply.presentation_id += 1;
+    cases.push((peer, reply));
+    let mut reply = ack;
+    reply.stream_id += 1;
+    cases.push((peer, reply));
+
+    for (live_peer, received) in cases {
+        assert_eq!(
+            ledger.activate_after_correlated_reply(trusted, live_peer, received),
+            Err(ReceiverTelemetryServiceLifecycleError::UncorrelatedStart)
+        );
+        assert!(ledger.current().is_none());
+    }
+    let mut rejected = ack;
+    rejected.status = ReceiverTelemetryStartAckStatus::Rejected;
+    assert_eq!(
+        ledger.activate_after_correlated_reply(trusted, peer, rejected),
+        Err(ReceiverTelemetryServiceLifecycleError::RejectedStart)
+    );
+    assert!(ledger.current().is_none());
+    assert_eq!(
+        ledger
+            .activate_after_correlated_reply(trusted, peer, ack)
+            .unwrap()
+            .receiver_generation,
+        1
+    );
+}
+
+#[test]
+fn stale_reply_after_worker_replacement_cannot_reactivate_old_presentation() {
+    let mut ledger = ReceiverTelemetryServiceLifecycle::default();
+    let prior = ledger
+        .activate_after_correlated_reply(started(), active_peer(), started_ack())
+        .unwrap();
+    let mut next = started();
+    next.worker_generation += 1;
+    next.process_id += 1;
+    let mut next_peer = active_peer();
+    next_peer.worker_generation += 1;
+    next_peer.process_id += 1;
+    let mut next_ack = started_ack();
+    next_ack.process_id += 1;
+
+    let new_owner = ledger
+        .activate_after_correlated_reply(next, next_peer, next_ack)
+        .unwrap();
+    assert_eq!(new_owner.receiver_generation, prior.receiver_generation + 1);
+    assert_eq!(
+        ledger.activate_after_correlated_reply(started(), next_peer, started_ack()),
+        Err(ReceiverTelemetryServiceLifecycleError::UncorrelatedStart)
+    );
+    assert!(!ledger.clear_if_matches(prior));
+    assert_eq!(ledger.current(), Some(new_owner));
 }
