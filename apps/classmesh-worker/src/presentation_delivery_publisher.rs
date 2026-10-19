@@ -24,16 +24,54 @@ use crate::group_media_receive::WorkerGroupMediaAuthenticationStats;
 use crate::presentation_decode_render::PresentationDecodeStep;
 use crate::presentation_delivery_telemetry::PresentationDeliveryTelemetry;
 
+/// An arbitrary caller must not synthesize a Worker receiver permit by
+/// filling in plausible identities. Only a Service-minted grant, checked
+/// against the Worker-installed key, may be converted to a permit.
+///
+/// ```compile_fail
+/// use classmesh_control::receiver_telemetry::ReceiverTelemetryBinding;
+/// use classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding;
+/// use classmesh_worker::presentation_delivery_publisher::WorkerReceiverTelemetryAuthorization;
+/// let forged = WorkerReceiverTelemetryAuthorization {
+///     owner: ReceiverTelemetryBinding {
+///         process_id: 501, session_id: 7, worker_generation: 11,
+///         control_session_id: 30, request_id: 91, presentation_id: 40,
+///         stream_id: 8, epoch: 2, receiver_generation: 1,
+///     },
+///     installed_key: PresentationKeyInstallBinding {
+///         control_session_id: 30, request_id: 51,
+///         presentation_id: 40, stream_id: 8, epoch: 2,
+///     },
+///     authorized_start_request_id: 91,
+/// };
+/// assert!(forged.is_valid());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerReceiverTelemetryAuthorization {
-    pub owner: ReceiverTelemetryBinding,
-    pub installed_key: PresentationKeyInstallBinding,
+    owner: ReceiverTelemetryBinding,
+    installed_key: PresentationKeyInstallBinding,
     /// Independently Service-authorized StreamOffer/start request, not key
     /// grant request. This value is not created by the Worker.
-    pub authorized_start_request_id: u64,
+    authorized_start_request_id: u64,
 }
 
 impl WorkerReceiverTelemetryAuthorization {
+    /// Non-authoritative read-only owner; a permit is NOT an OS credential.
+    #[must_use]
+    pub const fn owner(self) -> ReceiverTelemetryBinding {
+        self.owner
+    }
+
+    #[must_use]
+    pub const fn installed_key(self) -> PresentationKeyInstallBinding {
+        self.installed_key
+    }
+
+    #[must_use]
+    pub const fn authorized_start_request_id(self) -> u64 {
+        self.authorized_start_request_id
+    }
+
     #[must_use]
     pub const fn is_valid(self) -> bool {
         self.owner.is_valid()
@@ -237,5 +275,61 @@ impl PresentationDeliveryPublisher {
             .try_clear_if_matches(owner)
             .map_err(PresentationDeliveryPublisherError::Mailbox)?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod permit_validation_tests {
+    use super::*;
+
+    #[test]
+    fn inconsistent_internal_permits_cannot_activate_outbox() {
+        let installed_key = PresentationKeyInstallBinding {
+            control_session_id: 30,
+            request_id: 51,
+            presentation_id: 40,
+            stream_id: 8,
+            epoch: 2,
+        };
+        let binding = ReceiverTelemetryBinding {
+            process_id: 501,
+            session_id: 7,
+            worker_generation: 11,
+            control_session_id: 30,
+            request_id: 91,
+            presentation_id: 40,
+            stream_id: 8,
+            epoch: 2,
+            receiver_generation: 1,
+        };
+        let valid = WorkerReceiverTelemetryAuthorization {
+            owner: binding,
+            installed_key,
+            authorized_start_request_id: 91,
+        };
+        assert!(valid.is_valid());
+        let mut outbox = PresentationDeliveryPublisher::default();
+        outbox.activate_from_service(valid).unwrap();
+
+        let bad_start = WorkerReceiverTelemetryAuthorization {
+            authorized_start_request_id: 92,
+            ..valid
+        };
+        assert_eq!(
+            outbox.activate_from_service(bad_start),
+            Err(PresentationDeliveryPublisherError::InvalidAuthorization)
+        );
+        let bad_key = WorkerReceiverTelemetryAuthorization {
+            installed_key: PresentationKeyInstallBinding {
+                epoch: 3,
+                ..installed_key
+            },
+            ..valid
+        };
+        assert_eq!(
+            outbox.activate_from_service(bad_key),
+            Err(PresentationDeliveryPublisherError::InvalidAuthorization)
+        );
+        assert_eq!(outbox.current(), Some(binding));
     }
 }
