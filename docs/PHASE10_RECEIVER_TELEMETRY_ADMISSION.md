@@ -531,3 +531,40 @@ not Windows peer authentication or an IPC/pipe sender. Any eventual sender
 must independently verify the Service's currently authenticated OS peer and
 current Worker/receiver generation immediately before nonblocking I/O.
 No Phase 12 IPC changes, adaptive-quality claim or physical qualification.
+
+## Single-attempt best-effort diagnostic dispatch boundary (still pre-IPC)
+
+`presentation_delivery_dispatch::try_dispatch_once` composes the existing
+detached read-only Worker checkout with the fixed-width 136-byte report codec
+and a **caller-injected** one-shot diagnostic sink. The caller must provide an
+independently authenticated, authoritative **current Service peer/Worker and
+receiver lifetime verifier**; the function checks that predicate before
+checkout and again just before local lease validation and the injected
+nonblocking write. Reject invalid receiver identities, revoked/expired
+leases, stale generations and busy/poisoned mailboxes without a write.
+Backpressure and disconnection **discard** a checked-out report after one
+attempt: there is no unbounded queue, retry loop, sleep or blocking operation
+in this helper. A later fresh report may replace it.
+
+**Security/availability limitation:** this is a **portable in-process
+composition**, not authenticated Windows Service/Worker IPC and not live
+Worker-loop wiring. Both the verifier and sink are supplied by the
+integration caller; a dishonest or stale verifier is not made trustworthy by
+its name. The sink contract requires a *complete, genuinely nonblocking*
+write; the portable function cannot enforce the Windows pipe mode or detect
+partial writes. A revocation can still race between the final local check and
+kernel I/O. A production sender MUST use a separate low-priority schedule,
+independently authenticate the OS peer, hold/pin its actual Worker generation
+and receiver authorization, negotiate any new message version with Astra's
+Phase 12 IPC owner, avoid blocking media and privileged control, and rely on
+Service-side verified-owner admission *again on arrival*. No quality
+promotion or Teacher delivery is added; 5-second diagnostics remain ineligible
+for the 2-second adaptive sample-age requirement.
+
+`cargo test --offline -p classmesh-worker --test receiver_authorized_outbox`
+covers the **six** extra regressions: valid fixed-width frame once only,
+pre-check denial preserving pending data, revocation between checkout and
+nonblocking send, Service authority changing during dispatch, backpressure/
+disconnect one-attempt drops and cross-receiver isolation. The tests inject
+a simulated verifier and sink; they do not establish authenticated transport
+or physical two-host security/performance qualification.
