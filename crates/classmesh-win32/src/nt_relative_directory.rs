@@ -1,5 +1,4 @@
-//! Experimental read-only relative directory HANDLE acquisition.
-//! Root authority is NOT attested. Never enable production Service use here.
+//! Internal NT-relative operations; callers must retain an independently trusted parent.
 use std::fs::File;
 use std::io;
 
@@ -133,6 +132,7 @@ pub(crate) fn query_object_link(name: &str) -> io::Result<String> {
 
 /// Compare the live OS volume and file IDs of two pinned directory objects.
 /// Equality is object identity, not proof that the objects are OS-trusted.
+#[cfg(test)]
 pub(crate) fn same_native_file_identity(left: &File, right: &File) -> io::Result<bool> {
     Ok(native_file_identity(left)? == native_file_identity(right)?)
 }
@@ -186,7 +186,7 @@ pub(crate) fn open_native_readonly_directory(
     parent: Option<&File>,
     name: &str,
 ) -> io::Result<File> {
-    open_native_node(parent, name, true, false, None)
+    open_native_node(parent, name, true, false, None, false)
 }
 
 fn open_native_node(
@@ -195,7 +195,9 @@ fn open_native_node(
     directory: bool,
     protected: bool,
     creation: Option<&NewDirectoryDescriptor>,
+    exclusive: bool,
 ) -> io::Result<File> {
+    let writing = creation.is_some() && !directory;
     let mut utf16: Vec<u16> = name.encode_utf16().collect();
     if utf16.is_empty() || utf16.len() > 32766 || name.contains('\0') {
         return Err(denied());
@@ -228,15 +230,21 @@ fn open_native_node(
             // Protected directories need LIST_DIRECTORY (same bit as READ_DATA)
             // so Windows enforces sharing against rename/delete opens. Metadata-only
             // directory handles do not provide that sharing exclusion.
-            0x0012_0080 | if protected { 0x0000_0001 } else { 0 },
+            0x0012_0080 | if protected { 1 } else { 0 } | if writing { 2 } else { 0 },
             &raw mut object,
             &raw mut status_block,
             std::ptr::null_mut(),
             0,
             // Protected subtree refuses existing/future data writers or deleters.
-            if protected { 1 } else { 7 },
+            if exclusive || writing {
+                0
+            } else if protected {
+                1
+            } else {
+                7
+            },
             if creation.is_some() { 2 } else { 1 }, // FILE_CREATE or FILE_OPEN
-            (if directory { 1 } else { 0x40 }) | 0x20 | 0x0020_0000, // type | synchronous | no-follow
+            (if directory { 1 } else { 0x40 }) | 0x20 | 0x0020_0000 | if writing { 2 } else { 0 }, // type | synchronous | no-follow
             std::ptr::null_mut(),
             0,
         )
@@ -299,19 +307,23 @@ pub(crate) fn open_relative_protected_node(
     if !crate::policy_file_origin::safe_child_leaf(leaf) || leaf.encode_utf16().count() > 255 {
         return Err(denied());
     }
-    open_native_node(Some(parent), leaf, directory, true, None)
+    open_native_node(Some(parent), leaf, directory, true, None, false)
 }
 
 struct NewDirectoryDescriptor(*mut c_void);
 
 impl NewDirectoryDescriptor {
-    fn new() -> io::Result<Self> {
+    fn new(directory: bool) -> io::Result<Self> {
         use windows_sys::Win32::Security::Authorization::{
             ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
         };
-        let sddl: Vec<u16> = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)\0"
-            .encode_utf16()
-            .collect();
+        let sddl: Vec<u16> = (if directory {
+            "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)\0"
+        } else {
+            "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)\0"
+        })
+        .encode_utf16()
+        .collect();
         let mut raw = std::ptr::null_mut();
         // Safety: fixed NUL-terminated SDDL and initialized writable output.
         if unsafe {
@@ -347,8 +359,26 @@ pub(crate) fn create_relative_protected_directory(parent: &File, leaf: &str) -> 
     if !crate::policy_file_origin::safe_child_leaf(leaf) || leaf.encode_utf16().count() > 255 {
         return Err(denied());
     }
-    let descriptor = NewDirectoryDescriptor::new()?;
-    open_native_node(Some(parent), leaf, true, true, Some(&descriptor))
+    let descriptor = NewDirectoryDescriptor::new(true)?;
+    open_native_node(Some(parent), leaf, true, true, Some(&descriptor), false)
+}
+
+/// Create only, protected at creation, exclusive READ/WRITE, write-through.
+/// Never adopts an orphan. The caller must flush and verify before committing.
+pub(crate) fn create_relative_protected_file(parent: &File, leaf: &str) -> io::Result<File> {
+    if !crate::policy_file_origin::safe_child_leaf(leaf) || leaf.encode_utf16().count() > 255 {
+        return Err(denied());
+    }
+    let descriptor = NewDirectoryDescriptor::new(false)?;
+    open_native_node(Some(parent), leaf, false, true, Some(&descriptor), true)
+}
+
+/// Existing stable lock object; no create/recovery/rename and no sharing.
+pub(crate) fn open_relative_exclusive_file(parent: &File, leaf: &str) -> io::Result<File> {
+    if !crate::policy_file_origin::safe_child_leaf(leaf) || leaf.encode_utf16().count() > 255 {
+        return Err(denied());
+    }
+    open_native_node(Some(parent), leaf, false, true, None, true)
 }
 
 #[cfg(test)]

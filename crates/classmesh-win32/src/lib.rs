@@ -17,7 +17,7 @@ mod input;
 // Inert Windows-only security qualification until trusted root attestation.
 #[cfg(windows)]
 mod named_pipe;
-#[cfg(all(windows, test))]
+#[cfg(all(windows, any(test, feature = "experimental-trusted-policy")))]
 mod nt_relative_directory;
 #[cfg(windows)]
 pub mod policy_file_origin;
@@ -27,7 +27,7 @@ mod power;
 pub mod program_data_known_folder;
 #[cfg(windows)]
 pub mod protected_app_bootstrap;
-#[cfg(all(windows, test))]
+#[cfg(all(windows, any(test, feature = "experimental-trusted-policy")))]
 mod registry_epoch;
 #[cfg(all(windows, test))]
 mod retained_policy_reader;
@@ -37,9 +37,9 @@ mod sensitive_pipe_listener;
 mod session;
 #[cfg(windows)]
 mod session_process;
-#[cfg(all(windows, test))]
+#[cfg(all(windows, any(test, feature = "experimental-trusted-policy")))]
 mod shared_ancestor_acl;
-#[cfg(all(windows, test))]
+#[cfg(all(windows, any(test, feature = "experimental-trusted-policy")))]
 mod system_volume;
 #[cfg(windows)]
 mod teacher_interaction;
@@ -77,3 +77,6 @@ pub use teacher_interaction::{
 };
 #[cfg(windows)]
 pub use workstation::{Win32WorkstationLocker, WorkstationLockError, WorkstationLocker};
+
+#[cfg(all(windows, any(test, feature = "experimental-trusted-policy")))]
+pub mod trusted_policy;

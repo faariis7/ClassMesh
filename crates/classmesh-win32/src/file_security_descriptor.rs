@@ -29,7 +29,7 @@ pub(crate) fn read_allowed_descriptor(file: &File) -> io::Result<DescriptorSnaps
 
 /// # Safety
 /// The caller must retain a valid registry key with READ_CONTROL for this call.
-#[cfg(test)]
+#[cfg(any(test, feature = "experimental-trusted-policy"))]
 pub(crate) unsafe fn read_allowed_registry_descriptor(
     key: windows_sys::Win32::System::Registry::HKEY,
 ) -> io::Result<DescriptorSnapshot> {

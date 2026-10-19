@@ -6,10 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = []
+experimental-trusted-policy = ["dep:classmesh-security"]
+
 [dependencies]
 zeroize = "1.8"
 
 [target.'cfg(windows)'.dependencies]
+classmesh-security = { path = "../classmesh-security", optional = true }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Security",

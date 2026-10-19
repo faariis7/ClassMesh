@@ -1,5 +1,14 @@
 ## Active execution checkpoint — independent Registry anchor and rooted reader (2026-10-18)
 
+## Active execution checkpoint — native installation and opt-in Service startup (2026-10-19)
+
+Registry/reader #553 merged at `0ff3a2662b003545201ecb8818d857af62870c42`, CI `39148646332` Portable Rust + Windows Build PASS. New batch `feat/phase12-trusted-policy-install-runtime`, code `1932805`: native protected create-only, exclusive, write-through policy file; same-HANDLE flush/bounded digest+JSON readback before Registry commit. Fixed `ClassMesh-Policy-v2` namespace; stable protected `authority.lock` retained from before epoch acquisition through Service runtime shutdown. Updates require stop/install/restart; no lock recreation, old-file fallback or orphan adoption.
+
+`experimental-trusted-policy` is default-off in Win32 and Service. The opt-in real `load_control_state` uses the qualified reader and keeps the extracted authorization's lease until ControlRuntime stops/joins. Existing identity, config and CNG validation remain; identity/config path loaders are NOT migrated or newly qualified. Default production behavior unchanged. Native tests cover independent process exclusion, extracting policy while retaining lease, panic cleanup, staged/committed process exits, hardlinked/missing lock, partial orphan, malformed/modified/missing current policy and rollback. Targeted VM2 3/3 functions and feature Clippy PASS. VM1 default+feature+SCM PASS; VM2 full run interrupted by 100 GB virtual disk limit (restored at 108 GB); hosted CI pending; independent final review no blockers after fixing colliding test scopes and rejecting the installed scope in the test worker.
+
+Still open: machine power-loss/storage qualification, installed Service positive/negative lifecycle qualification, identity/config trusted acquisition, authorized live reload and revocation lifecycle. This is compiled Service integration, not default activation or full Phase 12 completion. No actual production objects are written by tests. See ASTRA WORK HANDOFF.
+
+
 #539 merged at `8a4021945def79949940ccb77856c3e6cad6cb44` after rebasing onto current Phase 10 main and exact-head CI `39147201155` PASS. Preserve Phase 10 files/worktrees. Active Phase 12 work is `feat/phase12-registry-epoch-anchor` in managed `registry-epoch` worktree, code `21fc0d9`, based on #539.
 
 Registry anchor now implements create-only protected HKLM/SOFTWARE 64-bit test scope, same-key owner/DACL checks, fixed bounded V2 record, monotonic compare/commit, flush and exact readback. Native RED exposed stale read-before-write TxR rollback; a unique transaction writer reservation before authoritative read fixes it. Positive/negative tests cover competing transaction AND process, rejected old/equal/stale expectations, actual registry symbolic links, malformed/type/torn records, real OS write denial, DACL changes, drop/unwind and process exit before/after commit. Five registry tests include one child-process entry point; targeted VM2 tests pass. Rooted reader now selects ONLY the blob named by the independently stored epoch/digest, parses while reservation is held, and releases the result only after commit/flush/readback. Missing current blob never falls back to an old one. VM1 security+Win32 and VM2 full workspace fmt/Clippy/tests PASS; both SCM LocalSystem reader1/registry5 and cleanup PASS. Final independent review found no blocker; hosted CI not submitted.
@@ -518,3 +527,7 @@ Current control-plane research baseline:
 Quality-tooling changes should stay in small independent PRs so they do not block or obscure Phase implementation diffs.
 
 Each merged Phase PR updates this file and `docs/IMPLEMENTATION_STATUS.md`.
+
+## Phase 12 native install and Service boundary — 2026-10-19
+
+#553 merged at 0ff3a2662b003545201ecb8818d857af62870c42 after CI39148646332 both jobs PASS. Next coherent batch: create-only NT-relative protected policy files with same-handle flush/readback before Registry commit; a protected exclusive authority file spanning install/startup/runtime to exclude concurrent writers; optional (default-off) Service startup integration with no legacy policy fallback. Acceptance: native provision/update/rollback/orphan/missing-current/active-runtime exclusion tests, feature and default Clippy/tests on both VMs and hosted CI. Do not modify Phase 10 control_runtime or activate the new path on installed machines. Stop/install/restart is the initial serialized lifecycle; hot reload remains separate.

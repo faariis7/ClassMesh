@@ -168,7 +168,7 @@ fn attest(key: &Key, shared_parent: bool) -> io::Result<()> {
     Ok(())
 }
 fn machine_parent(scope: &str) -> io::Result<Key> {
-    if !scope.starts_with("ClassMesh-anchor-probe-")
+    if scope != "ClassMesh-Policy-v2" && !scope.starts_with("ClassMesh-anchor-probe-")
         || scope.len() > 100
         || !scope
             .bytes()
@@ -286,7 +286,7 @@ impl RegistryAnchor {
         anchor.flush_exact(record)?;
         Ok(anchor)
     }
-    fn open(scope: &str) -> io::Result<Self> {
+    pub(crate) fn open(scope: &str) -> io::Result<Self> {
         let parent = machine_parent(scope)?;
         let anchor = Self {
             key: open(parent.0, scope, ACCESS)?,
@@ -297,7 +297,7 @@ impl RegistryAnchor {
         anchor.flush_exact(&record)?;
         Ok(anchor)
     }
-    fn read(&self) -> io::Result<[u8; RECORD_LEN]> {
+    pub(crate) fn read(&self) -> io::Result<[u8; RECORD_LEN]> {
         attest(&self.key, false)?;
         read_record(&self.key)
     }
@@ -580,6 +580,7 @@ fn registry_anchor_rejects_torn_wrong_type_and_untrusted_descriptor() {
     remove_fixture(&scope);
 }
 
+#[cfg(test)]
 pub(crate) fn remove_fixture(scope: &str) {
     let parent = machine_parent(scope).unwrap();
     let name = wide(scope);
@@ -587,6 +588,7 @@ pub(crate) fn remove_fixture(scope: &str) {
     status(unsafe { RegDeleteKeyExW(parent.0, name.as_ptr(), KEY_WOW64_64KEY, 0) }).unwrap();
 }
 
+#[cfg(test)]
 fn set_fixture_dacl(scope: &str, sddl: &str) {
     let parent = machine_parent(scope).unwrap();
     let acl_key = open(parent.0, scope, 0x0004_0000 | KEY_WOW64_64KEY).unwrap();
@@ -615,6 +617,7 @@ fn set_fixture_dacl(scope: &str, sddl: &str) {
     .unwrap();
 }
 
+#[cfg(test)]
 fn run_worker(scope: &str, mode: &str) -> std::process::Output {
     std::process::Command::new(std::env::current_exe().unwrap())
         .args([
