@@ -568,3 +568,31 @@ nonblocking send, Service authority changing during dispatch, backpressure/
 disconnect one-attempt drops and cross-receiver isolation. The tests inject
 a simulated verifier and sink; they do not establish authenticated transport
 or physical two-host security/performance qualification.
+
+## Bounded Worker dispatch -> Service admission composition qualification
+
+The new `receiver_delivery_roundtrip` integration suite drives the
+**actual** Service-issued key/start/receiver grant through the actual Worker
+`PresentationDeliveryPublisher`, detached read-only checkout and
+`try_dispatch_once` into a one-slot Rust `sync_channel(1)`, then admits the
+exact 136-byte snapshot through
+`ReceiverTelemetryServiceRuntime::observe_after_verified_peer`. It runs the
+Worker dispatcher on an independent OS thread and verifies that contiguous
+five-second counter reports produce only the observed authenticated/queue-drop
+intervals, never fabricated decode/present success.
+
+Congestion drops the middle report with **one** `try_send` attempt and zero
+retries, so Service sees a sequence gap and returns `Baseline` rather than
+asserting healthy uninterrupted media. Later contiguous reports restore only
+the actual interval. Independently revoked Service Worker lifetimes reject
+previously-sent valid bytes, even if the sender had a current local lease.
+An incoming report attributed to a different verified Worker generation is
+rejected before decoding and cannot poison the correct active baseline.
+
+**Scope/limitations:** this is strictly portable **in-process, test-only**
+composition; `sync_channel` is not a Windows IPC channel. The harness passes
+synthetic independently selected Worker identity and simulates a trustworthy
+Service peer predicate. It does NOT establish or exercise OS authentication,
+new message IDs, live Worker loop delivery, Service→Teacher, automatic quality
+control, native GPU performance or the two-physical-PC gate. Phase 12 owns its
+IPC changes and future true authenticated transport negotiation.
