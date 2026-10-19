@@ -467,3 +467,20 @@ freshness. An independent low-priority nonblocking Worker→Service telemetry
 return path is still absent; do not misuse the 5-second cumulative diagnostic
 as a fresh 2-second adaptive quality sample. Physical two-PC/GPU/soak tests
 remain OPEN.
+
+
+## Receiver generation must be independently pinned before grant consistency
+
+The passive, **untrusted** 96-byte grant decoder now requires the caller's
+independently known active Service-issued `receiver_generation` in
+`matches_verified_local_state`, in addition to verified Worker identity,
+installed protected key and separately authorized media-start request ID.
+A missing/zero or changed receiver generation fails closed, even if a reused
+Worker process/session, protected key and start request otherwise match.
+Regression tests cover generation replacement and tampering of generation
+bytes in a well-formed payload. This is still only a local comparison: a
+caller MUST pin the expected generation from authenticated Service/lifecycle
+state, never copy it from the decoded frame, and MUST independently enforce
+Service peer authentication and revocation on every received message. No IPC
+version, registration, transport, Worker outbox activation or Teacher feed is
+introduced by this change.
