@@ -34,6 +34,7 @@ pub mod receiver_telemetry;
 pub mod receiver_telemetry_ingress;
 pub mod receiver_telemetry_service_admission;
 pub mod receiver_telemetry_service_lifecycle;
+pub mod receiver_telemetry_service_runtime;
 pub mod receiver_telemetry_transport;
 pub mod stream;
 pub mod system_action_execution;
