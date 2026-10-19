@@ -4,9 +4,9 @@ PR #569 is open at `d975dd8` for protected immutable installation and default-of
 
 The stacked `feat/phase12-trusted-startup-identity` batch moves primary machine identity and control config acquisition onto the retained OS-rooted ProgramData HANDLE chain under the existing policy lease. No environment path, backup, or untrusted primary is used by the opt-in startup path. Native VM1 identity/config negatives and the Service parser differential test passed; the identity test passed again under SCM LocalSystem. Feature Clippy and portable identity tests passed. Windows CI now explicitly runs the feature-gated Service config test. Merge this batch only after #569, rebasing only its own commits, then exact-head hosted CI. Default activation, real installed Service lifecycle, authorized reload/revocation, power interruption and physical qualification remain open.
 
-## Historical active execution checkpoint — independent Registry anchor and rooted reader (2026-10-18)
+## Historical checkpoint — independent Registry anchor and rooted reader (2026-10-18)
 
-## Active execution checkpoint — native installation and opt-in Service startup (2026-10-19)
+## Historical checkpoint — native installation and opt-in Service startup (2026-10-19)
 
 Registry/reader #553 merged at `0ff3a2662b003545201ecb8818d857af62870c42`, CI `39148646332` Portable Rust + Windows Build PASS. New batch `feat/phase12-trusted-policy-install-runtime`, code `1932805`: native protected create-only, exclusive, write-through policy file; same-HANDLE flush/bounded digest+JSON readback before Registry commit. Fixed `ClassMesh-Policy-v2` namespace; stable protected `authority.lock` retained from before epoch acquisition through Service runtime shutdown. Updates require stop/install/restart; no lock recreation, old-file fallback or orphan adoption.
 

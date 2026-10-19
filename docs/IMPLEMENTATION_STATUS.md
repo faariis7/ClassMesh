@@ -4,9 +4,9 @@ PR #569 (`d975dd8`) remains open; Portable Rust passed and hosted Windows Build 
 
 Stacked local branch `feat/phase12-trusted-startup-identity` adds bounded canonical machine-identity parsing from the retained trusted HANDLE, protected primary-only `ClassMesh/state/machine-identity.json` and `ClassMesh/config/control-runtime.json` reads, and opt-in Service startup integration. No identity `.bak` recovery or `ProgramData` environment path exists in that feature path. Disposable VM1 native test proves in-flight write/rename denial, hardlink and missing-primary rejection, size limits and unwind cleanup; one Service config differential test passed. VM1 feature Clippy, portable identity tests and genuine SCM LocalSystem identity test passed. Hosted exact-head CI remains required after #569 merges. No installed Service runtime, actual power-loss or physical-device proof is claimed.
 
-## Historical active execution checkpoint — independent Registry anchor and rooted reader (2026-10-18)
+## Historical checkpoint — independent Registry anchor and rooted reader (2026-10-18)
 
-## Active execution checkpoint — native installation and opt-in Service startup (2026-10-19)
+## Historical checkpoint — native installation and opt-in Service startup (2026-10-19)
 
 Registry/reader #553 merged at `0ff3a2662b003545201ecb8818d857af62870c42`, CI `39148646332` Portable Rust + Windows Build PASS. New batch `feat/phase12-trusted-policy-install-runtime`, code `1932805`: native protected create-only, exclusive, write-through policy file; same-HANDLE flush/bounded digest+JSON readback before Registry commit. Fixed `ClassMesh-Policy-v2` namespace; stable protected `authority.lock` retained from before epoch acquisition through Service runtime shutdown. Updates require stop/install/restart; no lock recreation, old-file fallback or orphan adoption.
 
