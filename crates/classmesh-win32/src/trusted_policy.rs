@@ -532,4 +532,50 @@ mod tests {
         crate::registry_epoch::remove_fixture(&scope);
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn protected_startup_provision_validates_before_create_and_never_adopts_existing_root() {
+        let scope = format!("ClassMesh-anchor-probe-provision-{}", std::process::id());
+        let root = crate::program_data_known_folder::resolve_os_program_data_path()
+            .unwrap()
+            .join(&scope);
+        let identity = format!(r#"{{"version":1,"principal_id":[{}],"cng_key_name":"ClassMesh-test","certificate_chain_der":[[48,1,0]],"trust_roots_der":[[48,1,1]],"not_after_unix_ms":999999}}"#, ["7"; 32].join(",")).into_bytes();
+        let config =
+            br#"{"version":1,"bind_address":"127.0.0.1:52000","multicast_interface":null}"#;
+        assert!(provision_inputs_at(&scope, b"invalid identity", config).is_err());
+        assert!(!root.exists(), "invalid identity has no filesystem side effect");
+        assert!(provision_inputs_at(&scope, &identity, b"invalid config").is_err());
+        assert!(!root.exists(), "invalid config has no filesystem side effect");
+        provision_inputs_at(&scope, &identity, config).unwrap();
+        assert!(provision_inputs_at(&scope, &identity, config).is_err());
+        let roots = crate::system_volume::pin_system_program_data().unwrap();
+        let parent = roots.last().unwrap();
+        let decoded = read_trusted_primary(
+            parent,
+            &scope,
+            "state",
+            "machine-identity.json",
+            1024 * 1024,
+            classmesh_identity_win::DurableMachineIdentity::parse_from_reader,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(decoded.principal_id, [7; 32]);
+        let installed_config = read_trusted_primary(
+            parent,
+            &scope,
+            "config",
+            "control-runtime.json",
+            64 * 1024,
+            |reader| {
+                let mut bytes = Vec::new();
+                reader.read_to_end(&mut bytes).unwrap();
+                bytes
+            },
+        )
+        .unwrap();
+        assert_eq!(installed_config, config);
+        drop(roots);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
