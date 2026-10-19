@@ -48,6 +48,29 @@ impl ReceiverTelemetryAuthorizedKey {
     }
 }
 
+/// Exact Worker receiver grant issued only by this Service-owned state
+/// machine after a separately correlated protected key install and media
+/// receiver start. Immutable private fields avoid casual construction by
+/// other crates; it is **not** a cryptographic credential or IPC message.
+/// A real transport must authenticate this grant and verify the OS peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiverTelemetryWorkerGrant {
+    receiver: ReceiverTelemetryBinding,
+    protected_key: ReceiverTelemetryAuthorizedKey,
+}
+
+impl ReceiverTelemetryWorkerGrant {
+    #[must_use]
+    pub const fn receiver(self) -> ReceiverTelemetryBinding {
+        self.receiver
+    }
+
+    #[must_use]
+    pub const fn protected_key_grant(self) -> ReceiverTelemetryAuthorizedKey {
+        self.protected_key
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiverTelemetryServiceRuntimeError {
     InvalidKey,
@@ -145,6 +168,39 @@ impl ReceiverTelemetryServiceRuntime {
     #[must_use]
     pub fn current(&self) -> Option<ReceiverTelemetryBinding> {
         self.admission.current()
+    }
+
+    /// Issue the exact current Worker receiver grant only after the
+    /// Service-authorized protected key and Worker start ACK are both
+    /// confirmed under this same independently verified Worker incarnation.
+    ///
+    /// This is an in-process snapshot, NOT OS peer authentication and NOT
+    /// delivery through an authenticated Service-to-Worker transport.
+    #[must_use]
+    pub fn worker_grant_after_verified_peer(
+        &self,
+        current_worker: ReceiverTelemetryCurrentWorker,
+    ) -> Option<ReceiverTelemetryWorkerGrant> {
+        let (key, installed_worker) = self.confirmed_key?;
+        if installed_worker != current_worker {
+            return None;
+        }
+        let receiver = self.admission.current()?;
+        if !receiver.is_valid()
+            || receiver.process_id != current_worker.process_id
+            || receiver.session_id != current_worker.session_id
+            || receiver.worker_generation != current_worker.worker_generation
+            || receiver.control_session_id != key.control_session_id
+            || receiver.presentation_id != key.presentation_id
+            || receiver.stream_id != key.stream_id
+            || receiver.epoch != key.epoch
+        {
+            return None;
+        }
+        Some(ReceiverTelemetryWorkerGrant {
+            receiver,
+            protected_key: key,
+        })
     }
 
     /// Diagnostic report: exact current Worker must still be verified by the

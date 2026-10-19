@@ -215,3 +215,54 @@ fn worker_exit_revokes_key_and_receiver_without_reusing_generation() {
         .unwrap();
     assert_eq!(next.receiver_generation, first.receiver_generation + 1);
 }
+
+#[test]
+fn worker_grant_is_service_issued_only_for_current_correlated_worker_and_key() {
+    let mut service = ReceiverTelemetryServiceRuntime::default();
+    assert!(service.worker_grant_after_verified_peer(peer()).is_none());
+    service.confirm_key_installed(key(), peer()).unwrap();
+    // A key install ACK does not attest that a receive runtime started.
+    assert!(service.worker_grant_after_verified_peer(peer()).is_none());
+    let first_owner = service
+        .activate_correlated_start(requested(), peer(), ack())
+        .unwrap();
+    let grant = service.worker_grant_after_verified_peer(peer()).unwrap();
+    assert_eq!(grant.receiver(), first_owner);
+    assert_eq!(grant.protected_key_grant(), key());
+    assert_ne!(
+        grant.receiver().request_id,
+        grant.protected_key_grant().key_grant_request_id
+    );
+
+    let mut wrong_worker = peer();
+    wrong_worker.worker_generation += 1;
+    assert!(
+        service
+            .worker_grant_after_verified_peer(wrong_worker)
+            .is_none()
+    );
+    wrong_worker = peer();
+    wrong_worker.process_id += 1;
+    assert!(
+        service
+            .worker_grant_after_verified_peer(wrong_worker)
+            .is_none()
+    );
+    assert_eq!(
+        service.worker_grant_after_verified_peer(peer()),
+        Some(grant)
+    );
+
+    assert!(service.revoke_matching_key(key()));
+    assert!(service.worker_grant_after_verified_peer(peer()).is_none());
+    service.confirm_key_installed(key(), peer()).unwrap();
+    let next_owner = service
+        .activate_correlated_start(requested(), peer(), ack())
+        .unwrap();
+    assert!(next_owner.receiver_generation > first_owner.receiver_generation);
+    let newer_grant = service.worker_grant_after_verified_peer(peer()).unwrap();
+    assert_eq!(newer_grant.receiver(), next_owner);
+    assert_ne!(newer_grant, grant);
+    service.worker_changed();
+    assert!(service.worker_grant_after_verified_peer(peer()).is_none());
+}

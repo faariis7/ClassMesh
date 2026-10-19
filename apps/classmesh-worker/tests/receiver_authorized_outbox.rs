@@ -181,3 +181,93 @@ fn bounded_mailbox_coalesces_old_samples_without_blocking_on_pipe() {
     assert_eq!(checkout.snapshot().counters.authenticated_frames, 3);
     assert!(outbox.try_checkout().unwrap().is_none());
 }
+
+#[test]
+fn publisher_can_accept_only_exact_service_minted_grant_and_confirmed_worker_key() {
+    use classmesh_control::receiver_telemetry_service_lifecycle::{
+        ReceiverTelemetryCurrentWorker, ReceiverTelemetryStart, ReceiverTelemetryStartAck,
+        ReceiverTelemetryStartAckStatus,
+    };
+    use classmesh_control::receiver_telemetry_service_runtime::{
+        ReceiverTelemetryAuthorizedKey, ReceiverTelemetryServiceRuntime,
+    };
+
+    let trusted_worker = ReceiverTelemetryCurrentWorker {
+        process_id: 501,
+        session_id: 7,
+        worker_generation: 11,
+    };
+    let key = permit(1, 91).installed_key;
+    let mut service = ReceiverTelemetryServiceRuntime::default();
+    service
+        .confirm_key_installed(
+            ReceiverTelemetryAuthorizedKey {
+                control_session_id: key.control_session_id,
+                key_grant_request_id: key.request_id,
+                presentation_id: key.presentation_id,
+                stream_id: key.stream_id,
+                epoch: key.epoch,
+            },
+            trusted_worker,
+        )
+        .unwrap();
+
+    let requested = ReceiverTelemetryStart {
+        process_id: trusted_worker.process_id,
+        session_id: trusted_worker.session_id,
+        worker_generation: trusted_worker.worker_generation,
+        control_session_id: key.control_session_id,
+        request_id: 91, // Not the grant's request 51.
+        presentation_id: key.presentation_id,
+        stream_id: key.stream_id,
+        epoch: key.epoch,
+    };
+    let ack = ReceiverTelemetryStartAck {
+        process_id: trusted_worker.process_id,
+        session_id: trusted_worker.session_id,
+        control_session_id: key.control_session_id,
+        request_id: 91,
+        presentation_id: key.presentation_id,
+        stream_id: key.stream_id,
+        status: ReceiverTelemetryStartAckStatus::Started,
+    };
+    let owner = service
+        .activate_correlated_start(requested, trusted_worker, ack)
+        .unwrap();
+    let grant = service
+        .worker_grant_after_verified_peer(trusted_worker)
+        .unwrap();
+    let permit = WorkerReceiverTelemetryAuthorization::from_service_grant(grant, key)
+        .expect("exact Service mint and installed Worker key");
+    assert_eq!(permit.owner, owner);
+    assert_eq!(permit.authorized_start_request_id, 91);
+    assert_eq!(permit.installed_key.request_id, 51);
+
+    assert!(
+        WorkerReceiverTelemetryAuthorization::from_service_grant(
+            grant,
+            PresentationKeyInstallBinding {
+                request_id: 52,
+                ..key
+            },
+        )
+        .is_none()
+    );
+    assert!(
+        WorkerReceiverTelemetryAuthorization::from_service_grant(
+            grant,
+            PresentationKeyInstallBinding { epoch: 3, ..key },
+        )
+        .is_none()
+    );
+
+    let now = Instant::now();
+    let mut outbox = PresentationDeliveryPublisher::default();
+    outbox.activate_from_service(permit).unwrap();
+    outbox.offer_if_due(now, counters(1), 0).unwrap();
+    outbox
+        .offer_if_due(now + Duration::from_secs(5), counters(3), 0)
+        .unwrap();
+    let leased = outbox.try_checkout().unwrap().unwrap();
+    assert_eq!(leased.snapshot().binding, owner);
+}

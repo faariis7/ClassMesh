@@ -408,3 +408,31 @@ sender. Its control-channel priority, backpressure and revocation races
 must be tested on native Windows. Five-second cumulative diagnostics remain
 distinct from two-second independently fresh network/decoder/adaptive
 measurements.
+
+
+## Service-minted Worker receiver lifetime grant (in-process only)
+
+The Service-owned `ReceiverTelemetryServiceRuntime` now issues an
+immutable `ReceiverTelemetryWorkerGrant` only when an exact protected key
+has been confirmed by the Worker ACK, a correlated successful media
+start has minted a receiver generation, and the independently verified
+current Worker PID/session/generation **still matches** both active
+lifetimes. Its constructor and fields are private to the Service
+control crate; callers can inspect only the exact Service-owned
+receiver binding and the protected key-grant identity. It cannot be
+issued before the media-start ACK, after key clear/Worker replacement,
+or for an obsolete Worker incarnation. The Worker-side
+`WorkerReceiverTelemetryAuthorization::from_service_grant` accepts this
+grant only when the Worker-installed protected grant matches all five
+key fields, including the *separate* grant request ID and epoch;
+the media-start ID stays in the Service-issued receiver binding.
+
+Tests compose the actual Service key/start state, grant issuance,
+Worker's exact installed key and the single-slot outbox, including
+revocation, stale peer and incorrect key/grant rejection. These Rust
+types are **not credentials**: a real transport must independently
+authenticate the operating-system peer, bind process and session to
+the Service WorkerManager generation, negotiate a protected payload
+version/capability, deliver the grant to the correct Worker and revoke
+it atomically on stop/replace. No new privileged IPC, sender, decoder
+quality source, or physical two-host qualification is introduced here.
