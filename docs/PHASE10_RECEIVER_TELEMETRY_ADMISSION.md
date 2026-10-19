@@ -235,3 +235,35 @@ from **independent OS peer credentials and an authoritative lifecycle**, hold
 that authorization across admission, revalidate on arrival/revocation, and
 never use report contents to select it. No Phase 12 IPC/message/version or
 adaptive-quality behavior changes were introduced.
+
+
+## Service-owned receiver-runtime generation ledger
+
+`ReceiverTelemetryServiceLifecycle` is an **inactive, process-local** Phase 10
+building block for the future Service-owned authorization chain. A
+`ReceiverTelemetryStart` carries only nonzero Worker PID, Windows session,
+Service Worker generation and exact protected control/presentation/stream/key
+identity. It deliberately has **no receiver-generation input**: after a
+separately verified, successful protected receiver start, the Service ledger
+assigns a unique monotonically increasing `receiver_generation`. Even a
+replacement/retry with exactly the same key epoch receives a fresh number.
+Revocation only clears an **exact** active binding, and does not reset the
+generation counter or let a stale clear revoke its successor. Invalid starts
+never spend a generation, and overflow fails closed rather than wrapping.
+A replacement report cannot be accepted under the old generation; a valid
+new report must start a new Service ingress baseline.
+
+**Not production wiring or authorization:** the caller of
+`activate_after_verified_start` MUST use independently OS-verified
+NamedPipe peer PID/session, `WorkerManager.generation`, a correlated
+pending authorized request and a *successful* receiver start. Nothing in
+this ledger proves these conditions; arbitrary caller-supplied fields have
+no authority. Actual activation must be owned by the sole authoritative
+Service lifecycle and coordinated with exact revocation, restart, Worker
+exit, key clear and in-flight concurrent receive operations. A new Service
+process can begin a fresh ledger: do not assume a process-local generation
+alone establishes global identity across restarts. The existing owner-aware
+ingress must revalidate live peer authority on receipt, and no Worker-created
+generation is allowed. There is **no IPC message or channel**, no telemetry
+sender, no adaptive-quality promotion, no new privilege or Phase12 change.
+Physical two-host and GPU/scale gates remain open.
