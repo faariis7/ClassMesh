@@ -51,23 +51,28 @@ impl UntrustedReceiverTelemetryGrant {
     /// Local consistency ONLY, not transport authentication or an
     /// authorization permit. The caller must independently verify that this
     /// came from the currently authenticated Service and that these local
-    /// Worker/installed-key/start values are genuinely current.
+    /// Worker/installed-key/start values and the Service-issued active receiver
+    /// generation are genuinely current. The generation must be pinned from a
+    /// trusted local receiver lifecycle, NOT copied from the parsed payload.
     #[must_use]
     pub fn matches_verified_local_state(
         self,
         current_worker: ReceiverTelemetryCurrentWorker,
         installed_key: ReceiverTelemetryAuthorizedKey,
         accepted_start_request_id: u64,
+        verified_receiver_generation: u64,
     ) -> bool {
         current_worker.process_id != 0
             && current_worker.session_id != 0
             && current_worker.worker_generation != 0
             && accepted_start_request_id != 0
+            && verified_receiver_generation != 0
             && installed_key.is_valid()
             && self.receiver.process_id == current_worker.process_id
             && self.receiver.session_id == current_worker.session_id
             && self.receiver.worker_generation == current_worker.worker_generation
             && self.receiver.request_id == accepted_start_request_id
+            && self.receiver.receiver_generation == verified_receiver_generation
             && self.protected_key_grant == installed_key
     }
 }

@@ -156,7 +156,12 @@ fn untrusted_wire_requires_independently_verified_worker_key_and_media_start() {
         worker_generation: 7,
     };
     let installed_key = grant.protected_key_grant();
-    assert!(parsed.matches_verified_local_state(current, installed_key, 16));
+    assert!(parsed.matches_verified_local_state(
+        current,
+        installed_key,
+        16,
+        grant.receiver().receiver_generation
+    ));
     for field in 0..3 {
         let mut stale = current;
         match field {
@@ -165,16 +170,79 @@ fn untrusted_wire_requires_independently_verified_worker_key_and_media_start() {
             2 => stale.worker_generation += 1,
             _ => unreachable!(),
         }
-        assert!(!parsed.matches_verified_local_state(stale, installed_key, 16));
+        assert!(!parsed.matches_verified_local_state(
+            stale,
+            installed_key,
+            16,
+            grant.receiver().receiver_generation
+        ));
     }
-    assert!(!parsed.matches_verified_local_state(current, installed_key, 17));
+    assert!(!parsed.matches_verified_local_state(
+        current,
+        installed_key,
+        17,
+        grant.receiver().receiver_generation
+    ));
     let mut stale_key = installed_key;
     stale_key.key_grant_request_id += 1;
-    assert!(!parsed.matches_verified_local_state(current, stale_key, 16));
+    assert!(!parsed.matches_verified_local_state(
+        current,
+        stale_key,
+        16,
+        grant.receiver().receiver_generation
+    ));
     stale_key = installed_key;
     stale_key.epoch += 1;
-    assert!(!parsed.matches_verified_local_state(current, stale_key, 16));
+    assert!(!parsed.matches_verified_local_state(
+        current,
+        stale_key,
+        16,
+        grant.receiver().receiver_generation
+    ));
     stale_key = installed_key;
     stale_key.stream_id += 1;
-    assert!(!parsed.matches_verified_local_state(current, stale_key, 16));
+    assert!(!parsed.matches_verified_local_state(
+        current,
+        stale_key,
+        16,
+        grant.receiver().receiver_generation
+    ));
+}
+
+#[test]
+fn receiver_grant_replay_rejects_stale_or_missing_independently_pinned_generation() {
+    let grant = service_minted_grant();
+    let untrusted = decode_untrusted_worker_grant(&encode_service_worker_grant(grant)).unwrap();
+    let worker = ReceiverTelemetryCurrentWorker {
+        process_id: 501,
+        session_id: 3,
+        worker_generation: 7,
+    };
+    let key = grant.protected_key_grant();
+    // This generation is assumed to be independently pinned from the authenticated
+    // Service lifetime, not copied from the untrusted decoded payload.
+    let pinned_generation = grant.receiver().receiver_generation;
+    assert!(untrusted.matches_verified_local_state(worker, key, 16, pinned_generation));
+    assert!(!untrusted.matches_verified_local_state(worker, key, 16, 0));
+    assert!(!untrusted.matches_verified_local_state(worker, key, 16, pinned_generation + 1));
+}
+
+#[test]
+fn untrusted_wire_relabeling_cannot_reuse_an_old_authorized_receiver_generation() {
+    let grant = service_minted_grant();
+    let mut tampered = encode_service_worker_grant(grant);
+    // Receiver generation is offset 56..64 (not the independent protected key).
+    tampered[56..64].copy_from_slice(&2_u64.to_be_bytes());
+    let parsed = decode_untrusted_worker_grant(&tampered).unwrap();
+    let worker = ReceiverTelemetryCurrentWorker {
+        process_id: 501,
+        session_id: 3,
+        worker_generation: 7,
+    };
+    assert!(!parsed.matches_verified_local_state(
+        worker,
+        grant.protected_key_grant(),
+        16,
+        grant.receiver().receiver_generation,
+    ));
 }
