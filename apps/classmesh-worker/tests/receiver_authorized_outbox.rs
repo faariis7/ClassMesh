@@ -301,3 +301,106 @@ fn publisher_can_accept_only_exact_service_minted_grant_and_confirmed_worker_key
     let leased = outbox.try_checkout().unwrap().unwrap();
     assert_eq!(leased.snapshot().binding, owner);
 }
+
+#[test]
+fn detached_sender_reader_receives_only_current_immutable_worker_reports() {
+    let now = Instant::now();
+    let mut publisher = PresentationDeliveryPublisher::default();
+    let reader = publisher.readonly_sender();
+    let owner = permit(1, 91);
+    assert!(
+        reader
+            .try_checkout_matching(owner.owner())
+            .unwrap()
+            .is_none()
+    );
+
+    publisher.activate_from_service(owner).unwrap();
+    publisher.offer_if_due(now, counters(10), 0).unwrap();
+    publisher
+        .offer_if_due(now + Duration::from_secs(5), counters(11), 0)
+        .unwrap();
+
+    let detached = reader.clone();
+    let lease = std::thread::spawn(move || detached.try_checkout_matching(owner.owner()))
+        .join()
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.snapshot().binding, owner.owner());
+    assert!(reader.lease_is_current(&lease).unwrap());
+
+    let replacement = permit(2, 91);
+    publisher.activate_from_service(replacement).unwrap();
+    assert!(!reader.lease_is_current(&lease).unwrap());
+    assert!(
+        reader
+            .try_checkout_matching(owner.owner())
+            .unwrap()
+            .is_none()
+    );
+    publisher
+        .offer_if_due(now + Duration::from_secs(6), counters(1), 0)
+        .unwrap();
+    publisher
+        .offer_if_due(now + Duration::from_secs(11), counters(2), 0)
+        .unwrap();
+    let fresh = reader
+        .try_checkout_matching(replacement.owner())
+        .unwrap()
+        .unwrap();
+    assert_eq!(fresh.snapshot().binding, replacement.owner());
+    assert!(reader.lease_is_current(&fresh).unwrap());
+}
+
+#[test]
+fn detached_sender_reader_fails_closed_on_revocation_and_publisher_drop() {
+    let now = Instant::now();
+    let reader;
+    let lease;
+    let owner = permit(1, 91);
+    {
+        let mut publisher = PresentationDeliveryPublisher::default();
+        reader = publisher.readonly_sender();
+        publisher.activate_from_service(owner).unwrap();
+        publisher.offer_if_due(now, counters(1), 0).unwrap();
+        publisher
+            .offer_if_due(now + Duration::from_secs(5), counters(2), 0)
+            .unwrap();
+        lease = reader
+            .try_checkout_matching(owner.owner())
+            .unwrap()
+            .unwrap();
+        assert!(reader.lease_is_current(&lease).unwrap());
+        assert!(publisher.clear_if_matches(owner.owner()).unwrap());
+        assert!(!reader.lease_is_current(&lease).unwrap());
+        let replacement = permit(2, 91);
+        publisher.activate_from_service(replacement).unwrap();
+        publisher
+            .offer_if_due(now + Duration::from_secs(6), counters(1), 0)
+            .unwrap();
+        publisher
+            .offer_if_due(now + Duration::from_secs(11), counters(2), 0)
+            .unwrap();
+        // Leave the replacement generation's report pending on publisher drop.
+        assert!(
+            reader
+                .try_checkout_matching(owner.owner())
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert!(!reader.lease_is_current(&lease).unwrap());
+    assert!(
+        reader
+            .try_checkout_matching(owner.owner())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        reader
+            .try_checkout_matching(permit(2, 91).owner())
+            .unwrap()
+            .is_none()
+    );
+}
