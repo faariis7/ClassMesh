@@ -181,6 +181,8 @@ mod tests {
     fn self_signed_certificate(key: CngMachineKey) -> CertificateDer<'static> {
         let adapter = CngRcgenSigningKey::new(key).expect("rcgen adapter");
         let mut params = CertificateParams::new(Vec::<String>::new()).expect("certificate params");
+        // rcgen requires an explicit serial with an external CNG signing key.
+        params.serial_number = Some(1_u64.into());
         params
             .distinguished_name
             .push(DnType::CommonName, "ClassMesh TLS Test");
