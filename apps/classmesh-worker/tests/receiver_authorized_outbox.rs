@@ -1,3 +1,4 @@
+use classmesh_control::receiver_telemetry::ReceiverTelemetryBinding;
 use std::time::{Duration, Instant};
 
 use classmesh_control::receiver_telemetry_service_lifecycle::{
@@ -402,5 +403,205 @@ fn detached_sender_reader_fails_closed_on_revocation_and_publisher_drop() {
             .try_checkout_matching(permit(2, 91).owner())
             .unwrap()
             .is_none()
+    );
+}
+
+// These test the passive, single-attempt dispatch boundary. No Windows named
+// pipe is opened, so the peer verification closures model an independently
+// authenticated Service caller rather than providing that authentication.
+fn queued_diagnostic(generation: u64) -> (PresentationDeliveryPublisher, ReceiverTelemetryBinding) {
+    let mut publisher = PresentationDeliveryPublisher::default();
+    let authorization = permit(generation, 91);
+    let now = Instant::now();
+    publisher.activate_from_service(authorization).unwrap();
+    assert!(
+        publisher
+            .offer_if_due(now, counters(10), 1)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        publisher
+            .offer_if_due(now + Duration::from_secs(5), counters(11), 2)
+            .unwrap(),
+        Some(false)
+    );
+    (publisher, authorization.owner())
+}
+
+#[test]
+fn one_try_dispatch_sends_exact_fixed_width_frame_after_two_owner_checks() {
+    use classmesh_worker::presentation_delivery_dispatch::{
+        TelemetryDispatchOutcome, try_dispatch_once,
+    };
+    let (publisher, owner) = queued_diagnostic(10);
+    let reader = publisher.readonly_sender();
+    let mut checked = 0;
+    let mut wire = vec![];
+    let outcome = try_dispatch_once(
+        &reader,
+        owner,
+        |current| {
+            checked += 1;
+            current == owner
+        },
+        |frame| {
+            wire.push(*frame);
+            Ok(())
+        },
+    );
+    assert_eq!(outcome, TelemetryDispatchOutcome::Sent);
+    assert_eq!(checked, 2);
+    assert_eq!(wire.len(), 1);
+    let sample = decode_receiver_telemetry(&wire[0]).unwrap();
+    assert_eq!(sample.binding, owner);
+    assert_eq!(sample.sequence, 1);
+    assert_eq!(sample.counters.authenticated_frames, 11);
+    assert_eq!(sample.counters.queue_drops, 2);
+    assert_eq!(
+        try_dispatch_once(&reader, owner, |_| true, |_| panic!("nothing to send")),
+        TelemetryDispatchOutcome::NoReport
+    );
+}
+
+#[test]
+fn dispatch_without_verified_service_peer_never_checks_out_or_writes() {
+    use classmesh_worker::presentation_delivery_dispatch::{
+        TelemetryDispatchOutcome, try_dispatch_once,
+    };
+    let (publisher, owner) = queued_diagnostic(11);
+    let reader = publisher.readonly_sender();
+    assert_eq!(
+        try_dispatch_once(&reader, owner, |_| false, |_| panic!("unauthorized send")),
+        TelemetryDispatchOutcome::UnverifiedPeer
+    );
+    let mut frames = 0;
+    assert_eq!(
+        try_dispatch_once(
+            &reader,
+            owner,
+            |_| true,
+            |_| {
+                frames += 1;
+                Ok(())
+            }
+        ),
+        TelemetryDispatchOutcome::Sent
+    );
+    assert_eq!(frames, 1);
+}
+
+#[test]
+fn service_revocation_between_checkout_and_write_discards_frame() {
+    use classmesh_worker::presentation_delivery_dispatch::{
+        TelemetryDispatchOutcome, try_dispatch_once,
+    };
+    let (mut publisher, owner) = queued_diagnostic(12);
+    let reader = publisher.readonly_sender();
+    let mut checked = 0;
+    assert_eq!(
+        try_dispatch_once(
+            &reader,
+            owner,
+            |expected| {
+                assert_eq!(expected, owner);
+                checked += 1;
+                if checked == 2 {
+                    assert!(publisher.clear_if_matches(owner).unwrap());
+                }
+                true
+            },
+            |_| panic!("revoked lease was written"),
+        ),
+        TelemetryDispatchOutcome::StaleLease
+    );
+    assert_eq!(checked, 2);
+}
+
+#[test]
+fn switched_service_owner_before_write_discards_old_report() {
+    use classmesh_worker::presentation_delivery_dispatch::{
+        TelemetryDispatchOutcome, try_dispatch_once,
+    };
+    let (publisher, owner) = queued_diagnostic(13);
+    let reader = publisher.readonly_sender();
+    let mut checked = 0;
+    assert_eq!(
+        try_dispatch_once(
+            &reader,
+            owner,
+            |_| {
+                checked += 1;
+                checked == 1
+            },
+            |_| panic!("different Service owner cannot receive old frame")
+        ),
+        TelemetryDispatchOutcome::UnverifiedPeer
+    );
+    assert_eq!(checked, 2);
+    assert_eq!(
+        try_dispatch_once(&reader, owner, |_| true, |_| panic!("already discarded")),
+        TelemetryDispatchOutcome::NoReport
+    );
+}
+
+#[test]
+fn write_backpressure_and_disconnection_discard_diagnostics_without_retry() {
+    use classmesh_worker::presentation_delivery_dispatch::{
+        TelemetryDispatchOutcome, TelemetryTryWriteError, try_dispatch_once,
+    };
+    for (generation, error, expected) in [
+        (
+            14,
+            TelemetryTryWriteError::WouldBlock,
+            TelemetryDispatchOutcome::DroppedBackpressure,
+        ),
+        (
+            15,
+            TelemetryTryWriteError::Disconnected,
+            TelemetryDispatchOutcome::DroppedDisconnected,
+        ),
+    ] {
+        let (publisher, owner) = queued_diagnostic(generation);
+        let reader = publisher.readonly_sender();
+        let mut attempts = 0;
+        assert_eq!(
+            try_dispatch_once(
+                &reader,
+                owner,
+                |_| true,
+                |_| {
+                    attempts += 1;
+                    Err(error)
+                }
+            ),
+            expected
+        );
+        assert_eq!(attempts, 1);
+        assert_eq!(
+            try_dispatch_once(&reader, owner, |_| true, |_| panic!("no retry allowed")),
+            TelemetryDispatchOutcome::NoReport
+        );
+    }
+}
+
+#[test]
+fn wrong_receiver_cannot_dispatch_another_receivers_frame() {
+    use classmesh_worker::presentation_delivery_dispatch::{
+        TelemetryDispatchOutcome, try_dispatch_once,
+    };
+    let (publisher, owner) = queued_diagnostic(16);
+    let reader = publisher.readonly_sender();
+    let wrong = ReceiverTelemetryBinding {
+        receiver_generation: owner.receiver_generation + 1,
+        ..owner
+    };
+    assert_eq!(
+        try_dispatch_once(&reader, wrong, |_| true, |_| panic!("wrong receiver")),
+        TelemetryDispatchOutcome::NoReport
+    );
+    assert_eq!(
+        try_dispatch_once(&reader, owner, |_| true, |_| Ok(())),
+        TelemetryDispatchOutcome::Sent
     );
 }
