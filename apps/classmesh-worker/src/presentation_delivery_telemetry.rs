@@ -297,6 +297,24 @@ mod tests {
         assert_eq!(snapshot.counters.queue_drops, 4);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn diagnostic_report_cadence_is_not_a_fresh_adaptive_quality_feed() {
+        use classmesh_core::receiver_quality::ReceiverQualityPolicy;
+
+        // Phase 10 playback reports are *diagnostic cumulative counters*.
+        // Their five-second interval exceeds the independently validated
+        // two-second freshness budget for actual adaptive-quality samples.
+        // Never translate a fresh Service telemetry-ingress report directly
+        // into a synthetic ReceiverQualitySample or healthy recovery vote.
+        let quality = ReceiverQualityPolicy::default();
+        let diagnostic_period_us = u64::try_from(REPORT_INTERVAL.as_micros()).unwrap();
+        assert!(
+            diagnostic_period_us > quality.max_sample_age_us,
+            "diagnostic cadence cannot silently become adaptive-quality cadence"
+        );
+    }
+
     #[test]
     fn local_worker_snapshot_round_trips_strict_wire_codec_without_losing_source_semantics() {
         use classmesh_control::receiver_telemetry_transport::{
