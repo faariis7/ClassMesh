@@ -166,15 +166,7 @@ impl DurableMachineIdentity {
     }
 
     pub fn save(&self, bundle: &MachineIdentityBundle) -> Result<(), MachineIdentityStateError> {
-        validate_bundle(bundle)?;
-        let persisted = PersistedMachineIdentity::from_bundle(bundle);
-        let bytes = serde_json::to_vec_pretty(&persisted)?;
-        if bytes.len() > MAX_STATE_BYTES {
-            return Err(MachineIdentityStateError::StateTooLarge {
-                bytes: bytes.len(),
-                maximum: MAX_STATE_BYTES,
-            });
-        }
+        let bytes = Self::encode_canonical(bundle)?;
 
         if let Some(parent) = self.path.parent()
             && !parent.as_os_str().is_empty()
@@ -207,6 +199,23 @@ impl DurableMachineIdentity {
         }
         let _ = fs::remove_file(&backup);
         Ok(())
+    }
+
+    /// Encode only recognized identity fields. A tolerated unknown input field
+    /// cannot be copied into a protected installation as accidental key material.
+    pub fn encode_canonical(
+        bundle: &MachineIdentityBundle,
+    ) -> Result<Vec<u8>, MachineIdentityStateError> {
+        validate_bundle(bundle)?;
+        let persisted = PersistedMachineIdentity::from_bundle(bundle);
+        let bytes = serde_json::to_vec_pretty(&persisted)?;
+        if bytes.len() > MAX_STATE_BYTES {
+            return Err(MachineIdentityStateError::StateTooLarge {
+                bytes: bytes.len(),
+                maximum: MAX_STATE_BYTES,
+            });
+        }
+        Ok(bytes)
     }
 }
 

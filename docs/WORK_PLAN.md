@@ -1,4 +1,10 @@
-## Active execution checkpoint — rooted Service startup inputs (2026-10-19)
+## Active execution checkpoint — protected fresh startup provisioning (2026-10-19)
+
+PR #569 merged at `c02d40f` (CI `39204535126` PASS). PR #571 merged at `f7bd34b58cb4b3bfe6a3f4bef47532186056e1b2` after exact-head Portable Rust + Windows Build CI `39253288095` PASS. Its feature Service binary also failed closed under real VM1 SCM LocalSystem when the fixed installed policy was absent (STOPPED, Win32 exit 1); the disposable service was deleted. #573 is rebased on that merged main; require fresh exact-head CI before its Squash. Phase 10 #582 changed only Worker files and was preserved.
+
+PR #573 `feat/phase12-protected-startup-provision` creates only a fresh, fixed protected `ClassMesh` identity/config tree under the Windows-rooted ProgramData HANDLE. It validates both bounded inputs before side effects, serializes only recognized fields, creates every directory/file relative to its held parent, flushes and reads back the original exclusive file HANDLEs, and refuses existing or partial roots. It shares the config parser with the opt-in Service reader. Native RED exposed persistence of ignored secret fields; after canonical encoding VM1 and VM2 targeted tests, disposable SCM LocalSystem and feature Clippy passed, with VM1 default package gates also passed. This is no migration or positive installed Service activation. Next: #573 final CI/Squash, then a qualified installed Service lifecycle and revocation work.
+
+## Historical checkpoint — rooted Service startup inputs (2026-10-19)
 
 PR #569 merged at `c02d40fef66174bcea4951439bab996459ffd3ec` after hosted CI `39204535126` Portable Rust + Windows Build PASS. Its protected immutable installation and default-off Service policy loading are present on main alongside independent Phase 10 #570/#572. VM1 default/feature qualification and SCM LocalSystem tests passed; VM2 full run was interrupted by guest disk exhaustion and is not a pass.
 
