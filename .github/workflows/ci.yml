@@ -67,13 +67,6 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Restore and save hosted Windows Cargo cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          prefix-key: classmesh-windows-ci-v1
-          shared-key: hosted-windows
-          cache-on-failure: false
-
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
