@@ -13,6 +13,7 @@
 use std::time::Instant;
 
 use classmesh_control::receiver_telemetry::ReceiverTelemetryBinding;
+use classmesh_control::receiver_telemetry_service_runtime::ReceiverTelemetryWorkerGrant;
 use classmesh_control::receiver_telemetry_transport::{
     ReceiverTelemetryConcurrentError, ReceiverTelemetryConcurrentMailbox,
     ReceiverTelemetrySendLease,
@@ -43,6 +44,35 @@ impl WorkerReceiverTelemetryAuthorization {
             && self.owner.presentation_id == self.installed_key.presentation_id
             && self.owner.stream_id == self.installed_key.stream_id
             && self.owner.epoch == self.installed_key.epoch
+    }
+}
+
+impl WorkerReceiverTelemetryAuthorization {
+    /// Convert a Service-minted grant into exact Worker-local key binding
+    /// consistency. An arbitrary caller cannot construct
+    /// ReceiverTelemetryWorkerGrant via its private fields, but this method
+    /// itself does NOT authenticate the source transport or OS peer.
+    #[must_use]
+    pub fn from_service_grant(
+        grant: ReceiverTelemetryWorkerGrant,
+        installed_key: PresentationKeyInstallBinding,
+    ) -> Option<Self> {
+        let authorized = grant.protected_key_grant();
+        if authorized.control_session_id != installed_key.control_session_id
+            || authorized.key_grant_request_id != installed_key.request_id
+            || authorized.presentation_id != installed_key.presentation_id
+            || authorized.stream_id != installed_key.stream_id
+            || authorized.epoch != installed_key.epoch
+        {
+            return None;
+        }
+        let owner = grant.receiver();
+        let permit = Self {
+            owner,
+            installed_key,
+            authorized_start_request_id: owner.request_id,
+        };
+        permit.is_valid().then_some(permit)
     }
 }
 
