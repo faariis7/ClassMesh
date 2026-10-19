@@ -596,3 +596,32 @@ Service peer predicate. It does NOT establish or exercise OS authentication,
 new message IDs, live Worker loop delivery, Service→Teacher, automatic quality
 control, native GPU performance or the two-physical-PC gate. Phase 12 owns its
 IPC changes and future true authenticated transport negotiation.
+
+
+## Native two-process Windows diagnostic pipe qualification (test-only)
+
+The Windows-only `receiver_native_pipe` test uses an actual local byte-mode
+Win32 named pipe with a DACL for the current interactive test-user SID and
+LocalSystem. A separately spawned Rust test child connects and writes one
+fixed 136-byte diagnostic. The test Service parent calls the existing
+`NamedPipeServer::accept_expected`, which obtains the **OS-observed** client
+PID and Windows session and compares them to the known spawned child. Only
+after that peer check does the test locally simulate correlated protected
+key/start ACKs, mint a `ReceiverTelemetryServiceRuntime` generation and
+admit the received bytes. An authenticated pipe peer claiming a *different*
+PID in its serialized report is rejected; revocation rejects already-read
+bytes. Neither the payload's PID nor any credential assertion from the child
+can activate the Service lifetime. The child uses real Windows process
+isolation, and native `cargo test` runs under a non-elevated account.
+
+**Hard limitation:** this is an independent **native test fixture**, NOT a
+production telemetry IPC endpoint or the actual LocalSystem Service. Test
+startup authorizations are simulated, Windows OS peer checking covers the
+Service's observed *client* PID/session only, and the child does not yet
+verify/pin a real LocalSystem Service server token and process lifetime. The
+existing `NamedPipeClient::write_all` used in the test is BLOCKING and MUST
+NOT be wired into the media/decode or privileged control loop. True
+nonblocking, lower-priority transport, complete frame boundaries, protocol
+negotiation, independently pinned Service peer and lifecycle synchronization
+remain future gates. No Phase 12 changes, app sender/receiver activation,
+automatic quality, Teacher feed or physical two-PC qualification.
