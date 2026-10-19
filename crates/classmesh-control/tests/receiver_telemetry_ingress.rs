@@ -112,3 +112,139 @@ fn stale_revocation_cannot_remove_replacement_and_exact_revocation_clears() {
         ))
     );
 }
+
+#[test]
+fn service_live_owner_mismatch_rejects_old_valid_bytes_without_advancing_state() {
+    let now = Instant::now();
+    let old = binding(1);
+    let next = binding(2);
+    let mut ingress = ReceiverTelemetryIngress::default();
+    ingress.activate_verified(old).unwrap();
+    let first = frame(old, 1, 2);
+    assert_eq!(
+        ingress.observe_for_current_owner(old, &first, now),
+        Ok(ReceiverTelemetryDecision::Baseline)
+    );
+    // The independently verified active Worker changed, but the old gate has
+    // not received teardown/replacement notification. Bytes alone must not
+    // retain the old owner, even when they exactly match the stale gate.
+    assert_eq!(
+        ingress.observe_for_current_owner(next, &frame(old, 2, 3), now + Duration::from_secs(1)),
+        Err(ReceiverTelemetryIngressError::Admission(
+            ReceiverTelemetryError::BindingMismatch
+        ))
+    );
+    assert!(!ingress.has_fresh_for_current_owner(next, now));
+    // The rejected attempt cannot spend old owner's monotonic sequence.
+    assert!(matches!(
+        ingress.observe_for_current_owner(old, &frame(old, 2, 3), now + Duration::from_secs(2)),
+        Ok(ReceiverTelemetryDecision::Interval(_))
+    ));
+    ingress.activate_verified(next).unwrap();
+    assert_eq!(
+        ingress.observe_for_current_owner(old, &frame(old, 3, 4), now + Duration::from_secs(3)),
+        Err(ReceiverTelemetryIngressError::Admission(
+            ReceiverTelemetryError::BindingMismatch
+        ))
+    );
+    assert_eq!(
+        ingress.observe_for_current_owner(next, &frame(next, 1, 1), now + Duration::from_secs(4)),
+        Ok(ReceiverTelemetryDecision::Baseline)
+    );
+    assert!(ingress.has_fresh_for_current_owner(next, now + Duration::from_secs(4)));
+    assert!(!ingress.has_fresh_for_current_owner(old, now + Duration::from_secs(4)));
+}
+
+#[test]
+fn service_live_owner_validation_precedes_parsing_or_liveness() {
+    let now = Instant::now();
+    let old = binding(1);
+    let next = binding(2);
+    let mut ingress = ReceiverTelemetryIngress::default();
+    let good = frame(old, 1, 2);
+    assert_eq!(
+        ingress.observe_for_current_owner(old, &good, now),
+        Err(ReceiverTelemetryIngressError::Admission(
+            ReceiverTelemetryError::NoActiveBinding
+        ))
+    );
+    ingress.activate_verified(old).unwrap();
+    let mut invalid_owner = old;
+    invalid_owner.worker_generation = 0;
+    assert_eq!(
+        ingress.observe_for_current_owner(invalid_owner, &good, now),
+        Err(ReceiverTelemetryIngressError::Admission(
+            ReceiverTelemetryError::InvalidBinding
+        ))
+    );
+    assert!(!ingress.has_fresh_for_current_owner(invalid_owner, now));
+    // An old or malformed payload must not be even decoded if the live owner
+    // differs from this gate. Its provenance is Service-owned, not in bytes.
+    assert_eq!(
+        ingress.observe_for_current_owner(next, b"bad wire", now),
+        Err(ReceiverTelemetryIngressError::Admission(
+            ReceiverTelemetryError::BindingMismatch
+        ))
+    );
+    assert_eq!(
+        ingress.observe_for_current_owner(old, &good, now),
+        Ok(ReceiverTelemetryDecision::Baseline)
+    );
+    assert_eq!(
+        ingress.observe_for_current_owner(old, &good, now + Duration::from_secs(1)),
+        Err(ReceiverTelemetryIngressError::Admission(
+            ReceiverTelemetryError::Replay
+        ))
+    );
+}
+
+#[test]
+fn service_owner_check_rejects_each_independent_worker_lifetime_dimension() {
+    let now = Instant::now();
+    let exact = binding(1);
+    let mut ingress = ReceiverTelemetryIngress::default();
+    ingress.activate_verified(exact).unwrap();
+    let mut variants = Vec::new();
+    let mut wrong = exact;
+    wrong.process_id += 1;
+    variants.push(wrong);
+    let mut wrong = exact;
+    wrong.session_id += 1;
+    variants.push(wrong);
+    let mut wrong = exact;
+    wrong.worker_generation += 1;
+    variants.push(wrong);
+    let mut wrong = exact;
+    wrong.control_session_id += 1;
+    variants.push(wrong);
+    let mut wrong = exact;
+    wrong.request_id += 1;
+    variants.push(wrong);
+    let mut wrong = exact;
+    wrong.presentation_id += 1;
+    variants.push(wrong);
+    let mut wrong = exact;
+    wrong.stream_id += 1;
+    variants.push(wrong);
+    let mut wrong = exact;
+    wrong.epoch += 1;
+    variants.push(wrong);
+    let mut wrong = exact;
+    wrong.receiver_generation += 1;
+    variants.push(wrong);
+
+    for verified_current_owner in variants {
+        assert_eq!(
+            ingress.observe_for_current_owner(verified_current_owner, &frame(exact, 1, 2), now),
+            Err(ReceiverTelemetryIngressError::Admission(
+                ReceiverTelemetryError::BindingMismatch
+            ))
+        );
+        assert!(!ingress.has_fresh_for_current_owner(verified_current_owner, now));
+    }
+    // None of the untrusted owner transitions consumes the good baseline.
+    assert_eq!(
+        ingress.observe_for_current_owner(exact, &frame(exact, 1, 2), now),
+        Ok(ReceiverTelemetryDecision::Baseline)
+    );
+}
