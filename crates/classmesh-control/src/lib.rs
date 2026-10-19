@@ -31,6 +31,7 @@ pub mod presentation_sender_plan;
 pub mod presentation_state;
 pub mod quic;
 pub mod receiver_telemetry;
+pub mod receiver_telemetry_grant_wire;
 pub mod receiver_telemetry_ingress;
 pub mod receiver_telemetry_service_admission;
 pub mod receiver_telemetry_service_lifecycle;

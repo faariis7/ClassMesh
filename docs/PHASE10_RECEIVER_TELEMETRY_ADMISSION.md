@@ -436,3 +436,34 @@ the Service WorkerManager generation, negotiate a protected payload
 version/capability, deliver the grant to the correct Worker and revoke
 it atomically on stop/replace. No new privileged IPC, sender, decoder
 quality source, or physical two-host qualification is introduced here.
+
+
+## Fixed-width Service grant payload, without IPC activation
+
+`receiver_telemetry_grant_wire` defines a bounded **96-byte** v1 *payload*
+for the existing Service-issued receiver grant: 8-byte magic/version/reserved
+prefix, 56-byte exact receiver (including Service-assigned generation and
+media-start request ID), and 32-byte independently confirmed protected key
+grant (including its **different** key-grant request ID). Encoding requires
+an actual `ReceiverTelemetryWorkerGrant` that only the Service lifecycle can
+mint. Decoding is strict and allocation-free, and returns an explicitly
+`UntrustedReceiverTelemetryGrant`: malformed length/magic/version/reserved
+bytes, zero identities, conflicting presentation/session/stream/epoch are
+rejected. A separate read-only consistency check requires exact local Worker
+PID/Windows session/Worker generation, installed key identity, and authorized
+media-start request ID. This check is **not** authentication or an executable
+Worker authorization permit.
+
+**Important version collision:** active Windows IPC remains **v11**.
+Phase 12 already reserves **future v12 / message 33** for zeroizing clipboard
+success. This grant payload is deliberately **not registered** as an IPC frame,
+is not sent by Service or admitted by Worker, and does not change the
+protocol version, OS privileges, named-pipe transport or decoder. Future
+activation must negotiate a compatible protocol with the Phase 12 owner,
+authenticate the Service/Worker peer independently, reject stale/replayed
+grants at the receiver and revoke on Worker/key/receiver generation change.
+A validated payload alone cannot prove issuance, peer authority, delivery or
+freshness. An independent low-priority nonblocking Worker→Service telemetry
+return path is still absent; do not misuse the 5-second cumulative diagnostic
+as a fresh 2-second adaptive quality sample. Physical two-PC/GPU/soak tests
+remain OPEN.
