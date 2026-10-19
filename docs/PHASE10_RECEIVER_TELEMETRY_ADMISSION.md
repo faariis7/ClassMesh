@@ -289,3 +289,30 @@ separate concurrent Service replacement after the comparison. The live
 Service must own/pin/revalidate all three inputs within its serialized
 lifecycle event processing, and route start/revoke events before attempting
 telemetry ingress. No existing IPC frame/version or Phase12 file is edited.
+
+
+## One Service owner for runtime and passive ingress
+
+`ReceiverTelemetryServiceAdmission` is a passive, in-process composition
+of the Service-minted receiver runtime ledger and the existing strict
+`ReceiverTelemetryIngress`. Correlated, acknowledged protected starts update
+both in one owner operation. Exact receiver-runtime teardown clears both the
+lifetime and diagnostic/replay state, while a stale teardown leaves the new
+receiver intact. `observe_after_verified_peer` requires the **independently
+OS-verified** Worker PID/session plus current Service Worker generation,
+compares it to the active Service-owned runtime **before parsing bytes**, and
+then admits bytes under the full nine-field Service-minted receiver binding.
+A no-runtime or stale-Worker report is rejected without decoding; reused
+key epochs still receive a new baseline. Diagnostic liveness stays separate
+from the independently fresh 2-second adaptive quality sample contract.
+
+This composition provides no new authentication, no OS-process lifetime
+pinning, no protection against concurrent external Worker replacement if the
+caller fails to serialize/revalidate, no IPC transport, no sender, and no
+quality promotion. The production Service must eventually own exactly one
+such lifetime + ingress pair for each authorized receiver slot, derive
+`current_worker` from its authenticated Windows pipe/WorkerManager state,
+correlate authorized key epoch and runtime start, and revoke on Worker exit,
+disconnect, key clear or stop. All still require real implementation and
+physical two-host/GPU qualification. No Astra Phase 12 IPC/version file
+changed.
