@@ -316,3 +316,37 @@ correlate authorized key epoch and runtime start, and revoke on Worker exit,
 disconnect, key clear or stop. All still require real implementation and
 physical two-host/GPU qualification. No Astra Phase 12 IPC/version file
 changed.
+
+
+## Real Service lifecycle integration (no telemetry transport)
+
+Phase 10 now attaches its passive `ReceiverTelemetryServiceRuntime` to the
+actual **Windows Service event loop**, but does not add any IPC message or
+receive a diagnostic report in production yet. The real
+`PresentationKeyWorkerLease` created from an authorized Control grant and
+confirmed Worker install acknowledgement passes its full **key grant request
+ID**, presentation, stream and epoch into typed internal multicast/unicast
+start dispatch. A new Worker key install immediately retires older receiver
+report authority; the matching confirmed key-install reply can re-establish
+only the Service-authorized key under the exact OS-bound current Worker
+PID/session and `WorkerManager` generation.
+
+On an already-correlated **successful** multicast or unicast start result, the
+Service combines its preserved key epoch and authorized pending request with
+the current OS-bound Worker identity and actual typed ACK. Only then does the
+existing lifecycle allocate a new receiver generation. Malformed/rejected,
+stale-worker or wrong-key starts never activate reporting. Key-grant teardown
+revokes only the exact current grant (including the grant request ID), and
+Worker restarts/session changes retire both grant and receiver report authority.
+This is entirely passive; missing optional telemetry state does **not** change
+the existing presentation StreamAnswer or deliver any bytes.
+
+**Still not production telemetry:** no Worker→Service transport, no message
+ID/IPC negotiation or bounded sender, no Teacher propagation, and no
+2-second network/decoder/adaptive-quality evidence. Do not confuse a verified
+key grant, a Worker ACK or a current named-pipe peer with authenticated
+receiver telemetry bytes. Before accepting the first live report, implement
+an independently authenticated, low-priority, nonblocking channel that
+rechecks the current Worker/receiver owner on arrival; coordinate shared IPC
+changes with the separate Phase 12 owner. Physical two-Windows-host/GPU/scale
+gates remain OPEN.

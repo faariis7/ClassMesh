@@ -690,6 +690,8 @@ pub(crate) struct PresentationKeyInstallDispatch {
 #[derive(Debug)]
 pub(crate) struct PresentationMulticastStartDispatch {
     pub(crate) start: ServicePresentationMulticastStart,
+    /// Confirmed Service-owned key grant, never supplied by a Worker start ACK.
+    pub(crate) key_binding: PresentationKeyInstallBinding,
     pub(crate) commit: MediaStartCommit,
     pub(crate) reply_tx: oneshot::Sender<Result<(), String>>,
 }
@@ -697,6 +699,8 @@ pub(crate) struct PresentationMulticastStartDispatch {
 #[derive(Debug)]
 pub(crate) struct PresentationUnicastStartDispatch {
     pub(crate) start: ServicePresentationUnicastStart,
+    /// Confirmed Service-owned key grant, never supplied by a Worker start ACK.
+    pub(crate) key_binding: PresentationKeyInstallBinding,
     pub(crate) commit: MediaStartCommit,
     pub(crate) reply_tx: oneshot::Sender<Result<(), String>>,
 }
@@ -2071,27 +2075,31 @@ async fn run_established_session(
                                         && u64::from(installed.stream_id()) == owner.stream_id
                                 })
                             });
-                            let worker_ready = installed.is_some_and(|installed| {
-                                worker_key_lease
-                                    .matches_installed(session.control_session_id, installed)
+                            let ready_key_binding = worker_key_lease.binding.filter(|_| {
+                                installed.is_some_and(|installed| {
+                                    worker_key_lease
+                                        .matches_installed(session.control_session_id, installed)
+                                })
                             });
 
                             let dispatch_result = match (
                                 owner,
                                 installed,
-                                worker_ready,
+                                ready_key_binding,
                                 envelope.request_id,
                             ) {
                                 (None, _, _, _) => {
                                     Err("control.presentation.stream_not_owner".to_owned())
                                 }
-                                (_, None, _, _) | (_, _, false, _) => {
+                                (_, None, _, _) | (_, _, None, _) => {
                                     Err("control.presentation.worker_key_not_installed".to_owned())
                                 }
                                 (_, _, _, 0) => {
                                     Err("control.presentation.invalid_request_id".to_owned())
                                 }
-                                (Some(owner), Some(_), true, _) => {
+                                (Some(owner), Some(_), Some(key_binding), _) => {
+                                    // A Worker-ready start owns this exact confirmed
+                                    // key lease; no optional unwrap/panic is needed.
                                     let stream_id = u32::try_from(validated_stream_id)
                                         .expect("validated stream id fits media header");
                                     match validated {
@@ -2137,6 +2145,7 @@ async fn run_established_session(
                                                         .try_send(
                                                             PresentationMulticastStartDispatch {
                                                                 start,
+                                                                key_binding,
                                                                 commit: commit.clone(),
                                                                 reply_tx,
                                                             },
@@ -2180,6 +2189,7 @@ async fn run_established_session(
                                             match presentation_dispatch.unicast_start_tx.try_send(
                                                 PresentationUnicastStartDispatch {
                                                     start,
+                                                    key_binding,
                                                     commit: commit.clone(),
                                                     reply_tx,
                                                 },

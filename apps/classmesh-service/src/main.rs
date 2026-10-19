@@ -5,6 +5,8 @@ pub mod file_transfer_storage;
 #[cfg(windows)]
 pub mod monitoring;
 #[cfg(windows)]
+mod presentation_receiver_bridge;
+#[cfg(windows)]
 mod system_action_power;
 
 #[cfg(windows)]
@@ -28,6 +30,8 @@ mod windows_service_app {
     use classmesh_control::file_transfer_source::{
         FileSourceId, FileTransferSourceFrame, FileTransferSourceSession,
     };
+    use classmesh_control::receiver_telemetry_service_lifecycle::ReceiverTelemetryCurrentWorker;
+    use classmesh_control::receiver_telemetry_service_runtime::ReceiverTelemetryServiceRuntime;
     use classmesh_control::system_action_execution::{
         SystemActionExecutionError, SystemActionExecutionOutcome, SystemActionExecutor,
     };
@@ -125,6 +129,10 @@ mod windows_service_app {
     use crate::file_transfer_storage::{
         WindowsFileTransferInboxSink, WindowsFileTransferOutboxSource,
     };
+    use crate::presentation_receiver_bridge::{
+        key_from_confirmed_grant, multicast_ack, multicast_start_identity, unicast_ack,
+        unicast_start_identity,
+    };
     use crate::system_action_power::ServicePowerSystemActionExecutor;
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -215,6 +223,7 @@ mod windows_service_app {
         expected_process_id: u32,
         expected_session_id: u32,
         binding: PresentationKeyInstallBinding,
+        expected_worker_generation: u64,
         reply_tx: tokio::sync::oneshot::Sender<Result<PresentationKeyInstallBinding, String>>,
     }
 
@@ -235,6 +244,8 @@ mod windows_service_app {
         expected_process_id: u32,
         expected_session_id: u32,
         start: ServicePresentationMulticastStart,
+        key_binding: PresentationKeyInstallBinding,
+        expected_worker_generation: u64,
         reply_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
     }
 
@@ -249,9 +260,9 @@ mod windows_service_app {
         }
 
         fn matches_key_binding(&self, binding: PresentationKeyInstallBinding) -> bool {
-            binding.control_session_id == self.start.control_session_id
-                && binding.presentation_id == self.start.presentation_id
-                && binding.stream_id == self.start.stream_id
+            // Never let an old grant (or epoch) tear down an authorized start
+            // for a newer key using the same media presentation/stream.
+            self.key_binding == binding
         }
     }
 
@@ -260,6 +271,8 @@ mod windows_service_app {
         expected_process_id: u32,
         expected_session_id: u32,
         start: ServicePresentationUnicastStart,
+        key_binding: PresentationKeyInstallBinding,
+        expected_worker_generation: u64,
         reply_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
     }
 
@@ -274,9 +287,9 @@ mod windows_service_app {
         }
 
         fn matches_key_binding(&self, binding: PresentationKeyInstallBinding) -> bool {
-            binding.control_session_id == self.start.control_session_id
-                && binding.presentation_id == self.start.presentation_id
-                && binding.stream_id == self.start.stream_id
+            // Never let an old grant (or epoch) tear down an authorized start
+            // for a newer key using the same media presentation/stream.
+            self.key_binding == binding
         }
     }
 
@@ -578,6 +591,29 @@ mod windows_service_app {
                 process.process_id() == process_id
                     && process.session_id() == session_id
                     && process.is_running().unwrap_or(false)
+            })
+        }
+
+        /// The Worker is still the OS-observed peer that passed the pipe
+        /// handshake and belongs to the current Service-managed generation.
+        /// Never derive this identity from a Worker telemetry report.
+        fn current_authenticated_receiver_worker(&self) -> Option<ReceiverTelemetryCurrentWorker> {
+            let process = self.process.as_ref()?;
+            if self.pipe.is_none() || !process.is_running().ok()? {
+                return None;
+            }
+            let process_id = process.process_id();
+            let session_id = process.session_id();
+            if !self
+                .capabilities
+                .is_current(self.generation, process_id, session_id)
+            {
+                return None;
+            }
+            Some(ReceiverTelemetryCurrentWorker {
+                process_id,
+                session_id,
+                worker_generation: self.generation,
             })
         }
 
@@ -1981,6 +2017,10 @@ mod windows_service_app {
         let mut pending_presentation_multicast_start: Option<PendingPresentationMulticastStart> =
             None;
         let mut pending_presentation_unicast_start: Option<PendingPresentationUnicastStart> = None;
+        // Passive diagnostics only: exact protected key / verified Worker
+        // lifetime is now driven by real Service start/revoke events. No new
+        // Worker→Service report transport or adaptive quality promotion.
+        let mut receiver_telemetry_runtime = ReceiverTelemetryServiceRuntime::default();
         loop {
             if let Some(pending) = pending_file_pull
                 && !file_pull_owner.is_owner(pending.control_session_id)
@@ -2391,6 +2431,9 @@ mod windows_service_app {
             }
 
             while let Ok(binding) = presentation_key_clear_rx.try_recv() {
+                // A revoked protected grant must also retire the corresponding
+                // in-process telemetry lifetime; stale clear is exact-match.
+                receiver_telemetry_runtime.revoke_matching_key(key_from_confirmed_grant(binding));
                 if pending_presentation_multicast_start
                     .as_ref()
                     .is_some_and(|pending| pending.matches_key_binding(binding))
@@ -2441,6 +2484,7 @@ mod windows_service_app {
                 }
                 if !workers
                     .is_running_worker(pending.expected_process_id, pending.expected_session_id)
+                    || workers.generation != pending.expected_worker_generation
                 {
                     let pending = pending_presentation_key_install
                         .take()
@@ -2456,6 +2500,21 @@ mod windows_service_app {
                     .expect("pending install presence checked");
                 match result.status {
                     WorkerPresentationKeyInstallStatus::Installed => {
+                        // The existing pending authorized key-grant and Worker
+                        // install ACK matched. Only an OS-authenticated current
+                        // Worker incarnation can confirm telemetry ownership.
+                        if let Some(peer) = workers.current_authenticated_receiver_worker()
+                            && peer.worker_generation == pending.expected_worker_generation
+                        {
+                            if let Err(error) = receiver_telemetry_runtime.confirm_key_installed(
+                                key_from_confirmed_grant(pending.binding),
+                                peer,
+                            ) {
+                                eprintln!(
+                                    "ClassMesh Phase10 receiver key admission stayed disabled: {error:?}"
+                                );
+                            }
+                        }
                         let _ = pending.reply_tx.send(Ok(pending.binding));
                     }
                     WorkerPresentationKeyInstallStatus::Rejected => {
@@ -2473,11 +2532,16 @@ mod windows_service_app {
                         .send(Err("control.presentation.worker_busy".to_owned()));
                     continue;
                 }
+                // Named-pipe writes can fail after partial delivery. Retire
+                // stale telemetry authority BEFORE attempting a new key
+                // install, not only after a successful write/Worker ACK.
+                receiver_telemetry_runtime.key_install_started();
                 match workers.send_presentation_key_install(dispatch.install) {
                     Ok((process_id, session_id, binding)) => {
                         pending_presentation_key_install = Some(PendingPresentationKeyInstall {
                             expected_process_id: process_id,
                             expected_session_id: session_id,
+                            expected_worker_generation: workers.generation,
                             binding,
                             reply_tx: dispatch.reply_tx,
                         });
@@ -2546,6 +2610,7 @@ mod windows_service_app {
                 }
                 if !workers
                     .is_running_worker(pending.expected_process_id, pending.expected_session_id)
+                    || workers.generation != pending.expected_worker_generation
                 {
                     let pending = pending_presentation_multicast_start
                         .take()
@@ -2561,6 +2626,23 @@ mod windows_service_app {
                     .expect("pending multicast start presence checked");
                 match result.status {
                     WorkerPresentationMulticastStartStatus::Started => {
+                        if let Some(peer) = workers.current_authenticated_receiver_worker()
+                            && peer.worker_generation == pending.expected_worker_generation
+                            && let Err(error) = receiver_telemetry_runtime
+                                .activate_correlated_start(
+                                    multicast_start_identity(
+                                        pending.start,
+                                        peer,
+                                        pending.key_binding,
+                                    ),
+                                    peer,
+                                    multicast_ack(result),
+                                )
+                        {
+                            eprintln!(
+                                "ClassMesh Phase10 multicast receiver admission stayed disabled: {error:?}"
+                            );
+                        }
                         let _ = pending.reply_tx.send(Ok(()));
                     }
                     WorkerPresentationMulticastStartStatus::Rejected => {
@@ -2592,6 +2674,8 @@ mod windows_service_app {
                             Some(PendingPresentationMulticastStart {
                                 expected_process_id: process_id,
                                 expected_session_id: session_id,
+                                expected_worker_generation: workers.generation,
+                                key_binding: dispatch.key_binding,
                                 start: dispatch.start,
                                 reply_tx: dispatch.reply_tx,
                             });
@@ -2622,6 +2706,7 @@ mod windows_service_app {
                 }
                 if !workers
                     .is_running_worker(pending.expected_process_id, pending.expected_session_id)
+                    || workers.generation != pending.expected_worker_generation
                 {
                     let pending = pending_presentation_unicast_start
                         .take()
@@ -2637,6 +2722,23 @@ mod windows_service_app {
                     .expect("pending unicast start presence checked");
                 match result.status {
                     WorkerPresentationUnicastStartStatus::Started => {
+                        if let Some(peer) = workers.current_authenticated_receiver_worker()
+                            && peer.worker_generation == pending.expected_worker_generation
+                            && let Err(error) = receiver_telemetry_runtime
+                                .activate_correlated_start(
+                                    unicast_start_identity(
+                                        pending.start,
+                                        peer,
+                                        pending.key_binding,
+                                    ),
+                                    peer,
+                                    unicast_ack(result),
+                                )
+                        {
+                            eprintln!(
+                                "ClassMesh Phase10 unicast receiver admission stayed disabled: {error:?}"
+                            );
+                        }
                         let _ = pending.reply_tx.send(Ok(()));
                     }
                     WorkerPresentationUnicastStartStatus::Rejected => {
@@ -2668,6 +2770,8 @@ mod windows_service_app {
                             Some(PendingPresentationUnicastStart {
                                 expected_process_id: process_id,
                                 expected_session_id: session_id,
+                                expected_worker_generation: workers.generation,
+                                key_binding: dispatch.key_binding,
                                 start: dispatch.start,
                                 reply_tx: dispatch.reply_tx,
                             });
@@ -2917,6 +3021,7 @@ mod windows_service_app {
             match event_rx.recv_timeout(Duration::from_millis(5)) {
                 Ok(RuntimeEvent::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Ok(RuntimeEvent::Session(event)) => {
+                    let prior_worker = workers.current_authenticated_receiver_worker();
                     let action = supervisor.on_event(event);
                     handle_supervisor_action(
                         action,
@@ -2924,6 +3029,11 @@ mod windows_service_app {
                         &mut workers,
                         input_availability.as_ref(),
                     );
+                    if workers.current_authenticated_receiver_worker() != prior_worker {
+                        // Session stop/replacement may run synchronously without
+                        // producing a later WorkerManager::poll event.
+                        receiver_telemetry_runtime.worker_changed();
+                    }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
@@ -2940,6 +3050,7 @@ mod windows_service_app {
                     event,
                 );
                 if !matches!(event, WorkerManagerEvent::None) {
+                    receiver_telemetry_runtime.worker_changed();
                     if let Some(pending) = pending_presentation_key_install.take() {
                         let _ = pending
                             .reply_tx
@@ -3360,6 +3471,7 @@ mod windows_service_app {
             PendingPresentationKeyInstall {
                 expected_process_id: 42,
                 expected_session_id: 7,
+                expected_worker_generation: 2,
                 binding,
                 reply_tx,
             }
@@ -3440,6 +3552,14 @@ mod windows_service_app {
             let pending = PendingPresentationMulticastStart {
                 expected_process_id: 42,
                 expected_session_id: 7,
+                expected_worker_generation: 2,
+                key_binding: PresentationKeyInstallBinding {
+                    control_session_id: start.control_session_id,
+                    request_id: 999,
+                    presentation_id: start.presentation_id,
+                    stream_id: start.stream_id,
+                    epoch: 77,
+                },
                 start,
                 reply_tx,
             };
@@ -3481,6 +3601,14 @@ mod windows_service_app {
             let pending = PendingPresentationMulticastStart {
                 expected_process_id: 42,
                 expected_session_id: 7,
+                expected_worker_generation: 2,
+                key_binding: PresentationKeyInstallBinding {
+                    control_session_id: start.control_session_id,
+                    request_id: 999,
+                    presentation_id: start.presentation_id,
+                    stream_id: start.stream_id,
+                    epoch: 77,
+                },
                 start,
                 reply_tx,
             };
@@ -3494,6 +3622,16 @@ mod windows_service_app {
             assert!(pending.matches_key_binding(exact_media_binding));
 
             for wrong in [
+                // Replacing the key under the same presentation/stream must
+                // not let an earlier grant's clear cancel the new start.
+                PresentationKeyInstallBinding {
+                    request_id: exact_media_binding.request_id + 1,
+                    ..exact_media_binding
+                },
+                PresentationKeyInstallBinding {
+                    epoch: exact_media_binding.epoch + 1,
+                    ..exact_media_binding
+                },
                 PresentationKeyInstallBinding {
                     control_session_id: start.control_session_id + 1,
                     ..exact_media_binding
@@ -3509,6 +3647,47 @@ mod windows_service_app {
             ] {
                 assert!(!pending.matches_key_binding(wrong));
             }
+        }
+
+        #[test]
+        fn pending_unicast_start_clear_requires_exact_key_grant_not_just_media_identity() {
+            let start = ServicePresentationUnicastStart {
+                control_session_id: 77,
+                request_id: 88,
+                presentation_id: 55,
+                stream_id: 7,
+                width: 640,
+                height: 360,
+                fps: 15,
+                bitrate_kbps: 1_000,
+                port: 50_001,
+                teacher_source: std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 21)),
+            };
+            let key_binding = PresentationKeyInstallBinding {
+                control_session_id: start.control_session_id,
+                request_id: 900,
+                presentation_id: start.presentation_id,
+                stream_id: start.stream_id,
+                epoch: 4,
+            };
+            let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+            let pending = PendingPresentationUnicastStart {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                expected_worker_generation: 2,
+                start,
+                key_binding,
+                reply_tx,
+            };
+            assert!(pending.matches_key_binding(key_binding));
+            assert!(!pending.matches_key_binding(PresentationKeyInstallBinding {
+                request_id: 901,
+                ..key_binding
+            }));
+            assert!(!pending.matches_key_binding(PresentationKeyInstallBinding {
+                epoch: 5,
+                ..key_binding
+            }));
         }
 
         #[test]
