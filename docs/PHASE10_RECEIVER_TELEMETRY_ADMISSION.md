@@ -625,3 +625,23 @@ nonblocking, lower-priority transport, complete frame boundaries, protocol
 negotiation, independently pinned Service peer and lifecycle synchronization
 remain future gates. No Phase 12 changes, app sender/receiver activation,
 automatic quality, Teacher feed or physical two-PC qualification.
+
+## Native forged-binding matrix (test-only follow-up)
+
+The real Windows two-process pipe test now carries **nine independent,
+syntactically valid forged receiver identity fields** across separate child
+process runs: OS-reported process ID and Windows session ID, Service-owned
+Worker generation, control session, media-start request, presentation,
+stream, key epoch, and receiver generation. Every test keeps the actual
+Named Pipe OS-attested PID/session intact while mutating only the bytes
+claimed by the child. Service admission must reject each claim, and none
+may mark receiver telemetry as fresh. The positive two-process baseline
+and rejection of already-read bytes after revocation remain unchanged.
+
+This is **native test coverage, not production integration**. The pipe
+client continues to use a blocking write on disposable test threads,
+and correlated Service key/start acknowledgements are simulated.
+It does not qualify the actual LocalSystem Service or independently
+pin its server token, enable Worker-to-Service / Service-to-Teacher
+telemetry, authorize quality promotion, or close Phase 10G / other
+physical-hardware acceptance gates.
