@@ -35,7 +35,7 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 const CHILD_PIPE: &str = "CLASSMESH_PHASE10_NATIVE_PIPE";
-const CHILD_WRONG_CLAIM: &str = "CLASSMESH_PHASE10_WRONG_PID_CLAIM";
+const CHILD_FORGED_FIELD: &str = "CLASSMESH_PHASE10_FORGED_BINDING_FIELD";
 static NEXT_PIPE: AtomicU64 = AtomicU64::new(1);
 
 struct OwnedToken(HANDLE);
@@ -112,8 +112,22 @@ fn child_send_native_report() {
     };
     let session_id = current_session_id().expect("Windows child session");
     let mut owner = identity(std::process::id(), session_id);
-    if std::env::var_os(CHILD_WRONG_CLAIM).is_some() {
-        owner.process_id = owner.process_id.saturating_add(1);
+    // Only the trusted test parent chooses which worker-supplied identity
+    // field to forge. All claims are syntactically valid, so the Service must
+    // reject them by comparing the complete independently verified binding.
+    if let Ok(field) = std::env::var(CHILD_FORGED_FIELD) {
+        match field.as_str() {
+            "process_id" => owner.process_id += 1,
+            "session_id" => owner.session_id += 1,
+            "worker_generation" => owner.worker_generation += 1,
+            "control_session_id" => owner.control_session_id += 1,
+            "request_id" => owner.request_id += 1,
+            "presentation_id" => owner.presentation_id += 1,
+            "stream_id" => owner.stream_id += 1,
+            "epoch" => owner.epoch += 1,
+            "receiver_generation" => owner.receiver_generation += 1,
+            _ => panic!("unknown forged identity field: {field}"),
+        }
     }
     let report = ReceiverTelemetrySnapshot {
         binding: owner,
@@ -205,7 +219,7 @@ fn receive_exact(mut pipe: NamedPipeServer, pid: u32, session_id: u32) -> (u32, 
     (attested.process_id(), attested.session_id(), bytes.to_vec())
 }
 
-fn run_native_pipe_case(wrong_claim: bool) {
+fn run_native_pipe_case(forged_field: Option<&str>) {
     let session_id = current_session_id().expect("native Windows session");
     let name = format!(
         "ClassMesh-Phase10-NativeSmoke-{}-{}",
@@ -226,8 +240,8 @@ fn run_native_pipe_case(wrong_claim: bool) {
         .env(CHILD_PIPE, &name)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    if wrong_claim {
-        command.env(CHILD_WRONG_CLAIM, "1");
+    if let Some(field) = forged_field {
+        command.env(CHILD_FORGED_FIELD, field);
     }
     let mut child = ChildGuard(
         command
@@ -252,13 +266,13 @@ fn run_native_pipe_case(wrong_claim: bool) {
     };
     let mut service = grant_service_for_real_peer(worker);
     let admitted = service.observe_after_verified_peer(worker, &bytes, Instant::now());
-    if wrong_claim {
+    if let Some(field) = forged_field {
         assert!(
             matches!(
-                admitted,
+                &admitted,
                 Err(ReceiverTelemetryServiceAdmissionError::Ingress(_))
             ),
-            "forged Worker-reported PID must not enter Service state"
+            "forged Worker-reported {field} must not enter Service state: {admitted:?}"
         );
         assert!(!service.has_fresh_for_verified_peer(worker, Instant::now()));
     } else {
@@ -286,10 +300,26 @@ fn run_native_pipe_case(wrong_claim: bool) {
 
 #[test]
 fn native_separate_process_pipe_accepts_os_attested_worker_and_rejects_after_revoke() {
-    run_native_pipe_case(false);
+    run_native_pipe_case(None);
 }
 
 #[test]
-fn native_pipe_os_peer_cannot_authorize_forged_report_process_identity() {
-    run_native_pipe_case(true);
+fn native_pipe_os_peer_cannot_authorize_any_forged_receiver_binding_dimension() {
+    // These are nine independent claims supplied by an actual, separately
+    // spawned child process. The Service obtains PID/session from Windows,
+    // while control/key/start/receiver lifetime remains Service-owned.
+    // Forging any individual field must reject without refreshing liveness.
+    for field in [
+        "process_id",
+        "session_id",
+        "worker_generation",
+        "control_session_id",
+        "request_id",
+        "presentation_id",
+        "stream_id",
+        "epoch",
+        "receiver_generation",
+    ] {
+        run_native_pipe_case(Some(field));
+    }
 }
