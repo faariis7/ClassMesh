@@ -48,6 +48,11 @@ const MESSAGE_SERVICE_TEACHER_INTERACTION_REQUEST: u16 = 29;
 const MESSAGE_WORKER_TEACHER_INTERACTION_RESULT: u16 = 30;
 const MESSAGE_SERVICE_CLIPBOARD_READ_REQUEST: u16 = 31;
 const MESSAGE_WORKER_CLIPBOARD_READ_FAILURE: u16 = 32;
+// Type 33 / minor 12 are EXCLUSIVELY reserved for the future sensitive
+// clipboard payload. A v11 optional capability + type 34 avoids collision.
+const MESSAGE_SERVICE_RECEIVER_TELEMETRY_GRANT: u16 = 34;
+const RECEIVER_TELEMETRY_GRANT_MIN_MINOR: u8 = 11;
+const SERVICE_RECEIVER_TELEMETRY_GRANT_LEN: usize = 60;
 const SERVICE_UDP_STREAM_START_LEN: usize = 32;
 const SERVICE_PRESENTATION_MULTICAST_START_LEN: usize = 56;
 const WORKER_PRESENTATION_MULTICAST_START_RESULT_LEN: usize = 40;
@@ -78,7 +83,9 @@ const ENCODER_EVIDENCE_FIXED_LEN: usize = 50;
 
 const WORKER_CAP_DXGI_CAPTURE: u32 = 1 << 0;
 const WORKER_CAP_H264_HARDWARE_ENCODE: u32 = 1 << 1;
-const KNOWN_WORKER_CAPABILITIES: u32 = WORKER_CAP_DXGI_CAPTURE | WORKER_CAP_H264_HARDWARE_ENCODE;
+const WORKER_CAP_TELEMETRY_GRANT_V11: u32 = 1 << 2;
+const KNOWN_WORKER_CAPABILITIES: u32 =
+    WORKER_CAP_DXGI_CAPTURE | WORKER_CAP_H264_HARDWARE_ENCODE | WORKER_CAP_TELEMETRY_GRANT_V11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpcRole {
@@ -227,6 +234,19 @@ impl WorkerRuntimeCapabilities {
     #[must_use]
     pub const fn h264_hardware_encode(self) -> bool {
         self.flags & WORKER_CAP_H264_HARDWARE_ENCODE != 0
+    }
+
+    /// Advertise support only in a Worker build that parses the exact
+    /// read-only v11 grant and uses a separate low-priority telemetry pipe.
+    #[must_use]
+    pub const fn with_receiver_telemetry_grant_v11(mut self) -> Self {
+        self.flags |= WORKER_CAP_TELEMETRY_GRANT_V11;
+        self
+    }
+
+    #[must_use]
+    pub const fn receiver_telemetry_grant_v11(self) -> bool {
+        self.flags & WORKER_CAP_TELEMETRY_GRANT_V11 != 0
     }
 
     #[must_use]
@@ -843,10 +863,44 @@ impl WorkerPresentationFeedback {
     }
 }
 
+/// A typed, non-secret receiver identity minted by Service after confirmed
+/// protected key + correlated media start, delivered ONLY over authenticated
+/// primary control IPC. It is not a bearer credential or Teacher grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceReceiverTelemetryGrant {
+    pub service_process_id: u32,
+    pub worker_process_id: u32,
+    pub worker_session_id: u32,
+    pub worker_generation: u64,
+    pub receiver_generation: u64,
+    pub control_session_id: u64,
+    pub start_request_id: u64,
+    pub presentation_id: u64,
+    pub stream_id: u32,
+    pub epoch: u32,
+}
+
+impl ServiceReceiverTelemetryGrant {
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.service_process_id != 0
+            && self.worker_process_id != 0
+            && self.worker_session_id != 0
+            && self.worker_generation != 0
+            && self.receiver_generation != 0
+            && self.control_session_id != 0
+            && self.start_request_id != 0
+            && self.presentation_id != 0
+            && self.stream_id != 0
+            && self.epoch != 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum IpcMessage {
     WorkerHello { process_id: u32, session_id: u32 },
     ServiceReady,
+    ServiceReceiverTelemetryGrant(ServiceReceiverTelemetryGrant),
     Control(IpcControlCommand),
     InputEvent(InputEvent),
     StreamReconfigure(StreamReconfigure),
@@ -942,6 +996,29 @@ impl IpcFrame {
     #[must_use]
     pub fn service_ready() -> Self {
         Self::new(MESSAGE_SERVICE_READY, Vec::new())
+    }
+
+    /// Optional non-secret v11 control-plane grant: type 34 is never the
+    /// reserved sensitive clipboard type 33, and carries no diagnostic data.
+    pub fn service_receiver_telemetry_grant(
+        grant: ServiceReceiverTelemetryGrant,
+    ) -> Result<Self, IpcMessageError> {
+        if !grant.is_valid() {
+            return Err(IpcMessageError::InvalidPayload);
+        }
+        let mut payload = Vec::with_capacity(SERVICE_RECEIVER_TELEMETRY_GRANT_LEN);
+        payload.extend_from_slice(&grant.service_process_id.to_be_bytes());
+        payload.extend_from_slice(&grant.worker_process_id.to_be_bytes());
+        payload.extend_from_slice(&grant.worker_session_id.to_be_bytes());
+        payload.extend_from_slice(&grant.worker_generation.to_be_bytes());
+        payload.extend_from_slice(&grant.receiver_generation.to_be_bytes());
+        payload.extend_from_slice(&grant.control_session_id.to_be_bytes());
+        payload.extend_from_slice(&grant.start_request_id.to_be_bytes());
+        payload.extend_from_slice(&grant.presentation_id.to_be_bytes());
+        payload.extend_from_slice(&grant.stream_id.to_be_bytes());
+        payload.extend_from_slice(&grant.epoch.to_be_bytes());
+        debug_assert_eq!(payload.len(), SERVICE_RECEIVER_TELEMETRY_GRANT_LEN);
+        Ok(Self::new(MESSAGE_SERVICE_RECEIVER_TELEMETRY_GRANT, payload))
     }
 
     #[must_use]
@@ -1383,6 +1460,31 @@ impl IpcFrame {
                 } else {
                     Err(IpcMessageError::InvalidPayload)
                 }
+            }
+            MESSAGE_SERVICE_RECEIVER_TELEMETRY_GRANT => {
+                if self.header.version_minor < RECEIVER_TELEMETRY_GRANT_MIN_MINOR {
+                    return Err(IpcMessageError::UnsupportedVersion);
+                }
+                if self.payload.len() != SERVICE_RECEIVER_TELEMETRY_GRANT_LEN {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                let p = &self.payload;
+                let grant = ServiceReceiverTelemetryGrant {
+                    service_process_id: u32::from_be_bytes(p[0..4].try_into().unwrap()),
+                    worker_process_id: u32::from_be_bytes(p[4..8].try_into().unwrap()),
+                    worker_session_id: u32::from_be_bytes(p[8..12].try_into().unwrap()),
+                    worker_generation: u64::from_be_bytes(p[12..20].try_into().unwrap()),
+                    receiver_generation: u64::from_be_bytes(p[20..28].try_into().unwrap()),
+                    control_session_id: u64::from_be_bytes(p[28..36].try_into().unwrap()),
+                    start_request_id: u64::from_be_bytes(p[36..44].try_into().unwrap()),
+                    presentation_id: u64::from_be_bytes(p[44..52].try_into().unwrap()),
+                    stream_id: u32::from_be_bytes(p[52..56].try_into().unwrap()),
+                    epoch: u32::from_be_bytes(p[56..60].try_into().unwrap()),
+                };
+                if !grant.is_valid() {
+                    return Err(IpcMessageError::InvalidPayload);
+                }
+                Ok(IpcMessage::ServiceReceiverTelemetryGrant(grant))
             }
             MESSAGE_CONTROL => {
                 let [raw] = self.payload.as_slice() else {
@@ -2158,6 +2260,79 @@ impl Drop for IpcFrameDecoder {
 
 #[cfg(test)]
 mod tests {
+    fn receiver_grant() -> ServiceReceiverTelemetryGrant {
+        ServiceReceiverTelemetryGrant {
+            service_process_id: 17,
+            worker_process_id: 21,
+            worker_session_id: 3,
+            worker_generation: 5,
+            receiver_generation: 11,
+            control_session_id: 101,
+            start_request_id: 307,
+            presentation_id: 555,
+            stream_id: 9,
+            epoch: 2,
+        }
+    }
+
+    #[test]
+    fn v11_receiver_grant_uses_nonreserved_type_and_exact_60_byte_wire() {
+        let grant = receiver_grant();
+        let frame = IpcFrame::service_receiver_telemetry_grant(grant).unwrap();
+        assert_eq!(frame.header.version_minor, IPC_VERSION_MINOR);
+        assert_eq!(frame.payload.len(), 60);
+        assert_eq!(
+            frame.message(),
+            Ok(IpcMessage::ServiceReceiverTelemetryGrant(grant))
+        );
+        assert_ne!(
+            frame.header.message_type,
+            crate::ipc_sensitive::CLIPBOARD_READ_SUCCESS_RESERVED_TYPE
+        );
+        let decoded = IpcFrameDecoder::default()
+            .push_bytes(&frame.encode().unwrap())
+            .unwrap();
+        assert_eq!(decoded, vec![frame]);
+    }
+
+    #[test]
+    fn receiver_grant_rejects_downgrade_truncation_and_every_zero_binding_field() {
+        let frame = IpcFrame::service_receiver_telemetry_grant(receiver_grant()).unwrap();
+        let mut legacy = frame.clone();
+        legacy.header.version_minor = 10;
+        assert_eq!(legacy.message(), Err(IpcMessageError::UnsupportedVersion));
+        let mut shortened = frame.clone();
+        shortened.payload.pop();
+        assert_eq!(shortened.message(), Err(IpcMessageError::InvalidPayload));
+        for (start, end) in [
+            (0, 4),
+            (4, 8),
+            (8, 12),
+            (12, 20),
+            (20, 28),
+            (28, 36),
+            (36, 44),
+            (44, 52),
+            (52, 56),
+            (56, 60),
+        ] {
+            let mut invalid = frame.clone();
+            invalid.payload[start..end].fill(0);
+            assert_eq!(invalid.message(), Err(IpcMessageError::InvalidPayload));
+        }
+    }
+
+    #[test]
+    fn only_capable_worker_advertises_optional_v11_telemetry_grant() {
+        let old = WorkerRuntimeCapabilities::new(21, 3, true, false);
+        assert!(!old.receiver_telemetry_grant_v11());
+        let modern = old.with_receiver_telemetry_grant_v11();
+        assert!(modern.receiver_telemetry_grant_v11());
+        let frame = IpcFrame::worker_capabilities(modern);
+        assert_eq!(frame.message(), Ok(IpcMessage::WorkerCapabilities(modern)));
+        assert_ne!(old.known_flags(), modern.known_flags());
+    }
+
     use super::*;
 
     fn frame(payload: &[u8]) -> IpcFrame {
