@@ -1,0 +1,3 @@
+# Exact guest PowerShell capture bytes include UTF-8 BOM/Windows CRLF.
+# Preserve SHA-256 provenance: retain as opaque log artifacts, not editable text.
+docs/evidence/phase10g-vm-20261021/*.txt -text -diff

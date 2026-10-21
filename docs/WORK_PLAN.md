@@ -1,3 +1,9 @@
+## Phase 10G VM qualification and evidence integrity (2026-10-21)
+
+VM1 Windows 11 24H2 and VM2 Windows 11 25H2 (both ARM64, running the exact CI x64 adaptive benchmark through Windows x64 emulation) each PASS the synthetic 5/10/20/30 receiver matrix at 30 rounds, CI artifact from run `39601537031`, executable SHA-256 `88bc23c56b8a597fabf75082ea7736128e2871d5a0933e96aa1c2c920ba0eb0a`. OS-real but synthetic: not physical 5/10/20/30 receiver qualification, not default transport selection; hardware Phase 10G OPEN. Initial native VM compiler attempt lacked clang for ring; using the x64 CI artifact avoided modifying VM toolchains. Evidence retained on Mac under `/Users/ahmed/sentinelx/workspace/classmesh-phase10g-evidence-20261021`.
+
+Evidence-integrity RED: the Phase 10G physical manifest initializer currently accepts a receiver ID of `..` on VM2, creating a manifest referencing a parent directory rather than a receiver log basename. Safely harden identifiers and the validator with negative native PowerShell tests; keep real evidence requirements explicit and no fabricated physical PASS. Work scoped to the 10G PowerShell helper/tests and evidence documentation, isolated from Astra Phase 12.
+
 ## Active execution checkpoint — protected fresh startup provisioning (2026-10-19)
 
 PR #569 merged at `c02d40f` (CI `39204535126` PASS). PR #571 merged at `f7bd34b58cb4b3bfe6a3f4bef47532186056e1b2` after exact-head Portable Rust + Windows Build CI `39253288095` PASS. Its feature Service binary also failed closed under real VM1 SCM LocalSystem when the fixed installed policy was absent (STOPPED, Win32 exit 1); the disposable service was deleted. #573 is rebased on that merged main; require fresh exact-head CI before its Squash. Phase 10 #582 changed only Worker files and was preserved.

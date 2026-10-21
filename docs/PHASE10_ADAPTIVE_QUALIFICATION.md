@@ -83,6 +83,24 @@ Then:
 
 The validator checks exact receiver correlation, non-empty evidence, and SHA-256 hashes. It deliberately keeps qualification and all production-default selections undetermined.
 
+### Safe receiver evidence identifiers
+
+Physical receiver IDs in `-ReceiverId` and externally supplied manifest
+`receiver_ids` must each be one **1–64 character** Windows-safe filename
+component, beginning with a Unicode letter/digit and then using letters,
+digits, `.`, `_` and `-`. Trailing dots/spaces, leading/trailing whitespace,
+relative paths (`.`, `..`), Windows device names (`CON`, `NUL`,
+`COM1`–`COM9`, `LPT1`–`LPT9`, even with extensions), path separators,
+control characters and case-insensitive duplicates fail before reading or
+writing evidence. Use stable host IDs or device enrollment IDs that match
+these constraints, not filenames containing untrusted path fragments.
+
+Run `scripts/phase10g-adaptive-validation-tests.ps1` in Windows PowerShell
+for positive Unicode identifier + SHA index qualification and hostile
+initialization/manifest negative tests. This protects artifact bookkeeping
+only: a correctly indexed but fabricated log **is not physical proof** and
+a reviewed physical qualification decision is still mandatory.
+
 ## Gate interactions
 
 Phase 10G cannot override independent open gates:

@@ -15,6 +15,37 @@ $ErrorActionPreference = "Stop"
 
 $SupportedReceiverCounts = @(5, 10, 20, 30)
 
+# Evidence IDs are single, safe Windows filename components, never paths.
+# Use the same strict validation on both manifest creation and later
+# untrusted manifest reads. Preserve Unicode letters without accepting path
+# aliases, Windows DOS device names or case-folded duplicate evidence files.
+function Assert-ReceiverIdentifier {
+    param([AllowNull()][string]$Id)
+
+    if ([string]::IsNullOrWhiteSpace($Id) -or $Id.Length -gt 64 -or
+        $Id -cne $Id.Trim() -or
+        $Id -cnotmatch '^[\p{L}\p{Nd}][\p{L}\p{Nd}._-]{0,63}$' -or
+        $Id.EndsWith(".")) {
+        throw "Invalid receiver identifier: must be one safe filename component (1..64 letters/digits/._-)"
+    }
+
+    $deviceStem = ($Id -split '\.', 2)[0]
+    if ($deviceStem -imatch '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+        throw "Invalid receiver identifier: reserved Windows device basename"
+    }
+    return $Id
+}
+
+function Assert-UniqueReceiverIdentifiers {
+    param([string[]]$Ids)
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($id in $Ids) {
+        if (-not $seen.Add($id)) {
+            throw "Receiver identifiers must be unique on case-insensitive Windows filesystems"
+        }
+    }
+}
+
 function Manifest-Path {
     Join-Path $ResultsDir "adaptive-controller-manifest.json"
 }
@@ -28,19 +59,9 @@ function Assert-ReceiverSet {
     }
 
     $normalized = @($ReceiverId | ForEach-Object {
-        if ([string]::IsNullOrWhiteSpace($_)) {
-            throw "Receiver identifiers must not be empty"
-        }
-        $value = $_.Trim()
-        if ($value.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
-            throw "Receiver identifiers must be valid file-name components"
-        }
-        $value
+        Assert-ReceiverIdentifier -Id $_
     })
-
-    if (@($normalized | Sort-Object -Unique).Count -ne $ReceiverCount) {
-        throw "Receiver identifiers must be unique"
-    }
+    Assert-UniqueReceiverIdentifiers -Ids $normalized
     $normalized
 }
 
@@ -128,10 +149,13 @@ switch ($Mode) {
             throw "Manifest receiver_ids do not match receiver_count"
         }
 
-        $ids = @($manifest.receiver_ids | ForEach-Object { [string]$_ })
-        if (@($ids | Sort-Object -Unique).Count -ne $manifest.receiver_count) {
-            throw "Manifest receiver_ids must be unique"
-        }
+        # Validate BEFORE combining a manifest field with a filesystem path.
+        # A forged manifest must never redirect hashing to parent directories,
+        # DOS devices or an equivalent path alias.
+        $ids = @($manifest.receiver_ids | ForEach-Object {
+            Assert-ReceiverIdentifier -Id ([string]$_)
+        })
+        Assert-UniqueReceiverIdentifiers -Ids $ids
         if ([int]$manifest.duration_seconds -le 0) {
             throw "Manifest duration_seconds must be positive"
         }
@@ -158,9 +182,6 @@ switch ($Mode) {
 
         $receiverEvidence = @()
         foreach ($id in $ids) {
-            if ([string]::IsNullOrWhiteSpace($id) -or $id.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
-                throw "Manifest contains an invalid receiver identifier"
-            }
             $path = Join-Path (Join-Path $ResultsDir "receivers") "$id.log"
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
                 throw "Missing receiver evidence: $id"

@@ -329,6 +329,10 @@ jobs:
             }
           }
 
+      - name: Validate Phase 10G receiver evidence identifier safety
+        shell: pwsh
+        run: .\scripts\phase10g-adaptive-validation-tests.ps1
+
       - name: Stage Phase 4 qualification bundle
         shell: pwsh
         run: |
