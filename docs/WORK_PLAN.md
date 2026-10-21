@@ -1,3 +1,27 @@
+## Phase 10 dedicated Windows receiver telemetry pipe primitives (2026-10-22)
+
+Isolated branch `feat/phase10-telemetry-service-wire` from main after #598 adds a
+separate **inactive** local-only diagnostics pipe boundary under
+`classmesh-win32`. It cannot share the privileged control pipe or the
+future-v12 clipboard-sensitive pipe. Address generation is fixed-size and
+incarnation-scoped, not an identity credential. The inbound pipe uses the
+existing LocalSystem + exact intended user SID DACL, inbound-only
+`FILE_FLAG_OVERLAPPED`, local-clients-only flags and first-instance
+ownership. Native connection and reads are guarded by the Service-launched
+Worker process HANDLE, OS-observed pipe PID/session and current Service-owned
+receiver incarnation. A one-shot Worker connection verifies the OS Service PID
+independently against the already-authenticated primary IPC identity.
+Read/write have <=250ms logical deadlines, explicit cancellation + drain of
+pending `OVERLAPPED`, fixed 136-byte sender records and <=4-record read size.
+Use only a LOW-priority thread, never the media/control loop.
+
+**Status:** Rust portable naming tests green, native Windows CI required and
+not yet proven by this note. This code does **not** launch a sender/listener,
+negotiate/grant telemetry in production, authenticate a Teacher or select
+a network transport; physical Phase 10G #288 remains OPEN. Do not merge until
+Windows native tests (real OS pipe, timeout/cancel, forged PID, frame bounds),
+full workspace quality gates and exact-head CI pass. Preserve Astra Phase 12.
+
 ## Engineering workflow efficiency checkpoint (2026-10-21)
 
 Adopt docs/ENGINEERING_EXECUTION_SPEED.md as the ongoing ClassMesh

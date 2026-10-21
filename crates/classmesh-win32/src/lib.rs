@@ -1,6 +1,7 @@
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 pub mod clipboard_bounds;
 pub mod sensitive_pipe_name;
+pub mod telemetry_pipe_name;
 pub use sensitive_pipe_name::{
     SensitivePipeAdmission, SensitivePipeAdmissionError, SensitivePipeNameBinding,
     sensitive_worker_pipe_name,
@@ -44,6 +45,8 @@ mod system_volume;
 #[cfg(windows)]
 mod teacher_interaction;
 #[cfg(windows)]
+mod telemetry_pipe;
+#[cfg(windows)]
 mod workstation;
 
 #[cfg(windows)]
@@ -68,6 +71,8 @@ pub use session::current_session_id;
 pub use session_process::{
     LaunchError, SessionProcess, launch_worker_in_session, session_user_sid,
 };
+#[cfg(windows)]
+pub use telemetry_pipe::{ReceiverTelemetryPipeClient, ReceiverTelemetryPipeListener};
 
 #[cfg(windows)]
 pub use teacher_interaction::{

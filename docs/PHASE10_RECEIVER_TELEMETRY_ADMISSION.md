@@ -826,3 +826,40 @@ write atomically safe: the real Service must serialize any send with
 receiver revocation and re-check the authenticated Teacher session. No
 new IPC message, sender, quality estimate or physical qualification is
 provided by this slice.
+
+
+## Native Windows telemetry-only pipe primitive (isolated, not activated)
+
+`classmesh-win32::ReceiverTelemetryPipeListener` and
+`ReceiverTelemetryPipeClient` are independent of the blocking
+Worker↔Service control channel and the future-v12 sensitive clipboard channel.
+A bounded pipe ADDRESS combines Service process ID, Worker Windows session and
+generation, and Service-minted receiver generation; it is not an auth token.
+The server's real local named pipe is inbound-only, write-only for Worker,
+DACL-restricted to LocalSystem + a production session user's exact SID, and
+refuses remote clients. Native peer PID/session come from Win32 pipe APIs;
+Service additionally compares the currently running **original launched
+Worker process HANDLE** and re-reads its own exact active receiver identity
+before/after accept and read, including after potentially blocking kernel I/O.
+Client verifies the server's OS process ID against the Service identity
+authenticated by the existing primary control channel.
+
+Both I/O directions require overlapped handles, bounded frame size
+(Worker exactly 136-byte receiver telemetry v1, Service at most four frames
+per read) and a 1–250ms per-operation deadline. A timed-out request is
+cancelled with `CancelIoEx` and synchronously drained with
+`GetOverlappedResult` before request/event/buffer memory is released. A
+faulty Windows driver can delay that drain beyond the **logical** deadline;
+do not run this code on media/control threads. A timed-out, disconnected or
+revoked incarnation must be discarded rather than reused. Native Windows
+tests exercise an actual local pipe, Win32-reported peer identity, server-PID
+forgery rejection, zero/oversize and deadline rejection, and cancel/drain.
+
+**This is an OS primitive, not live application integration.** There is still
+no scheduled Service listener or separate Worker diagnostic sender, no
+authenticated receipt into `ReceiverTelemetryServiceRuntime`, and no
+authorized Teacher publication. Native Windows CI, explicit Service ledger
+binding, cancellation-safe lifecycle/ownership and multiple-machine Phase 10G
+evidence are independent requirements before declaring production readiness.
+Do not infer authenticated sessions or physical evidence from pipe naming,
+hosted CI or a localhost test.
