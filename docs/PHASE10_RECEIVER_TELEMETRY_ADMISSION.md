@@ -645,3 +645,45 @@ It does not qualify the actual LocalSystem Service or independently
 pin its server token, enable Worker-to-Service / Service-to-Teacher
 telemetry, authorize quality promotion, or close Phase 10G / other
 physical-hardware acceptance gates.
+
+
+## Bounded byte-stream framing seam (passive, not live IPC)
+
+`ReceiverTelemetryFrameStream` is a Service-owned, **passive** parser for the
+fixed-width, versioned 136-byte diagnostic over a future authenticated Windows
+byte-mode Named Pipe. OS reads need not align with record boundaries. The
+parser retains **at most one incomplete record** (135 bytes), consumes at most
+**544 bytes per call** and returns at most **four complete records** per call,
+even when an earlier read left a partial record. It has no background queue,
+thread, socket, timer, sender, privilege or implicit Service activation.
+Because the parser has no clock, its real transport owner must enforce a
+finite partial-record/read deadline and clear it on disconnect or timeout;
+this API is not a replacement for cancellation-safe Windows I/O.
+
+Only the independently authenticated and currently authorized Service
+receiver binding may activate the parser. The caller must serialize such
+activation and reads with Worker/receiver revocation; a caller-supplied
+"current owner" is only a comparison, **not a proof of authority**. Switching
+to a different receiver clears partial bytes, while repeating the same
+activation preserves them. Wrong-owner reads cannot mutate buffered data.
+Malformed complete records, forged embedded bindings, zero-length disconnects
+and oversized reads clear the entire parser instead of resynchronizing by
+scanning untrusted bytes. Each batch is all-or-nothing; no records are emitted
+from a batch containing a malformed record.
+
+Pure-Rust tests exercise every split point, coalescing, maximum-size reads
+after a partial, Service admission separation, owner replacement and stale
+teardown, forged report binding, malformed batches, liveness disconnect and
+oversize. The Windows test fixture adds a real separate-process named-pipe
+read with deliberately short 17-byte read buffers, proving framing after OS
+PID/session attestation and then baseline admission in a **test-owned** Service
+state machine.
+
+**Remaining production gates:** independently pinned real LocalSystem
+Service/server peer identity, secure version negotiation, cancel-safe
+nonblocking diagnostic sender/reader, Service event-loop/lifecycle binding,
+Worker/Service/Teacher delivery and real per-receiver adaptive input
+qualification. The existing blocking named-pipe test I/O is **not suitable**
+for a Worker render/decode or privileged Service control thread. Phase 10G
+physical 5/10/20/30-receiver evidence remains OPEN; no physical network,
+codec, GPU or user-visible performance claim follows from hosted tests.

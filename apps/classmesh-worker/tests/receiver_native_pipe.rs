@@ -24,6 +24,7 @@ use classmesh_control::receiver_telemetry_service_lifecycle::{
 use classmesh_control::receiver_telemetry_service_runtime::{
     ReceiverTelemetryAuthorizedKey, ReceiverTelemetryServiceRuntime,
 };
+use classmesh_control::receiver_telemetry_stream_framing::ReceiverTelemetryFrameStream;
 use classmesh_control::receiver_telemetry_transport::{
     RECEIVER_TELEMETRY_WIRE_LEN, encode_receiver_telemetry,
 };
@@ -322,4 +323,87 @@ fn native_pipe_os_peer_cannot_authorize_any_forged_receiver_binding_dimension() 
     ] {
         run_native_pipe_case(Some(field));
     }
+}
+
+/// A real Windows byte-mode pipe does not promise frame-aligned reads. Force
+/// 17-byte consumer buffers on the attested OS connection so the bounded
+/// parser must assemble an entire diagnostic without a blocking media thread.
+#[test]
+fn native_pipe_reader_assembles_forced_short_reads_before_service_admission() {
+    let session_id = current_session_id().expect("native Windows session");
+    let name = format!(
+        "ClassMesh-Phase10-FramedSmoke-{}-{}",
+        std::process::id(),
+        NEXT_PIPE.fetch_add(1, Ordering::Relaxed)
+    );
+    let server = NamedPipeServer::create_for_user(&name, &current_user_sid_for_test()).unwrap();
+    let mut child = ChildGuard(
+        Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("child_send_native_report")
+            .env(CHILD_PIPE, &name)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn distinct Worker test process"),
+    );
+    let pid = child.0.id();
+    let (tx, rx) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let mut pipe = server;
+        let observed = pipe
+            .accept_expected(pid, session_id)
+            .expect("OS attests real child PID and session before parsing");
+        let owner = identity(observed.process_id(), observed.session_id());
+        let mut parser = ReceiverTelemetryFrameStream::default();
+        parser.activate_verified(owner).unwrap();
+        let mut received = 0_usize;
+        let mut reads = 0;
+        let mut report = None;
+        while received < RECEIVER_TELEMETRY_WIRE_LEN {
+            let mut chunk = [0_u8; 17];
+            let count = pipe
+                .read(&mut chunk[..(RECEIVER_TELEMETRY_WIRE_LEN - received).min(17)])
+                .expect("native Windows pipe read");
+            assert_ne!(count, 0, "child must produce one complete frame");
+            received += count;
+            reads += 1;
+            let decoded = parser.accept_verified(owner, &chunk[..count]).unwrap();
+            if !decoded.is_empty() {
+                assert!(report.is_none(), "exactly one bounded report per child");
+                assert_eq!(decoded.len(), 1);
+                report = decoded.into_iter().next();
+            }
+        }
+        let _ = tx.send((owner, reads, report.expect("reassembled native report")));
+    });
+    let (owner, reads, report) = rx
+        .recv_timeout(Duration::from_secs(8))
+        .expect("finite deadline for OS pipe reassembly");
+    assert!(
+        reads >= 8,
+        "small native read buffers must force fragmentation"
+    );
+    assert_eq!(report.binding, owner);
+    assert_eq!(report.sequence, 1);
+    let current_worker = ReceiverTelemetryCurrentWorker {
+        process_id: owner.process_id,
+        session_id: owner.session_id,
+        worker_generation: owner.worker_generation,
+    };
+    let mut service = grant_service_for_real_peer(current_worker);
+    let encoded = encode_receiver_telemetry(&report).unwrap();
+    assert_eq!(
+        service.observe_after_verified_peer(current_worker, &encoded, Instant::now()),
+        Ok(ReceiverTelemetryDecision::Baseline)
+    );
+    reader.join().expect("native receiver thread completed");
+    assert!(
+        child
+            .0
+            .wait()
+            .expect("native Worker child finished")
+            .success(),
+        "actual child must have written a valid report"
+    );
 }
