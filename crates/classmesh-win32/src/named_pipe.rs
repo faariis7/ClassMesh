@@ -27,8 +27,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-    GetNamedPipeClientSessionId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
-    PIPE_WAIT,
+    GetNamedPipeClientSessionId, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentProcess, WaitForSingleObject};
 
@@ -36,6 +36,9 @@ const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 const PIPE_DEFAULT_TIMEOUT_MS: u32 = 5_000;
 const MAX_REJECTED_PEERS: u8 = 8;
+const TELEMETRY_FRAME_BYTES: usize = 136;
+const TELEMETRY_READ_LIMIT: usize = TELEMETRY_FRAME_BYTES * 4;
+const TELEMETRY_IO_MAX_MILLIS: u128 = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipeError {
@@ -138,6 +141,19 @@ impl NamedPipeServer {
     /// sensitive connection or I/O APIs here; the owner must implement
     /// separate OS peer verification and cancellation-safe reads later.
     pub(crate) fn create_sensitive_overlapped_for_user(
+        name: &str,
+        user_sid: &[u8],
+    ) -> Result<Self, PipeError> {
+        Self::create_for_user_mode(
+            name,
+            user_sid,
+            PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+        )
+    }
+
+    /// A separate one-shot, inbound-only, local-ACL-restricted, overlapped
+    /// diagnostic endpoint. It cannot carry sensitive v12 clipboard bytes.
+    pub(crate) fn create_telemetry_overlapped_for_user(
         name: &str,
         user_sid: &[u8],
     ) -> Result<Self, PipeError> {
@@ -321,6 +337,32 @@ impl NamedPipeServer {
         })
     }
 
+    /// Read at most four 136-byte diagnostic frames with bounded, drained
+    /// overlapped I/O; call only from a dedicated low-priority Service thread.
+    /// Caller MUST retire this pipe on timeout, partial failure or peer exit.
+    pub(crate) fn telemetry_read_bounded(
+        &self,
+        buffer: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize, PipeError> {
+        if !self.overlapped {
+            return Err(PipeError {
+                stage: "TelemetryReadRequiresOverlapped",
+                win32_error: 87,
+            });
+        }
+        validate_telemetry_io_size(buffer.len())?;
+        telemetry_overlapped_io(self.handle, timeout, "TelemetryRead", |request| unsafe {
+            ReadFile(
+                self.handle,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                null_mut(),
+                request,
+            )
+        })
+    }
+
     pub fn read(&self, buffer: &mut [u8]) -> Result<usize, PipeError> {
         read_handle(self.handle, buffer)
     }
@@ -488,6 +530,7 @@ impl Drop for NamedPipeServer {
 #[derive(Debug)]
 pub struct NamedPipeClient {
     handle: HANDLE,
+    overlapped: bool,
 }
 
 unsafe impl Send for NamedPipeClient {}
@@ -514,7 +557,10 @@ impl NamedPipeClient {
                 )
             };
             if handle != INVALID_HANDLE_VALUE {
-                return Ok(Self { handle });
+                return Ok(Self {
+                    handle,
+                    overlapped: false,
+                });
             }
 
             let error = unsafe { GetLastError() };
@@ -534,8 +580,96 @@ impl NamedPipeClient {
         }
     }
 
+    /// One-shot, write-only overlapped diagnostics connection. The expected
+    /// Service PID must come from the previously authenticated PRIMARY IPC;
+    /// a pipe name or Worker report is never proof of Service identity.
+    pub(crate) fn connect_telemetry_once(
+        name: &str,
+        expected_service_process_id: u32,
+    ) -> Result<Self, PipeError> {
+        if expected_service_process_id == 0 {
+            return Err(PipeError {
+                stage: "TelemetryExpectedServicePid",
+                win32_error: 87,
+            });
+        }
+        let full_name = normalize_pipe_name(name);
+        let wide_name = wide_null(OsStr::new(&full_name));
+        let handle = unsafe {
+            CreateFileW(
+                wide_name.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_NONE,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(last_error("TelemetryConnectOneShot"));
+        }
+        let client = Self {
+            handle,
+            overlapped: true,
+        };
+        let mut service_pid = 0_u32;
+        if unsafe { GetNamedPipeServerProcessId(client.handle, &mut service_pid) } == 0 {
+            return Err(last_error("TelemetryServerProcessId"));
+        }
+        if service_pid != expected_service_process_id {
+            return Err(PipeError {
+                stage: "TelemetryServerPidMismatch",
+                win32_error: 5,
+            });
+        }
+        Ok(client)
+    }
+
+    /// Exactly one full report, with no retry or partial-write resumption.
+    /// Call only from a LOW-PRIORITY diagnostics sender. Any failed attempt
+    /// retires the connection, never blocks the Worker control/media loop.
+    pub(crate) fn telemetry_write_bounded(
+        &self,
+        frame: &[u8],
+        timeout: Duration,
+    ) -> Result<(), PipeError> {
+        if !self.overlapped {
+            return Err(PipeError {
+                stage: "TelemetryWriteRequiresOverlapped",
+                win32_error: 87,
+            });
+        }
+        if frame.len() != TELEMETRY_FRAME_BYTES {
+            return Err(PipeError {
+                stage: "TelemetryFrameLength",
+                win32_error: 87,
+            });
+        }
+        let written =
+            telemetry_overlapped_io(self.handle, timeout, "TelemetryWrite", |request| unsafe {
+                WriteFile(
+                    self.handle,
+                    frame.as_ptr(),
+                    frame.len() as u32,
+                    null_mut(),
+                    request,
+                )
+            })?;
+        if written != frame.len() {
+            return Err(PipeError {
+                stage: "TelemetryWriteIncomplete",
+                win32_error: 0,
+            });
+        }
+        Ok(())
+    }
+
     pub fn try_clone(&self) -> Result<Self, PipeError> {
-        duplicate_pipe_handle(self.handle).map(|handle| Self { handle })
+        duplicate_pipe_handle(self.handle).map(|handle| Self {
+            handle,
+            overlapped: self.overlapped,
+        })
     }
 
     pub fn read(&self, buffer: &mut [u8]) -> Result<usize, PipeError> {
@@ -595,6 +729,85 @@ fn duplicate_pipe_handle(handle: HANDLE) -> Result<HANDLE, PipeError> {
         return Err(last_error("DuplicateHandle(pipe)"));
     }
     Ok(duplicate)
+}
+
+/// Validate before starting any Windows asynchronous request. A malformed
+/// size must not leave an undisclosed pending I/O operation running.
+fn validate_telemetry_io_size(size: usize) -> Result<(), PipeError> {
+    if size == 0 || size > TELEMETRY_READ_LIMIT {
+        return Err(PipeError {
+            stage: "TelemetryReadSize",
+            win32_error: 87,
+        });
+    }
+    Ok(())
+}
+
+/// One bounded, correctly drained Windows overlapped read/write operation.
+///
+/// The supplied byte buffer is borrowed by start(), but may remain kernel-
+/// owned until CancelIoEx + GetOverlappedResult have drained it. The caller
+/// must not move/drop the buffer or OVERLAPPED early. No automatic retry.
+/// Never run this primitive on the privileged control/media event loop.
+fn telemetry_overlapped_io(
+    handle: HANDLE,
+    timeout: Duration,
+    stage: &'static str,
+    start: impl FnOnce(*mut OVERLAPPED) -> i32,
+) -> Result<usize, PipeError> {
+    let millis = timeout.as_millis();
+    if millis == 0 || millis > TELEMETRY_IO_MAX_MILLIS {
+        return Err(PipeError {
+            stage: "TelemetryIoDeadline",
+            win32_error: 87,
+        });
+    }
+    let event = unsafe { CreateEventW(null(), 1, 0, null()) };
+    if event.is_null() {
+        return Err(last_error("TelemetryCreateEvent"));
+    }
+    let mut request: OVERLAPPED = unsafe { zeroed() };
+    request.hEvent = event;
+    let result = (|| {
+        let began = start(&mut request);
+        if began == 0 {
+            let initial = unsafe { GetLastError() };
+            if initial != ERROR_IO_PENDING {
+                return Err(PipeError {
+                    stage,
+                    win32_error: initial,
+                });
+            }
+            let waited = unsafe { WaitForSingleObject(event, millis as u32) };
+            if waited != WAIT_OBJECT_0 {
+                let failure = if waited == WAIT_TIMEOUT {
+                    PipeError {
+                        stage: "TelemetryIoTimeout",
+                        win32_error: WAIT_TIMEOUT,
+                    }
+                } else {
+                    last_error("TelemetryIoWait")
+                };
+                // SAFETY: cancellation is limited to this exact request,
+                // not other control-plane writes/reads on a different pipe.
+                unsafe { CancelIoEx(handle, &request) };
+                let mut ignored = 0_u32;
+                // SAFETY: ALWAYS drain, including cancel/success races.
+                // The kernel may still own request and its caller buffer.
+                unsafe { GetOverlappedResult(handle, &request, &mut ignored, 1) };
+                return Err(failure); // late bytes are never admitted
+            }
+        }
+        let mut transferred = 0_u32;
+        if unsafe { GetOverlappedResult(handle, &request, &mut transferred, 0) } == 0 {
+            return Err(last_error(stage));
+        }
+        Ok(transferred as usize)
+    })();
+    // SAFETY: only after a synchronous completion or cancelling/draining
+    // the asynchronous operation may the event and OVERLAPPED be released.
+    unsafe { CloseHandle(event) };
+    result
 }
 
 fn normalize_pipe_name(name: &str) -> String {
