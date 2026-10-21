@@ -5,13 +5,41 @@ use classmesh_control::receiver_telemetry_service_lifecycle::{
     ReceiverTelemetryCurrentWorker, ReceiverTelemetryStart, ReceiverTelemetryStartAck,
     ReceiverTelemetryStartAckStatus,
 };
-use classmesh_control::receiver_telemetry_service_runtime::ReceiverTelemetryAuthorizedKey;
+use classmesh_control::receiver_telemetry_service_runtime::{
+    ReceiverTelemetryAuthorizedKey, ReceiverTelemetryServiceRuntime,
+    ReceiverTelemetryServiceStreamError,
+};
 use classmesh_windows_runtime::ipc::{
     ServicePresentationMulticastStart, ServicePresentationUnicastStart,
     WorkerPresentationMulticastStartResult, WorkerPresentationMulticastStartStatus,
     WorkerPresentationUnicastStartResult, WorkerPresentationUnicastStartStatus,
 };
 use classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding;
+use std::time::Instant;
+
+/// Service-owned 250ms Worker liveness poll hook, called only after the
+/// authoritative WorkerManager has refreshed the actual launched process and
+/// authenticated pipe generation. Expire any outstanding incomplete receiver
+/// telemetry even if no further bytes arrive. Do not derive peer identity
+/// from media bytes or from a Worker-reported PID.
+///
+/// No receiver has yet been authorized during normal startup => no-op. A
+/// missing authenticated Worker immediately retires any stale grant. Stale
+/// peer candidates cannot consume or cancel a replacement receiver.
+pub(crate) fn service_receiver_telemetry_poll_tick(
+    runtime: &mut ReceiverTelemetryServiceRuntime,
+    worker: Option<ReceiverTelemetryCurrentWorker>,
+    service_now: Instant,
+) -> Result<(), ReceiverTelemetryServiceStreamError> {
+    let Some(worker) = worker else {
+        runtime.worker_changed();
+        return Ok(());
+    };
+    match runtime.expire_partial_stream_after_verified_peer(worker, service_now) {
+        Err(ReceiverTelemetryServiceStreamError::NotAuthorized) => Ok(()),
+        result => result,
+    }
+}
 
 /// The protected key's grant ID is distinct from the subsequent stream-start
 /// request ID and must be retained to reject stale clear/replacement events.
@@ -212,6 +240,114 @@ mod tests {
                 .unwrap()
                 .receiver_generation,
             1
+        );
+    }
+
+    fn armed_telemetry() -> ReceiverTelemetryServiceRuntime {
+        let key = confirmed();
+        let mut runtime = ReceiverTelemetryServiceRuntime::default();
+        runtime
+            .confirm_key_installed(key_from_confirmed_grant(key), owner())
+            .unwrap();
+        runtime
+            .activate_correlated_start(
+                ReceiverTelemetryStart {
+                    process_id: owner().process_id,
+                    session_id: owner().session_id,
+                    worker_generation: owner().worker_generation,
+                    control_session_id: key.control_session_id,
+                    request_id: 33,
+                    presentation_id: key.presentation_id,
+                    stream_id: key.stream_id,
+                    epoch: key.epoch,
+                },
+                owner(),
+                ReceiverTelemetryStartAck {
+                    process_id: owner().process_id,
+                    session_id: owner().session_id,
+                    control_session_id: key.control_session_id,
+                    request_id: 33,
+                    presentation_id: key.presentation_id,
+                    stream_id: key.stream_id,
+                    status: ReceiverTelemetryStartAckStatus::Started,
+                },
+            )
+            .unwrap();
+        runtime
+    }
+
+    #[test]
+    fn authenticated_service_worker_poll_expires_idle_partial_and_key() {
+        use classmesh_control::receiver_telemetry_service_runtime::ReceiverTelemetryServiceStreamError;
+        use classmesh_control::receiver_telemetry_stream_framing::{
+            MAX_RECEIVER_TELEMETRY_PARTIAL_AGE, ReceiverTelemetryFrameStreamError,
+        };
+        use std::time::{Duration, Instant};
+        let mut runtime = armed_telemetry();
+        let at = Instant::now();
+        assert_eq!(
+            runtime.observe_stream_chunk_after_verified_peer(owner(), &[42], at),
+            Ok(None)
+        );
+        assert_eq!(
+            service_receiver_telemetry_poll_tick(
+                &mut runtime,
+                Some(owner()),
+                at + MAX_RECEIVER_TELEMETRY_PARTIAL_AGE
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            service_receiver_telemetry_poll_tick(
+                &mut runtime,
+                Some(owner()),
+                at + MAX_RECEIVER_TELEMETRY_PARTIAL_AGE + Duration::from_nanos(1)
+            ),
+            Err(ReceiverTelemetryServiceStreamError::Framing(
+                ReceiverTelemetryFrameStreamError::PartialTimedOut
+            ))
+        );
+        assert!(runtime.current().is_none());
+        assert!(runtime.worker_grant_after_verified_peer(owner()).is_none());
+    }
+
+    #[test]
+    fn poll_without_authenticated_worker_revokes_current_telemetry() {
+        use std::time::Instant;
+        let mut runtime = armed_telemetry();
+        assert!(runtime.current().is_some());
+        assert_eq!(
+            service_receiver_telemetry_poll_tick(&mut runtime, None, Instant::now()),
+            Ok(())
+        );
+        assert!(runtime.current().is_none());
+        assert!(runtime.worker_grant_after_verified_peer(owner()).is_none());
+    }
+
+    #[test]
+    fn old_worker_poll_cannot_expire_an_authorized_successor() {
+        use std::time::{Duration, Instant};
+        let mut runtime = armed_telemetry();
+        let at = Instant::now();
+        assert_eq!(
+            runtime.observe_stream_chunk_after_verified_peer(owner(), &[42], at),
+            Ok(None)
+        );
+        let mut old = owner();
+        old.worker_generation -= 1;
+        assert_eq!(
+            service_receiver_telemetry_poll_tick(
+                &mut runtime,
+                Some(old),
+                at + Duration::from_secs(10)
+            ),
+            Ok(())
+        );
+        assert!(runtime.current().is_some());
+        assert_eq!(service_receiver_telemetry_poll_tick(&mut runtime, Some(owner()), at + Duration::from_secs(10)),
+            Err(ReceiverTelemetryServiceStreamError::Framing(
+                classmesh_control::receiver_telemetry_stream_framing::ReceiverTelemetryFrameStreamError::PartialTimedOut
+            ))
         );
     }
 }
