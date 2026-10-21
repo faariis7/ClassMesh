@@ -656,9 +656,10 @@ parser retains **at most one incomplete record** (135 bytes), consumes at most
 **544 bytes per call** and returns at most **four complete records** per call,
 even when an earlier read left a partial record. It has no background queue,
 thread, socket, timer, sender, privilege or implicit Service activation.
-Because the parser has no clock, its real transport owner must enforce a
-finite partial-record/read deadline and clear it on disconnect or timeout;
-this API is not a replacement for cancellation-safe Windows I/O.
+The parser does not own a thread or wall clock. Its active Service owner
+must supply independent monotonic receive timestamps and schedule the passive
+expiry check on a bounded timer even if no bytes arrive. This state guard is
+not a replacement for cancellation-safe Windows I/O.
 
 Only the independently authenticated and currently authorized Service
 receiver binding may activate the parser. The caller must serialize such
@@ -721,6 +722,38 @@ instead of reconstructing a frame and separately admitting it.
 **Not yet live:** no production new IPC message, pipe listener, Service
 server-token attestation, cancel-safe nonblocking sender/reader, deployed
 telemetry integration, Teacher feedback delivery, or physical classroom
-performance evidence. Caller must supply finite read/partial-frame deadlines
+performance evidence. Caller must schedule the new passive partial-frame
+deadline timer, implement cancellation-safe Windows OS read deadlines,
 and serialize OS peer admission with Service revocation. These tests do
 **not** close Phase 10G physical qualification or Phase 12 security gates.
+
+## Service-monotonic partial-frame deadline (still passive)
+
+`ReceiverTelemetryServiceRuntime::observe_stream_chunk_after_verified_peer`
+now passes its Service-received `Instant` to
+`ReceiverTelemetryFrameStream::accept_verified_at`. The parser tracks at
+most one partial frame and fixes its first-byte timestamp for its full
+lifetime. Subsequent fragments **cannot extend that deadline**. At exactly
+`MAX_RECEIVER_TELEMETRY_PARTIAL_AGE` (2 seconds) the partial frame may
+finish, but any later byte triggers `PartialTimedOut` and retires the
+current key, receiver admission, and partial bytes. Service clock
+regression and attempts to splice untimed fixture reads into Service-timed
+partial records also fail closed; a wrong/stale Worker cannot consume a
+successor's data or invoke expiry.
+
+A real Service event loop **must** call
+`expire_partial_stream_after_verified_peer(worker, service_now)` from
+its own independent monotonic timeout tick, including when the Worker
+ceases to write. This performs bounded O(1) time/space validation and
+is safe to run on an idle reader, while preserving complete reports and
+their ordinary freshness/admission state. It never waits, reads a pipe,
+schedules a timer, creates credentials, admits a Worker itself, invents
+RTT/loss or invokes adaptation. TDD regressions cover expiry on both
+the next pipe read and an idle Service tick, exact boundary, clock
+regression, replacement/stale timer isolation, and mixed parser modes.
+
+**Still required to go live**: genuine authenticated Service/Worker pipe,
+separately attested and bounded cancel-safe Windows read/write path and
+timer ownership, Worker dispatch, authorized Teacher result delivery and
+real physical qualification. Until these are implemented and validated
+this is still passive state, not production telemetry.

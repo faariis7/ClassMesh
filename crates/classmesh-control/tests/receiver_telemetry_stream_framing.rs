@@ -296,3 +296,151 @@ fn invalid_service_binding_cannot_arm_reader() {
         Err(ReceiverTelemetryFrameStreamError::Inactive)
     );
 }
+
+#[test]
+fn service_timed_partial_allows_exact_deadline_and_refuses_later_fragments() {
+    use classmesh_control::receiver_telemetry_stream_framing::MAX_RECEIVER_TELEMETRY_PARTIAL_AGE;
+    use std::time::Duration;
+    let owner = binding(1);
+    let bytes = frame(owner, 1);
+    let at = Instant::now();
+    let mut stream = ReceiverTelemetryFrameStream::default();
+    stream.activate_verified(owner).unwrap();
+    assert!(
+        stream
+            .accept_verified_at(owner, &bytes[..1], at)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        stream
+            .accept_verified_at(owner, &bytes[1..], at + MAX_RECEIVER_TELEMETRY_PARTIAL_AGE)
+            .unwrap()[0]
+            .sequence,
+        1
+    );
+    assert!(
+        stream
+            .accept_verified_at(owner, &frame(owner, 2)[..3], at + Duration::from_secs(20))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        stream.accept_verified_at(
+            owner,
+            &frame(owner, 2)[3..],
+            at + Duration::from_secs(20)
+                + MAX_RECEIVER_TELEMETRY_PARTIAL_AGE
+                + Duration::from_nanos(1)
+        ),
+        Err(ReceiverTelemetryFrameStreamError::PartialTimedOut)
+    );
+    assert_eq!(
+        stream.accept_verified_at(owner, &frame(owner, 3), at + Duration::from_secs(25)),
+        Err(ReceiverTelemetryFrameStreamError::Inactive)
+    );
+}
+
+#[test]
+fn mixed_clock_modes_fail_closed_instead_of_bypassing_service_deadline() {
+    let owner = binding(1);
+    let bytes = frame(owner, 1);
+    let now = Instant::now();
+    let mut timed = ReceiverTelemetryFrameStream::default();
+    timed.activate_verified(owner).unwrap();
+    assert!(
+        timed
+            .accept_verified_at(owner, &bytes[..5], now)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        timed.accept_verified(owner, &bytes[5..]),
+        Err(ReceiverTelemetryFrameStreamError::MixedClockModes)
+    );
+    assert_eq!(
+        timed.accept_verified_at(owner, &bytes, now),
+        Err(ReceiverTelemetryFrameStreamError::Inactive)
+    );
+
+    let mut untimed = ReceiverTelemetryFrameStream::default();
+    untimed.activate_verified(owner).unwrap();
+    assert!(
+        untimed
+            .accept_verified(owner, &bytes[..5])
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        untimed.accept_verified_at(owner, &bytes[5..], now),
+        Err(ReceiverTelemetryFrameStreamError::MixedClockModes)
+    );
+}
+
+#[test]
+fn timer_for_an_old_owner_cannot_expire_the_successor() {
+    use classmesh_control::receiver_telemetry_stream_framing::MAX_RECEIVER_TELEMETRY_PARTIAL_AGE;
+    use std::time::Duration;
+    let old = binding(1);
+    let successor = binding(2);
+    let at = Instant::now();
+    let bytes = frame(successor, 1);
+    let mut stream = ReceiverTelemetryFrameStream::default();
+    stream.activate_verified(old).unwrap();
+    stream.activate_verified(successor).unwrap();
+    assert!(
+        stream
+            .accept_verified_at(successor, &bytes[..8], at)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        stream.expire_partial_after_verified_owner(
+            old,
+            at + MAX_RECEIVER_TELEMETRY_PARTIAL_AGE + Duration::from_secs(1)
+        ),
+        Err(ReceiverTelemetryFrameStreamError::WrongServiceOwner)
+    );
+    assert_eq!(
+        stream
+            .accept_verified_at(successor, &bytes[8..], at)
+            .unwrap()[0]
+            .binding,
+        successor
+    );
+}
+
+#[test]
+fn new_partial_after_complete_coalesced_frame_gets_its_own_clock() {
+    use classmesh_control::receiver_telemetry_stream_framing::MAX_RECEIVER_TELEMETRY_PARTIAL_AGE;
+    use std::time::Duration;
+    let owner = binding(1);
+    let at = Instant::now();
+    let mut stream = ReceiverTelemetryFrameStream::default();
+    stream.activate_verified(owner).unwrap();
+    assert_eq!(
+        stream
+            .accept_verified_at(owner, &frame(owner, 1), at)
+            .unwrap()
+            .len(),
+        1
+    );
+    let next = frame(owner, 2);
+    assert!(
+        stream
+            .accept_verified_at(owner, &next[..17], at + Duration::from_secs(30))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        stream
+            .accept_verified_at(
+                owner,
+                &next[17..],
+                at + Duration::from_secs(30) + MAX_RECEIVER_TELEMETRY_PARTIAL_AGE
+            )
+            .unwrap()[0]
+            .sequence,
+        2
+    );
+}
