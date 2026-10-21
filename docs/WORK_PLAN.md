@@ -1,3 +1,16 @@
+## Engineering workflow efficiency checkpoint (2026-10-21)
+
+Adopt docs/ENGINEERING_EXECUTION_SPEED.md as the ongoing ClassMesh
+engineering policy: make reviewable batches of related TDD, code and
+docs, limit remote tool round trips, run targeted tests during iteration,
+run all workspace/Windows/security gates on final revisions, and avoid
+continuous CI polling. A stdlib report script now records the baseline
+from four successful Windows jobs (median 18m 04s versus 28–61s Portable
+Rust). Historical cache #428 was intentionally removed in #569 after a
+hung optional step; DO NOT re-enable without a separately bounded and
+measured experiment. This is workflow tooling, not a measured build
+speedup, production IPC launch or Phase 10 physical qualification.
+
 ## Phase 10 Service receiver diagnostic delivery boundary (2026-10-21)
 
 The isolated `feat/phase10-service-telemetry-feedback-outbox` branch adds a constant-space, one-slot Service-owned diagnostic candidate from **only** an OS-verified, exactly bound, admitted `ReceiverTelemetryDecision::Interval`. Initial/rebaselined reports never create a Teacher candidate. Each later admitted interval replaces an unsent older one; checkout checks the independently verified current Worker/key/receiver and a Service-owned <=5s age, and consumes once. Revocation, generation replacement, invalid input and stale-clock checkout revoke/drop pending data. RED/GREEN tests explicitly caught and repaired a separate direct-ingress wrong-Worker call clearing an authorized pending report. **No new Windows IPC, Teacher wire emission, PrincipalId resolution, network RTT/loss inference, adaptive promotion or physical 10G qualification is implemented by this branch.** Follow with a separately authenticated low-priority Worker telemetry channel and Teacher authorization/wire handoff under independent OS tests. Exact-head Portable Rust + Windows CI required before merge.
