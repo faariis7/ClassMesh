@@ -8,6 +8,8 @@ pub mod monitoring;
 mod presentation_receiver_bridge;
 #[cfg(windows)]
 mod system_action_power;
+#[cfg(windows)]
+mod telemetry_native;
 
 #[cfg(windows)]
 mod windows_service_app {
@@ -55,11 +57,11 @@ mod windows_service_app {
     use classmesh_windows_runtime::ipc::{
         IpcControlCommand, IpcFrame, IpcFrameDecoder, IpcMessage, ServiceClipboardReadRequest,
         ServicePresentationMulticastStart, ServicePresentationUnicastStart,
-        ServiceTeacherInteractionRequest, ServiceUdpStreamStart, WorkerClipboardReadFailure,
-        WorkerPresentationKeyInstallResult, WorkerPresentationKeyInstallStatus,
-        WorkerPresentationMulticastStartResult, WorkerPresentationMulticastStartStatus,
-        WorkerPresentationUnicastStartResult, WorkerPresentationUnicastStartStatus,
-        WorkerTeacherInteractionResult,
+        ServiceReceiverTelemetryGrant, ServiceTeacherInteractionRequest, ServiceUdpStreamStart,
+        WorkerClipboardReadFailure, WorkerPresentationKeyInstallResult,
+        WorkerPresentationKeyInstallStatus, WorkerPresentationMulticastStartResult,
+        WorkerPresentationMulticastStartStatus, WorkerPresentationUnicastStartResult,
+        WorkerPresentationUnicastStartStatus, WorkerTeacherInteractionResult,
     };
     use classmesh_windows_runtime::ipc_sensitive::{
         PresentationKeyInstallBinding, SensitivePresentationKeyInstall,
@@ -137,6 +139,7 @@ mod windows_service_app {
         service_receiver_telemetry_poll_tick, unicast_ack, unicast_start_identity,
     };
     use crate::system_action_power::ServicePowerSystemActionExecutor;
+    use crate::telemetry_native::ServiceTelemetryReader;
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
 
@@ -620,6 +623,72 @@ mod windows_service_app {
             })
         }
 
+        /// Optional authenticated v11 grant, sent once after correlated
+        /// protected start; playback reports use the separate native pipe.
+        fn offer_receiver_telemetry(
+            &self,
+            binding: classmesh_control::receiver_telemetry::ReceiverTelemetryBinding,
+            reader: &mut ServiceTelemetryReader,
+        ) -> Result<(), String> {
+            // Inactive by default until the dedicated native cross-process
+            // transport has been explicitly qualified on the target machine.
+            // This Service-only switch never weakens Worker/Teacher trust.
+            if std::env::var("CLASSMESH_ENABLE_PHASE10_TELEMETRY").as_deref() != Ok("1") {
+                return Ok(());
+            }
+            let Some(peer) = self.current_authenticated_receiver_worker() else {
+                return Err("telemetry Worker not authenticated".to_owned());
+            };
+            if !self.capabilities.receiver_telemetry_grant_supported(
+                peer.worker_generation,
+                peer.process_id,
+                peer.session_id,
+            ) {
+                return Ok(()); // old Worker has not opted into v11 type 34
+            }
+            if binding.process_id != peer.process_id
+                || binding.session_id != peer.session_id
+                || binding.worker_generation != peer.worker_generation
+            {
+                return Err("telemetry grant Worker mismatch".to_owned());
+            }
+            let process = self
+                .process
+                .as_ref()
+                .ok_or_else(|| "telemetry Worker unavailable".to_owned())?;
+            let sid = session_user_sid(peer.session_id)
+                .map_err(|error| format!("telemetry session SID: {error}"))?;
+            let identity = reader.arm(binding, process, &sid).map_err(str::to_owned)?;
+            let grant = ServiceReceiverTelemetryGrant {
+                service_process_id: identity.service_process_id,
+                worker_process_id: binding.process_id,
+                worker_session_id: binding.session_id,
+                worker_generation: binding.worker_generation,
+                receiver_generation: binding.receiver_generation,
+                control_session_id: binding.control_session_id,
+                start_request_id: binding.request_id,
+                presentation_id: binding.presentation_id,
+                stream_id: binding.stream_id,
+                epoch: binding.epoch,
+            };
+            let result = (|| {
+                let frame = IpcFrame::service_receiver_telemetry_grant(grant)
+                    .map_err(|error| format!("telemetry grant: {error:?}"))?;
+                let bytes = frame
+                    .encode()
+                    .map_err(|error| format!("telemetry encoding: {error:?}"))?;
+                self.pipe
+                    .as_ref()
+                    .ok_or_else(|| "telemetry control IPC unavailable".to_owned())?
+                    .write_all(&bytes)
+                    .map_err(|error| format!("telemetry grant IPC: {error}"))
+            })();
+            if result.is_err() {
+                reader.retire();
+            }
+            result
+        }
+
         fn send_presentation_key_install(
             &self,
             install: SensitivePresentationKeyInstall,
@@ -1035,6 +1104,7 @@ mod windows_service_app {
                                 report.session_id,
                                 report.dxgi_capture(),
                                 report.h264_hardware_encode(),
+                                report.receiver_telemetry_grant_v11(),
                             ) {
                                 eprintln!(
                                     "ClassMesh Worker capabilities updated: pid={}, session={}, dxgi={}, h264_hw={}",
@@ -2089,6 +2159,7 @@ mod windows_service_app {
         // lifetime is now driven by real Service start/revoke events. No new
         // Worker→Service report transport or adaptive quality promotion.
         let mut receiver_telemetry_runtime = ReceiverTelemetryServiceRuntime::default();
+        let mut native_receiver_telemetry = ServiceTelemetryReader::new();
         loop {
             if let Some(pending) = pending_file_pull
                 && !file_pull_owner.is_owner(pending.control_session_id)
@@ -2696,20 +2767,26 @@ mod windows_service_app {
                     WorkerPresentationMulticastStartStatus::Started => {
                         if let Some(peer) = workers.current_authenticated_receiver_worker()
                             && peer.worker_generation == pending.expected_worker_generation
-                            && let Err(error) = receiver_telemetry_runtime
-                                .activate_correlated_start(
-                                    multicast_start_identity(
-                                        pending.start,
-                                        peer,
-                                        pending.key_binding,
-                                    ),
-                                    peer,
-                                    multicast_ack(result),
-                                )
                         {
-                            eprintln!(
-                                "ClassMesh Phase10 multicast receiver admission stayed disabled: {error:?}"
-                            );
+                            match receiver_telemetry_runtime.activate_correlated_start(
+                                multicast_start_identity(pending.start, peer, pending.key_binding),
+                                peer,
+                                multicast_ack(result),
+                            ) {
+                                Ok(binding) => {
+                                    if let Err(error) = workers.offer_receiver_telemetry(
+                                        binding,
+                                        &mut native_receiver_telemetry,
+                                    ) {
+                                        eprintln!(
+                                            "ClassMesh Phase10 multicast diagnostic pipe unavailable: {error}"
+                                        );
+                                    }
+                                }
+                                Err(error) => eprintln!(
+                                    "ClassMesh Phase10 multicast receiver admission stayed disabled: {error:?}"
+                                ),
+                            }
                         }
                         let _ = pending.reply_tx.send(Ok(()));
                     }
@@ -2792,20 +2869,26 @@ mod windows_service_app {
                     WorkerPresentationUnicastStartStatus::Started => {
                         if let Some(peer) = workers.current_authenticated_receiver_worker()
                             && peer.worker_generation == pending.expected_worker_generation
-                            && let Err(error) = receiver_telemetry_runtime
-                                .activate_correlated_start(
-                                    unicast_start_identity(
-                                        pending.start,
-                                        peer,
-                                        pending.key_binding,
-                                    ),
-                                    peer,
-                                    unicast_ack(result),
-                                )
                         {
-                            eprintln!(
-                                "ClassMesh Phase10 unicast receiver admission stayed disabled: {error:?}"
-                            );
+                            match receiver_telemetry_runtime.activate_correlated_start(
+                                unicast_start_identity(pending.start, peer, pending.key_binding),
+                                peer,
+                                unicast_ack(result),
+                            ) {
+                                Ok(binding) => {
+                                    if let Err(error) = workers.offer_receiver_telemetry(
+                                        binding,
+                                        &mut native_receiver_telemetry,
+                                    ) {
+                                        eprintln!(
+                                            "ClassMesh Phase10 unicast diagnostic pipe unavailable: {error}"
+                                        );
+                                    }
+                                }
+                                Err(error) => eprintln!(
+                                    "ClassMesh Phase10 unicast receiver admission stayed disabled: {error:?}"
+                                ),
+                            }
                         }
                         let _ = pending.reply_tx.send(Ok(()));
                     }
@@ -3156,6 +3239,13 @@ mod windows_service_app {
                     .checked_add(Duration::from_millis(250))
                     .unwrap_or_else(Instant::now);
             }
+            // Only the serialized privileged Service loop may admit
+            // complete reports; the reader thread contributes best-effort
+            // fixed-size bytes, not authorization or telemetry conclusions.
+            native_receiver_telemetry.drain(
+                &mut receiver_telemetry_runtime,
+                workers.current_authenticated_receiver_worker(),
+            );
         }
 
         InputAvailability::Unavailable.store(input_availability.as_ref());

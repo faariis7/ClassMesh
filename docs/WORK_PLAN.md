@@ -1,3 +1,33 @@
+## Phase 10 native Worker/Service diagnostic delivery opt-in (2026-10-22)
+
+On the isolated branch \`feat/phase10-native-runtime-v1\` we connect the
+v11 (nonsecret, type34) capability-gated receiver grant to the *real*
+Service protected-key/correlated-start lifetime, and to a dedicated
+Worker-native diagnostics sender using authentic playback counters from
+one valid renderer. The Service's native reader owns a duplicate of the
+original launched Worker process HANDLE, verifies the Win32 pipe client
+before/after each read, and sends only **complete 136-byte records**
+through a one-slot best-effort channel into the serialized Service
+admission state machine. The media/control loops never wait for report
+I/O; missing or stale bindings revoke the channel, and dropping a full
+mailbox discards a complete record, not a frame fragment.
+
+**The actual Service runtime is INACTIVE BY DEFAULT** and will offer the
+optional v11 diagnostic grant only if explicitly started with
+\`CLASSMESH_ENABLE_PHASE10_TELEMETRY=1\` AND the current OS-authenticated
+Worker advertised support. This protects deployed classrooms until real
+full-process Windows/VM qualification. The Worker verifies the OS
+process ID of its authenticated primary Service pipe, current installed
+protected group-media key, and exact active start request before accepting
+any grant or emitting a report. No RTT, loss, adaptive tier or Teacher
+permission is inferred from playback counters. This is not physical 10G
+qualification; Issue #288 remains open.
+
+The native integration batch is NOT eligible for merge until exact-head
+Windows Service/Worker build, host regression tests (including process
+identity, cancellation, mixed versions, rollback and backpressure), and
+CI gates pass. Parallel Astra Phase12 worktrees remain untouched.
+
 ## Phase 10 telemetry idle read and revocation (2026-10-22)
 
 Branch `fix/phase10-telemetry-idle-read` fixes an activation blocker in the
