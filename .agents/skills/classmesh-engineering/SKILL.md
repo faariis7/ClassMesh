@@ -26,6 +26,19 @@ Before making a non-trivial change, inspect the smallest relevant set of:
 
 Treat implementation status, hosted-CI evidence, and physical-hardware evidence as different facts.
 
+## Efficient, repeatable execution
+
+Read docs/ENGINEERING_EXECUTION_SPEED.md before multi-file work or CI
+performance changes. Group related code, tests and docs into coherent,
+reviewable PR batches; use fast focused TDD while iterating and full
+workspace + Windows/security gates on the final candidate. Minimize
+remote round trips and redundant GitHub CI re-runs; do not skip a gate.
+Keep unrelated security changes separately reviewable.
+
+A prior Windows Rust cache optimization (#428) was deliberately removed
+in #569 after a cache step HUNG. Never re-enable it on cache presence
+alone; require an isolated experiment with measured, bounded behavior.
+
 ## Mandatory workflow
 
 1. **Research**
