@@ -778,3 +778,33 @@ Windows Service bridge tests cover expiration during idle reads, missing
 Worker revocation and stale Worker isolation. The code does not configure
 a new IPC message or modify Phase 12 privileged policy, and it does not
 qualify the Phase 10G physical network gate.
+
+## Bounded Service-only admitted diagnostic candidate (no Teacher transport)
+
+A Service-owned `ReceiverTelemetryServiceRuntime` now has **exactly one**
+pending playback-counter delta. Only `Interval` from a previously
+OS-authenticated Worker, precisely current Service-owned protected key and
+receiver generation, valid ordered wire and replay/counter/clock admission may
+populate it. The first report and a rebaseline from sequence gaps/long
+silence clear the candidate; they do not imply a measured healthy interval.
+Coalesced input uses only the latest accepted report. A subsequent accepted
+interval replaces the earlier unsent one instead of accumulating backlog.
+There is no queue, network I/O, allocation per receiver or sender thread.
+
+`take_diagnostic_after_verified_peer` rechecks the current Worker and
+receiver binding. A stale Worker cannot consume or clear someone else's
+pending delta. The Service-monotonic candidate expires after
+`MAX_SERVICE_DIAGNOSTIC_AGE` (5 seconds); future/retrograde clocks also
+discard it. Each successful checkout consumes once. Changing installed
+keys, Worker generation or receiver lifetime, invalid wire, timeout or
+revocation deletes the candidate. The alternative single-message ingress
+cannot allow a failed spoofed call to drain an authorized candidate.
+
+This **is not a Teacher authorization token or an automatic push**. A real
+caller MUST authenticate/authorize the exact Teacher PrincipalId and active
+control session *before* checkout, then use a separately versioned
+authenticated, bounded delivery channel. Neither the local playback counters
+nor these intervals represent RTT, packet loss, bandwidth or a validated
+adaptive-quality promotion. The dedicated OS-attested and cancellation-safe
+Worker-to-Service telemetry channel is also still required. Physical 10G
+5/10/20/30-device qualification and Phase 12 security gates remain open.
