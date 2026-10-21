@@ -123,6 +123,10 @@ pub struct ReceiverTelemetryServiceRuntime {
     // Single-slot latest-only diagnostics: no heap queue or media blocking.
     // This never grants Teacher access or publishes network health.
     pending_diagnostic: Option<ReceiverTelemetryAdmittedDiagnostic>,
+    // Distinguishes the exact last authorized candidate from a previously
+    // checked-out or forged copy. Checkout empties pending only, not this
+    // authorization snapshot; new admission/rekey/revoke updates both.
+    last_admitted_diagnostic: Option<ReceiverTelemetryAdmittedDiagnostic>,
 }
 
 impl ReceiverTelemetryServiceRuntime {
@@ -189,6 +193,7 @@ impl ReceiverTelemetryServiceRuntime {
         // A newly authorized receiver incarnation cannot inherit buffered
         // diagnostics from its predecessor, even with an identical key epoch.
         self.pending_diagnostic = None;
+        self.last_admitted_diagnostic = None;
         Ok(binding)
     }
 
@@ -327,6 +332,7 @@ impl ReceiverTelemetryServiceRuntime {
                         })
                     }
                 };
+                self.last_admitted_diagnostic = self.pending_diagnostic;
                 Ok(Some(decision))
             }
             Err(error) => {
@@ -388,6 +394,24 @@ impl ReceiverTelemetryServiceRuntime {
         Ok(Some(candidate))
     }
 
+    /// Validate that a previously taken observation still matches the
+    /// Service-owned current receiver, latest admitted value and local age.
+    /// A caller must separately enforce its transport trust boundary.
+    #[must_use]
+    pub fn diagnostic_still_current_after_verified_peer(
+        &self,
+        current_worker: ReceiverTelemetryCurrentWorker,
+        candidate: ReceiverTelemetryAdmittedDiagnostic,
+        service_now: Instant,
+    ) -> bool {
+        self.worker_grant_after_verified_peer(current_worker)
+            .is_some_and(|grant| grant.receiver() == candidate.binding)
+            && self.last_admitted_diagnostic == Some(candidate)
+            && service_now
+                .checked_duration_since(candidate.service_received_at)
+                .is_some_and(|age| age <= MAX_SERVICE_DIAGNOSTIC_AGE)
+    }
+
     /// Direct single-message compatibility path, not the timed framed IPC.
     /// Never carry over already-pending framed diagnostics across this path.
     /// Diagnostic report: exact current Worker must still be verified by the
@@ -406,6 +430,7 @@ impl ReceiverTelemetryServiceRuntime {
         // Never let an untrusted/stale direct caller erase a correctly
         // admitted stream interval. Retire it only after a real admission.
         self.pending_diagnostic = None;
+        self.last_admitted_diagnostic = None;
         Ok(decision)
     }
 
@@ -423,6 +448,7 @@ impl ReceiverTelemetryServiceRuntime {
         // Revocation removes any previously admitted but undelivered interval
         // before a replacement Worker/key/receiver can be authenticated.
         self.pending_diagnostic = None;
+        self.last_admitted_diagnostic = None;
         if let Some(binding) = self.admission.current() {
             self.framing.clear_if_matches(binding);
             self.admission.clear_if_matches(binding);
