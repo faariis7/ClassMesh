@@ -48,6 +48,33 @@ pub struct SessionProcess {
 unsafe impl Send for SessionProcess {}
 
 impl SessionProcess {
+    /// Native unit-test helper only; never permit application callers to
+    /// fabricate an independently attested launched Worker HANDLE.
+    #[cfg(test)]
+    pub(crate) fn duplicate_current_process_for_test(session_id: u32) -> Self {
+        let current = unsafe { GetCurrentProcess() };
+        let mut owned: HANDLE = null_mut();
+        assert_ne!(
+            unsafe {
+                DuplicateHandle(
+                    current,
+                    current,
+                    current,
+                    &mut owned,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            },
+            0
+        );
+        Self {
+            process: owned,
+            process_id: std::process::id(),
+            session_id,
+        }
+    }
+
     #[must_use]
     pub const fn process_id(&self) -> u32 {
         self.process_id

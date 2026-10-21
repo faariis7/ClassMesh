@@ -882,3 +882,19 @@ Native two-process smoke and this original-HANDLE lifecycle are
 prerequisites, not an activation. No application sender/listener startup,
 Teacher wire or mTLS permission, quality promotion, production default
 or classroom hardware qualification is implied.
+
+
+## Idle read is not a disconnect
+
+Worker playback diagnostics are generated on a ~5-second cadence. A Service
+reader operating with the required per-request <=250ms Win32 cancellation
+budget must distinguish a **cancelled+drained idle read** from pipe death:
+return `Ok(None)` only after comparing the original launched Worker HANDLE,
+real OS pipe PID/session and current Service receiver generation again.
+Continue using a new bounded overlapped read request, never a stale kernel
+buffer. A real frame yields `Ok(Some(received_bytes))`. A revoked Worker,
+wrong receiver, true disconnect or other I/O failure permanently retires the
+connection. A separate Service-monotonic two-second partial-record deadline
+still applies to a frame that has actually begun. Native Windows tests prove
+multiple empty windows followed by a real complete frame, and fail-closed
+revocation after the idle window.
