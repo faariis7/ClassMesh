@@ -808,3 +808,21 @@ nor these intervals represent RTT, packet loss, bandwidth or a validated
 adaptive-quality promotion. The dedicated OS-attested and cancellation-safe
 Worker-to-Service telemetry channel is also still required. Physical 10G
 5/10/20/30-device qualification and Phase 12 security gates remain open.
+
+## Recheck a previously checked-out diagnostic before I/O (dependent slice)
+
+After checkout, **do not** interpret possession of a report as permanent
+authority: an intervening receiver restart, newer admitted sample or
+rebaseline invalidates that candidate even when its original key epoch
+looks unchanged. Before an eventual authorized Teacher delivery, use
+`diagnostic_still_current_after_verified_peer`, supplying the independently
+verified current Worker and Service-monotonic timestamp. The check compares
+the **entire exact admitted diagnostic** against the latest Service-owned
+value, including its counters and timestamp, not only its sequence.
+
+This read-only check is not an authentication credential, not Teacher
+PrincipalId/session authorization, and cannot make a concurrent outbound
+write atomically safe: the real Service must serialize any send with
+receiver revocation and re-check the authenticated Teacher session. No
+new IPC message, sender, quality estimate or physical qualification is
+provided by this slice.

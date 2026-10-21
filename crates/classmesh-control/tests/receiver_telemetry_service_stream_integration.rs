@@ -786,3 +786,117 @@ fn stale_key_revocation_cannot_erase_newer_authorized_teacher_diagnostic() {
         2
     );
 }
+
+#[test]
+fn checked_out_diagnostic_revalidates_exact_live_sequence_and_all_counters_before_teacher_io() {
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    service
+        .observe_stream_chunk_after_verified_peer(peer(), &report(owner, 1), at)
+        .unwrap();
+    service
+        .observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 2),
+            at + Duration::from_secs(2),
+        )
+        .unwrap();
+    let candidate = service
+        .take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    assert!(service.diagnostic_still_current_after_verified_peer(
+        peer(),
+        candidate,
+        at + Duration::from_secs(2)
+    ));
+    // Matching sequence alone must not authorize a fabricated counter delta.
+    let mut altered = candidate;
+    altered.interval.presented_frames += 1;
+    assert!(!service.diagnostic_still_current_after_verified_peer(
+        peer(),
+        altered,
+        at + Duration::from_secs(2)
+    ));
+    // A superseding verified interval invalidates an earlier lease even
+    // without receiver generation, Worker PID or media epoch changes.
+    service
+        .observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 3),
+            at + Duration::from_secs(4),
+        )
+        .unwrap();
+    assert!(!service.diagnostic_still_current_after_verified_peer(
+        peer(),
+        candidate,
+        at + Duration::from_secs(4)
+    ));
+    let newest = service
+        .take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(4))
+        .unwrap()
+        .unwrap();
+    assert!(service.diagnostic_still_current_after_verified_peer(
+        peer(),
+        newest,
+        at + Duration::from_secs(4)
+    ));
+    // A new rebaseline wipes authority to deliver an earlier interval.
+    service
+        .observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 7),
+            at + Duration::from_secs(6),
+        )
+        .unwrap();
+    assert!(!service.diagnostic_still_current_after_verified_peer(
+        peer(),
+        newest,
+        at + Duration::from_secs(6)
+    ));
+}
+
+#[test]
+fn diagnostic_revalidation_rejects_stale_worker_revocation_and_elapsed_lease() {
+    use classmesh_control::receiver_telemetry_service_runtime::MAX_SERVICE_DIAGNOSTIC_AGE;
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    service
+        .observe_stream_chunk_after_verified_peer(peer(), &report(owner, 1), at)
+        .unwrap();
+    service
+        .observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 2),
+            at + Duration::from_secs(2),
+        )
+        .unwrap();
+    let candidate = service
+        .take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    let mut spoofed = peer();
+    spoofed.worker_generation += 1;
+    assert!(!service.diagnostic_still_current_after_verified_peer(
+        spoofed,
+        candidate,
+        at + Duration::from_secs(2)
+    ));
+    assert!(!service.diagnostic_still_current_after_verified_peer(peer(), candidate, at));
+    assert!(!service.diagnostic_still_current_after_verified_peer(
+        peer(),
+        candidate,
+        at + Duration::from_secs(2) + MAX_SERVICE_DIAGNOSTIC_AGE + Duration::from_nanos(1)
+    ));
+    assert!(service.diagnostic_still_current_after_verified_peer(
+        peer(),
+        candidate,
+        at + Duration::from_secs(2)
+    ));
+    service.key_install_started();
+    assert!(!service.diagnostic_still_current_after_verified_peer(
+        peer(),
+        candidate,
+        at + Duration::from_secs(2)
+    ));
+}
