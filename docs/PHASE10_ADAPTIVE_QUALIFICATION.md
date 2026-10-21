@@ -59,6 +59,11 @@ Initialize a result directory:
 .\phase10g-adaptive.ps1 -Mode Init -ReceiverCount 5 -ReceiverId student-01,student-02,student-03,student-04,student-05 -ResultsDir .\phase10g-5
 ```
 
+**Choose a fresh, not-yet-existing `ResultsDir` for every separate physical
+run.** `Init` rejects an existing output directory instead of overwriting a
+manifest while silently retaining old Teacher or receiver logs. Preserve
+completed evidence and use a new uniquely named directory for each rerun.
+
 Required:
 
 ```text

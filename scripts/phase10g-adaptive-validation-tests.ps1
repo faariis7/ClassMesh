@@ -42,6 +42,26 @@ try {
         Assert-InitRejects -Ids $badIds[$i] -CaseName ("bad-" + $i)
     }
 
+    # TDD: a new Init must NEVER relabel old Teacher/receiver files as
+    # evidence for a fresh test. Even a previously valid output directory
+    # must not be reused without the operator choosing a new empty folder.
+    $reusedDir = Join-Path $root "reused-physical-result"
+    & $helper -Mode Init -ReceiverCount 5 -ReceiverId $good -ResultsDir $reusedDir | Out-Null
+    $staleTeacher = Join-Path $reusedDir "teacher.log"
+    Set-Content -LiteralPath $staleTeacher -Encoding UTF8 -Value "STALE TEST EVIDENCE"
+    $reinitRejected = $false
+    try {
+        & $helper -Mode Init -ReceiverCount 5 -ReceiverId $good -ResultsDir $reusedDir | Out-Null
+    } catch {
+        $reinitRejected = $true
+    }
+    if (-not $reinitRejected) {
+        throw "Phase 10G Init reused a nonempty evidence folder and mislabeled stale logs"
+    }
+    if ((Get-Content -LiteralPath $staleTeacher -Raw) -notmatch "STALE TEST EVIDENCE") {
+        throw "Rejected Phase 10G Init must leave the existing evidence unchanged"
+    }
+
     # Accepted letters/digits include non-ASCII names, plus safe punctuation.
     $positiveDir = Join-Path $root "valid"
     $arabicId = ((@([char]0x0637, [char]0x0627, [char]0x0644, [char]0x0628) -join "") + "-05")

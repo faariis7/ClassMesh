@@ -77,6 +77,8 @@ Modes:
 Example:
   .\scripts\phase10g-adaptive.ps1 -Mode Init -ReceiverCount 5 -ReceiverId student-01,student-02,student-03,student-04,student-05 -ResultsDir .\phase10g-5
 
+Init requires a NEW, non-existing ResultsDir. Never reuse previous run logs.
+
 Required evidence:
   <ResultsDir>\teacher.log
   <ResultsDir>\receivers\<receiver-id>.log
@@ -106,8 +108,15 @@ switch ($Mode) {
             throw "-DurationSeconds must be positive"
         }
 
-        New-Item -ItemType Directory -Path $ResultsDir -Force | Out-Null
-        New-Item -ItemType Directory -Path (Join-Path $ResultsDir "receivers") -Force | Out-Null
+        # A new physical run must NEVER recycle an old result directory.
+        # In particular, reinitializing must not silently associate a fresh
+        # manifest with stale Teacher / receiver / network evidence.
+        # New-Item without -Force additionally fails on a concurrent creator.
+        if (Test-Path -LiteralPath $ResultsDir) {
+            throw "Phase 10G results directory already exists; choose a fresh unused path"
+        }
+        New-Item -ItemType Directory -Path $ResultsDir | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $ResultsDir "receivers") | Out-Null
 
         [ordered]@{
             schema_version = 1
