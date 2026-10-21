@@ -452,3 +452,337 @@ fn completed_frames_do_not_expire_or_reset_freshness_on_later_idle_tick() {
     assert_eq!(service.current(), Some(owner));
     assert!(service.has_fresh_for_verified_peer(peer(), at + MAX_RECEIVER_TELEMETRY_PARTIAL_AGE));
 }
+
+#[test]
+fn service_diagnostics_only_publish_admitted_intervals_not_first_baselines() {
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    assert_eq!(
+        service.observe_stream_chunk_after_verified_peer(peer(), &report(owner, 1), at),
+        Ok(Some(ReceiverTelemetryDecision::Baseline))
+    );
+    assert_eq!(
+        service
+            .take_diagnostic_after_verified_peer(peer(), at)
+            .unwrap(),
+        None
+    );
+    assert!(matches!(
+        service.observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 2),
+            at + Duration::from_secs(2)
+        ),
+        Ok(Some(ReceiverTelemetryDecision::Interval(_)))
+    ));
+    let published = service
+        .take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(published.binding, owner);
+    assert_eq!(published.sequence, 2);
+    assert_eq!(published.interval.presented_frames, 1);
+    assert_eq!(published.interval.authenticated_frames, 1);
+    assert_eq!(published.interval.elapsed, Duration::from_secs(2));
+    assert_eq!(
+        service.take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(2)),
+        Ok(None)
+    );
+}
+
+#[test]
+fn service_diagnostics_replace_unsent_data_without_an_unbounded_queue() {
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    for seq in 1..=4 {
+        service
+            .observe_stream_chunk_after_verified_peer(
+                peer(),
+                &report(owner, seq),
+                at + Duration::from_secs(2 * (seq - 1)),
+            )
+            .unwrap();
+    }
+    let latest = service
+        .take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(6))
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.sequence, 4);
+    assert_eq!(latest.interval.presented_frames, 1);
+    assert_eq!(
+        service.take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(6)),
+        Ok(None)
+    );
+}
+
+#[test]
+fn untrusted_or_old_worker_cannot_drain_a_newer_receiver_diagnostic() {
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    service
+        .observe_stream_chunk_after_verified_peer(peer(), &report(owner, 1), at)
+        .unwrap();
+    service
+        .observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 2),
+            at + Duration::from_secs(2),
+        )
+        .unwrap();
+    let mut forged = peer();
+    forged.worker_generation += 1;
+    assert_eq!(
+        service.take_diagnostic_after_verified_peer(forged, at + Duration::from_secs(2)),
+        Err(ReceiverTelemetryServiceStreamError::NotAuthorized)
+    );
+    assert_eq!(service.current(), Some(owner));
+    assert_eq!(
+        service
+            .take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(2))
+            .unwrap()
+            .unwrap()
+            .sequence,
+        2
+    );
+}
+
+#[test]
+fn stale_diagnostic_is_dropped_and_cannot_be_used_for_teacher_health() {
+    use classmesh_control::receiver_telemetry_service_runtime::MAX_SERVICE_DIAGNOSTIC_AGE;
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    service
+        .observe_stream_chunk_after_verified_peer(peer(), &report(owner, 1), at)
+        .unwrap();
+    service
+        .observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 2),
+            at + Duration::from_secs(2),
+        )
+        .unwrap();
+    let recorded_at = at + Duration::from_secs(2);
+    assert_eq!(
+        service.take_diagnostic_after_verified_peer(
+            peer(),
+            recorded_at + MAX_SERVICE_DIAGNOSTIC_AGE + Duration::from_nanos(1)
+        ),
+        Ok(None)
+    );
+    assert!(service.has_fresh_for_verified_peer(peer(), recorded_at));
+    service
+        .observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 3),
+            at + Duration::from_secs(4),
+        )
+        .unwrap();
+    assert_eq!(
+        service
+            .take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(4))
+            .unwrap()
+            .unwrap()
+            .sequence,
+        3
+    );
+}
+
+#[test]
+fn service_replacement_revokes_pending_diagnostics_even_with_same_media_epoch() {
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    service
+        .observe_stream_chunk_after_verified_peer(peer(), &report(owner, 1), at)
+        .unwrap();
+    service
+        .observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 2),
+            at + Duration::from_secs(2),
+        )
+        .unwrap();
+    service.key_install_started();
+    assert_eq!(
+        service.take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(2)),
+        Err(ReceiverTelemetryServiceStreamError::NotAuthorized)
+    );
+    service.confirm_key_installed(key(), peer()).unwrap();
+    let replacement = service
+        .activate_correlated_start(start(), peer(), ack())
+        .unwrap();
+    assert_ne!(replacement.receiver_generation, owner.receiver_generation);
+    assert_eq!(
+        service.take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(2)),
+        Ok(None)
+    );
+    service
+        .observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(replacement, 1),
+            at + Duration::from_secs(3),
+        )
+        .unwrap();
+    assert_eq!(
+        service.take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(3)),
+        Ok(None)
+    );
+}
+
+#[test]
+fn malformed_report_closes_service_and_discards_prior_valid_diagnostic() {
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    service
+        .observe_stream_chunk_after_verified_peer(peer(), &report(owner, 1), at)
+        .unwrap();
+    service
+        .observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 2),
+            at + Duration::from_secs(2),
+        )
+        .unwrap();
+    let mut corrupted = report(owner, 3);
+    corrupted[0] ^= 0xff;
+    assert!(
+        service
+            .observe_stream_chunk_after_verified_peer(
+                peer(),
+                &corrupted,
+                at + Duration::from_secs(4)
+            )
+            .is_err()
+    );
+    assert_eq!(
+        service.take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(4)),
+        Err(ReceiverTelemetryServiceStreamError::NotAuthorized)
+    );
+}
+
+#[test]
+fn stale_peer_direct_ingress_cannot_erase_authorized_pending_interval() {
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    service
+        .observe_stream_chunk_after_verified_peer(peer(), &report(owner, 1), at)
+        .unwrap();
+    service
+        .observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 2),
+            at + Duration::from_secs(2),
+        )
+        .unwrap();
+    let mut stale_worker = peer();
+    stale_worker.worker_generation += 1;
+    assert!(
+        service
+            .observe_after_verified_peer(
+                stale_worker,
+                &report(owner, 3),
+                at + Duration::from_secs(4)
+            )
+            .is_err()
+    );
+    assert_eq!(
+        service
+            .take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(2))
+            .unwrap()
+            .unwrap()
+            .sequence,
+        2
+    );
+}
+
+#[test]
+fn skipped_sequence_rebaseline_withholds_previously_queued_diagnostic() {
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    service
+        .observe_stream_chunk_after_verified_peer(peer(), &report(owner, 1), at)
+        .unwrap();
+    service
+        .observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 2),
+            at + Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(
+        service.observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 5),
+            at + Duration::from_secs(4)
+        ),
+        Ok(Some(ReceiverTelemetryDecision::Baseline))
+    );
+    assert_eq!(
+        service.take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(4)),
+        Ok(None)
+    );
+}
+
+#[test]
+fn diagnostic_checkout_clock_regression_discards_without_emitting_a_health_sample() {
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    service
+        .observe_stream_chunk_after_verified_peer(peer(), &report(owner, 1), at)
+        .unwrap();
+    service
+        .observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 2),
+            at + Duration::from_secs(2),
+        )
+        .unwrap();
+    // The Service must never reinterpret a pre-observation clock as a fresh
+    // interval; this is not a Worker-supplied timestamp.
+    assert_eq!(
+        service.take_diagnostic_after_verified_peer(peer(), at),
+        Ok(None)
+    );
+    service
+        .observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 3),
+            at + Duration::from_secs(4),
+        )
+        .unwrap();
+    assert_eq!(
+        service
+            .take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(4))
+            .unwrap()
+            .unwrap()
+            .sequence,
+        3
+    );
+}
+
+#[test]
+fn stale_key_revocation_cannot_erase_newer_authorized_teacher_diagnostic() {
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    service
+        .observe_stream_chunk_after_verified_peer(peer(), &report(owner, 1), at)
+        .unwrap();
+    service
+        .observe_stream_chunk_after_verified_peer(
+            peer(),
+            &report(owner, 2),
+            at + Duration::from_secs(2),
+        )
+        .unwrap();
+    let mut wrong_grant = key();
+    wrong_grant.key_grant_request_id += 1;
+    assert!(!service.revoke_matching_key(wrong_grant));
+    assert_eq!(service.current(), Some(owner));
+    assert_eq!(
+        service
+            .take_diagnostic_after_verified_peer(peer(), at + Duration::from_secs(2))
+            .unwrap()
+            .unwrap()
+            .sequence,
+        2
+    );
+}

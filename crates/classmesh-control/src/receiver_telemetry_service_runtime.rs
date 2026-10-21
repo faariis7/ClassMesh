@@ -6,7 +6,7 @@
 //! and serialize Worker/key/receiver lifecycle changes with admission.
 //! No Worker report bytes may provide the active key or receiver generation.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::receiver_telemetry::{ReceiverTelemetryBinding, ReceiverTelemetryDecision};
 use crate::receiver_telemetry_service_admission::{
@@ -94,6 +94,22 @@ pub enum ReceiverTelemetryServiceStreamError {
     Admission(ReceiverTelemetryServiceAdmissionError),
 }
 
+/// An admitted counter interval must be consumed promptly or discarded.
+/// This is *not* an RTT, packet-loss estimate, network-quality vote or
+/// authorization to send anything to the Teacher.
+pub const MAX_SERVICE_DIAGNOSTIC_AGE: Duration = Duration::from_secs(5);
+
+/// Service-admitted playback delta for the exact independently verified
+/// Worker/receiver incarnation. Its monotonic received_at timestamp is
+/// local-only and must never be serialized as a Worker/Teacher clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiverTelemetryAdmittedDiagnostic {
+    pub binding: ReceiverTelemetryBinding,
+    pub sequence: u64,
+    pub interval: crate::receiver_telemetry::ReceiverTelemetryInterval,
+    pub service_received_at: Instant,
+}
+
 /// A single Service-owned receiver slot: key installation/teardown and
 /// receiver runtime/admission advance within one serialized owner.
 #[derive(Debug, Default)]
@@ -104,6 +120,9 @@ pub struct ReceiverTelemetryServiceRuntime {
     )>,
     admission: ReceiverTelemetryServiceAdmission,
     framing: ReceiverTelemetryFrameStream,
+    // Single-slot latest-only diagnostics: no heap queue or media blocking.
+    // This never grants Teacher access or publishes network health.
+    pending_diagnostic: Option<ReceiverTelemetryAdmittedDiagnostic>,
 }
 
 impl ReceiverTelemetryServiceRuntime {
@@ -167,6 +186,9 @@ impl ReceiverTelemetryServiceRuntime {
                 ReceiverTelemetryServiceLifecycleError::InvalidBinding,
             ));
         }
+        // A newly authorized receiver incarnation cannot inherit buffered
+        // diagnostics from its predecessor, even with an identical key epoch.
+        self.pending_diagnostic = None;
         Ok(binding)
     }
 
@@ -289,7 +311,24 @@ impl ReceiverTelemetryServiceRuntime {
             .admission
             .observe_after_verified_peer(current_worker, &wire, service_received_at)
         {
-            Ok(decision) => Ok(Some(decision)),
+            Ok(decision) => {
+                self.pending_diagnostic = match decision {
+                    // Baselines after dropped packets, long gaps or first
+                    // activation never imply a measured healthy interval.
+                    ReceiverTelemetryDecision::Baseline => None,
+                    ReceiverTelemetryDecision::Interval(interval) => {
+                        // One slot: the newest admitted interval supersedes
+                        // any undelivered observation without growing memory.
+                        Some(ReceiverTelemetryAdmittedDiagnostic {
+                            binding,
+                            sequence: latest.sequence,
+                            interval,
+                            service_received_at,
+                        })
+                    }
+                };
+                Ok(Some(decision))
+            }
             Err(error) => {
                 self.key_install_started();
                 Err(ReceiverTelemetryServiceStreamError::Admission(error))
@@ -320,6 +359,37 @@ impl ReceiverTelemetryServiceRuntime {
         }
     }
 
+    /// Check out at most one recent, Service-ADMITTED playback interval.
+    /// The caller must also independently authenticate/authorize the Teacher
+    /// before delivering it: this API itself has no Teacher/network sender,
+    /// no remote principal resolution and no quality-tier promotion.
+    ///
+    /// Wrong Worker does not consume a pending observation. An expired one
+    /// is discarded. This is a single-slot latest-only bounded outbox.
+    pub fn take_diagnostic_after_verified_peer(
+        &mut self,
+        current_worker: ReceiverTelemetryCurrentWorker,
+        service_now: Instant,
+    ) -> Result<Option<ReceiverTelemetryAdmittedDiagnostic>, ReceiverTelemetryServiceStreamError>
+    {
+        let Some(grant) = self.worker_grant_after_verified_peer(current_worker) else {
+            return Err(ReceiverTelemetryServiceStreamError::NotAuthorized);
+        };
+        let Some(candidate) = self.pending_diagnostic.take() else {
+            return Ok(None);
+        };
+        if candidate.binding != grant.receiver()
+            || !service_now
+                .checked_duration_since(candidate.service_received_at)
+                .is_some_and(|age| age <= MAX_SERVICE_DIAGNOSTIC_AGE)
+        {
+            return Ok(None);
+        }
+        Ok(Some(candidate))
+    }
+
+    /// Direct single-message compatibility path, not the timed framed IPC.
+    /// Never carry over already-pending framed diagnostics across this path.
     /// Diagnostic report: exact current Worker must still be verified by the
     /// caller, and transport bytes remain untrusted until parsed/admitted.
     pub fn observe_after_verified_peer(
@@ -328,8 +398,15 @@ impl ReceiverTelemetryServiceRuntime {
         bytes: &[u8],
         service_received_at: Instant,
     ) -> Result<ReceiverTelemetryDecision, ReceiverTelemetryServiceAdmissionError> {
-        self.admission
-            .observe_after_verified_peer(current_worker, bytes, service_received_at)
+        let decision = self.admission.observe_after_verified_peer(
+            current_worker,
+            bytes,
+            service_received_at,
+        )?;
+        // Never let an untrusted/stale direct caller erase a correctly
+        // admitted stream interval. Retire it only after a real admission.
+        self.pending_diagnostic = None;
+        Ok(decision)
     }
 
     #[must_use]
@@ -343,6 +420,9 @@ impl ReceiverTelemetryServiceRuntime {
     }
 
     fn revoke_active(&mut self) {
+        // Revocation removes any previously admitted but undelivered interval
+        // before a replacement Worker/key/receiver can be authenticated.
+        self.pending_diagnostic = None;
         if let Some(binding) = self.admission.current() {
             self.framing.clear_if_matches(binding);
             self.admission.clear_if_matches(binding);
