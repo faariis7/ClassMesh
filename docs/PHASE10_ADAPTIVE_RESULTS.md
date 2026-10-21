@@ -4,6 +4,25 @@ Status: **PENDING PHYSICAL EXECUTION**
 
 Hosted CI and synthetic benchmarks do not establish physical qualification or select production defaults.
 
+## 2026-10-21 Windows VM synthetic qualification (not physical)
+
+Verified Windows 11 **24H2 VM1** and **25H2 VM2**, both ARM64 with the
+same exact CI-built **x64 binary under emulation**, against **5, 10, 20 and
+30 synthetic receivers at 30 rounds per count**. All eight runs exited
+successfully with `synthetic_invariants_passed=true`,
+`physical_qualification=false`, `production_default_selected=false`;
+a single weak or silent receiver remained isolated while N-1 peers stayed
+High; borderline/noisy samples never flapped the quality tier.
+
+Source CI run `39601537031` / PR #593, binary SHA-256
+`88bc23c56b8a597fabf75082ea7736128e2871d5a0933e96aa1c2c920ba0eb0a`.
+Original guest outputs, per-file SHA-256 and environment limitations are in
+[`docs/evidence/phase10g-vm-20261021/`](evidence/phase10g-vm-20261021/README.md).
+This adds cross-VM Windows execution evidence; it is **not** 5/10/20/30
+real receiver machines, a live network test, media performance validation
+or the required largest-feasible-scale 30-minute soak. The physical scale
+matrix and all unresolved production-default decisions below remain pending.
+
 ## Environment
 
 - Date/time:
