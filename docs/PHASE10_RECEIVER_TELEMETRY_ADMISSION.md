@@ -757,3 +757,24 @@ separately attested and bounded cancel-safe Windows read/write path and
 timer ownership, Worker dispatch, authorized Teacher result delivery and
 real physical qualification. Until these are implemented and validated
 this is still passive state, not production telemetry.
+
+## Service loop poll-tick wiring (no production telemetry ingress)
+
+The existing Service `WorkerManager::poll` path already runs at a bounded
+250ms cadence. The Windows Service loop now calls
+`service_receiver_telemetry_poll_tick` after its authoritative Worker liveness
+poll, using the current OS-bound process/session/Worker generation and its own
+monotonic `Instant`. This calls the parser's two-second partial-frame deadline
+without depending on another pipe read. Normal startup without an active
+telemetry grant is a no-op; a disappeared authenticated Worker revokes its
+Service receiver key. A stale candidate Worker cannot retire a newer live
+receiver. Expired partial data retires the admission key and is diagnosed
+without stopping the Service's control plane.
+
+The real Service still has **no live Worker-to-Service telemetry byte reader
+or sender**; therefore no partial diagnostic actually enters production
+today. This is timer scheduling and lifecycle hardening only. Native
+Windows Service bridge tests cover expiration during idle reads, missing
+Worker revocation and stale Worker isolation. The code does not configure
+a new IPC message or modify Phase 12 privileged policy, and it does not
+qualify the Phase 10G physical network gate.

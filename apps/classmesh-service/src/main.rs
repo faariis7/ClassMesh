@@ -133,8 +133,8 @@ mod windows_service_app {
         WindowsFileTransferInboxSink, WindowsFileTransferOutboxSource,
     };
     use crate::presentation_receiver_bridge::{
-        key_from_confirmed_grant, multicast_ack, multicast_start_identity, unicast_ack,
-        unicast_start_identity,
+        key_from_confirmed_grant, multicast_ack, multicast_start_identity,
+        service_receiver_telemetry_poll_tick, unicast_ack, unicast_start_identity,
     };
     use crate::system_action_power::ServicePowerSystemActionExecutor;
 
@@ -3142,6 +3142,16 @@ mod windows_service_app {
                     next_media_reconfigure_attempt = Instant::now();
                 }
                 handle_worker_event(event, &mut supervisor, input_availability.as_ref());
+                // Poll every 250ms from the Service's monotonic clock, even
+                // when no new Worker telemetry bytes are available. This
+                // does not activate a telemetry pipe or authorize a report.
+                if let Err(error) = service_receiver_telemetry_poll_tick(
+                    &mut receiver_telemetry_runtime,
+                    workers.current_authenticated_receiver_worker(),
+                    Instant::now(),
+                ) {
+                    eprintln!("ClassMesh receiver telemetry partial frame retired: {error:?}");
+                }
                 next_worker_poll = Instant::now()
                     .checked_add(Duration::from_millis(250))
                     .unwrap_or_else(Instant::now);
