@@ -687,3 +687,40 @@ qualification. The existing blocking named-pipe test I/O is **not suitable**
 for a Worker render/decode or privileged Service control thread. Phase 10G
 physical 5/10/20/30-receiver evidence remains OPEN; no physical network,
 codec, GPU or user-visible performance claim follows from hosted tests.
+
+## Service-owned framed ingress handoff (passive, no production IPC)
+
+`ReceiverTelemetryServiceRuntime` now owns its `ReceiverTelemetryFrameStream`
+inside the **same serialized key/Worker/receiver lifetime**. An independently
+correlated, authorized key install and actual Worker receiver-start ACK arm
+the exact Service-minted binding. Key-install initiation, exact grant
+revocation and Worker exit/replacement clear both Service admission and any
+partial buffered frame. A stale Worker candidate may not consume or revoke
+a newer stream, and invalid/malformed stream traffic retires the current
+receiver and key rather than keeping misleading report liveness.
+
+`observe_stream_chunk_after_verified_peer` accepts bounded byte-mode
+chunks **only after** the caller separately authenticates the actual Windows
+named-pipe peer and checks the live launched process/session/generation.
+It is not a peer authenticator: caller-controlled arguments cannot establish
+authority. No state changes on wrong-owner reads. The stream parser validates
+each complete frame and rejects incorrect embedded receiver identities.
+Within a single coalesced pipe read, only the **latest report** is passed
+to the existing replay/counter/interval admission gate; earlier reports
+have no independent trustworthy Service arrival timestamp and must not
+fabricate a healthy adaptive-quality interval. Out-of-order/duplicated
+records inside one batch fail closed; replay across reads also retires
+current telemetry. A partial frame alone never refreshes freshness.
+
+Portable TDD tests cover incomplete frames, coalescing, stale peer, key
+replacement/revocation, worker exit, malformed fields, duplicate sequence
+and disconnected reads. The independent native Windows two-process fixture
+now passes forced 17-byte reads directly into this SAME Service runtime
+instead of reconstructing a frame and separately admitting it.
+
+**Not yet live:** no production new IPC message, pipe listener, Service
+server-token attestation, cancel-safe nonblocking sender/reader, deployed
+telemetry integration, Teacher feedback delivery, or physical classroom
+performance evidence. Caller must supply finite read/partial-frame deadlines
+and serialize OS peer admission with Service revocation. These tests do
+**not** close Phase 10G physical qualification or Phase 12 security gates.

@@ -16,6 +16,10 @@ use crate::receiver_telemetry_service_lifecycle::{
     ReceiverTelemetryCurrentWorker, ReceiverTelemetryServiceLifecycleError, ReceiverTelemetryStart,
     ReceiverTelemetryStartAck,
 };
+use crate::receiver_telemetry_stream_framing::{
+    ReceiverTelemetryFrameStream, ReceiverTelemetryFrameStreamError,
+};
+use crate::receiver_telemetry_transport::encode_receiver_telemetry;
 
 /// The exact authorized protected key grant, copied from a Service-owned
 /// committed grant and confirmed by its independently correlated Worker ACK.
@@ -80,6 +84,16 @@ pub enum ReceiverTelemetryServiceRuntimeError {
     Start(ReceiverTelemetryServiceLifecycleError),
 }
 
+/// Errors from passive byte-stream assembly and Service-owned admission.
+/// Neither peer identity nor the current key may be inferred from the bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverTelemetryServiceStreamError {
+    NotAuthorized,
+    Framing(ReceiverTelemetryFrameStreamError),
+    NonmonotonicBatch,
+    Admission(ReceiverTelemetryServiceAdmissionError),
+}
+
 /// A single Service-owned receiver slot: key installation/teardown and
 /// receiver runtime/admission advance within one serialized owner.
 #[derive(Debug, Default)]
@@ -89,6 +103,7 @@ pub struct ReceiverTelemetryServiceRuntime {
         ReceiverTelemetryCurrentWorker,
     )>,
     admission: ReceiverTelemetryServiceAdmission,
+    framing: ReceiverTelemetryFrameStream,
 }
 
 impl ReceiverTelemetryServiceRuntime {
@@ -139,9 +154,20 @@ impl ReceiverTelemetryServiceRuntime {
         if !key.matches_start(pending) {
             return Err(ReceiverTelemetryServiceRuntimeError::KeyMismatch);
         }
-        self.admission
+        let binding = self
+            .admission
             .activate_after_correlated_reply(pending, current_worker, reply)
-            .map_err(ReceiverTelemetryServiceRuntimeError::Start)
+            .map_err(ReceiverTelemetryServiceRuntimeError::Start)?;
+        // This exact receiver lifetime is Service-minted, not sent by the
+        // Worker. The framing slot advances atomically with admission in the
+        // same owner and is cleared by every lifecycle revocation path.
+        if self.framing.activate_verified(binding).is_err() {
+            self.key_install_started();
+            return Err(ReceiverTelemetryServiceRuntimeError::Start(
+                ReceiverTelemetryServiceLifecycleError::InvalidBinding,
+            ));
+        }
+        Ok(binding)
     }
 
     /// Only an exact Service-owned grant revocation can retire this key.
@@ -203,6 +229,71 @@ impl ReceiverTelemetryServiceRuntime {
         })
     }
 
+    /// Process one bounded byte-mode named-pipe read in the same Service-owned
+    /// serialized key/Worker/runtime lifetime as frame and replay admission.
+    ///
+    /// The caller MUST independently attest the actual Windows OS pipe peer
+    /// and live launched Worker generation before entry. A copied peer value
+    /// is not a credential, and this method adds no IPC or sender.
+    ///
+    /// Coalesced records use latest-only admission: earlier record timestamps
+    /// cannot be reconstructed from a single Service arrival clock. Gaps
+    /// rebaseline in the existing Service gate; never synthesize RTT/packet
+    /// loss or declare an old observation healthy. Malformed/reordered input
+    /// and admission failures revoke the active telemetry key and runtime.
+    pub fn observe_stream_chunk_after_verified_peer(
+        &mut self,
+        current_worker: ReceiverTelemetryCurrentWorker,
+        bytes: &[u8],
+        service_received_at: Instant,
+    ) -> Result<Option<ReceiverTelemetryDecision>, ReceiverTelemetryServiceStreamError> {
+        let Some(grant) = self.worker_grant_after_verified_peer(current_worker) else {
+            // A stale caller cannot mutate a replacement receiver or drain
+            // its partial record, even when it copied an older binding.
+            return Err(ReceiverTelemetryServiceStreamError::NotAuthorized);
+        };
+        let binding = grant.receiver();
+        let reports = match self.framing.accept_verified(binding, bytes) {
+            Ok(reports) => reports,
+            Err(error) => {
+                self.key_install_started();
+                return Err(ReceiverTelemetryServiceStreamError::Framing(error));
+            }
+        };
+        if !reports
+            .windows(2)
+            .all(|pair| pair[0].sequence < pair[1].sequence)
+        {
+            self.key_install_started();
+            return Err(ReceiverTelemetryServiceStreamError::NonmonotonicBatch);
+        }
+        let Some(latest) = reports.last().copied() else {
+            return Ok(None);
+        };
+        // The bounded parser strictly decoded this exact report, and the
+        // existing Service ingress accepts only a fixed-width versioned wire.
+        // Re-encoding preserves the current checked transport contract.
+        let wire = match encode_receiver_telemetry(&latest) {
+            Ok(wire) => wire,
+            Err(error) => {
+                self.key_install_started();
+                return Err(ReceiverTelemetryServiceStreamError::Framing(
+                    ReceiverTelemetryFrameStreamError::Wire(error),
+                ));
+            }
+        };
+        match self
+            .admission
+            .observe_after_verified_peer(current_worker, &wire, service_received_at)
+        {
+            Ok(decision) => Ok(Some(decision)),
+            Err(error) => {
+                self.key_install_started();
+                Err(ReceiverTelemetryServiceStreamError::Admission(error))
+            }
+        }
+    }
+
     /// Diagnostic report: exact current Worker must still be verified by the
     /// caller, and transport bytes remain untrusted until parsed/admitted.
     pub fn observe_after_verified_peer(
@@ -227,6 +318,7 @@ impl ReceiverTelemetryServiceRuntime {
 
     fn revoke_active(&mut self) {
         if let Some(binding) = self.admission.current() {
+            self.framing.clear_if_matches(binding);
             self.admission.clear_if_matches(binding);
         }
     }

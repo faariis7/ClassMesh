@@ -24,7 +24,6 @@ use classmesh_control::receiver_telemetry_service_lifecycle::{
 use classmesh_control::receiver_telemetry_service_runtime::{
     ReceiverTelemetryAuthorizedKey, ReceiverTelemetryServiceRuntime,
 };
-use classmesh_control::receiver_telemetry_stream_framing::ReceiverTelemetryFrameStream;
 use classmesh_control::receiver_telemetry_transport::{
     RECEIVER_TELEMETRY_WIRE_LEN, encode_receiver_telemetry,
 };
@@ -355,11 +354,17 @@ fn native_pipe_reader_assembles_forced_short_reads_before_service_admission() {
             .accept_expected(pid, session_id)
             .expect("OS attests real child PID and session before parsing");
         let owner = identity(observed.process_id(), observed.session_id());
-        let mut parser = ReceiverTelemetryFrameStream::default();
-        parser.activate_verified(owner).unwrap();
+        let current_worker = ReceiverTelemetryCurrentWorker {
+            process_id: owner.process_id,
+            session_id: owner.session_id,
+            worker_generation: owner.worker_generation,
+        };
+        // All new framing and admission happens in the same simulated Service
+        // lifetime and only AFTER the OS-attested native Worker connection.
+        let mut service = grant_service_for_real_peer(current_worker);
         let mut received = 0_usize;
         let mut reads = 0;
-        let mut report = None;
+        let mut admitted = None;
         while received < RECEIVER_TELEMETRY_WIRE_LEN {
             let mut chunk = [0_u8; 17];
             let count = pipe
@@ -368,34 +373,37 @@ fn native_pipe_reader_assembles_forced_short_reads_before_service_admission() {
             assert_ne!(count, 0, "child must produce one complete frame");
             received += count;
             reads += 1;
-            let decoded = parser.accept_verified(owner, &chunk[..count]).unwrap();
-            if !decoded.is_empty() {
-                assert!(report.is_none(), "exactly one bounded report per child");
-                assert_eq!(decoded.len(), 1);
-                report = decoded.into_iter().next();
+            let decision = service
+                .observe_stream_chunk_after_verified_peer(
+                    current_worker,
+                    &chunk[..count],
+                    Instant::now(),
+                )
+                .expect("authorized native fragment must be admitted safely");
+            if let Some(decision) = decision {
+                assert!(admitted.is_none(), "exactly one admitted report");
+                admitted = Some(decision);
             }
         }
-        let _ = tx.send((owner, reads, report.expect("reassembled native report")));
+        let _ = tx.send((
+            owner,
+            reads,
+            admitted.expect("native fragments produce one Service admission"),
+            service.has_fresh_for_verified_peer(current_worker, Instant::now()),
+        ));
     });
-    let (owner, reads, report) = rx
+    let (owner, reads, decision, fresh) = rx
         .recv_timeout(Duration::from_secs(8))
         .expect("finite deadline for OS pipe reassembly");
     assert!(
         reads >= 8,
         "small native read buffers must force fragmentation"
     );
-    assert_eq!(report.binding, owner);
-    assert_eq!(report.sequence, 1);
-    let current_worker = ReceiverTelemetryCurrentWorker {
-        process_id: owner.process_id,
-        session_id: owner.session_id,
-        worker_generation: owner.worker_generation,
-    };
-    let mut service = grant_service_for_real_peer(current_worker);
-    let encoded = encode_receiver_telemetry(&report).unwrap();
-    assert_eq!(
-        service.observe_after_verified_peer(current_worker, &encoded, Instant::now()),
-        Ok(ReceiverTelemetryDecision::Baseline)
+    assert!(owner.is_valid());
+    assert_eq!(decision, ReceiverTelemetryDecision::Baseline);
+    assert!(
+        fresh,
+        "Service liveness requires the completed authorized report"
     );
     reader.join().expect("native receiver thread completed");
     assert!(
