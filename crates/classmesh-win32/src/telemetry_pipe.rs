@@ -140,7 +140,7 @@ impl ReceiverTelemetryPipeListener {
 /// Must live on a separate low-priority sender thread, not the media loop.
 #[derive(Debug)]
 pub struct ReceiverTelemetryPipeClient {
-    pipe: NamedPipeClient,
+    pipe: Option<NamedPipeClient>,
 }
 
 impl ReceiverTelemetryPipeClient {
@@ -159,14 +159,25 @@ impl ReceiverTelemetryPipeClient {
             .pipe_name()
             .ok_or(denied("TelemetryClientBinding"))?;
         let pipe = NamedPipeClient::connect_telemetry_once(&name, binding.service_process_id)?;
-        Ok(Self { pipe })
+        Ok(Self { pipe: Some(pipe) })
     }
 
     /// Single complete 136-byte v1 report. This cannot be used to send
     /// clipboard plaintext, remote control commands or variable-size IPC.
     /// Any error must retire this client; NO retry is allowed.
-    pub fn send_once(&self, frame: &[u8; 136], timeout: Duration) -> Result<(), PipeError> {
-        self.pipe.telemetry_write_bounded(frame, timeout)
+    pub fn send_once(&mut self, frame: &[u8; 136], timeout: Duration) -> Result<(), PipeError> {
+        let Some(pipe) = self.pipe.as_ref() else {
+            return Err(denied("TelemetryClientRetired"));
+        };
+        match pipe.telemetry_write_bounded(frame, timeout) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // The overlapped operation has been cancelled and drained.
+                // A failed frame retires this pipe incarnation permanently.
+                self.pipe = None;
+                Err(error)
+            }
+        }
     }
 }
 
@@ -223,7 +234,7 @@ mod tests {
         let binding = identity();
         let mut listener =
             ReceiverTelemetryPipeListener::create(binding, &test_sid()).expect("one local pipe");
-        let client = ReceiverTelemetryPipeClient::connect_from_verified_service(binding)
+        let mut client = ReceiverTelemetryPipeClient::connect_from_verified_service(binding)
             .expect("client must verify actual OS Service PID");
         let peer = listener
             .pipe
@@ -302,7 +313,20 @@ mod tests {
                 "TelemetryIoDeadline",
             );
         }
-        let client = ReceiverTelemetryPipeClient::connect_from_verified_service(binding).unwrap();
+        let mut client =
+            ReceiverTelemetryPipeClient::connect_from_verified_service(binding).unwrap();
+        // Validate the low-level length rejection while the client still
+        // owns the pipe. A subsequent failed send deliberately RETIRES it.
+        assert_eq!(
+            client
+                .pipe
+                .as_ref()
+                .unwrap()
+                .telemetry_write_bounded(&[0; 1], Duration::from_millis(30))
+                .unwrap_err()
+                .stage,
+            "TelemetryFrameLength",
+        );
         assert_eq!(
             client
                 .send_once(&[0; 136], Duration::ZERO)
@@ -312,11 +336,10 @@ mod tests {
         );
         assert_eq!(
             client
-                .pipe
-                .telemetry_write_bounded(&[0; 1], Duration::from_millis(30))
+                .send_once(&[0; 136], Duration::from_millis(30))
                 .unwrap_err()
                 .stage,
-            "TelemetryFrameLength",
+            "TelemetryClientRetired",
         );
     }
 
@@ -337,6 +360,92 @@ mod tests {
                 .unwrap_err()
                 .stage,
             "TelemetryWorkerClientIdentity",
+        );
+    }
+
+    #[test]
+    fn failed_native_telemetry_send_retires_connection_permanently() {
+        let binding = identity();
+        let _listener = ReceiverTelemetryPipeListener::create(binding, &test_sid()).unwrap();
+        let mut client = ReceiverTelemetryPipeClient::connect_from_verified_service(binding)
+            .expect("test-only local server PID attested");
+        assert_eq!(
+            client
+                .send_once(&[0; 136], Duration::ZERO)
+                .unwrap_err()
+                .stage,
+            "TelemetryIoDeadline"
+        );
+        assert_eq!(
+            client
+                .send_once(&[0; 136], Duration::from_millis(25))
+                .unwrap_err()
+                .stage,
+            "TelemetryClientRetired"
+        );
+    }
+
+    /// Invoked only as a child of the native process test; regular test runs
+    /// must never create or join any local pipe from ambient configuration.
+    #[test]
+    fn telemetry_child_process_one_shot_sender() {
+        let Ok(name) = std::env::var("CLASSMESH_NATIVE_TELEMETRY_TEST_PIPE") else {
+            return;
+        };
+        let server_pid: u32 = std::env::var("CLASSMESH_NATIVE_TELEMETRY_TEST_SERVICE_PID")
+            .expect("parent Service PID in test harness")
+            .parse()
+            .expect("numeric PID");
+        let client = NamedPipeClient::connect_telemetry_once(&name, server_pid)
+            .expect("separate-process test client verifies kernel server PID");
+        client
+            .telemetry_write_bounded(&[0xa7; 136], Duration::from_millis(250))
+            .expect("native child sends one bounded telemetry frame");
+    }
+
+    #[test]
+    fn native_two_process_telemetry_wire_uses_real_os_pid_and_fixed_frame() {
+        let binding = identity();
+        let mut listener = ReceiverTelemetryPipeListener::create(binding, &test_sid())
+            .expect("isolated local pipe with test SID");
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "telemetry_pipe::tests::telemetry_child_process_one_shot_sender",
+                "--nocapture",
+            ])
+            .env(
+                "CLASSMESH_NATIVE_TELEMETRY_TEST_PIPE",
+                binding.pipe_name().unwrap(),
+            )
+            .env(
+                "CLASSMESH_NATIVE_TELEMETRY_TEST_SERVICE_PID",
+                std::process::id().to_string(),
+            )
+            .spawn()
+            .expect("launch independent Windows test process");
+        let actual_pid = child.id();
+        let peer = listener
+            .pipe
+            .wait_for_overlapped_peer(Duration::from_millis(1_500))
+            .expect("Service OS named pipe accepts separate Worker process");
+        assert_eq!(peer.process_id(), actual_pid);
+        assert_eq!(peer.session_id(), crate::current_session_id().unwrap());
+        let mut payload = [0_u8; 136];
+        assert_eq!(
+            listener
+                .pipe
+                .telemetry_read_bounded(&mut payload, Duration::from_millis(250)),
+            Ok(136)
+        );
+        let finished = child.wait_with_output().expect("collect child result");
+        // This test intentionally uses two Windows processes, not two
+        // threads in one process; OS PID attestation must identify the child.
+        assert_ne!(actual_pid, std::process::id());
+        assert_eq!(payload, [0xa7; 136]);
+        assert!(
+            finished.status.success(),
+            "native sender failed: {}",
+            String::from_utf8_lossy(&finished.stderr)
         );
     }
 }

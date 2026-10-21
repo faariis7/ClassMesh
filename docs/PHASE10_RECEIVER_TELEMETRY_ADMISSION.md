@@ -863,3 +863,22 @@ binding, cancellation-safe lifecycle/ownership and multiple-machine Phase 10G
 evidence are independent requirements before declaring production readiness.
 Do not infer authenticated sessions or physical evidence from pipe naming,
 hosted CI or a localhost test.
+
+
+## Native two-process transport and failed-send retirement checkpoint
+
+Windows tests use a REAL child process, not only an intra-process thread,
+to verify the PID reported by the named-pipe kernel API, the Windows
+session, and one complete 136-byte transmission. A failed attempt now
+permanently takes/drops the Worker-owned `ReceiverTelemetryPipeClient`
+handle, and follow-on sends return `TelemetryClientRetired`: no retry can
+silently resume a partial or stale record. The Service may later own an
+independently duplicated original launched Worker process HANDLE via
+`SessionProcess::try_clone`, rather than trusting a PID reopened after
+process termination. Its native regression checks that dropping the
+original owner does not close the clone.
+
+Native two-process smoke and this original-HANDLE lifecycle are
+prerequisites, not an activation. No application sender/listener startup,
+Teacher wire or mTLS permission, quality promotion, production default
+or classroom hardware qualification is implied.
