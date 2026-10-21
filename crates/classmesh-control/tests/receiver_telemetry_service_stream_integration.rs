@@ -328,3 +328,127 @@ fn stale_replay_across_reads_revokes_service_key_and_report_liveness() {
     assert!(!service.has_fresh_for_verified_peer(peer(), at + Duration::from_secs(2)));
     assert!(service.worker_grant_after_verified_peer(peer()).is_none());
 }
+
+#[test]
+fn partial_byte_stream_times_out_on_next_read_and_revokes_service_key() {
+    use classmesh_control::receiver_telemetry_stream_framing::MAX_RECEIVER_TELEMETRY_PARTIAL_AGE;
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    let bytes = report(owner, 1);
+    assert_eq!(
+        service.observe_stream_chunk_after_verified_peer(peer(), &bytes[..45], at),
+        Ok(None)
+    );
+    assert_eq!(
+        service.observe_stream_chunk_after_verified_peer(
+            peer(),
+            &bytes[45..],
+            at + MAX_RECEIVER_TELEMETRY_PARTIAL_AGE + Duration::from_nanos(1)
+        ),
+        Err(ReceiverTelemetryServiceStreamError::Framing(
+            ReceiverTelemetryFrameStreamError::PartialTimedOut
+        ))
+    );
+    assert_eq!(service.current(), None);
+    assert!(service.worker_grant_after_verified_peer(peer()).is_none());
+    assert!(!service.has_fresh_for_verified_peer(peer(), at));
+}
+
+#[test]
+fn service_tick_retires_idle_partial_without_another_pipe_read() {
+    use classmesh_control::receiver_telemetry_stream_framing::MAX_RECEIVER_TELEMETRY_PARTIAL_AGE;
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    let bytes = report(owner, 1);
+    assert_eq!(
+        service.observe_stream_chunk_after_verified_peer(peer(), &bytes[..32], at),
+        Ok(None)
+    );
+    assert_eq!(
+        service.expire_partial_stream_after_verified_peer(
+            peer(),
+            at + MAX_RECEIVER_TELEMETRY_PARTIAL_AGE
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        service.expire_partial_stream_after_verified_peer(
+            peer(),
+            at + MAX_RECEIVER_TELEMETRY_PARTIAL_AGE + Duration::from_nanos(1)
+        ),
+        Err(ReceiverTelemetryServiceStreamError::Framing(
+            ReceiverTelemetryFrameStreamError::PartialTimedOut
+        ))
+    );
+    assert_eq!(service.current(), None);
+    assert!(!service.has_fresh_for_verified_peer(peer(), at));
+}
+
+#[test]
+fn stale_worker_tick_never_expires_newer_receiver_partial() {
+    use classmesh_control::receiver_telemetry_stream_framing::MAX_RECEIVER_TELEMETRY_PARTIAL_AGE;
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    let bytes = report(owner, 1);
+    assert_eq!(
+        service.observe_stream_chunk_after_verified_peer(peer(), &bytes[..30], at),
+        Ok(None)
+    );
+    let mut old_worker = peer();
+    old_worker.worker_generation += 1;
+    assert_eq!(
+        service.expire_partial_stream_after_verified_peer(
+            old_worker,
+            at + MAX_RECEIVER_TELEMETRY_PARTIAL_AGE + Duration::from_secs(10)
+        ),
+        Err(ReceiverTelemetryServiceStreamError::NotAuthorized)
+    );
+    assert_eq!(service.current(), Some(owner));
+    assert_eq!(
+        service.observe_stream_chunk_after_verified_peer(peer(), &bytes[30..], at),
+        Ok(Some(ReceiverTelemetryDecision::Baseline))
+    );
+}
+
+#[test]
+fn service_partial_clock_regression_fails_closed_without_admission() {
+    let (mut service, owner) = armed();
+    let at = Instant::now() + Duration::from_secs(2);
+    let bytes = report(owner, 1);
+    assert_eq!(
+        service.observe_stream_chunk_after_verified_peer(peer(), &bytes[..30], at),
+        Ok(None)
+    );
+    assert_eq!(
+        service.observe_stream_chunk_after_verified_peer(
+            peer(),
+            &bytes[30..],
+            at - Duration::from_nanos(1)
+        ),
+        Err(ReceiverTelemetryServiceStreamError::Framing(
+            ReceiverTelemetryFrameStreamError::PartialClockRegression
+        ))
+    );
+    assert_eq!(service.current(), None);
+    assert!(!service.has_fresh_for_verified_peer(peer(), at));
+}
+
+#[test]
+fn completed_frames_do_not_expire_or_reset_freshness_on_later_idle_tick() {
+    use classmesh_control::receiver_telemetry_stream_framing::MAX_RECEIVER_TELEMETRY_PARTIAL_AGE;
+    let (mut service, owner) = armed();
+    let at = Instant::now();
+    assert_eq!(
+        service.observe_stream_chunk_after_verified_peer(peer(), &report(owner, 1), at),
+        Ok(Some(ReceiverTelemetryDecision::Baseline))
+    );
+    assert_eq!(
+        service.expire_partial_stream_after_verified_peer(
+            peer(),
+            at + MAX_RECEIVER_TELEMETRY_PARTIAL_AGE + Duration::from_secs(1)
+        ),
+        Ok(())
+    );
+    assert_eq!(service.current(), Some(owner));
+    assert!(service.has_fresh_for_verified_peer(peer(), at + MAX_RECEIVER_TELEMETRY_PARTIAL_AGE));
+}

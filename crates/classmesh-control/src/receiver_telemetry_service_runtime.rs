@@ -253,7 +253,10 @@ impl ReceiverTelemetryServiceRuntime {
             return Err(ReceiverTelemetryServiceStreamError::NotAuthorized);
         };
         let binding = grant.receiver();
-        let reports = match self.framing.accept_verified(binding, bytes) {
+        let reports = match self
+            .framing
+            .accept_verified_at(binding, bytes, service_received_at)
+        {
             Ok(reports) => reports,
             Err(error) => {
                 self.key_install_started();
@@ -290,6 +293,29 @@ impl ReceiverTelemetryServiceRuntime {
             Err(error) => {
                 self.key_install_started();
                 Err(ReceiverTelemetryServiceStreamError::Admission(error))
+            }
+        }
+    }
+
+    /// Called on a bounded Service timer even if the pipe reader is idle.
+    /// Do not let untrusted partial data linger indefinitely. Caller must
+    /// verify the active OS-authenticated Worker and serialize lifecycle.
+    pub fn expire_partial_stream_after_verified_peer(
+        &mut self,
+        current_worker: ReceiverTelemetryCurrentWorker,
+        service_now: Instant,
+    ) -> Result<(), ReceiverTelemetryServiceStreamError> {
+        let Some(grant) = self.worker_grant_after_verified_peer(current_worker) else {
+            return Err(ReceiverTelemetryServiceStreamError::NotAuthorized);
+        };
+        match self
+            .framing
+            .expire_partial_after_verified_owner(grant.receiver(), service_now)
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.key_install_started();
+                Err(ReceiverTelemetryServiceStreamError::Framing(error))
             }
         }
     }
