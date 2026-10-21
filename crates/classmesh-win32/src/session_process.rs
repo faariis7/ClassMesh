@@ -6,15 +6,16 @@ use std::path::Path;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::{
     CopySid, GetLengthSid, GetTokenInformation, IsValidSid, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::System::RemoteDesktop::WTSQueryUserToken;
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, PROCESS_INFORMATION,
-    STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, GetCurrentProcess,
+    PROCESS_INFORMATION, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +68,34 @@ impl SessionProcess {
             return Ok(false);
         }
         self.is_running()
+    }
+
+    /// Duplicate the *original launched* process kernel object for an
+    /// independent low-priority telemetry reader thread. Never look up the
+    /// process again by PID: a recycled PID is not the same Worker identity.
+    /// Each clone owns exactly one handle and may safely outlive this owner.
+    pub fn try_clone(&self) -> Result<Self, LaunchError> {
+        let current_process = unsafe { GetCurrentProcess() };
+        let mut copy: HANDLE = null_mut();
+        if unsafe {
+            DuplicateHandle(
+                current_process,
+                self.process,
+                current_process,
+                &mut copy,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        } == 0
+        {
+            return Err(last_error("DuplicateHandle(WorkerProcess)"));
+        }
+        Ok(Self {
+            process: copy,
+            process_id: self.process_id,
+            session_id: self.session_id,
+        })
     }
 
     pub fn is_running(&self) -> Result<bool, LaunchError> {
@@ -282,6 +311,42 @@ mod tests {
     use std::os::windows::ffi::OsStringExt;
 
     use super::*;
+
+    #[test]
+    fn duplicated_launched_process_handle_survives_original_owner_shutdown() {
+        use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let current = unsafe { GetCurrentProcess() };
+        let mut owned = null_mut();
+        assert_ne!(
+            unsafe {
+                DuplicateHandle(
+                    current,
+                    current,
+                    current,
+                    &mut owned,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            },
+            0
+        );
+        let original = SessionProcess {
+            process: owned,
+            process_id: std::process::id(),
+            session_id: 31,
+        };
+        let duplicate = original.try_clone().expect("independent owned HANDLE");
+        assert_eq!(duplicate.process_id(), original.process_id());
+        assert_eq!(duplicate.session_id(), original.session_id());
+        assert!(duplicate.is_running().unwrap());
+        drop(original);
+        // Diagnostics thread may continue OS attestation against the original
+        // launched process object. This must not reopen by PID (PID reuse).
+        assert!(duplicate.is_running().unwrap());
+        assert_eq!(duplicate.process_id(), std::process::id());
+    }
 
     #[test]
     fn alive_session_process_accepts_only_exact_os_pipe_peer_identity() {

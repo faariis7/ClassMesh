@@ -1,3 +1,24 @@
+## Phase 10 native independent-process telemetry qualification and failure retirement (2026-10-22)
+
+`feat/phase10-native-two-process-telemetry` strengthens #600 on a separate
+branch from its merged main: a native Windows test launches an actual
+independent process of the Rust test binary, obtains its real OS-observed
+named-pipe PID and session and transfers exactly one fixed 136-byte frame.
+A second native RED/GREEN regression shows why a failed/invalid Worker
+telemetry send must retire its owned channel permanently; no retry can
+reuse partial/stale records. `SessionProcess::try_clone()` transfers a
+duplicate of the original launched Worker process kernel HANDLE to a
+future low-priority Service diagnostics reader, preserving OS identity
+through process-manager owner changes without reopening by PID. Native
+tests prove duplicate liveness after dropping the original wrapper.
+
+Require exact-head native Windows CI and all quality gates before any
+merge. These qualifications do NOT start production Worker telemetry,
+activate a Service listener or authorize a Teacher: next integration
+must serialize Service receiver revocation with the background reader
+and explicitly grant the exact receiver identity over authenticated
+control IPC. Physical 10G Issue #288 remains OPEN.
+
 ## Phase 10 dedicated Windows receiver telemetry pipe primitives (2026-10-22)
 
 Isolated branch `feat/phase10-telemetry-service-wire` from main after #598 adds a
