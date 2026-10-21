@@ -1,3 +1,19 @@
+## Phase 10 telemetry idle read and revocation (2026-10-22)
+
+Branch `fix/phase10-telemetry-idle-read` fixes an activation blocker in the
+native dedicated Worker→Service read primitive: Worker diagnostics cadence
+is about 5 seconds, while the OS read's individually cancelled/drained
+maximum wait is only 250ms. A normal empty/idle read must return `Ok(None)`
+and retain an authenticated pipe, **after** revalidating original Worker
+HANDLE and the exact live receiver identity. A newly arriving full frame
+returns `Ok(Some(bytes))`; a disconnect, oversized/malformed input, other
+I/O errors or revoked Worker must close the incarnation permanently.
+Native Windows regression tests cover several consecutive drained idle
+waits followed by a real frame, and revocation immediately after an idle
+wait (no subsequent acceptance). Mac portable fmt/tests/Clippy and hosted
+Windows exact-head CI required before squash. No live sender activation,
+Teacher feedback or physical 10G qualification is claimed.
+
 ## Phase 10 native independent-process telemetry qualification and failure retirement (2026-10-22)
 
 `feat/phase10-native-two-process-telemetry` strengthens #600 on a separate

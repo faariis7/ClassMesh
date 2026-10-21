@@ -93,7 +93,7 @@ impl ReceiverTelemetryPipeListener {
         timeout: Duration,
         worker: &SessionProcess,
         mut current: impl FnMut() -> Option<TelemetryPipeIdentity>,
-    ) -> Result<usize, PipeError> {
+    ) -> Result<Option<usize>, PipeError> {
         let peer = self
             .accepted
             .ok_or(denied("TelemetryConnectionNotAuthenticated"))?;
@@ -105,12 +105,18 @@ impl ReceiverTelemetryPipeListener {
             self.disconnect_permanently();
             return Err(denied("TelemetryWorkerNotCurrent"));
         }
-        let len = match self.pipe.telemetry_read_bounded(buffer, timeout) {
-            Ok(len) if len > 0 => len,
-            Ok(_) => {
+        // A cancelled+drained read after an ordinary 250ms idle window is
+        // *not* a failed connection: genuine playback reports arrive about
+        // every five seconds. Keep the same peer/handle but independently
+        // recheck Worker and receiver authority AFTER every elapsed wait.
+        // All other read failures/disconnects permanently retire this pipe.
+        let result = match self.pipe.telemetry_read_bounded(buffer, timeout) {
+            Ok(0) => {
                 self.disconnect_permanently();
                 return Err(denied("TelemetryPipeDisconnected"));
             }
+            Ok(len) => Some(len),
+            Err(error) if error.stage == "TelemetryIoTimeout" => None,
             Err(error) => {
                 self.disconnect_permanently();
                 return Err(error);
@@ -121,7 +127,7 @@ impl ReceiverTelemetryPipeListener {
             self.disconnect_permanently();
             return Err(denied("TelemetryWorkerNotCurrentAfterRead"));
         }
-        Ok(len)
+        Ok(result)
     }
 
     fn disconnect_permanently(&mut self) {
@@ -227,6 +233,85 @@ mod tests {
             worker_generation: 5,
             receiver_generation: NEXT_RECEIVER.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    #[test]
+    fn native_idle_poll_cancels_drained_reads_but_stays_connected_for_next_report() {
+        let binding = identity();
+        let mut listener = ReceiverTelemetryPipeListener::create(binding, &test_sid()).unwrap();
+        let mut client =
+            ReceiverTelemetryPipeClient::connect_from_verified_service(binding).unwrap();
+        let peer = listener
+            .pipe
+            .wait_for_overlapped_peer(Duration::from_millis(250))
+            .unwrap();
+        listener.accepted = Some(peer);
+        let worker = SessionProcess::duplicate_current_process_for_test(binding.worker_session_id);
+        let mut frame = [0_u8; 136];
+        for _ in 0..3 {
+            assert_eq!(
+                listener.read_authenticated_chunk(
+                    &mut frame,
+                    Duration::from_millis(25),
+                    &worker,
+                    || Some(binding),
+                ),
+                Ok(None),
+                "idle timeout must NOT retire an otherwise live receiver"
+            );
+        }
+        client
+            .send_once(&[0x72; 136], Duration::from_millis(250))
+            .unwrap();
+        assert_eq!(
+            listener.read_authenticated_chunk(
+                &mut frame,
+                Duration::from_millis(250),
+                &worker,
+                || Some(binding),
+            ),
+            Ok(Some(136))
+        );
+        assert_eq!(frame, [0x72; 136]);
+    }
+
+    #[test]
+    fn revocation_after_idle_poll_rejects_old_worker_without_new_read() {
+        let binding = identity();
+        let mut listener = ReceiverTelemetryPipeListener::create(binding, &test_sid()).unwrap();
+        let _client = ReceiverTelemetryPipeClient::connect_from_verified_service(binding).unwrap();
+        let peer = listener
+            .pipe
+            .wait_for_overlapped_peer(Duration::from_millis(250))
+            .unwrap();
+        listener.accepted = Some(peer);
+        let worker = SessionProcess::duplicate_current_process_for_test(binding.worker_session_id);
+        let mut frame = [0_u8; 136];
+        assert_eq!(
+            listener.read_authenticated_chunk(
+                &mut frame,
+                Duration::from_millis(25),
+                &worker,
+                || Some(binding),
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            listener
+                .read_authenticated_chunk(&mut frame, Duration::from_millis(25), &worker, || None,)
+                .unwrap_err()
+                .stage,
+            "TelemetryWorkerNotCurrent"
+        );
+        assert_eq!(
+            listener
+                .read_authenticated_chunk(&mut frame, Duration::from_millis(25), &worker, || Some(
+                    binding
+                ),)
+                .unwrap_err()
+                .stage,
+            "TelemetryConnectionNotAuthenticated"
+        );
     }
 
     #[test]
