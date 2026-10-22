@@ -1,4 +1,4 @@
-//! Explicit fresh-only installer for the opt-in trusted Service policy path.
+//! Explicit installer for the opt-in trusted Service policy path.
 //! Inputs are operator-selected; this command does not generate or export keys.
 #[cfg(windows)]
 fn main() {
@@ -22,10 +22,14 @@ fn main() {
     }
     fn run() -> io::Result<()> {
         let args: Vec<_> = std::env::args().collect();
-        if args.len() != 6 || args[1] != "--fresh" {
+        let mode = args.get(1).map(String::as_str);
+        if !matches!(
+            (mode, args.len()),
+            (Some("--fresh"), 6) | (Some("--update"), 4)
+        ) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "usage: classmesh-trusted-provision --fresh <epoch> <policy.json> <identity.json> <control-runtime.json>",
+                "usage: classmesh-trusted-provision --fresh <epoch> <policy.json> <identity.json> <control-runtime.json> | --update <epoch> <policy.json>",
             ));
         }
         let epoch = args[2].parse::<u64>().map_err(|_| {
@@ -35,16 +39,23 @@ fn main() {
             )
         })?;
         let policy = bounded(&args[3], 4 * 1024 * 1024)?;
-        let identity = bounded(&args[4], 1024 * 1024)?;
-        let config = bounded(&args[5], 64 * 1024)?;
-        classmesh_win32::trusted_policy::provision_fresh_install(
-            epoch, &policy, &identity, &config,
-        )?;
-        println!("Trusted fresh installation committed at epoch {epoch}.");
+        if mode == Some("--fresh") {
+            let identity = bounded(&args[4], 1024 * 1024)?;
+            let config = bounded(&args[5], 64 * 1024)?;
+            classmesh_win32::trusted_policy::provision_fresh_install(
+                epoch, &policy, &identity, &config,
+            )?;
+            println!("Trusted fresh installation committed at epoch {epoch}.");
+        } else {
+            // The trusted API requires the Service's lifetime lease to be
+            // released first and rejects stale/repeated epochs and blob reuse.
+            classmesh_win32::trusted_policy::install_policy(epoch, &policy)?;
+            println!("Trusted policy update committed at epoch {epoch}.");
+        }
         Ok(())
     }
     if let Err(error) = run() {
-        eprintln!("Trusted fresh installation rejected: {error}");
+        eprintln!("Trusted policy installation rejected: {error}");
         std::process::exit(1);
     }
 }
