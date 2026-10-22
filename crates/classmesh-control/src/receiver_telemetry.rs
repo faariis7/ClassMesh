@@ -175,8 +175,7 @@ impl ReceiverTelemetryGate {
     pub fn has_fresh_report(&self, now: Instant) -> bool {
         self.active.is_some()
             && self.last.is_some_and(|(_, accepted_at)| {
-                now.checked_duration_since(accepted_at)
-                    .is_some_and(|age| age <= MAX_RECEIVER_TELEMETRY_GAP)
+                now >= accepted_at && now.duration_since(accepted_at) <= MAX_RECEIVER_TELEMETRY_GAP
             })
     }
 
@@ -200,9 +199,10 @@ impl ReceiverTelemetryGate {
             if sample.sequence <= previous.sequence {
                 return Err(ReceiverTelemetryError::Replay);
             }
-            let elapsed = received_at
-                .checked_duration_since(previous_at)
-                .ok_or(ReceiverTelemetryError::ClockRegression)?;
+            if received_at < previous_at {
+                return Err(ReceiverTelemetryError::ClockRegression);
+            }
+            let elapsed = received_at.duration_since(previous_at);
             if elapsed < MIN_RECEIVER_TELEMETRY_INTERVAL {
                 return Err(ReceiverTelemetryError::TooFrequent);
             }

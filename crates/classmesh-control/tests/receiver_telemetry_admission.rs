@@ -233,6 +233,23 @@ fn freshness_liveness_requires_a_current_accepted_sample_and_revokes_on_clear() 
 }
 
 #[test]
+fn service_gate_rejects_subtick_reverse_clock_without_renewing_liveness() {
+    let now = Instant::now();
+    let mut gate = ReceiverTelemetryGate::default();
+    gate.activate(binding(1)).unwrap();
+    gate.observe(sample(binding(1), 1, 10), now).unwrap();
+    let previous = now - Duration::from_nanos(1);
+    if previous < now {
+        assert!(!gate.has_fresh_report(previous));
+        assert_eq!(
+            gate.observe(sample(binding(1), 2, 11), previous),
+            Err(ReceiverTelemetryError::ClockRegression)
+        );
+        assert!(gate.has_fresh_report(now));
+    }
+}
+
+#[test]
 fn invalid_replay_cannot_extend_report_liveness() {
     let mut gate = ReceiverTelemetryGate::default();
     let now = Instant::now();

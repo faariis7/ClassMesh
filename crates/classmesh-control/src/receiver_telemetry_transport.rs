@@ -246,9 +246,9 @@ struct ReceiverTelemetryConcurrentState {
 
 impl ReceiverTelemetryConcurrentState {
     fn fresh_at(&self, now: Instant) -> bool {
-        self.last_offered_at
-            .and_then(|accepted| now.checked_duration_since(accepted))
-            .is_some_and(|age| age <= MAX_RECEIVER_TELEMETRY_GAP)
+        self.last_offered_at.is_some_and(|accepted| {
+            now >= accepted && now.duration_since(accepted) <= MAX_RECEIVER_TELEMETRY_GAP
+        })
     }
 }
 
@@ -353,7 +353,7 @@ impl ReceiverTelemetryConcurrentMailbox {
         self.try_access(|state| {
             if state
                 .last_offered_at
-                .is_some_and(|previous| offered_at.checked_duration_since(previous).is_none())
+                .is_some_and(|previous| offered_at < previous)
             {
                 return Err(ReceiverTelemetryWireError::ClockRegression);
             }
@@ -623,6 +623,27 @@ mod concurrent_mailbox_tests {
                 .snapshot(),
             snapshot(1, 2)
         );
+    }
+
+    #[test]
+    fn subtick_reverse_clock_does_not_offer_or_authorize_worker_mailbox_lease() {
+        let at = std::time::Instant::now();
+        let mail = ReceiverTelemetryConcurrentMailbox::default();
+        mail.try_activate(binding(1)).unwrap();
+        mail.try_offer_at(snapshot(1, 1), at).unwrap();
+        let earlier = at - std::time::Duration::from_nanos(1);
+        if earlier < at {
+            assert_eq!(
+                mail.try_offer_at(snapshot(1, 2), earlier),
+                Err(ReceiverTelemetryConcurrentError::Wire(
+                    ReceiverTelemetryWireError::ClockRegression
+                ))
+            );
+            let original = mail.try_checkout_at(binding(1), at).unwrap().unwrap();
+            assert_eq!(original.snapshot(), snapshot(1, 1));
+            assert_eq!(mail.try_lease_is_current_at(&original, earlier), Ok(false));
+            assert_eq!(mail.try_lease_is_current_at(&original, at), Ok(true));
+        }
     }
 
     #[test]
