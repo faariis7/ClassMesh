@@ -6,8 +6,8 @@ pub mod monitoring;
 pub mod monitoring_promotion;
 pub mod presentation_view;
 pub mod receiver_playback_diagnostics;
-pub mod receiver_playback_ui;
 pub mod receiver_playback_session;
+pub mod receiver_playback_ui;
 #[cfg(windows)]
 pub mod ui_actions;
 #[cfg(windows)]
