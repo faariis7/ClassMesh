@@ -45,6 +45,7 @@ pub enum TeacherPlaybackDiagnosticError {
     BindingMismatch,
     Malformed,
     Replay,
+    ClockRegression,
 }
 
 /// Latest-only receiver counter projection. An old session or a lower
