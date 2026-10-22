@@ -5,6 +5,8 @@
 //! and is revalidated against the current installed key, media start,
 //! independently reported OS Service PID, Worker PID and Windows session.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread;
 use std::time::Duration;
@@ -41,9 +43,29 @@ pub(crate) fn grant_matches_current_receiver(
         && grant.start_request_id != key.request_id
 }
 
+/// Remove a pending frame without forwarding it if the owner retired while
+/// the background sender was blocked or descheduled. The Service MUST still
+/// verify current OS-backed receiver authority at arrival.
+fn take_if_native_sender_armed(
+    rx: &mpsc::Receiver<[u8; 136]>,
+    armed: &AtomicBool,
+) -> Option<[u8; 136]> {
+    let frame = rx.recv().ok()?;
+    armed.load(Ordering::Acquire).then_some(frame)
+}
+
 pub(crate) struct BestEffortReceiverSender {
     grant: ServiceReceiverTelemetryGrant,
     outbox: SyncSender<[u8; 136]>,
+    armed: Arc<AtomicBool>,
+}
+
+impl Drop for BestEffortReceiverSender {
+    fn drop(&mut self) {
+        // The sender's queue may still have one item. Closing the producer
+        // alone does not discard it: recv() drains queued items on disconnect.
+        self.armed.store(false, Ordering::Release);
+    }
 }
 
 impl BestEffortReceiverSender {
@@ -76,22 +98,36 @@ impl BestEffortReceiverSender {
             receiver_generation: grant.receiver_generation,
         };
         let (outbox, rx) = mpsc::sync_channel::<[u8; 136]>(1);
+        let armed = Arc::new(AtomicBool::new(true));
+        let sender_armed = Arc::clone(&armed);
         thread::Builder::new()
             .name("classmesh-phase10-telemetry-sender".to_owned())
             .spawn(move || {
+                if !sender_armed.load(Ordering::Acquire) {
+                    return;
+                }
                 let Ok(mut pipe) =
                     ReceiverTelemetryPipeClient::connect_from_verified_service(identity)
                 else {
                     return;
                 };
-                while let Ok(frame) = rx.recv() {
-                    if pipe.send_once(&frame, Duration::from_millis(250)).is_err() {
+                while let Some(frame) = take_if_native_sender_armed(&rx, &sender_armed) {
+                    // The drop/revocation check is the last local check
+                    // before I/O. A concurrent revocation can still race
+                    // an in-flight send; Service admission remains mandatory.
+                    if !sender_armed.load(Ordering::Acquire)
+                        || pipe.send_once(&frame, Duration::from_millis(250)).is_err()
+                    {
                         return;
                     }
                 }
             })
             .map_err(|_| "WorkerTelemetrySenderSpawnFailed")?;
-        Ok(Self { grant, outbox })
+        Ok(Self {
+            grant,
+            outbox,
+            armed,
+        })
     }
 
     /// Derive a real counter snapshot only from the unique locally active
@@ -106,6 +142,9 @@ impl BestEffortReceiverSender {
         own_pid: u32,
         own_session: u32,
     ) -> Result<bool, &'static str> {
+        if !self.armed.load(Ordering::Acquire) {
+            return Err("WorkerTelemetrySenderRetired");
+        }
         let grant = self.grant;
         if !grant_matches_current_receiver(
             grant,
@@ -167,6 +206,40 @@ mod tests {
             stream_id: 14,
             epoch: 15,
         }
+    }
+
+    #[test]
+    fn queued_report_is_never_offered_to_native_io_after_revocation() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let armed = AtomicBool::new(true);
+        assert!(tx.try_send([7; 136]).is_ok());
+        armed.store(false, Ordering::Release);
+        assert_eq!(take_if_native_sender_armed(&rx, &armed), None);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn sender_drop_retires_queued_report_even_while_sender_thread_is_alive() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let armed = Arc::new(AtomicBool::new(true));
+        let sender = BestEffortReceiverSender {
+            grant: grant(),
+            outbox: tx,
+            armed: Arc::clone(&armed),
+        };
+        assert!(sender.outbox.try_send([9; 136]).is_ok());
+        drop(sender);
+        assert!(!armed.load(Ordering::Acquire));
+        assert_eq!(take_if_native_sender_armed(&rx, &armed), None);
+    }
+
+    #[test]
+    fn authorized_report_still_passes_without_bounded_queue_growth() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let armed = AtomicBool::new(true);
+        assert!(tx.try_send([4; 136]).is_ok());
+        assert!(tx.try_send([5; 136]).is_err());
+        assert_eq!(take_if_native_sender_armed(&rx, &armed), Some([4; 136]));
     }
 
     #[test]
