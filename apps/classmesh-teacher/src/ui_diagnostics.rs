@@ -6,6 +6,7 @@ use classmesh_core::{MediaTransport, StreamKind};
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::device_diagnostics::{DeviceDiagnosticsView, TroubleshootingOverrideRequest};
+use crate::receiver_playback_diagnostics::TeacherPlaybackCounters;
 use crate::ui_shell::{TeacherUiMessage, media_label, presence_label, quality_label};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -20,6 +21,7 @@ pub fn show_diagnostics(
     ui: &mut egui::Ui,
     selected_source: Option<MonitoringSourceId>,
     diagnostics: Option<&DeviceDiagnosticsView>,
+    playback: Option<TeacherPlaybackCounters>,
     draft: &mut DiagnosticsOverrideDraft,
     action_pending: bool,
 ) -> Option<TeacherUiMessage> {
@@ -100,6 +102,29 @@ pub fn show_diagnostics(
                         "Render delay",
                         format!("{:.1} ms", sample.render_delay_ms),
                     );
+                });
+        });
+    }
+
+    // Playback counts must never be folded into ReceiverQualitySample:
+    // only the latter has genuinely measured RTT/loss/network delay.
+    if let Some(data) = playback {
+        ui.collapsing("Authenticated receiver playback", |ui| {
+            ui.small("Read-only playback counters · not network RTT, loss or a quality decision");
+            egui::Grid::new("classmesh_authenticated_receiver_playback")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    sample_metric(ui, "Window", format!("{} ms", data.interval_ms));
+                    sample_metric(ui, "Receiver generation", data.receiver_generation);
+                    sample_metric(ui, "Sequence", data.sequence);
+                    sample_metric(ui, "Authenticated", data.authenticated_frames);
+                    sample_metric(ui, "Rejected", data.rejected_frames);
+                    sample_metric(ui, "Decoded", data.decoded_frames);
+                    sample_metric(ui, "Presented", data.presented_frames);
+                    sample_metric(ui, "Present errors", data.present_errors);
+                    sample_metric(ui, "Decode errors", data.decode_errors);
+                    sample_metric(ui, "Keyframe waits", data.keyframe_waits);
+                    sample_metric(ui, "Queue drops", data.queue_drops);
                 });
         });
     }

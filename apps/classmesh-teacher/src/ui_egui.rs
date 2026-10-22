@@ -1,4 +1,8 @@
 use eframe::egui;
+use std::time::Instant;
+
+use classmesh_protocol::{Capability, control_wire::ControlEnvelope};
+use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::classroom_grid::{MonitoringGridViewConfig, TeacherMonitoringGridViewModel};
 use crate::classroom_view::{ClassroomViewConfig, TeacherClassroomViewModel};
@@ -9,6 +13,10 @@ use crate::device_diagnostics::{
 use crate::presentation_view::{
     PresentationRuntimeSnapshot, PresentationViewState, TeacherPresentationViewModel,
 };
+use crate::receiver_playback_diagnostics::{
+    TeacherPlaybackBinding, TeacherPlaybackCounters, TeacherPlaybackDiagnosticError,
+};
+use crate::receiver_playback_ui::TeacherPlaybackUiProjection;
 use crate::ui_actions::{
     TeacherInteractionDraft, reset_teacher_interaction_draft, show_device_actions,
 };
@@ -38,6 +46,7 @@ pub struct TeacherEguiShell {
     presentation: PresentationViewState,
     diagnostics_model: TeacherDeviceDiagnosticsViewModel,
     diagnostics: Option<DeviceDiagnosticsView>,
+    playback: Option<TeacherPlaybackUiProjection>,
     diagnostics_draft: DiagnosticsOverrideDraft,
     teacher_interaction_context: Option<TeacherInteractionUiContext>,
     file_pull_context: Option<TeacherFilePullContext>,
@@ -62,6 +71,7 @@ impl Default for TeacherEguiShell {
             )
             .expect("default diagnostics view configuration is valid"),
             diagnostics: None,
+            playback: None,
             diagnostics_draft: DiagnosticsOverrideDraft::default(),
             teacher_interaction_context: None,
             file_pull_context: None,
@@ -90,6 +100,7 @@ impl TeacherEguiShell {
             )
             .expect("default diagnostics view configuration is valid"),
             diagnostics: None,
+            playback: None,
             diagnostics_draft: DiagnosticsOverrideDraft::default(),
             teacher_interaction_context: None,
             file_pull_context: None,
@@ -108,12 +119,112 @@ impl TeacherEguiShell {
         {
             reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
         }
+        // A new control session, source or missing optional v0.8
+        // diagnostics capability invalidates all previously visible data.
+        if self.playback.as_ref().is_some_and(|p| {
+            p.source_id() != context.source_id
+                || p.binding().control_session_id != context.control_session_id
+                || context.version.major != 0
+                || context.version.minor < 8
+                || !context
+                    .capabilities
+                    .contains(&Capability::ReceiverPlaybackDiagnostics)
+        }) {
+            self.playback = None;
+        }
         self.teacher_interaction_context = Some(context);
     }
 
     pub fn clear_teacher_interaction_context(&mut self) {
         self.teacher_interaction_context = None;
+        self.playback = None;
         reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
+    }
+
+    /// Only the authenticated QUIC client may supply this bound session
+    /// context. A UI action alone does not grant or authenticate telemetry.
+    pub fn set_receiver_playback_context(
+        &mut self,
+        source_id: MonitoringSourceId,
+        binding: TeacherPlaybackBinding,
+    ) -> Result<(), TeacherPlaybackDiagnosticError> {
+        let context = self
+            .teacher_interaction_context
+            .as_ref()
+            .ok_or(TeacherPlaybackDiagnosticError::NotNegotiated)?;
+        if context.source_id != source_id
+            || context.control_session_id != binding.control_session_id
+        {
+            return Err(TeacherPlaybackDiagnosticError::BindingMismatch);
+        }
+        if context.version.major != 0
+            || context.version.minor < 8
+            || !context
+                .capabilities
+                .contains(&Capability::ReceiverPlaybackDiagnostics)
+        {
+            return Err(TeacherPlaybackDiagnosticError::NotNegotiated);
+        }
+        if self
+            .playback
+            .as_ref()
+            .is_some_and(|old| old.source_id() == source_id && old.binding() == binding)
+        {
+            return Ok(());
+        }
+        self.playback = Some(TeacherPlaybackUiProjection::new(source_id, binding)?);
+        Ok(())
+    }
+
+    /// Inputs MUST already be authenticated to the enrolled Service's
+    /// current QUIC PrincipalId; the bounded ledger then verifies replay,
+    /// negotiated protocol and exact presentation session before display.
+    pub fn accept_authenticated_receiver_playback(
+        &mut self,
+        envelope: &ControlEnvelope,
+        now: Instant,
+    ) -> Result<TeacherPlaybackCounters, TeacherPlaybackDiagnosticError> {
+        let context = self
+            .teacher_interaction_context
+            .as_ref()
+            .ok_or(TeacherPlaybackDiagnosticError::Inactive)?;
+        let state = self
+            .playback
+            .as_mut()
+            .ok_or(TeacherPlaybackDiagnosticError::Inactive)?;
+        if state.source_id() != context.source_id
+            || state.binding().control_session_id != context.control_session_id
+        {
+            return Err(TeacherPlaybackDiagnosticError::BindingMismatch);
+        }
+        let available = context.version.major == 0
+            && context.version.minor >= 8
+            && context
+                .capabilities
+                .contains(&Capability::ReceiverPlaybackDiagnostics);
+        state.accept_authenticated(envelope, available, now)
+    }
+
+    /// An old session's disconnect must not invalidate a replacement.
+    pub fn revoke_receiver_playback_context(
+        &mut self,
+        source_id: MonitoringSourceId,
+        binding: TeacherPlaybackBinding,
+    ) -> bool {
+        let Some(state) = self.playback.as_mut() else {
+            return false;
+        };
+        if !state.revoke(source_id, binding) {
+            return false;
+        }
+        self.playback = None;
+        true
+    }
+
+    #[must_use]
+    fn visible_receiver_playback_at(&self, now: Instant) -> Option<TeacherPlaybackCounters> {
+        let selected = self.classroom.selected()?;
+        self.playback.as_ref()?.visible(selected, now)
     }
 
     pub fn set_file_pull_context(&mut self, context: TeacherFilePullContext) {
@@ -153,6 +264,13 @@ impl TeacherEguiShell {
         let view = self.diagnostics_model.project(snapshot)?;
         if self.diagnostics.as_ref().map(|current| current.source_id) != Some(view.source_id) {
             self.diagnostics_draft = DiagnosticsOverrideDraft::default();
+            if self
+                .playback
+                .as_ref()
+                .is_some_and(|p| p.source_id() != view.source_id)
+            {
+                self.playback = None;
+            }
         }
         self.diagnostics = Some(view);
         Ok(())
@@ -160,6 +278,9 @@ impl TeacherEguiShell {
 
     pub fn clear_diagnostics(&mut self) {
         self.diagnostics = None;
+        // The trusted source was removed; never resurrect previously
+        // authenticated counters after a new device snapshot appears.
+        self.playback = None;
         self.diagnostics_draft = DiagnosticsOverrideDraft::default();
     }
 
@@ -304,10 +425,12 @@ impl TeacherEguiShell {
                 }
             }
             TeacherUiSection::Diagnostics => {
+                let playback = self.visible_receiver_playback_at(Instant::now());
                 if let Some(message) = show_diagnostics(
                     ui,
                     self.classroom.selected(),
                     self.diagnostics.as_ref(),
+                    playback,
                     &mut self.diagnostics_draft,
                     self.pending_action.is_some(),
                 ) {
@@ -469,6 +592,141 @@ mod tests {
             version: classmesh_protocol::PROTOCOL_VERSION,
             capabilities,
         }
+    }
+
+    fn bound_playback() -> TeacherPlaybackBinding {
+        TeacherPlaybackBinding {
+            control_session_id: 77,
+            presentation_id: 25,
+            stream_id: 12,
+            epoch: 2,
+        }
+    }
+
+    fn playback_frame() -> ControlEnvelope {
+        use classmesh_protocol::control_wire::{
+            ProtocolVersion, ReceiverPlaybackDiagnostic, control_envelope,
+        };
+        ControlEnvelope {
+            control_session_id: 77,
+            sequence: 9,
+            protocol_version: Some(ProtocolVersion { major: 0, minor: 8 }),
+            request_id: 0,
+            payload: Some(control_envelope::Payload::ReceiverPlaybackDiagnostic(
+                ReceiverPlaybackDiagnostic {
+                    presentation_id: 25,
+                    stream_id: 12,
+                    epoch: 2,
+                    receiver_generation: 3,
+                    sequence: 1,
+                    interval_ms: 5_000,
+                    authenticated_frames: 100,
+                    rejected_frames: 0,
+                    decoded_frames: 92,
+                    presented_frames: 90,
+                    present_errors: 1,
+                    decode_errors: 2,
+                    keyframe_waits: 0,
+                    queue_drops: 1,
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn teacher_ui_displays_only_authenticated_selected_and_fresh_receiver_playback() {
+        use std::time::Duration;
+        let now = Instant::now();
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::from([
+            Capability::ReceiverPlaybackDiagnostics,
+        ])));
+        assert_eq!(app.visible_receiver_playback_at(now), None);
+        app.set_receiver_playback_context(MonitoringSourceId(7), bound_playback())
+            .unwrap();
+        let sample = app
+            .accept_authenticated_receiver_playback(&playback_frame(), now)
+            .unwrap();
+        assert_eq!(sample.presented_frames, 90);
+        assert_eq!(sample.queue_drops, 1);
+        assert_eq!(app.visible_receiver_playback_at(now), Some(sample));
+        app.classroom.select(None).unwrap();
+        assert_eq!(app.visible_receiver_playback_at(now), None);
+        app.classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        assert_eq!(
+            app.visible_receiver_playback_at(now + Duration::from_secs(11)),
+            None
+        );
+        assert_eq!(
+            app.accept_authenticated_receiver_playback(
+                &playback_frame(),
+                now + Duration::from_secs(12)
+            ),
+            Err(TeacherPlaybackDiagnosticError::Replay)
+        );
+        assert_eq!(
+            app.visible_receiver_playback_at(now + Duration::from_secs(12)),
+            None
+        );
+    }
+
+    #[test]
+    fn clearing_diagnostics_erases_previous_authenticated_playback() {
+        let now = Instant::now();
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::from([
+            Capability::ReceiverPlaybackDiagnostics,
+        ])));
+        app.set_receiver_playback_context(MonitoringSourceId(7), bound_playback())
+            .unwrap();
+        app.accept_authenticated_receiver_playback(&playback_frame(), now)
+            .unwrap();
+        assert!(app.visible_receiver_playback_at(now).is_some());
+        app.clear_diagnostics();
+        assert!(app.visible_receiver_playback_at(now).is_none());
+    }
+
+    #[test]
+    fn teacher_ui_rejects_legacy_and_changed_context_and_stale_teardown() {
+        let now = Instant::now();
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
+        assert_eq!(
+            app.set_receiver_playback_context(MonitoringSourceId(7), bound_playback()),
+            Err(TeacherPlaybackDiagnosticError::NotNegotiated)
+        );
+        assert_eq!(app.visible_receiver_playback_at(now), None);
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::from([
+            Capability::ReceiverPlaybackDiagnostics,
+        ])));
+        app.set_receiver_playback_context(MonitoringSourceId(7), bound_playback())
+            .unwrap();
+        app.accept_authenticated_receiver_playback(&playback_frame(), now)
+            .unwrap();
+        let mut stale = bound_playback();
+        stale.control_session_id = 76;
+        assert!(!app.revoke_receiver_playback_context(MonitoringSourceId(7), stale));
+        assert!(app.visible_receiver_playback_at(now).is_some());
+        let mut changed =
+            interaction_context(BTreeSet::from([Capability::ReceiverPlaybackDiagnostics]));
+        changed.control_session_id = 78;
+        app.set_teacher_interaction_context(changed);
+        assert_eq!(app.visible_receiver_playback_at(now), None);
+        assert_eq!(
+            app.accept_authenticated_receiver_playback(&playback_frame(), now),
+            Err(TeacherPlaybackDiagnosticError::Inactive)
+        );
+        let mut old =
+            interaction_context(BTreeSet::from([Capability::ReceiverPlaybackDiagnostics]));
+        old.version.minor = 7;
+        app.set_teacher_interaction_context(old);
+        assert_eq!(
+            app.set_receiver_playback_context(MonitoringSourceId(7), bound_playback()),
+            Err(TeacherPlaybackDiagnosticError::NotNegotiated)
+        );
     }
 
     #[test]
