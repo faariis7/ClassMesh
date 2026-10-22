@@ -935,3 +935,20 @@ production quality default. It must pass exact-head native Windows CI,
 full binary-pair/VM tests and independent Teacher PrincipalId/session
 authorization before actual classroom qualification. Physical Phase
 10G Issue #288 stays open.
+
+## Native-report expiry across read completion and queued admission
+
+The native Service reader now persists the **Service monotonic timestamp
+of the first received frame byte** through the one-slot mailbox. An
+individual bounded overlapped read may begin before the two-second partial
+deadline and finish after it. The reader must reject the late completion
+even if it fills all 136 bytes; it must also reject a finished record that
+waited in the mailbox past the deadline. The Service owner rechecks that
+timestamp before admitting a record. A retired native transport must never
+admit an already-queued frame just because the passive receiver runtime
+still holds a valid key/start binding. Unit tests cover boundary equality,
+a delayed final read, expired queued data, and retired transport backlog.
+
+These freshness decisions do not derive Worker RTT/loss or grant Teacher
+access, do not relax the default-off rollout setting, and do not replace
+physical Phase 10G testing on real classrooms.
