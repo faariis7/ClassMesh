@@ -270,6 +270,7 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
 
     let mut other = report();
     other.payload = None;
+    other.sequence = 1;
     pair.server_channel.send(&other).await?;
     let event = owner
         .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
@@ -418,5 +419,44 @@ async fn malformed_epoch_does_not_destroy_last_valid_owner_projection() -> TestR
         ))
     ));
     assert_eq!(owner.visible(SOURCE, now + Duration::from_secs(1)), valid);
+    Ok(())
+}
+
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replayed_outer_control_sequence_forces_retirement_even_when_message_type_changes() -> TestResult {
+    use classmesh_teacher::receiver_playback_session::{
+        TeacherPlaybackSessionError, TeacherPlaybackSessionOwner,
+    };
+    let mut pair = pair().await?;
+    let now = Instant::now();
+    let mut owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, binding())
+        .map_err(|error| format!("{error:?}"))?;
+
+    pair.server_channel.send(&report()).await?;
+    owner
+        .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+    assert!(owner.visible(SOURCE, now).is_some());
+
+    let mut replayed = report();
+    replayed.payload = None;
+    // The unrelated control message repeats the preceding playback's
+    // outer sequence. A single owning dispatcher must reject this globally.
+    pair.server_channel.send(&replayed).await?;
+    assert!(matches!(
+        owner
+            .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
+            .await,
+        Err(TeacherPlaybackSessionError::ControlSequenceRegression)
+    ));
+    assert_eq!(owner.visible(SOURCE, now), None);
+    assert!(matches!(
+        owner
+            .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
+            .await,
+        Err(TeacherPlaybackSessionError::Retired)
+    ));
     Ok(())
 }
