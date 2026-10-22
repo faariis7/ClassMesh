@@ -77,6 +77,19 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # Freeze the default-feature native test image immediately after
+      # workspace tests, BEFORE opt-in feature tests build another
+      # classmesh_win32-<hash>.exe under target/debug/deps.
+      - name: Freeze Phase 10 native Windows unit-test executable
+        shell: pwsh
+        run: |
+          $bins = @(Get-ChildItem -LiteralPath target/debug/deps -Filter 'classmesh_win32-*.exe' -File)
+          if ($bins.Count -ne 1) {
+            throw "Expected exactly one default-feature native test executable, found $($bins.Count)"
+          }
+          New-Item -ItemType Directory -Path phase10-native-telemetry-bundle -Force | Out-Null
+          Copy-Item -LiteralPath $bins[0].FullName -Destination phase10-native-telemetry-bundle/classmesh-win32-native-tests.exe
+
       - name: Build media diagnostics
         run: cargo build -p classmesh-worker --bin classmesh-media-probe --bin classmesh-media-receiver --bin classmesh-media-recovery-probe --release
 
@@ -337,6 +350,10 @@ jobs:
         shell: pwsh
         run: .\scripts\phase10g-adaptive-validation-tests.ps1
 
+      - name: Validate Phase 10 native VM bundle integrity helper
+        shell: pwsh
+        run: .\scripts\phase10-native-telemetry-smoke-tests.ps1
+
       - name: Stage Phase 4 qualification bundle
         shell: pwsh
         run: |
@@ -461,6 +478,34 @@ jobs:
         with:
           name: classmesh-phase10g-adaptive-qualification-windows-x64
           path: phase10g-bundle/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
+
+      # Reuse the exact native Windows unit-test binary already built by
+      # cargo test --workspace; no extra x64 compiler on VMPal Windows ARM.
+      - name: Stage Phase 10 native Windows telemetry VM smoke bundle
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath phase10-native-telemetry-bundle/classmesh-win32-native-tests.exe -PathType Leaf)) {
+            throw 'Default-feature native Windows test executable was not staged'
+          }
+          Copy-Item scripts/phase10-native-telemetry-smoke.ps1 phase10-native-telemetry-bundle/
+          Copy-Item docs/PHASE10_NATIVE_WINDOWS_VM_SMOKE.md phase10-native-telemetry-bundle/
+          .\scripts\phase10-native-telemetry-smoke.ps1 -Mode IndexBundle -BundleDir phase10-native-telemetry-bundle -SourceRevision $env:GITHUB_SHA
+          .\scripts\phase10-native-telemetry-smoke.ps1 -Mode ValidateBundle -BundleDir phase10-native-telemetry-bundle
+          $results = Join-Path $env:RUNNER_TEMP 'phase10-native-telemetry-smoke-hosted'
+          .\scripts\phase10-native-telemetry-smoke.ps1 -Mode Run -BundleDir phase10-native-telemetry-bundle -ResultsDir $results
+          $report = Get-Content -LiteralPath (Join-Path $results 'native-smoke-result.json') -Raw | ConvertFrom-Json
+          if ($report.physical_qualification -ne $false -or $report.production_default_selected -ne $false) {
+            throw 'Phase 10 hosted CI must never claim physical classroom qualification'
+          }
+          Copy-Item -LiteralPath (Join-Path $results 'native-smoke-result.json') -Destination phase10-native-telemetry-bundle/hosted-ci-smoke-result.json
+
+      - name: Upload Phase 10 native Windows telemetry VM smoke bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-phase10-native-telemetry-smoke-windows-x64
+          path: phase10-native-telemetry-bundle/
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
