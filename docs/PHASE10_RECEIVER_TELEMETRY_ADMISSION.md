@@ -979,3 +979,39 @@ The Teacher eframe Diagnostics panel has a separate **Authenticated receiver pla
 This is a UI projection and an authenticated-client integration interface, **not evidence of a live Teacher QUIC subscription or full classroom physical qualification**. That integration must use an actually enrolled PrincipalId and TLS session rather than hand-authored UI context. Phase 10G physical gates in #288 remain open.
 
 The projection additionally rejects a new authenticated report whose Teacher-local monotonic reception timestamp is earlier than the last accepted report. The check runs *before* mutating replay state; rejected clock-reversing samples cannot overwrite counters, refresh freshness, or consume a legitimate next sequence. This does not establish clock synchronization between Worker, Service and Teacher, and does not change the external authenticated QUIC-client responsibility.
+
+## Teacher live QUIC receive boundary (candidate, not GUI production wiring)
+
+The classmesh-control Teacher playback receive adapter now accepts a
+**caller-owned, existing** ClientControlSession and performs an actual bounded
+read from its QUIC ControlChannel (not synthetic events or a separate shadow
+receiver). Before and after each read it resolves the TLS-verified server
+certificate against a newly acquired snapshot from the canonical
+LiveAuthorizationStore **at both authorization points**, requires the exact
+expected StudentDevice PrincipalId, and checks a freshly sampled trusted wall
+clock for credential expiry. A policy publication revoking that credential
+while a network read is pending is denied after I/O, never silently accepted
+using the older snapshot. A poisoned policy lock fails closed. It rejects a wrong negotiated Teacher role,
+zero or different control session, and playback diagnostics without a negotiated
+v0.8 ReceiverPlaybackDiagnostics (capability 18) contract.
+
+Other control envelopes remain available to the *single owner* of the
+session's multiplexed control dispatcher; the adapter does not silently drop
+messages intended for group-media, feedback, key negotiation or other handlers.
+Its AuthenticatedTeacherControlMessage has a private constructor to prevent
+UI code from fabricating the proof object. The existing source/session-bound
+Teacher ledger still independently validates diagnostic payloads, presentation
+epoch, generation, sequence and freshness; this new transport check alone does
+not grant permission to present or emit any control command.
+
+Real loopback QUIC tests cover the matched trusted certificate, wrong expected
+PrincipalId, inactive credential, v0.8 capability denial, wrong session, unrelated
+message preservation and credential **expiry during the receive await**. Tests
+use test-only root certificates in a local loopback environment, not production
+enrollment. Production callers MUST construct a trusted enrolled client endpoint,
+refresh policy and wall time, run one centralized QUIC dispatcher, map the
+verified Service PrincipalId to the correct selected monitoring source, and
+revoke playback projection on disconnect or trust failure. **The eframe Teacher
+GUI is not yet wired to this adapter**, so this is not an enabled production
+Teacher subscription. Never infer RTT, packet loss, adaptive quality or Phase
+10G physical-qualification results from receiver playback counters.
