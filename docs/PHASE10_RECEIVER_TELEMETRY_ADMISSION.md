@@ -952,3 +952,9 @@ a delayed final read, expired queued data, and retired transport backlog.
 These freshness decisions do not derive Worker RTT/loss or grant Teacher
 access, do not relax the default-off rollout setting, and do not replace
 physical Phase 10G testing on real classrooms.
+
+## Teacher Diagnostics panel: authenticated playback counters (2026-10-22)
+
+The Teacher eframe Diagnostics panel has a separate **Authenticated receiver playback** section for optional v0.8/capability-18 Service-admitted counters. It does **not** reuse or manufacture a ReceiverQualitySample (network RTT, loss, jitter or adaptation votes). Teacher's UI is bound to one selected source and exact current presentation epoch/control session. Its context may be supplied only by an already authenticated/enrolled Service QUIC client with negotiated cap 18; the UI never authenticates a peer. Replay, wrong media/session/legacy version and stale disconnect are rejected by the existing Teacher ledger. Data disappears on device/session change, revocation, or after 10 seconds without a new accepted report; no automatic production transport is enabled.
+
+This is a UI projection and an authenticated-client integration interface, **not evidence of a live Teacher QUIC subscription or full classroom physical qualification**. That integration must use an actually enrolled PrincipalId and TLS session rather than hand-authored UI context. Phase 10G physical gates in #288 remain open.
