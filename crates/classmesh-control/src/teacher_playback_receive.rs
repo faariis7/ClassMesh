@@ -6,9 +6,10 @@ use std::fmt::{Display, Formatter};
 
 use classmesh_protocol::control_wire::{ControlEnvelope, control_envelope};
 use classmesh_protocol::{Capability, ControlRole};
-use classmesh_security::{AuthorizationStore, PrincipalId, PrincipalKind};
+use classmesh_security::{PrincipalId, PrincipalKind};
 
 use crate::client_session::ClientControlSession;
+use crate::live_authorization::{LiveAuthorizationError, LiveAuthorizationStore};
 use crate::peer_identity::{PeerIdentityError, authenticated_peer_identity};
 use crate::quic::ControlTransportError;
 
@@ -48,6 +49,7 @@ pub enum AuthenticatedTeacherReceiveError {
     NotNegotiated,
     SessionMismatch,
     PeerIdentity(PeerIdentityError),
+    Authorization(LiveAuthorizationError),
     Transport(ControlTransportError),
 }
 
@@ -63,7 +65,7 @@ impl Error for AuthenticatedTeacherReceiveError {}
 /// dispatch unrelated control envelopes returned by this method.
 ///
 /// The verified TLS certificate resolves to the expected live StudentDevice
-/// principal in AuthorizationStore. The receiver revalidates after I/O and
+/// principal in a fresh LiveAuthorizationStore snapshot. It revalidates after I/O and
 /// fails closed if it no longer matches. On errors the owning caller must
 /// revoke its old playback UI projection instead of reusing stale counters.
 ///
@@ -74,7 +76,7 @@ impl Error for AuthenticatedTeacherReceiveError {}
 /// and does not connect a GUI or enable Phase 10 telemetry by default.
 pub async fn receive_authenticated_teacher_control(
     session: &mut ClientControlSession,
-    authorization: &AuthorizationStore,
+    authorization: &LiveAuthorizationStore,
     expected_student: PrincipalId,
     now_unix_ms: impl Fn() -> u64,
 ) -> Result<AuthenticatedTeacherControlMessage, AuthenticatedTeacherReceiveError> {
@@ -85,14 +87,17 @@ pub async fn receive_authenticated_teacher_control(
         return Err(AuthenticatedTeacherReceiveError::InvalidSession);
     }
     let verify_peer = |session: &ClientControlSession| {
-        let peer = authenticated_peer_identity(&session.connection, authorization, now_unix_ms())
+        // Never reuse a policy snapshot across awaited network I/O.
+        let snapshot = authorization
+            .snapshot()
+            .map_err(AuthenticatedTeacherReceiveError::Authorization)?;
+        let store = snapshot.store();
+        let peer = authenticated_peer_identity(&session.connection, store, now_unix_ms())
             .map_err(AuthenticatedTeacherReceiveError::PeerIdentity)?;
         if peer.principal_id() != expected_student {
             return Err(AuthenticatedTeacherReceiveError::WrongPrincipal);
         }
-        if authorization.principal(expected_student).map(|p| p.kind)
-            != Some(PrincipalKind::StudentDevice)
-        {
+        if store.principal(expected_student).map(|p| p.kind) != Some(PrincipalKind::StudentDevice) {
             return Err(AuthenticatedTeacherReceiveError::WrongPrincipalKind);
         }
         Ok(())
@@ -171,7 +176,7 @@ mod tests {
         _server_connection: Connection,
         server_channel: ControlChannel,
         client: ClientControlSession,
-        authorization: AuthorizationStore,
+        authorization: LiveAuthorizationStore,
     }
 
     async fn pair(with_capability: bool) -> Result<Pair, Box<dyn Error + Send + Sync>> {
@@ -251,7 +256,7 @@ mod tests {
             _server_connection: server_connection,
             server_channel,
             client,
-            authorization,
+            authorization: LiveAuthorizationStore::new(authorization),
         })
     }
 
@@ -313,7 +318,7 @@ mod tests {
             .await,
             Err(AuthenticatedTeacherReceiveError::WrongPrincipal)
         ));
-        let empty = AuthorizationStore::default();
+        let empty = LiveAuthorizationStore::new(AuthorizationStore::default());
         assert!(matches!(
             receive_authenticated_teacher_control(&mut pair.client, &empty, EXPECTED, || 150).await,
             Err(AuthenticatedTeacherReceiveError::PeerIdentity(_))
@@ -393,6 +398,7 @@ mod tests {
             })
             .map_err(|e| format!("{e:?}"))?;
         pair.server_channel.send(&report(SESSION)).await?;
+        let store = LiveAuthorizationStore::new(store);
         let polls = AtomicUsize::new(0);
         assert!(matches!(
             receive_authenticated_teacher_control(&mut pair.client, &store, EXPECTED, || {
@@ -406,6 +412,34 @@ mod tests {
             Err(AuthenticatedTeacherReceiveError::PeerIdentity(_))
         ));
         assert_eq!(polls.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn policy_revoked_during_receive_cannot_authorize_queued_playback() -> TestResult {
+        let mut pair = pair(true).await?;
+        let (received, sent) = tokio::join!(
+            receive_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150
+            ),
+            async {
+                // Poll the reader first so it has already passed the first
+                // identity check before publishing the revocation.
+                let version = pair.authorization.snapshot().unwrap().version();
+                pair.authorization
+                    .publish_if_version(version, AuthorizationStore::default())
+                    .expect("publish empty policy");
+                pair.server_channel.send(&report(SESSION)).await
+            }
+        );
+        sent?;
+        assert!(matches!(
+            received,
+            Err(AuthenticatedTeacherReceiveError::PeerIdentity(_))
+        ));
         Ok(())
     }
 

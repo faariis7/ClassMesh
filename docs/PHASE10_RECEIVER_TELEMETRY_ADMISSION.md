@@ -986,9 +986,12 @@ The classmesh-control Teacher playback receive adapter now accepts a
 **caller-owned, existing** ClientControlSession and performs an actual bounded
 read from its QUIC ControlChannel (not synthetic events or a separate shadow
 receiver). Before and after each read it resolves the TLS-verified server
-certificate against the **current** trusted AuthorizationStore, requires the
-exact expected StudentDevice PrincipalId, and checks a freshly sampled trusted
-wall clock for credential expiry. It rejects a wrong negotiated Teacher role,
+certificate against a newly acquired snapshot from the canonical
+LiveAuthorizationStore **at both authorization points**, requires the exact
+expected StudentDevice PrincipalId, and checks a freshly sampled trusted wall
+clock for credential expiry. A policy publication revoking that credential
+while a network read is pending is denied after I/O, never silently accepted
+using the older snapshot. A poisoned policy lock fails closed. It rejects a wrong negotiated Teacher role,
 zero or different control session, and playback diagnostics without a negotiated
 v0.8 ReceiverPlaybackDiagnostics (capability 18) contract.
 
