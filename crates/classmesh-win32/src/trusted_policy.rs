@@ -749,4 +749,27 @@ mod tests {
         assert!(!root.join("config").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn fresh_install_preflight_rejects_invalid_inputs_without_creating_either_scope() {
+        let suffix = std::process::id();
+        let policy_scope = format!("ClassMesh-anchor-probe-fresh-{suffix}");
+        let startup_scope = format!("ClassMesh-anchor-probe-provision-{suffix}");
+        let program_data = crate::program_data_known_folder::resolve_os_program_data_path().unwrap();
+        let policy_root = program_data.join(&policy_scope);
+        let startup_root = program_data.join(&startup_scope);
+        assert!(
+            provision_fresh_at(
+                &policy_scope,
+                &startup_scope,
+                1,
+                br#"{"version":1,"principals":[]}"#,
+                b"invalid identity",
+                br#"{"version":1,"bind_address":"127.0.0.1:5151","multicast_interface":null}"#,
+            )
+            .is_err()
+        );
+        assert!(!policy_root.exists());
+        assert!(!startup_root.exists());
+    }
 }
