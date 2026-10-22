@@ -74,8 +74,7 @@ impl TeacherPlaybackUiProjection {
         if selected_source != self.source_id
             || !self
                 .received_at
-                .and_then(|at| now.checked_duration_since(at))
-                .is_some_and(|age| age <= MAX_PLAYBACK_UI_AGE)
+                .is_some_and(|at| now >= at && now.duration_since(at) <= MAX_PLAYBACK_UI_AGE)
         {
             return None;
         }
@@ -161,10 +160,17 @@ mod tests {
             ),
             None
         );
+        // Windows clocks may not represent a one-nanosecond subtraction.
+        // Always test an earlier representable instant and retain the
+        // one-nanosecond assertion when the platform can distinguish it.
         assert_eq!(
-            state.visible(MonitoringSourceId(7), now - Duration::from_nanos(1)),
+            state.visible(MonitoringSourceId(7), now - Duration::from_millis(1)),
             None
         );
+        let just_before = now - Duration::from_nanos(1);
+        if just_before < now {
+            assert_eq!(state.visible(MonitoringSourceId(7), just_before), None);
+        }
     }
 
     #[test]
