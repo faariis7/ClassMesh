@@ -2130,7 +2130,7 @@ mod windows_service_app {
                 teacher_interaction_result_tx: worker_teacher_interaction_result_tx,
                 clipboard_read_result_tx: worker_clipboard_read_result_tx,
             },
-            presentation_feedback,
+            presentation_feedback.clone(),
         );
         let mut power_executor = ServicePowerSystemActionExecutor::new(Win32SystemPowerController);
         let mut desired_focused_start: Option<ServiceUdpStreamStart> = None;
