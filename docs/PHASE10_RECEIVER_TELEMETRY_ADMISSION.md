@@ -953,6 +953,25 @@ These freshness decisions do not derive Worker RTT/loss or grant Teacher
 access, do not relax the default-off rollout setting, and do not replace
 physical Phase 10G testing on real classrooms.
 
+## Native reader re-arm and Service clock-regression hardening
+
+A retired Service native telemetry reader must not be revived by re-arming
+an identical Worker PID/session/generation and receiver generation. Each
+locally armed reader gets a strictly increasing, Service-private incarnation
+which is not put in IPC frames or supplied by Worker. The reader loop checks
+that exact incarnation before and after OS pipe I/O; its one-slot mailbox
+retains the arm incarnation, and privileged Service admission rejects an old
+arm's queued report even when its OS receiver identity and timestamp still
+match. Counter exhaustion fails closed rather than recycling a token.
+
+A future-dated first-byte timestamp relative to the Service's monotonic clock
+is expired immediately; a completed or partial report cannot become fresh
+through `Instant` saturating subtraction on Windows. The existing two-second
+partial-record deadline, bounded queues, exact OS Worker identity and default-
+off activation remain unchanged. Native Windows CI tests are required, and
+none of this qualifies physical receiver scale or makes local counters into
+RTT/packet-loss estimates.
+
 ## Teacher Diagnostics panel: authenticated playback counters (2026-10-22)
 
 The Teacher eframe Diagnostics panel has a separate **Authenticated receiver playback** section for optional v0.8/capability-18 Service-admitted counters. It does **not** reuse or manufacture a ReceiverQualitySample (network RTT, loss, jitter or adaptation votes). Teacher's UI is bound to one selected source and exact current presentation epoch/control session. Its context may be supplied only by an already authenticated/enrolled Service QUIC client with negotiated cap 18; the UI never authenticates a peer. Replay, wrong media/session/legacy version and stale disconnect are rejected by the existing Teacher ledger. Data disappears on device/session change, revocation, or after 10 seconds without a new accepted report; no automatic production transport is enabled.
