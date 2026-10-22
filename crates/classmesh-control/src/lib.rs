@@ -420,3 +420,6 @@ mod clipboard_live_authority_tests;
 
 #[cfg(test)]
 mod live_authorization_tests;
+
+// Phase 10: verified read-only Teacher playback control reception.
+pub mod teacher_playback_receive;
