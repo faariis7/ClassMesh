@@ -30,6 +30,10 @@ use classmesh_control::presentation_state::{PresentationOwnership, PresentationO
 use classmesh_control::quic::{
     ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
 };
+use classmesh_control::receiver_playback_diagnostic_wire::build_after_authorized_teacher;
+use classmesh_control::receiver_telemetry_service_runtime::{
+    MAX_SERVICE_DIAGNOSTIC_AGE, ReceiverTelemetryAdmittedDiagnostic,
+};
 use classmesh_control::stream::{
     ValidatedPresentationStreamOffer, ValidatedPresentationUnicastFallbackOffer,
     peer_bound_udp_unicast_destination, stream_profile_to_wire, validate_interactive_stream_offer,
@@ -716,12 +720,16 @@ pub(crate) struct PresentationDispatchChannels {
 #[derive(Debug, Clone)]
 pub(crate) struct PresentationFeedbackBus {
     tx: broadcast::Sender<WorkerPresentationFeedback>,
+    // Dedicated bounded subscriber path: diagnostics cannot delay or spoof
+    // keyframe/repair feedback and have independent per-Teacher filtering.
+    playback_tx: broadcast::Sender<ReceiverTelemetryAdmittedDiagnostic>,
 }
 
 impl Default for PresentationFeedbackBus {
     fn default() -> Self {
         let (tx, _) = broadcast::channel(PRESENTATION_FEEDBACK_BUS_CAPACITY);
-        Self { tx }
+        let (playback_tx, _) = broadcast::channel(16);
+        Self { tx, playback_tx }
     }
 }
 
@@ -732,6 +740,14 @@ impl PresentationFeedbackBus {
 
     fn subscribe(&self) -> broadcast::Receiver<WorkerPresentationFeedback> {
         self.tx.subscribe()
+    }
+
+    pub(crate) fn publish_playback(&self, sample: ReceiverTelemetryAdmittedDiagnostic) -> bool {
+        self.playback_tx.send(sample).is_ok()
+    }
+
+    fn subscribe_playback(&self) -> broadcast::Receiver<ReceiverTelemetryAdmittedDiagnostic> {
+        self.playback_tx.subscribe()
     }
 }
 
@@ -944,6 +960,14 @@ impl WorkerCapabilityState {
             && snapshot.generation == generation
             && snapshot.process_id == process_id
             && snapshot.session_id == session_id
+            && snapshot.flags & WORKER_CAP_TELEMETRY_GRANT_V11 != 0
+    }
+
+    fn has_native_playback_grant(&self) -> bool {
+        let snapshot = *self.lock_snapshot();
+        snapshot.generation != 0
+            && snapshot.process_id != 0
+            && snapshot.session_id != 0
             && snapshot.flags & WORKER_CAP_TELEMETRY_GRANT_V11 != 0
     }
 
@@ -1687,6 +1711,7 @@ async fn run_listener(
                                     media: &media,
                                     presentation_dispatch: &presentation_dispatch,
                                     presentation_feedback: &presentation_feedback,
+                                    worker_capabilities: worker_capabilities.as_ref(),
                                     presentation: &presentation,
                                     multicast_interface,
                                 },
@@ -1731,6 +1756,7 @@ struct EstablishedSessionRuntime<'a> {
     media: &'a FocusedMediaDispatchChannels,
     presentation_dispatch: &'a PresentationDispatchChannels,
     presentation_feedback: &'a PresentationFeedbackBus,
+    worker_capabilities: &'a WorkerCapabilityState,
     presentation: &'a PresentationDispatchState,
     multicast_interface: Option<Ipv4Addr>,
 }
@@ -1784,6 +1810,7 @@ async fn run_established_session(
         media,
         presentation_dispatch,
         presentation_feedback,
+        worker_capabilities,
         presentation,
         multicast_interface,
     } = runtime;
@@ -1803,6 +1830,7 @@ async fn run_established_session(
     let mut worker_key_lease =
         PresentationKeyWorkerLease::new(presentation_dispatch.key_clear_tx.clone());
     let mut presentation_feedback_rx = presentation_feedback.subscribe();
+    let mut playback_diagnostic_rx = presentation_feedback.subscribe_playback();
     let (mut send, mut receive) = channel.into_split();
     let (inbound_tx, mut inbound_rx) =
         tokio_mpsc::channel::<ControlInboundEvent>(CONTROL_INBOUND_QUEUE_CAPACITY);
@@ -1846,6 +1874,104 @@ async fn run_established_session(
                         return;
                     }
                 }
+            }
+            playback_diagnostic = playback_diagnostic_rx.recv() => {
+                let diagnostic = match playback_diagnostic {
+                    Ok(report) => report,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return,
+                };
+                // Never send an unknown payload to legacy Teacher clients.
+                // Both hello peers must explicitly negotiate capability 18,
+                // and the authenticated Worker must still own the same OS PID,
+                // session and generation that admitted the observation.
+                if !session.negotiated.capabilities.contains(
+                    &Capability::ReceiverPlaybackDiagnostics
+                ) || !worker_capabilities.receiver_telemetry_grant_supported(
+                    diagnostic.binding.worker_generation,
+                    diagnostic.binding.process_id,
+                    diagnostic.binding.session_id,
+                ) || !Instant::now().checked_duration_since(
+                    diagnostic.service_received_at
+                ).is_some_and(|age| age <= MAX_SERVICE_DIAGNOSTIC_AGE)
+                {
+                    continue;
+                }
+                let binding = diagnostic.binding;
+                let Some(installed) = installed_presentation_key else {
+                    continue;
+                };
+                if binding.control_session_id != session.control_session_id
+                    || binding.presentation_id != installed.presentation_id()
+                    || binding.stream_id != installed.stream_id()
+                    || binding.epoch != installed.epoch()
+                    || !worker_key_lease.binding.is_some_and(|key| {
+                        key.control_session_id == binding.control_session_id
+                            && key.presentation_id == binding.presentation_id
+                            && key.stream_id == binding.stream_id
+                            && key.epoch == binding.epoch
+                    })
+                    || !presentation.matches_owner(
+                        peer.identity.principal_id(),
+                        session.control_session_id,
+                        binding.presentation_id,
+                        u64::from(binding.stream_id),
+                    )
+                {
+                    continue;
+                }
+                // Authorization MUST be sampled from the live enrolled TLS
+                // credential, not inferred from any Worker counter or a
+                // handshake-time PrincipalId snapshot.
+                let now_ms = match unix_time_ms() {
+                    Ok(value) => value,
+                    Err(_) => return,
+                };
+                let current_auth = match authorization.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(_) => return,
+                };
+                let store = current_auth.store();
+                if store.principal_for_credential(
+                    peer.identity.credential_fingerprint(), now_ms,
+                ) != Some(peer.identity.principal_id())
+                    || !store.authorize_credential(
+                        peer.identity.credential_fingerprint(),
+                        Permission::StartPresentation, now_ms,
+                    )
+                {
+                    connection.close(0_u32.into(), b"Teacher playback diagnostic authorization revoked");
+                    return;
+                }
+                let Some(next_sequence) = outbound_sequence.checked_add(1) else {
+                    connection.close(0_u32.into(), b"control sequence exhausted");
+                    return;
+                };
+                let envelope = match build_after_authorized_teacher(
+                    diagnostic,
+                    session.control_session_id,
+                    session.negotiated.version,
+                    next_sequence,
+                ) {
+                    Ok(envelope) => envelope,
+                    Err(_) => continue,
+                };
+                // TLS transport and owner may be replaced during other async
+                // operations. Confirm the local freshness immediately before
+                // enqueueing the bounded QUIC control message.
+                if !Instant::now().checked_duration_since(
+                    diagnostic.service_received_at
+                ).is_some_and(|age| age <= MAX_SERVICE_DIAGNOSTIC_AGE) {
+                    continue;
+                }
+                if let Err(error) = send.send(&envelope).await {
+                    eprintln!("ClassMesh playback diagnostic send failed: {}",
+                        transport_diagnostic_code(&error));
+                    connection.close(0_u32.into(), b"playback diagnostic transport failed");
+                    return;
+                }
+                outbound_sequence = next_sequence;
+                continue;
             }
             feedback = presentation_feedback_rx.recv() => {
                 let report = match feedback {
@@ -3378,6 +3504,15 @@ fn zeroize_presentation_key_envelope(envelope: &mut ControlEnvelope) {
     }
 }
 
+/// The optional Teacher diagnostic capability is never inherited from a
+/// stale Worker and never enabled by a general presentation capability.
+fn native_playback_diagnostics_capability(
+    worker_capabilities: &WorkerCapabilityState,
+    service_opt_in: bool,
+) -> bool {
+    service_opt_in && worker_capabilities.has_native_playback_grant()
+}
+
 fn service_hello_capabilities(
     worker_capabilities: &WorkerCapabilityState,
     udp_multicast_available: bool,
@@ -3387,6 +3522,14 @@ fn service_hello_capabilities(
     capabilities.insert(Capability::TeacherPresentation);
     capabilities.insert(Capability::SframeGroupMedia);
     capabilities.insert(Capability::SystemActions);
+    // No legacy Teacher receives unknown payload 54; both Service opt-in
+    // and exact live Worker support are required to advertise capability 18.
+    if native_playback_diagnostics_capability(
+        worker_capabilities,
+        std::env::var("CLASSMESH_ENABLE_PHASE10_TELEMETRY").as_deref() == Ok("1"),
+    ) {
+        capabilities.insert(Capability::ReceiverPlaybackDiagnostics);
+    }
     if worker_capabilities.has_live_worker() {
         capabilities.insert(Capability::TeacherMessage);
         capabilities.insert(Capability::OpenTarget);
@@ -4654,17 +4797,33 @@ mod tests {
     }
 
     #[test]
+    fn phase10_teacher_diagnostics_require_service_opt_in_and_current_worker() {
+        let state = WorkerCapabilityState::default();
+        assert!(!native_playback_diagnostics_capability(&state, true));
+        state.activate(6, 42, 7);
+        assert!(!native_playback_diagnostics_capability(&state, true));
+        assert!(state.apply_report(6, 42, 7, false, false, true));
+        assert!(!native_playback_diagnostics_capability(&state, false));
+        assert!(native_playback_diagnostics_capability(&state, true));
+        state.activate(7, 44, 8);
+        assert!(!native_playback_diagnostics_capability(&state, true));
+    }
+
+    #[test]
     fn opt_in_native_telemetry_capability_never_inherits_stale_worker_generation() {
         let state = WorkerCapabilityState::default();
         state.activate(6, 42, 7);
         assert!(!state.receiver_telemetry_grant_supported(6, 42, 7));
+        assert!(!state.has_native_playback_grant());
         assert!(state.apply_report(6, 42, 7, false, false, true));
         assert!(state.receiver_telemetry_grant_supported(6, 42, 7));
+        assert!(state.has_native_playback_grant());
         assert!(!state.receiver_telemetry_grant_supported(5, 42, 7));
         assert!(!state.receiver_telemetry_grant_supported(6, 43, 7));
         assert!(!state.receiver_telemetry_grant_supported(6, 42, 8));
         state.activate(7, 44, 8);
         assert!(!state.receiver_telemetry_grant_supported(7, 44, 8));
+        assert!(!state.has_native_playback_grant());
         assert!(!state.receiver_telemetry_grant_supported(6, 42, 7));
     }
 

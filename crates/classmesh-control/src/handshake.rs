@@ -556,6 +556,7 @@ fn capability_to_wire(capability: Capability) -> i32 {
         Capability::TeacherMessage => 15,
         Capability::OpenTarget => 16,
         Capability::FileTransfer => 17,
+        Capability::ReceiverPlaybackDiagnostics => 18,
     }
 }
 
@@ -578,6 +579,7 @@ fn capability_from_wire(value: i32) -> Option<Capability> {
         15 => Some(Capability::TeacherMessage),
         16 => Some(Capability::OpenTarget),
         17 => Some(Capability::FileTransfer),
+        18 => Some(Capability::ReceiverPlaybackDiagnostics),
         _ => None,
     }
 }
@@ -591,11 +593,24 @@ mod tests {
     }
 
     #[test]
+    fn v08_playback_diagnostic_is_opt_in_and_has_distinct_capability_number() {
+        assert_eq!(
+            capability_to_wire(Capability::ReceiverPlaybackDiagnostics),
+            18
+        );
+        assert_eq!(
+            capability_from_wire(18),
+            Some(Capability::ReceiverPlaybackDiagnostics)
+        );
+        assert_eq!(capability_from_wire(19), None);
+    }
+
+    #[test]
     fn v07_file_transfer_capability_has_explicit_additive_wire_mapping() {
         assert_eq!(capability_to_wire(Capability::FileTransfer), 17);
         assert_eq!(capability_from_wire(17), Some(Capability::FileTransfer));
         assert_eq!(capability_from_wire(16), Some(Capability::OpenTarget));
-        assert_eq!(capability_from_wire(18), None);
+        assert_eq!(capability_from_wire(19), None);
     }
 
     fn capabilities(values: &[Capability]) -> BTreeSet<Capability> {

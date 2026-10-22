@@ -30,6 +30,7 @@ pub mod presentation_recovery;
 pub mod presentation_sender_plan;
 pub mod presentation_state;
 pub mod quic;
+pub mod receiver_playback_diagnostic_wire;
 pub mod receiver_telemetry;
 pub mod receiver_telemetry_grant_wire;
 pub mod receiver_telemetry_ingress;

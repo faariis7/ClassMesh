@@ -2130,7 +2130,7 @@ mod windows_service_app {
                 teacher_interaction_result_tx: worker_teacher_interaction_result_tx,
                 clipboard_read_result_tx: worker_clipboard_read_result_tx,
             },
-            presentation_feedback,
+            presentation_feedback.clone(),
         );
         let mut power_executor = ServicePowerSystemActionExecutor::new(Win32SystemPowerController);
         let mut desired_focused_start: Option<ServiceUdpStreamStart> = None;
@@ -3246,6 +3246,21 @@ mod windows_service_app {
                 &mut receiver_telemetry_runtime,
                 workers.current_authenticated_receiver_worker(),
             );
+            // A complete, OS-authenticated Worker sample now has a bounded
+            // one-slot handoff to the independently authorized Teacher control
+            // channel. No raw Worker bytes or network-RTT guesses are sent.
+            if let Some(peer) = workers.current_authenticated_receiver_worker()
+                && let Ok(Some(sample)) = receiver_telemetry_runtime
+                    .take_diagnostic_after_verified_peer(peer, Instant::now())
+                && native_receiver_telemetry.is_armed_for(sample.binding)
+                && receiver_telemetry_runtime.diagnostic_still_current_after_verified_peer(
+                    peer,
+                    sample,
+                    Instant::now(),
+                )
+            {
+                let _ = presentation_feedback.publish_playback(sample);
+            }
         }
 
         InputAvailability::Unavailable.store(input_availability.as_ref());
