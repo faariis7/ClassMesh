@@ -45,6 +45,19 @@ pub struct PresentationViewState {
     pub metrics: PresentationMetricsView,
 }
 
+/// A local presentation replacement retires diagnostics bound to the former
+/// stream/epoch. Preserve reports already bound to the incoming presentation
+/// when authenticated events arrive before the snapshot update.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) fn presentation_change_retires_playback(
+    previous: Option<PresentationBindingView>,
+    incoming: Option<PresentationBindingView>,
+    playback: PresentationBindingView,
+) -> bool {
+    previous != incoming && incoming != Some(playback)
+}
+
 #[derive(Debug, Default)]
 pub struct TeacherPresentationViewModel;
 
@@ -123,6 +136,35 @@ mod tests {
                 ..PresentationMetricsView::default()
             },
         }
+    }
+
+    #[test]
+    fn presentation_change_retires_only_mismatched_receiver_playback() {
+        let old = PresentationBindingView {
+            presentation_id: 25,
+            stream_id: 12,
+            epoch: 2,
+        };
+        let newer = PresentationBindingView { epoch: 3, ..old };
+        assert!(!presentation_change_retires_playback(
+            Some(old),
+            Some(old),
+            old
+        ));
+        assert!(presentation_change_retires_playback(
+            Some(old),
+            Some(newer),
+            old
+        ));
+        assert!(presentation_change_retires_playback(Some(old), None, old));
+        // An authenticated new presentation may already be selected before
+        // the local status snapshot arrives; do not erase the newer sample.
+        assert!(!presentation_change_retires_playback(
+            Some(old),
+            Some(newer),
+            newer
+        ));
+        assert!(!presentation_change_retires_playback(None, None, old));
     }
 
     #[test]

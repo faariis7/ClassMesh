@@ -11,7 +11,8 @@ use crate::device_diagnostics::{
     DeviceDiagnosticsView, TeacherDeviceDiagnosticsViewModel,
 };
 use crate::presentation_view::{
-    PresentationRuntimeSnapshot, PresentationViewState, TeacherPresentationViewModel,
+    PresentationBindingView, PresentationRuntimeSnapshot, PresentationViewState,
+    TeacherPresentationViewModel, presentation_change_retires_playback,
 };
 use crate::receiver_playback_diagnostics::{
     TeacherPlaybackBinding, TeacherPlaybackCounters, TeacherPlaybackDiagnosticError,
@@ -254,7 +255,22 @@ impl TeacherEguiShell {
     }
 
     pub fn set_presentation_snapshot(&mut self, snapshot: PresentationRuntimeSnapshot) {
-        self.presentation = TeacherPresentationViewModel::state(snapshot);
+        let next = TeacherPresentationViewModel::state(snapshot);
+        if self.playback.as_ref().is_some_and(|current| {
+            let bound = current.binding();
+            presentation_change_retires_playback(
+                self.presentation.binding,
+                next.binding,
+                PresentationBindingView {
+                    presentation_id: bound.presentation_id,
+                    stream_id: bound.stream_id,
+                    epoch: bound.epoch,
+                },
+            )
+        }) {
+            self.playback = None;
+        }
+        self.presentation = next;
     }
 
     pub fn update_diagnostics(
@@ -669,6 +685,64 @@ mod tests {
             app.visible_receiver_playback_at(now + Duration::from_secs(12)),
             None
         );
+    }
+
+    #[test]
+    fn presentation_epoch_change_and_stop_discard_previous_receiver_playback() {
+        use crate::presentation_view::PresentationBindingView;
+        use classmesh_protocol::control_wire::control_envelope;
+        let now = Instant::now();
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let mut snapshot = PresentationRuntimeSnapshot {
+            binding: Some(PresentationBindingView {
+                presentation_id: 25,
+                stream_id: 12,
+                epoch: 2,
+            }),
+            ..PresentationRuntimeSnapshot::default()
+        };
+        app.set_presentation_snapshot(snapshot);
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::from([
+            Capability::ReceiverPlaybackDiagnostics,
+        ])));
+        app.set_receiver_playback_context(MonitoringSourceId(7), bound_playback())
+            .unwrap();
+        let accepted = app
+            .accept_authenticated_receiver_playback(&playback_frame(), now)
+            .unwrap();
+        assert_eq!(app.visible_receiver_playback_at(now), Some(accepted));
+
+        // Same presentation, ordinary metrics refresh: preserve the data.
+        snapshot.metrics.encoded_frames = 42;
+        app.set_presentation_snapshot(snapshot);
+        assert_eq!(app.visible_receiver_playback_at(now), Some(accepted));
+
+        // Rekeying the same stream is a new binding even with the same
+        // source, principal, control session and other identifiers.
+        snapshot.binding.as_mut().unwrap().epoch += 1;
+        app.set_presentation_snapshot(snapshot);
+        assert_eq!(app.visible_receiver_playback_at(now), None);
+        assert_eq!(
+            app.accept_authenticated_receiver_playback(&playback_frame(), now),
+            Err(TeacherPlaybackDiagnosticError::Inactive)
+        );
+
+        let mut next_binding = bound_playback();
+        next_binding.epoch += 1;
+        let mut next_frame = playback_frame();
+        if let Some(control_envelope::Payload::ReceiverPlaybackDiagnostic(ref mut report)) =
+            next_frame.payload
+        {
+            report.epoch += 1;
+        }
+        app.set_receiver_playback_context(MonitoringSourceId(7), next_binding)
+            .unwrap();
+        app.accept_authenticated_receiver_playback(&next_frame, now)
+            .unwrap();
+        assert!(app.visible_receiver_playback_at(now).is_some());
+        app.set_presentation_snapshot(PresentationRuntimeSnapshot::default());
+        assert_eq!(app.visible_receiver_playback_at(now), None);
     }
 
     #[test]
