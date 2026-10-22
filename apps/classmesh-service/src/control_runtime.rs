@@ -32,7 +32,7 @@ use classmesh_control::quic::{
 };
 use classmesh_control::receiver_playback_diagnostic_wire::build_after_authorized_teacher;
 use classmesh_control::receiver_telemetry_service_runtime::{
-    MAX_SERVICE_DIAGNOSTIC_AGE, ReceiverTelemetryAdmittedDiagnostic,
+    ReceiverTelemetryAdmittedDiagnostic, service_diagnostic_fresh_at,
 };
 use classmesh_control::stream::{
     ValidatedPresentationStreamOffer, ValidatedPresentationUnicastFallbackOffer,
@@ -1891,9 +1891,10 @@ async fn run_established_session(
                     diagnostic.binding.worker_generation,
                     diagnostic.binding.process_id,
                     diagnostic.binding.session_id,
-                ) || !Instant::now().checked_duration_since(
-                    diagnostic.service_received_at
-                ).is_some_and(|age| age <= MAX_SERVICE_DIAGNOSTIC_AGE)
+                ) || !service_diagnostic_fresh_at(
+                    diagnostic.service_received_at,
+                    Instant::now(),
+                )
                 {
                     continue;
                 }
@@ -1959,9 +1960,7 @@ async fn run_established_session(
                 // TLS transport and owner may be replaced during other async
                 // operations. Confirm the local freshness immediately before
                 // enqueueing the bounded QUIC control message.
-                if !Instant::now().checked_duration_since(
-                    diagnostic.service_received_at
-                ).is_some_and(|age| age <= MAX_SERVICE_DIAGNOSTIC_AGE) {
+                if !service_diagnostic_fresh_at(diagnostic.service_received_at, Instant::now()) {
                     continue;
                 }
                 if let Err(error) = send.send(&envelope).await {
@@ -3748,6 +3747,29 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+
+    #[test]
+    fn outbound_playback_diagnostic_age_rejects_clock_regression_and_expiry() {
+        use classmesh_control::receiver_telemetry_service_runtime::MAX_SERVICE_DIAGNOSTIC_AGE;
+        let accepted_at = Instant::now();
+        assert!(service_diagnostic_fresh_at(accepted_at, accepted_at));
+        assert!(service_diagnostic_fresh_at(
+            accepted_at,
+            accepted_at + MAX_SERVICE_DIAGNOSTIC_AGE
+        ));
+        assert!(!service_diagnostic_fresh_at(
+            accepted_at,
+            accepted_at + MAX_SERVICE_DIAGNOSTIC_AGE + Duration::from_millis(1)
+        ));
+        assert!(!service_diagnostic_fresh_at(
+            accepted_at,
+            accepted_at - Duration::from_millis(1)
+        ));
+        let sub_tick_before = accepted_at - Duration::from_nanos(1);
+        if sub_tick_before < accepted_at {
+            assert!(!service_diagnostic_fresh_at(accepted_at, sub_tick_before));
+        }
+    }
 
     #[test]
     fn clipboard_commands_require_negotiated_text_capability() {

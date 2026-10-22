@@ -19,6 +19,31 @@ use classmesh_control::receiver_telemetry_transport::{
 };
 use std::time::{Duration, Instant};
 
+#[test]
+fn service_diagnostic_age_is_monotonic_and_has_inclusive_expiry() {
+    use classmesh_control::receiver_telemetry_service_runtime::{
+        MAX_SERVICE_DIAGNOSTIC_AGE, service_diagnostic_fresh_at,
+    };
+    let accepted_at = Instant::now();
+    assert!(service_diagnostic_fresh_at(accepted_at, accepted_at));
+    assert!(service_diagnostic_fresh_at(
+        accepted_at,
+        accepted_at + MAX_SERVICE_DIAGNOSTIC_AGE
+    ));
+    assert!(!service_diagnostic_fresh_at(
+        accepted_at,
+        accepted_at + MAX_SERVICE_DIAGNOSTIC_AGE + Duration::from_millis(1)
+    ));
+    assert!(!service_diagnostic_fresh_at(
+        accepted_at,
+        accepted_at - Duration::from_millis(1)
+    ));
+    let sub_tick_before = accepted_at - Duration::from_nanos(1);
+    if sub_tick_before < accepted_at {
+        assert!(!service_diagnostic_fresh_at(accepted_at, sub_tick_before));
+    }
+}
+
 fn peer() -> ReceiverTelemetryCurrentWorker {
     ReceiverTelemetryCurrentWorker {
         process_id: 501,
