@@ -55,6 +55,11 @@ impl TeacherPlaybackUiProjection {
         capability_negotiated: bool,
         now: Instant,
     ) -> Result<TeacherPlaybackCounters, TeacherPlaybackDiagnosticError> {
+        // Check before mutating the ledger: a backward local receive clock
+        // must not consume a valid sequence or replace newer counters.
+        if self.received_at.is_some_and(|previous| now < previous) {
+            return Err(TeacherPlaybackDiagnosticError::ClockRegression);
+        }
         let accepted = self
             .ledger
             .accept_from_authenticated_control(envelope, capability_negotiated)?;
@@ -170,6 +175,57 @@ mod tests {
         let just_before = now - Duration::from_nanos(1);
         if just_before < now {
             assert_eq!(state.visible(MonitoringSourceId(7), just_before), None);
+        }
+    }
+
+    #[test]
+    fn reversed_reception_clock_cannot_replace_counters_or_advance_replay_ledger() {
+        let now = Instant::now();
+        let mut state = TeacherPlaybackUiProjection::new(MonitoringSourceId(7), binding()).unwrap();
+        let first = state.accept_authenticated(&envelope(), true, now).unwrap();
+        let mut next = envelope();
+        next.sequence += 1;
+        if let Some(control_envelope::Payload::ReceiverPlaybackDiagnostic(ref mut payload)) =
+            next.payload
+        {
+            payload.sequence += 1;
+            payload.presented_frames += 1;
+        }
+        assert_eq!(
+            state.accept_authenticated(&next, true, now - Duration::from_millis(1)),
+            Err(TeacherPlaybackDiagnosticError::ClockRegression)
+        );
+        assert_eq!(state.visible(MonitoringSourceId(7), now), Some(first));
+        assert_eq!(
+            state.visible(
+                MonitoringSourceId(7),
+                now + MAX_PLAYBACK_UI_AGE + Duration::from_millis(1)
+            ),
+            None
+        );
+        // The rejected sequence must be reusable at a genuinely later
+        // authenticated reception time, not consumed by the rejected report.
+        let second = state
+            .accept_authenticated(&next, true, now + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(second.sequence, first.sequence + 1);
+        assert_eq!(
+            state.visible(MonitoringSourceId(7), now + Duration::from_secs(1)),
+            Some(second)
+        );
+        let sub_tick_before = now - Duration::from_nanos(1);
+        if sub_tick_before < now {
+            let mut third = next;
+            third.sequence += 1;
+            if let Some(control_envelope::Payload::ReceiverPlaybackDiagnostic(ref mut payload)) =
+                third.payload
+            {
+                payload.sequence += 1;
+            }
+            assert_eq!(
+                state.accept_authenticated(&third, true, sub_tick_before),
+                Err(TeacherPlaybackDiagnosticError::ClockRegression)
+            );
         }
     }
 
