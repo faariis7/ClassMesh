@@ -99,6 +99,13 @@ pub enum ReceiverTelemetryServiceStreamError {
 /// authorization to send anything to the Teacher.
 pub const MAX_SERVICE_DIAGNOSTIC_AGE: Duration = Duration::from_secs(5);
 
+/// Check Service-local diagnostic age without accepting a reversed monotonic
+/// clock. This is freshness only, not peer or Teacher authorization.
+#[must_use]
+pub fn service_diagnostic_fresh_at(received_at: Instant, now: Instant) -> bool {
+    now >= received_at && now.duration_since(received_at) <= MAX_SERVICE_DIAGNOSTIC_AGE
+}
+
 /// Service-admitted playback delta for the exact independently verified
 /// Worker/receiver incarnation. Its monotonic received_at timestamp is
 /// local-only and must never be serialized as a Worker/Teacher clock.
@@ -385,9 +392,7 @@ impl ReceiverTelemetryServiceRuntime {
             return Ok(None);
         };
         if candidate.binding != grant.receiver()
-            || !service_now
-                .checked_duration_since(candidate.service_received_at)
-                .is_some_and(|age| age <= MAX_SERVICE_DIAGNOSTIC_AGE)
+            || !service_diagnostic_fresh_at(candidate.service_received_at, service_now)
         {
             return Ok(None);
         }
@@ -407,9 +412,7 @@ impl ReceiverTelemetryServiceRuntime {
         self.worker_grant_after_verified_peer(current_worker)
             .is_some_and(|grant| grant.receiver() == candidate.binding)
             && self.last_admitted_diagnostic == Some(candidate)
-            && service_now
-                .checked_duration_since(candidate.service_received_at)
-                .is_some_and(|age| age <= MAX_SERVICE_DIAGNOSTIC_AGE)
+            && service_diagnostic_fresh_at(candidate.service_received_at, service_now)
     }
 
     /// Direct single-message compatibility path, not the timed framed IPC.
