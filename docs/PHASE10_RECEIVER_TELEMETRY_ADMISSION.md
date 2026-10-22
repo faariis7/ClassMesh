@@ -898,3 +898,40 @@ connection. A separate Service-monotonic two-second partial-record deadline
 still applies to a frame that has actually begun. Native Windows tests prove
 multiple empty windows followed by a real complete frame, and fail-closed
 revocation after the idle window.
+
+
+## Optional native Worker→Service runtime (off by default)
+
+The Phase 10 experimental runtime can be enabled by a **privileged Service
+process environment** setting \`CLASSMESH_ENABLE_PHASE10_TELEMETRY=1\`. A
+missing or differently valued setting keeps both the native listener and
+the grant frame disabled in production. Even when enabled, the Service
+only sends the v11 typed receiver-binding grant over existing authenticated
+control IPC to a Worker that advertised the exact optional capability,
+after a protected key install and matching receiver start ACK.
+
+The Service creates an ACL-restricted inbound-only local native pipe,
+retains an owned duplicate of the original Worker process HANDLE, and
+serializes its key/restart/revocation lifecycle on the privileged main
+loop. A single independent background reader waits for the OS-attested
+peer, runs bounded cancel/drain reads, assembles only complete 136-byte
+receiver diagnostics and enqueues at most one complete frame without
+blocking the control plane. The Service main loop checks the exact
+Worker/receiver incarnation AGAIN before invoking existing framed
+telemetry admission. A full mailbox drops a whole report; the next
+sequence gap rebaselines rather than fabricating smooth metrics.
+
+The Worker independently checks the OS Service PID on the already
+authenticated primary pipe, the group-media key and the currently
+running media-start request ID before accepting the grant. An isolated
+sender thread owns the one-shot secondary pipe and single-slot queue.
+Only real playback counters from an exact healthy receiver become wire
+snapshots. A mismatched/rekeyed/restarted Worker drops its queue; an I/O
+failure retires the incarnation. The protocol does not send clipboard
+plaintext, Teacher messages, network RTT or inferred UDP loss.
+
+This transport deliberately DOES NOT publish to Teacher or choose a
+production quality default. It must pass exact-head native Windows CI,
+full binary-pair/VM tests and independent Teacher PrincipalId/session
+authorization before actual classroom qualification. Physical Phase
+10G Issue #288 stays open.

@@ -665,6 +665,22 @@ impl NamedPipeClient {
         Ok(())
     }
 
+    /// Service PID as independently reported by the kernel on the already
+    /// authenticated primary Worker IPC connection, not by a Worker report.
+    pub fn server_process_id(&self) -> Result<u32, PipeError> {
+        let mut pid = 0_u32;
+        if unsafe { GetNamedPipeServerProcessId(self.handle, &mut pid) } == 0 {
+            return Err(last_error("NamedPipeServerProcessId"));
+        }
+        if pid == 0 {
+            return Err(PipeError {
+                stage: "NamedPipeServerPidZero",
+                win32_error: 5,
+            });
+        }
+        Ok(pid)
+    }
+
     pub fn try_clone(&self) -> Result<Self, PipeError> {
         duplicate_pipe_handle(self.handle).map(|handle| Self {
             handle,

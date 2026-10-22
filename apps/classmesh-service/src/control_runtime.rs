@@ -832,6 +832,7 @@ pub(crate) struct WorkerCapabilityState {
 
 const WORKER_CAP_DXGI_CAPTURE: u8 = 1 << 0;
 const WORKER_CAP_H264_HARDWARE_ENCODE: u8 = 1 << 1;
+const WORKER_CAP_TELEMETRY_GRANT_V11: u8 = 1 << 2;
 
 impl WorkerCapabilityState {
     pub(crate) fn activate(&self, generation: u64, process_id: u32, session_id: u32) {
@@ -904,6 +905,7 @@ impl WorkerCapabilityState {
         session_id: u32,
         dxgi_capture: bool,
         h264_hardware_encode: bool,
+        telemetry_grant_v11: bool,
     ) -> bool {
         let mut snapshot = self.lock_snapshot();
         if generation == 0
@@ -921,8 +923,28 @@ impl WorkerCapabilityState {
         if h264_hardware_encode {
             flags |= WORKER_CAP_H264_HARDWARE_ENCODE;
         }
+        if telemetry_grant_v11 {
+            flags |= WORKER_CAP_TELEMETRY_GRANT_V11;
+        }
         snapshot.flags = flags;
         true
+    }
+
+    /// Optional telemetry grant is only safe for the exact authenticated
+    /// current Worker that explicitly advertised the v11 typed receiver
+    /// binding. No fallback for old or replaced Worker generations.
+    pub(crate) fn receiver_telemetry_grant_supported(
+        &self,
+        generation: u64,
+        process_id: u32,
+        session_id: u32,
+    ) -> bool {
+        let snapshot = *self.lock_snapshot();
+        generation != 0
+            && snapshot.generation == generation
+            && snapshot.process_id == process_id
+            && snapshot.session_id == session_id
+            && snapshot.flags & WORKER_CAP_TELEMETRY_GRANT_V11 != 0
     }
 
     fn has_live_worker(&self) -> bool {
@@ -4632,6 +4654,21 @@ mod tests {
     }
 
     #[test]
+    fn opt_in_native_telemetry_capability_never_inherits_stale_worker_generation() {
+        let state = WorkerCapabilityState::default();
+        state.activate(6, 42, 7);
+        assert!(!state.receiver_telemetry_grant_supported(6, 42, 7));
+        assert!(state.apply_report(6, 42, 7, false, false, true));
+        assert!(state.receiver_telemetry_grant_supported(6, 42, 7));
+        assert!(!state.receiver_telemetry_grant_supported(5, 42, 7));
+        assert!(!state.receiver_telemetry_grant_supported(6, 43, 7));
+        assert!(!state.receiver_telemetry_grant_supported(6, 42, 8));
+        state.activate(7, 44, 8);
+        assert!(!state.receiver_telemetry_grant_supported(7, 44, 8));
+        assert!(!state.receiver_telemetry_grant_supported(6, 42, 7));
+    }
+
+    #[test]
     fn worker_capabilities_gate_explicit_udp_on_verified_h264_and_dxgi() {
         let state = WorkerCapabilityState::default();
         assert_eq!(
@@ -4640,13 +4677,13 @@ mod tests {
         );
 
         state.activate(3, 42, 7);
-        assert!(!state.apply_report(2, 42, 7, true, true));
+        assert!(!state.apply_report(2, 42, 7, true, true, false));
         assert_eq!(
             state.hello_capabilities(),
             BTreeSet::from([Capability::ServiceSessionWorker])
         );
 
-        assert!(state.apply_report(3, 42, 7, true, true));
+        assert!(state.apply_report(3, 42, 7, true, true, false));
         assert_eq!(
             state.hello_capabilities(),
             BTreeSet::from([
@@ -4674,7 +4711,7 @@ mod tests {
     fn h264_qualification_updates_only_the_current_worker_generation() {
         let state = WorkerCapabilityState::default();
         state.activate(12, 120, 7);
-        assert!(state.apply_report(12, 120, 7, true, false));
+        assert!(state.apply_report(12, 120, 7, true, false, false));
 
         assert!(!state.apply_h264_qualification(11, 120, 7, true));
         assert!(
@@ -4718,16 +4755,16 @@ mod tests {
     fn old_generation_cannot_restore_flags_after_worker_replacement() {
         let state = WorkerCapabilityState::default();
         state.activate(4, 40, 8);
-        assert!(state.apply_report(4, 40, 8, true, true));
+        assert!(state.apply_report(4, 40, 8, true, true, false));
 
         state.activate(5, 50, 9);
-        assert!(!state.apply_report(4, 40, 8, true, true));
+        assert!(!state.apply_report(4, 40, 8, true, true, false));
         assert_eq!(
             state.hello_capabilities(),
             BTreeSet::from([Capability::ServiceSessionWorker])
         );
 
-        assert!(state.apply_report(5, 50, 9, true, false));
+        assert!(state.apply_report(5, 50, 9, true, false, false));
         assert_eq!(
             state.hello_capabilities(),
             BTreeSet::from([Capability::DxgiCapture, Capability::ServiceSessionWorker,])
@@ -4738,10 +4775,10 @@ mod tests {
     fn stale_capability_reader_cannot_clear_replacement_worker_flags() {
         let state = WorkerCapabilityState::default();
         state.activate(10, 100, 4);
-        assert!(state.apply_report(10, 100, 4, true, false));
+        assert!(state.apply_report(10, 100, 4, true, false, false));
 
         state.activate(11, 101, 5);
-        assert!(state.apply_report(11, 101, 5, true, false));
+        assert!(state.apply_report(11, 101, 5, true, false, false));
         assert!(!state.clear_report_if_current(10, 100, 4));
         assert_eq!(
             state.hello_capabilities(),
@@ -4760,9 +4797,9 @@ mod tests {
         let state = WorkerCapabilityState::default();
         state.activate(9, 100, 5);
 
-        assert!(!state.apply_report(9, 101, 5, true, false));
-        assert!(!state.apply_report(9, 100, 6, true, false));
-        assert!(!state.apply_report(10, 100, 5, true, false));
+        assert!(!state.apply_report(9, 101, 5, true, false, false));
+        assert!(!state.apply_report(9, 100, 6, true, false, false));
+        assert!(!state.apply_report(10, 100, 5, true, false, false));
         assert_eq!(
             state.hello_capabilities(),
             BTreeSet::from([Capability::ServiceSessionWorker])

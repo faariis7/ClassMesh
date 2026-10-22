@@ -1,4 +1,7 @@
 #[cfg(windows)]
+mod telemetry_native;
+
+#[cfg(windows)]
 const WORKER_IPC_EVENT_QUEUE_CAPACITY: usize = 128;
 #[cfg(windows)]
 const PRESENTATION_RECEIVE_DRAIN_LIMIT: usize = 8;
@@ -53,6 +56,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Pin the original privileged control pipe's native Service PID before
+    // considering any optional diagnostic grant. Worker report bytes and
+    // the secondary telemetry address are not Service authentication.
+    let primary_service_pid = pipe.server_process_id()?;
     let (event_tx, event_rx) = mpsc::sync_channel(WORKER_IPC_EVENT_QUEUE_CAPACITY);
     let reader_pipe = pipe.try_clone()?;
     let _ipc_thread = spawn_ipc_reader(reader_pipe, event_tx);
@@ -109,6 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         classmesh_worker::presentation_keyframe_retry::PresentationKeyframeSilence::default();
     let mut presentation_delivery_telemetry =
         classmesh_worker::presentation_delivery_telemetry::PresentationDeliveryTelemetry::default();
+    let mut native_telemetry_sender: Option<telemetry_native::BestEffortReceiverSender> = None;
 
     loop {
         let now = Instant::now();
@@ -367,6 +375,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Ok(WorkerEvent::PresentationMulticastStart(start)) => {
+                native_telemetry_sender = None;
                 use classmesh_windows_runtime::ipc::WorkerPresentationMulticastStartStatus;
 
                 let key_binding_matches = group_media_keys.binding().is_some_and(|binding| {
@@ -447,6 +456,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             Ok(WorkerEvent::PresentationUnicastStart(start)) => {
+                native_telemetry_sender = None;
                 use classmesh_windows_runtime::ipc::WorkerPresentationUnicastStartStatus;
 
                 let key_binding_matches = group_media_keys.binding().is_some_and(|binding| {
@@ -521,9 +531,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )?;
                 continue;
             }
+            Ok(WorkerEvent::ReceiverTelemetryGrant(grant)) => {
+                let key = group_media_keys.binding();
+                let active = presentation_multicast
+                    .as_ref()
+                    .filter(|receiver| {
+                        !receiver.failed()
+                            && key.is_some_and(|key| receiver.matches_key_binding(key))
+                    })
+                    .map(|receiver| receiver.binding().request_id)
+                    .or_else(|| {
+                        presentation_unicast
+                            .as_ref()
+                            .filter(|receiver| {
+                                !receiver.failed()
+                                    && key.is_some_and(|key| receiver.matches_key_binding(key))
+                            })
+                            .map(|receiver| receiver.binding().request_id)
+                    });
+                match telemetry_native::BestEffortReceiverSender::start(
+                    grant,
+                    primary_service_pid,
+                    std::process::id(),
+                    actual_session,
+                    key,
+                    active,
+                ) {
+                    Ok(sender) => native_telemetry_sender = Some(sender),
+                    Err(reason) => eprintln!(
+                        "ClassMesh Worker refused stale/unbound Phase10 diagnostics: {reason}"
+                    ),
+                }
+                continue;
+            }
             Ok(WorkerEvent::PresentationKeyClear(clear)) => {
                 let cleared = group_media_keys.clear_if_matches(clear);
                 if cleared {
+                    native_telemetry_sender = None;
                     presentation_multicast = None;
                     presentation_unicast = None;
                     presentation_decode = None;
@@ -540,6 +584,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             Ok(WorkerEvent::PresentationKeyInstall(install)) => {
+                // A newly installing protected key may revoke the old one
+                // before its IPC reply: do not retain the old sender.
+                native_telemetry_sender = None;
                 let binding = install.binding();
                 let receive_binding_mismatch = presentation_multicast
                     .as_ref()
@@ -762,6 +809,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         if presentation_pipeline_failed {
+            native_telemetry_sender = None;
             eprintln!(
                 "ClassMesh Worker presentation receive path stopped after media-local runtime failure; control remains active"
             );
@@ -832,6 +880,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         authenticated,
                         queue_drops,
                     ) {
+                        // Real cumulative playback counters are encoded
+                        // only after verifying the exact installed key,
+                        // active receiver start and Service-issued lifetime.
+                        // The one-slot sender never blocks the media loop.
+                        if let Some(sender) = native_telemetry_sender.as_ref() {
+                            let active_start = presentation_multicast.as_ref()
+                                .filter(|receiver| !receiver.failed()
+                                    && receiver.matches_key_binding(binding))
+                                .map(|receiver| receiver.binding().request_id)
+                                .or_else(|| presentation_unicast.as_ref()
+                                    .filter(|receiver| !receiver.failed()
+                                        && receiver.matches_key_binding(binding))
+                                    .map(|receiver| receiver.binding().request_id));
+                            if sender.offer(
+                                report, binding, active_start,
+                                primary_service_pid, std::process::id(), actual_session,
+                            ).is_err() {
+                                native_telemetry_sender = None;
+                            }
+                        }
                         let counters = report.playback_counters();
                         eprintln!(
                             "ClassMesh Worker local presentation playback: presentation={} stream={} epoch={} sample_sequence={} auth_opened={} auth_rejected={} decoded={} presented={} present_errors={} decode_errors={} waiting_for_keyframe={} queue_drop_events_total={}",
@@ -1084,6 +1152,7 @@ enum WorkerEvent {
         classmesh_windows_runtime::ipc_sensitive::SensitivePresentationKeyInstall,
     ),
     PresentationKeyClear(classmesh_windows_runtime::ipc::ServicePresentationKeyClear),
+    ReceiverTelemetryGrant(classmesh_windows_runtime::ipc::ServiceReceiverTelemetryGrant),
     PresentationMulticastStart(classmesh_windows_runtime::ipc::ServicePresentationMulticastStart),
     PresentationUnicastStart(classmesh_windows_runtime::ipc::ServicePresentationUnicastStart),
     PresentationKeyframeRequest(classmesh_core::keyframe::PresentationKeyframeRequest),
@@ -1608,7 +1677,8 @@ fn publish_worker_capabilities(
             session_id,
             snapshot.dxgi_capture,
             snapshot.h264_hardware_encode,
-        ),
+        )
+        .with_receiver_telemetry_grant_v11(),
     );
     let encoded = frame.encode().map_err(ipc_frame_error)?;
     pipe.write_all(&encoded)?;
@@ -1638,6 +1708,9 @@ fn worker_event_from_decoded_frame(
             }
             Ok(IpcMessage::ServicePresentationKeyClear(clear)) => {
                 Ok(WorkerEvent::PresentationKeyClear(clear))
+            }
+            Ok(IpcMessage::ServiceReceiverTelemetryGrant(grant)) => {
+                Ok(WorkerEvent::ReceiverTelemetryGrant(grant))
             }
             Ok(IpcMessage::ServicePresentationMulticastStart(start)) => {
                 Ok(WorkerEvent::PresentationMulticastStart(start))
