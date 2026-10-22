@@ -75,7 +75,7 @@ impl TeacherPlaybackDiagnosticLedger {
     /// Call only after the enclosing ControlEnvelope was authenticated by the
     /// exact enrolled Service QUIC connection and the receiver capability was
     /// negotiated. This method rechecks the exact live presentation binding.
-    pub fn accept_from_authenticated_control(
+    pub(crate) fn accept_from_authenticated_control(
         &mut self,
         envelope: &ControlEnvelope,
         capability_negotiated: bool,
