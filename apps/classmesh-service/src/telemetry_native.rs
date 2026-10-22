@@ -16,16 +16,39 @@ const NATIVE_DIAGNOSTIC_PARTIAL_TIMEOUT: Duration = Duration::from_secs(2);
 // Check BOTH before and after a potentially blocking native read. A last
 // fragment may complete after the deadline even if the read began before it.
 fn partial_report_expired(began: Option<Instant>, now: Instant) -> bool {
-    began.is_some_and(|at| now.saturating_duration_since(at) >= NATIVE_DIAGNOSTIC_PARTIAL_TIMEOUT)
+    began.is_some_and(|at| now < at || now.duration_since(at) >= NATIVE_DIAGNOSTIC_PARTIAL_TIMEOUT)
+}
+
+// Private Service-owned rearm incarnation. An identical OS pipe identity
+// must not make reports/listeners from an earlier retired arm current again.
+fn next_native_reader_incarnation(last: u64) -> Result<u64, &'static str> {
+    last.checked_add(1)
+        .ok_or("TelemetryReaderIncarnationExhausted")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeReaderArm {
+    identity: TelemetryPipeIdentity,
+    incarnation: u64,
+}
+
+fn live_identity_for_arm(
+    current: &Mutex<Option<NativeReaderArm>>,
+    arm: NativeReaderArm,
+) -> Option<TelemetryPipeIdentity> {
+    current
+        .lock()
+        .ok()
+        .and_then(|state| (*state == Some(arm)).then_some(arm.identity))
 }
 
 struct AuthorizedNativeStart {
     pipe: ReceiverTelemetryPipeListener,
     worker: SessionProcess,
-    identity: TelemetryPipeIdentity,
+    arm: NativeReaderArm,
 }
 struct NativeReport {
-    identity: TelemetryPipeIdentity,
+    arm: NativeReaderArm,
     // Service-owned first-byte time, not a timestamp supplied by Worker.
     // Keep it through the bounded mailbox to reject reports delayed in queue.
     began: Instant,
@@ -43,8 +66,11 @@ impl NativeReport {
 pub(super) struct ServiceTelemetryReader {
     // Active transport is distinct from an otherwise authorized runtime.
     // A failed grant send must never re-arm the OS reader by polling state.
-    armed: Option<TelemetryPipeIdentity>,
-    current: Arc<Mutex<Option<TelemetryPipeIdentity>>>,
+    armed: Option<NativeReaderArm>,
+    // Monotonic even across retirement/re-arm with the SAME OS identity.
+    // Exhaustion fails closed; do not wrap into an old incarnation.
+    last_incarnation: u64,
+    current: Arc<Mutex<Option<NativeReaderArm>>>,
     starts: mpsc::SyncSender<AuthorizedNativeStart>,
     reports: mpsc::Receiver<NativeReport>,
 }
@@ -63,6 +89,7 @@ impl ServiceTelemetryReader {
             });
         Self {
             armed: None,
+            last_incarnation: 0,
             current,
             starts,
             reports,
@@ -88,17 +115,23 @@ impl ServiceTelemetryReader {
             worker_generation: receiver.worker_generation,
             receiver_generation: receiver.receiver_generation,
         };
+        let incarnation = next_native_reader_incarnation(self.last_incarnation)?;
         let pipe = ReceiverTelemetryPipeListener::create(identity, user_sid)
             .map_err(|_| "TelemetryPipeCreate")?;
         let owned_worker = worker
             .try_clone()
             .map_err(|_| "TelemetryWorkerHandleClone")?;
-        self.armed = Some(identity);
-        self.set_current(Some(identity));
+        let arm = NativeReaderArm {
+            identity,
+            incarnation,
+        };
+        self.last_incarnation = incarnation;
+        self.armed = Some(arm);
+        self.set_current(Some(arm));
         match self.starts.try_send(AuthorizedNativeStart {
             pipe,
             worker: owned_worker,
-            identity,
+            arm,
         }) {
             Ok(()) => Ok(identity),
             Err(_) => {
@@ -116,10 +149,10 @@ impl ServiceTelemetryReader {
             worker_generation: r.worker_generation,
             receiver_generation: r.receiver_generation,
         });
-        if target != self.armed {
+        if target != self.armed.map(|arm| arm.identity) {
             self.retire();
         } else {
-            self.set_current(target);
+            self.set_current(self.armed);
         }
     }
 
@@ -132,17 +165,19 @@ impl ServiceTelemetryReader {
     /// delivery. Only the actual Service-armed OS-attested channel qualifies.
     #[must_use]
     pub(super) fn is_armed_for(&self, binding: ReceiverTelemetryBinding) -> bool {
-        self.armed
-            == Some(TelemetryPipeIdentity {
-                service_process_id: std::process::id(),
-                worker_process_id: binding.process_id,
-                worker_session_id: binding.session_id,
-                worker_generation: binding.worker_generation,
-                receiver_generation: binding.receiver_generation,
-            })
+        self.armed.is_some_and(|arm| {
+            arm.identity
+                == TelemetryPipeIdentity {
+                    service_process_id: std::process::id(),
+                    worker_process_id: binding.process_id,
+                    worker_session_id: binding.session_id,
+                    worker_generation: binding.worker_generation,
+                    receiver_generation: binding.receiver_generation,
+                }
+        })
     }
 
-    fn set_current(&self, target: Option<TelemetryPipeIdentity>) {
+    fn set_current(&self, target: Option<NativeReaderArm>) {
         if let Ok(mut guard) = self.current.lock() {
             *guard = target;
         }
@@ -161,7 +196,7 @@ impl ServiceTelemetryReader {
             // Revocation or a failed control-grant send can leave a report in
             // the one-slot mailbox while the runtime binding is still valid.
             // Only an explicitly armed native transport may feed admission.
-            if self.armed != Some(incoming.identity) {
+            if self.armed != Some(incoming.arm) {
                 continue;
             }
             // The reader may be descheduled after its last deadline check,
@@ -177,7 +212,7 @@ impl ServiceTelemetryReader {
                 continue;
             };
             let r = authorized.receiver();
-            if incoming.identity
+            if incoming.arm.identity
                 != (TelemetryPipeIdentity {
                     service_process_id: std::process::id(),
                     worker_process_id: r.process_id,
@@ -209,11 +244,12 @@ impl ServiceTelemetryReader {
 
 fn run_one_listener(
     mut start: AuthorizedNativeStart,
-    current: &Mutex<Option<TelemetryPipeIdentity>>,
+    current: &Mutex<Option<NativeReaderArm>>,
     out: &mpsc::SyncSender<NativeReport>,
 ) {
-    let identity = start.identity;
-    let live = || current.lock().ok().and_then(|state| *state);
+    let arm = start.arm;
+    let identity = arm.identity;
+    let live = || live_identity_for_arm(current, arm);
     if start
         .pipe
         .accept_bound_worker(Duration::from_secs(2), &start.worker, live)
@@ -257,7 +293,7 @@ fn run_one_listener(
                         return; // a complete frame must have a first byte
                     };
                     let _ = out.try_send(NativeReport {
-                        identity,
+                        arm,
                         began: began_at,
                         data: frame,
                     });
@@ -300,16 +336,64 @@ mod tests {
     }
 
     #[test]
+    fn native_partial_and_queued_report_expire_on_clock_regression() {
+        let at = Instant::now();
+        assert!(partial_report_expired(
+            Some(at + Duration::from_millis(1)),
+            at
+        ));
+        let very_small_future = at + Duration::from_nanos(1);
+        if very_small_future > at {
+            assert!(partial_report_expired(Some(very_small_future), at));
+        }
+    }
+
+    #[test]
+    fn native_rearm_incarnation_is_strictly_increasing_without_wraparound() {
+        assert_eq!(next_native_reader_incarnation(0), Ok(1));
+        assert_eq!(next_native_reader_incarnation(1), Ok(2));
+        assert_eq!(
+            next_native_reader_incarnation(u64::MAX),
+            Err("TelemetryReaderIncarnationExhausted")
+        );
+    }
+
+    #[test]
+    fn an_old_reader_cannot_become_live_after_same_identity_rearm() {
+        let identity = TelemetryPipeIdentity {
+            service_process_id: 1,
+            worker_process_id: 2,
+            worker_session_id: 3,
+            worker_generation: 4,
+            receiver_generation: 5,
+        };
+        let old = NativeReaderArm {
+            identity,
+            incarnation: 1,
+        };
+        let newer = NativeReaderArm {
+            identity,
+            incarnation: 2,
+        };
+        let current = Mutex::new(Some(newer));
+        assert_eq!(live_identity_for_arm(&current, old), None);
+        assert_eq!(live_identity_for_arm(&current, newer), Some(identity));
+    }
+
+    #[test]
     fn queued_native_report_expires_before_privileged_admission() {
         let received = Instant::now();
         let queued_at = received - Duration::from_millis(1_999);
         let report = NativeReport {
-            identity: TelemetryPipeIdentity {
-                service_process_id: 1,
-                worker_process_id: 2,
-                worker_session_id: 3,
-                worker_generation: 4,
-                receiver_generation: 5,
+            arm: NativeReaderArm {
+                identity: TelemetryPipeIdentity {
+                    service_process_id: 1,
+                    worker_process_id: 2,
+                    worker_session_id: 3,
+                    worker_generation: 4,
+                    receiver_generation: 5,
+                },
+                incarnation: 1,
             },
             began: queued_at,
             data: [0; ONE_REPORT_BYTES],
@@ -319,10 +403,12 @@ mod tests {
         // remains authoritative even when it reaches admission later.
         assert!(report.is_fresh_at(received));
         assert!(!report.is_fresh_at(received + Duration::from_millis(1)));
+        let regressed = queued_at - Duration::from_millis(1);
+        assert!(!report.is_fresh_at(regressed));
     }
 
     #[test]
-    fn retired_native_reader_discards_queued_report_even_with_live_runtime_binding() {
+    fn retired_or_rearmed_native_reader_discards_earlier_incarnation_reports() {
         use classmesh_control::receiver_telemetry::{
             ReceiverPlaybackCounters, ReceiverTelemetrySnapshot,
         };
@@ -398,15 +484,20 @@ mod tests {
         // Model an actually armed reader before a failed control-grant send.
         // Without this setup, the test could pass merely because no pipe was
         // ever armed, rather than proving that retirement revokes admission.
-        reader.armed = Some(identity);
-        reader.set_current(Some(identity));
-        assert_eq!(reader.armed, Some(identity));
+        let old_arm = NativeReaderArm {
+            identity,
+            incarnation: 1,
+        };
+        reader.armed = Some(old_arm);
+        reader.last_incarnation = 1;
+        reader.set_current(Some(old_arm));
+        assert_eq!(reader.armed, Some(old_arm));
         // Simulate a report already queued before control-grant send failed.
         // Runtime authorization survives, but the native transport was retired.
         assert!(
             sender
                 .try_send(NativeReport {
-                    identity,
+                    arm: old_arm,
                     began: Instant::now(),
                     data: wire,
                 })
@@ -419,6 +510,43 @@ mod tests {
         assert!(reader.reports.try_recv().is_err());
         assert_eq!(runtime.current(), Some(binding));
         assert!(!runtime.has_fresh_for_verified_peer(worker, Instant::now()));
+
+        // Re-arming the exact same OS receiver identity cannot revive an
+        // earlier connection's still-fresh queued report or its old reader.
+        let newer_arm = NativeReaderArm {
+            identity,
+            incarnation: 2,
+        };
+        reader.last_incarnation = 2;
+        reader.armed = Some(newer_arm);
+        reader.set_current(Some(newer_arm));
+        assert!(
+            sender
+                .try_send(NativeReport {
+                    arm: old_arm,
+                    began: Instant::now(),
+                    data: wire,
+                })
+                .is_ok()
+        );
+        reader.drain(&mut runtime, Some(worker));
+        assert!(reader.reports.try_recv().is_err());
+        assert!(!runtime.has_fresh_for_verified_peer(worker, Instant::now()));
+
+        // The new incarnation is independently allowed to admit the first
+        // matching frame, without borrowing authority from the old arm.
+        assert!(
+            sender
+                .try_send(NativeReport {
+                    arm: newer_arm,
+                    began: Instant::now(),
+                    data: wire,
+                })
+                .is_ok()
+        );
+        reader.drain(&mut runtime, Some(worker));
+        assert!(reader.reports.try_recv().is_err());
+        assert!(runtime.has_fresh_for_verified_peer(worker, Instant::now()));
     }
 
     #[test]
