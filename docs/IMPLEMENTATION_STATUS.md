@@ -1,3 +1,5 @@
+**Phase 12 trusted fresh-install integration (2026-10-22):** #573 is merged (`c1347f8`, exact-head CI `39256003390` PASS). Current Phase 12 worktree `feat/phase12-service-lifecycle-qualification` adds an opt-in installer that preflights candidate policy/identity/config, authorized certificate, CNG key match and non-exportability before protected startup/policy/Registry creation. VM1 native fresh-install tests 7/7 and Windows feature Clippy passed on the current implementation; final policy-disabled regression and CI remain pending. The Service feature is still default-off; positive installed SCM, sudden power loss, VM2 confirmation and physical-device qualification remain OPEN. No production or Phase 10 files changed.
+
 **Phase 10 Win32 diagnostic transport prerequisite (2026-10-22):**
 The isolated `feat/phase10-telemetry-service-wire` introduces **inactive**
 write-only Worker / inbound-only Service local named-pipe primitives, Windows

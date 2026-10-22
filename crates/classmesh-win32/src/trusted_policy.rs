@@ -13,14 +13,16 @@ use crate::{
     registry_epoch::RegistryAnchor,
 };
 use classmesh_security::{
-    AuthorizationStore, persistence::DurableAuthorizationState,
+    AuthorizationStore, CredentialFingerprint, PrincipalId, persistence::DurableAuthorizationState,
     policy_epoch::encode_bound_policy_checkpoint,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
     net::{Ipv4Addr, SocketAddr},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const INSTALLED_SCOPE: &str = "ClassMesh-Policy-v2";
@@ -155,6 +157,25 @@ pub fn provision_installed(epoch: u64, bytes: &[u8]) -> io::Result<()> {
 pub fn provision_startup_inputs(identity: &[u8], config: &[u8]) -> io::Result<()> {
     provision_inputs_at("ClassMesh", identity, config)
 }
+/// Provision all required inputs of a fresh opt-in Service installation. No
+/// filesystem or Registry creation occurs before the candidate policy, machine
+/// credential, non-exportable CNG key and config agree. A crash after the first
+/// create can leave an orphan; startup remains fail-closed and never repairs it.
+pub fn provision_fresh_install(
+    epoch: u64,
+    policy: &[u8],
+    identity: &[u8],
+    config: &[u8],
+) -> io::Result<()> {
+    provision_fresh_at(
+        INSTALLED_SCOPE,
+        "ClassMesh",
+        epoch,
+        policy,
+        identity,
+        config,
+    )
+}
 /// Service must first stop. Refuse active runtime, stale epoch and existing blob.
 /// An error after commit can leave the newer epoch durable but unacknowledged;
 /// recovery must reopen the anchor, never retry with the old expected record.
@@ -229,6 +250,66 @@ fn provision_inputs_at(scope: &str, identity: &[u8], config: &[u8]) -> io::Resul
         MAX_CONFIG_BYTES,
     )?;
     Ok(())
+}
+fn preflight_fresh_install(
+    epoch: u64,
+    policy: &[u8],
+    identity: &[u8],
+    config: &[u8],
+) -> io::Result<()> {
+    let record = validate(epoch, policy)?;
+    let authorization = DurableAuthorizationState::parse_bound_primary_from_readers(
+        record.as_slice(),
+        policy,
+        epoch,
+    )
+    .map_err(|_| denied())?;
+    let identity = classmesh_identity_win::DurableMachineIdentity::parse_from_reader(identity)
+        .map_err(|_| denied())?;
+    parse_control_config(config)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| denied())?;
+    let now_ms = u64::try_from(now.as_millis()).map_err(|_| denied())?;
+    if identity.not_after_unix_ms <= now_ms {
+        return Err(denied());
+    }
+    let leaf = identity.certificate_chain_der.first().ok_or_else(denied)?;
+    let fingerprint = CredentialFingerprint(Sha256::digest(leaf).into());
+    if authorization.principal_for_credential(fingerprint, now_ms)
+        != Some(PrincipalId(identity.principal_id))
+    {
+        return Err(denied());
+    }
+    let key =
+        classmesh_identity_win::CngMachineKey::open(identity.cng_key_name).map_err(|_| denied())?;
+    if key.export_policy().map_err(|_| denied())? != 0 {
+        return Err(denied());
+    }
+    let chain = identity
+        .certificate_chain_der
+        .into_iter()
+        .map(rustls::pki_types::CertificateDer::from)
+        .collect();
+    classmesh_identity_win::cng_server_cert_resolver(chain, key).map_err(|_| denied())?;
+    Ok(())
+}
+fn provision_fresh_at(
+    policy_scope: &str,
+    startup_scope: &str,
+    epoch: u64,
+    policy: &[u8],
+    identity: &[u8],
+    config: &[u8],
+) -> io::Result<()> {
+    if (policy_scope != INSTALLED_SCOPE && !cfg!(test)) || !startup_scope_allowed(startup_scope) {
+        return Err(denied());
+    }
+    preflight_fresh_install(epoch, policy, identity, config)?;
+    // Startup inputs precede the policy commit. The latter is the activation
+    // boundary, and any partial prior step leaves only an inert orphan.
+    provision_inputs_at(startup_scope, identity, config)?;
+    provision_at(policy_scope, epoch, policy)
 }
 fn validate(epoch: u64, bytes: &[u8]) -> io::Result<[u8; 48]> {
     if bytes.is_empty() || bytes.len() > MAX_POLICY_BYTES {
@@ -752,10 +833,11 @@ mod tests {
 
     #[test]
     fn fresh_install_preflight_rejects_invalid_inputs_without_creating_either_scope() {
-        let suffix = std::process::id();
+        let suffix = std::process::id().wrapping_add(1_000_000);
         let policy_scope = format!("ClassMesh-anchor-probe-fresh-{suffix}");
         let startup_scope = format!("ClassMesh-anchor-probe-provision-{suffix}");
-        let program_data = crate::program_data_known_folder::resolve_os_program_data_path().unwrap();
+        let program_data =
+            crate::program_data_known_folder::resolve_os_program_data_path().unwrap();
         let policy_root = program_data.join(&policy_scope);
         let startup_root = program_data.join(&startup_scope);
         assert!(
@@ -771,5 +853,141 @@ mod tests {
         );
         assert!(!policy_root.exists());
         assert!(!startup_root.exists());
+    }
+
+    #[test]
+    fn fresh_install_binds_policy_identity_key_and_config_before_commit() {
+        use rcgen::{
+            BasicConstraints, CertificateParams, CertifiedIssuer, DnType, IsCa, KeyUsagePurpose,
+        };
+        struct KeyCleanup(String);
+        impl Drop for KeyCleanup {
+            fn drop(&mut self) {
+                if let Ok(key) = classmesh_identity_win::CngMachineKey::open(self.0.clone()) {
+                    let _ = key.delete();
+                }
+            }
+        }
+        let suffix = std::process::id().wrapping_add(2_000_000);
+        let policy_scope = format!("ClassMesh-anchor-probe-fresh-valid-{suffix}");
+        let startup_scope = format!("ClassMesh-anchor-probe-provision-{suffix}");
+        let program_data =
+            crate::program_data_known_folder::resolve_os_program_data_path().unwrap();
+        let policy_root = program_data.join(&policy_scope);
+        let startup_root = program_data.join(&startup_scope);
+        let key_name = format!("ClassMesh-fresh-test-{suffix}");
+        let _cleanup = KeyCleanup(key_name.clone());
+        let key = classmesh_identity_win::CngMachineKey::create(key_name.clone()).unwrap();
+        let adapter = classmesh_identity_win::CngRcgenSigningKey::new(key).unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.serial_number = Some(1_u64.into());
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "ClassMesh Fresh Install Test");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyCertSign,
+        ];
+        let leaf = CertifiedIssuer::self_signed(params, adapter)
+            .unwrap()
+            .der()
+            .to_vec();
+        let fingerprint: [u8; 32] = Sha256::digest(&leaf).into();
+        let principal = [7_u8; 32];
+        let policy = serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "principals": [{"id": principal, "kind": 4, "enabled": true,
+                "permissions": [], "credentials": [{"fingerprint": fingerprint,
+                    "state": 1, "issued_at_unix_ms": 0,
+                    "expires_at_unix_ms": null, "revoked_at_unix_ms": null}]}]
+        }))
+        .unwrap();
+        let identity = serde_json::to_vec(&serde_json::json!({
+            "version": 1, "principal_id": principal, "cng_key_name": key_name,
+            "certificate_chain_der": [leaf], "trust_roots_der": [],
+            "not_after_unix_ms": u64::MAX
+        }))
+        .unwrap();
+        let config = br#"{"version":1,"bind_address":"127.0.0.1:5151","multicast_interface":null}"#;
+        let mut wrong_policy: serde_json::Value = serde_json::from_slice(&policy).unwrap();
+        wrong_policy["principals"][0]["enabled"] = false.into();
+        assert!(
+            provision_fresh_at(
+                &policy_scope,
+                &startup_scope,
+                1,
+                &serde_json::to_vec(&wrong_policy).unwrap(),
+                &identity,
+                config
+            )
+            .is_err()
+        );
+        let mut wrong_identity: serde_json::Value = serde_json::from_slice(&identity).unwrap();
+        wrong_identity["cng_key_name"] = "ClassMesh-missing-key".into();
+        assert!(
+            provision_fresh_at(
+                &policy_scope,
+                &startup_scope,
+                1,
+                &policy,
+                &serde_json::to_vec(&wrong_identity).unwrap(),
+                config
+            )
+            .is_err()
+        );
+        let other_key_name = format!("ClassMesh-fresh-other-test-{suffix}");
+        let _other_cleanup = KeyCleanup(other_key_name.clone());
+        classmesh_identity_win::CngMachineKey::create(other_key_name.clone()).unwrap();
+        wrong_identity["cng_key_name"] = other_key_name.into();
+        assert!(
+            provision_fresh_at(
+                &policy_scope,
+                &startup_scope,
+                1,
+                &policy,
+                &serde_json::to_vec(&wrong_identity).unwrap(),
+                config
+            )
+            .is_err(),
+            "existing CNG key with a different public key must fail preflight"
+        );
+        wrong_identity["cng_key_name"] = key_name.into();
+        wrong_identity["not_after_unix_ms"] = 1.into();
+        assert!(
+            provision_fresh_at(
+                &policy_scope,
+                &startup_scope,
+                1,
+                &policy,
+                &serde_json::to_vec(&wrong_identity).unwrap(),
+                config
+            )
+            .is_err()
+        );
+        assert!(
+            provision_fresh_at(
+                &policy_scope,
+                &startup_scope,
+                1,
+                &policy,
+                &identity,
+                b"bad config"
+            )
+            .is_err()
+        );
+        assert!(!policy_root.exists());
+        assert!(!startup_root.exists());
+        provision_fresh_at(&policy_scope, &startup_scope, 1, &policy, &identity, config).unwrap();
+        assert!(policy_root.exists());
+        assert!(startup_root.join("state/machine-identity.json").exists());
+        assert_eq!(open_at(&policy_scope).unwrap().epoch(), 1);
+        assert!(
+            provision_fresh_at(&policy_scope, &startup_scope, 1, &policy, &identity, config)
+                .is_err()
+        );
+        crate::registry_epoch::remove_fixture(&policy_scope);
+        std::fs::remove_dir_all(policy_root).unwrap();
+        std::fs::remove_dir_all(startup_root).unwrap();
     }
 }
