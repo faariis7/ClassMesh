@@ -227,6 +227,15 @@ pub(crate) struct RegistryAnchor {
     key: Key,
 }
 impl RegistryAnchor {
+    /// A fresh installer must not seed startup inputs that would activate an
+    /// earlier committed policy. Probe without flushing or adopting a key.
+    pub(crate) fn require_absent(scope: &str) -> io::Result<()> {
+        let parent = machine_parent(scope)?;
+        match open(parent.0, scope, KEY_READ | KEY_WOW64_64KEY) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            _ => Err(denied()),
+        }
+    }
     pub(crate) fn create(scope: &str, record: &[u8; RECORD_LEN]) -> io::Result<Self> {
         epoch(record)?;
         let parent = machine_parent(scope)?;

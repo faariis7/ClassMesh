@@ -9,6 +9,7 @@ use crate::{
     nt_relative_directory::{
         create_relative_protected_directory, create_relative_protected_file,
         open_relative_exclusive_file, open_relative_protected_node,
+        open_relative_readonly_directory,
     },
     registry_epoch::RegistryAnchor,
 };
@@ -195,6 +196,9 @@ fn startup_scope_allowed(scope: &str) -> bool {
                 .strip_prefix("ClassMesh-anchor-probe-provision-")
                 .is_some_and(|suffix| suffix.parse::<u32>().is_ok()))
 }
+fn policy_scope_allowed(scope: &str) -> bool {
+    scope == INSTALLED_SCOPE || (cfg!(test) && scope.starts_with("ClassMesh-anchor-probe-"))
+}
 
 fn stage_startup_input(
     parent: &File,
@@ -302,10 +306,20 @@ fn provision_fresh_at(
     identity: &[u8],
     config: &[u8],
 ) -> io::Result<()> {
-    if (policy_scope != INSTALLED_SCOPE && !cfg!(test)) || !startup_scope_allowed(startup_scope) {
+    if !policy_scope_allowed(policy_scope) || !startup_scope_allowed(startup_scope) {
         return Err(denied());
     }
     preflight_fresh_install(epoch, policy, identity, config)?;
+    // An earlier committed policy with missing startup inputs could become
+    // runnable if we created inputs first and only then noticed its authority.
+    // Check both independent namespaces without adopting or mutating either.
+    RegistryAnchor::require_absent(policy_scope)?;
+    let roots = crate::system_volume::pin_system_program_data()?;
+    let program_data = roots.last().ok_or_else(denied)?;
+    match open_relative_readonly_directory(program_data, policy_scope) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        _ => return Err(denied()),
+    }
     // Startup inputs precede the policy commit. The latter is the activation
     // boundary, and any partial prior step leaves only an inert orphan.
     provision_inputs_at(startup_scope, identity, config)?;
@@ -325,7 +339,7 @@ fn state(directories: &[File]) -> io::Result<&File> {
 }
 fn pin(scope: &str, create: bool) -> io::Result<Vec<File>> {
     // Caller-independent fixed production scope; private tests use unique siblings.
-    if scope != INSTALLED_SCOPE && !(cfg!(test) && scope.starts_with("ClassMesh-anchor-probe-")) {
+    if !policy_scope_allowed(scope) {
         return Err(denied());
     }
     let mut directories = crate::system_volume::pin_system_program_data()?;
@@ -910,6 +924,67 @@ mod tests {
         }))
         .unwrap();
         let config = br#"{"version":1,"bind_address":"127.0.0.1:5151","multicast_interface":null}"#;
+        // An existing policy must not become startable by a failed attempt to
+        // seed startup inputs for a different fresh installation.
+        let existing_scope = format!("ClassMesh-anchor-probe-fresh-existing-{suffix}");
+        let existing_root = program_data.join(&existing_scope);
+        provision_at(&existing_scope, 1, &policy).unwrap();
+        assert!(
+            provision_fresh_at(
+                &existing_scope,
+                &startup_scope,
+                2,
+                &policy,
+                &identity,
+                config
+            )
+            .is_err()
+        );
+        assert!(
+            !startup_root.exists(),
+            "failed fresh install must not activate existing policy"
+        );
+        crate::registry_epoch::remove_fixture(&existing_scope);
+        std::fs::remove_dir_all(existing_root).unwrap();
+        let anchor_only_scope = format!("ClassMesh-anchor-probe-fresh-anchor-only-{suffix}");
+        let record = validate(1, &policy).unwrap();
+        drop(crate::registry_epoch::RegistryAnchor::create(&anchor_only_scope, &record).unwrap());
+        assert!(
+            provision_fresh_at(
+                &anchor_only_scope,
+                &startup_scope,
+                2,
+                &policy,
+                &identity,
+                config
+            )
+            .is_err()
+        );
+        assert!(
+            !startup_root.exists(),
+            "orphan Registry anchor must reject before create"
+        );
+        crate::registry_epoch::remove_fixture(&anchor_only_scope);
+        let file_only_scope = format!("ClassMesh-anchor-probe-fresh-file-only-{suffix}");
+        let roots = crate::system_volume::pin_system_program_data().unwrap();
+        drop(create_relative_protected_directory(roots.last().unwrap(), &file_only_scope).unwrap());
+        drop(roots);
+        assert!(
+            provision_fresh_at(
+                &file_only_scope,
+                &startup_scope,
+                2,
+                &policy,
+                &identity,
+                config
+            )
+            .is_err()
+        );
+        assert!(
+            !startup_root.exists(),
+            "orphan policy root must reject before create"
+        );
+        std::fs::remove_dir_all(program_data.join(file_only_scope)).unwrap();
         let mut wrong_policy: serde_json::Value = serde_json::from_slice(&policy).unwrap();
         wrong_policy["principals"][0]["enabled"] = false.into();
         assert!(
