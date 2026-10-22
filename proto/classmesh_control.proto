@@ -26,6 +26,9 @@ enum Capability {
   CAPABILITY_TEACHER_MESSAGE = 15;
   CAPABILITY_OPEN_TARGET = 16;
   CAPABILITY_FILE_TRANSFER = 17;
+  // Optional v0.8 read-only playback diagnostics. This never authorizes
+  // Teacher media control and is negotiated separately from presentation.
+  CAPABILITY_RECEIVER_PLAYBACK_DIAGNOSTICS = 18;
 }
 
 enum PrincipalRole {
@@ -201,6 +204,27 @@ message ReceiverFeedback {
   uint64 dropped_frames = 9;
   uint64 reordered_packets = 10;
   uint64 received_bitrate_bps = 11;
+}
+
+// Service-ADMITTED receiver playback counter interval. Source is pinned to
+// the authenticated Service/Worker grant, and destination to the exact
+// enrolled Teacher PrincipalId/control-session that owns the presentation.
+// No RTT, loss, render-to-network inference, key material, or PID.
+message ReceiverPlaybackDiagnostic {
+  uint64 presentation_id = 1;
+  uint64 stream_id = 2;
+  uint32 epoch = 3;
+  uint64 receiver_generation = 4;
+  uint64 sequence = 5;
+  uint64 interval_ms = 6;
+  uint64 authenticated_frames = 7;
+  uint64 rejected_frames = 8;
+  uint64 decoded_frames = 9;
+  uint64 presented_frames = 10;
+  uint64 present_errors = 11;
+  uint64 decode_errors = 12;
+  uint64 keyframe_waits = 13;
+  uint64 queue_drops = 14;
 }
 
 message Nack {
@@ -542,5 +566,7 @@ message ControlEnvelope {
     FileTransferCancel file_transfer_cancel = 51;
     FileTransferStatus file_transfer_status = 52;
     FileTransferPullRequest file_transfer_pull_request = 53;
+    // Strictly opt-in, server-to-authorized-Teacher read-only diagnostic.
+    ReceiverPlaybackDiagnostic receiver_playback_diagnostic = 54;
   }
 }

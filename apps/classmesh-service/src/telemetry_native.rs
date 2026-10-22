@@ -128,6 +128,20 @@ impl ServiceTelemetryReader {
         self.set_current(None);
     }
 
+    /// Passive Service ledger validity alone must never activate Teacher
+    /// delivery. Only the actual Service-armed OS-attested channel qualifies.
+    #[must_use]
+    pub(super) fn is_armed_for(&self, binding: ReceiverTelemetryBinding) -> bool {
+        self.armed
+            == Some(TelemetryPipeIdentity {
+                service_process_id: std::process::id(),
+                worker_process_id: binding.process_id,
+                worker_session_id: binding.session_id,
+                worker_generation: binding.worker_generation,
+                receiver_generation: binding.receiver_generation,
+            })
+    }
+
     fn set_current(&self, target: Option<TelemetryPipeIdentity>) {
         if let Ok(mut guard) = self.current.lock() {
             *guard = target;

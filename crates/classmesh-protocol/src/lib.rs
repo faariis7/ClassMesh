@@ -68,6 +68,7 @@ pub enum Capability {
     TeacherMessage,
     OpenTarget,
     FileTransfer,
+    ReceiverPlaybackDiagnostics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +179,43 @@ mod tests {
             PROTOCOL_VERSION.negotiate(ProtocolVersion { major: 0, minor: 3 }),
             Some(ProtocolVersion { major: 0, minor: 3 })
         );
+    }
+
+    #[test]
+    fn v08_opt_in_receiver_playback_diagnostic_is_additive_and_never_network_metrics() {
+        use control_wire::{ReceiverPlaybackDiagnostic, control_envelope};
+        let sample = ReceiverPlaybackDiagnostic {
+            presentation_id: 71,
+            stream_id: 72,
+            epoch: 73,
+            receiver_generation: 74,
+            sequence: 75,
+            interval_ms: 5_000,
+            authenticated_frames: 100,
+            rejected_frames: 1,
+            decoded_frames: 90,
+            presented_frames: 89,
+            present_errors: 2,
+            decode_errors: 3,
+            keyframe_waits: 4,
+            queue_drops: 5,
+        };
+        let envelope = control_wire::ControlEnvelope {
+            control_session_id: 11,
+            sequence: 12,
+            protocol_version: Some(control_wire::ProtocolVersion { major: 0, minor: 8 }),
+            request_id: 0,
+            payload: Some(control_envelope::Payload::ReceiverPlaybackDiagnostic(
+                sample,
+            )),
+        };
+        use prost::Message;
+        let decoded =
+            control_wire::ControlEnvelope::decode(envelope.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded, envelope);
+        assert_eq!(sample.interval_ms, 5_000);
+        assert!(!format!("{sample:?}").contains("packet_loss"));
+        assert!(!format!("{sample:?}").contains("rtt_ms"));
     }
 
     #[test]
