@@ -257,9 +257,9 @@ async fn authenticated_wrong_epoch_never_replaces_valid_teacher_report() -> Test
     Ok(())
 }
 
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn single_owner_dispatches_non_playback_without_dropping_next_verified_report() -> TestResult {
+async fn single_owner_dispatches_non_playback_without_dropping_next_verified_report() -> TestResult
+{
     use classmesh_teacher::receiver_playback_session::{
         TeacherPlaybackSessionEvent, TeacherPlaybackSessionOwner,
     };
@@ -271,8 +271,10 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
     let mut other = report();
     other.payload = None;
     pair.server_channel.send(&other).await?;
-    let event = owner.receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
-        .await.map_err(|error| format!("{error:?}"))?;
+    let event = owner
+        .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
+        .await
+        .map_err(|error| format!("{error:?}"))?;
     match event {
         TeacherPlaybackSessionEvent::OtherControl(envelope) => {
             assert_eq!(envelope.control_session_id, CONTROL_SESSION);
@@ -283,13 +285,17 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
     assert_eq!(owner.visible(SOURCE, now), None);
 
     pair.server_channel.send(&report()).await?;
-    let event = owner.receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
-        .await.map_err(|error| format!("{error:?}"))?;
+    let event = owner
+        .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
+        .await
+        .map_err(|error| format!("{error:?}"))?;
     match event {
         TeacherPlaybackSessionEvent::Playback(counters) => {
             assert_eq!(counters.presented_frames, 89);
         }
-        TeacherPlaybackSessionEvent::OtherControl(_) => panic!("playback report was not dispatched"),
+        TeacherPlaybackSessionEvent::OtherControl(_) => {
+            panic!("playback report was not dispatched")
+        }
     }
     assert!(owner.visible(SOURCE, now).is_some());
     assert_eq!(owner.visible(MonitoringSourceId(8), now), None);
@@ -312,22 +318,32 @@ async fn policy_revocation_retires_live_teacher_owner_and_hides_stale_playback()
         .map_err(|error| format!("{error:?}"))?;
 
     pair.server_channel.send(&report()).await?;
-    owner.receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
-        .await.map_err(|error| format!("{error:?}"))?;
+    owner
+        .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
+        .await
+        .map_err(|error| format!("{error:?}"))?;
     assert!(owner.visible(SOURCE, now).is_some());
 
-    let version = pair.live_auth.snapshot()
-        .map_err(|error| format!("{error:?}"))?.version();
-    pair.live_auth.publish_if_version(version, AuthorizationStore::default())
+    let version = pair
+        .live_auth
+        .snapshot()
+        .map_err(|error| format!("{error:?}"))?
+        .version();
+    pair.live_auth
+        .publish_if_version(version, AuthorizationStore::default())
         .map_err(|error| format!("{error:?}"))?;
 
     assert!(matches!(
-        owner.receive_next(&mut pair.client, &pair.live_auth, || 150, || now).await,
+        owner
+            .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
+            .await,
         Err(TeacherPlaybackSessionError::Receive(_))
     ));
     assert_eq!(owner.visible(SOURCE, now), None);
     assert!(matches!(
-        owner.receive_next(&mut pair.client, &pair.live_auth, || 150, || now).await,
+        owner
+            .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
+            .await,
         Err(TeacherPlaybackSessionError::Retired)
     ));
     Ok(())
@@ -347,14 +363,19 @@ async fn mismatched_control_session_retires_owner_before_consuming_control_chann
     pair.server_channel.send(&report()).await?;
 
     assert!(matches!(
-        owner.receive_next(&mut pair.client, &pair.live_auth, || 150, || now).await,
+        owner
+            .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
+            .await,
         Err(TeacherPlaybackSessionError::ControlSessionMismatch)
     ));
     assert_eq!(owner.visible(SOURCE, now), None);
     // Rejected route never drained the correctly bound control channel.
-    assert!(receive_authenticated_teacher_control(
-        &mut pair.client, &pair.live_auth, STUDENT, || 150
-    ).await?.receiver_playback().is_some());
+    assert!(
+        receive_authenticated_teacher_control(&mut pair.client, &pair.live_auth, STUDENT, || 150)
+            .await?
+            .receiver_playback()
+            .is_some()
+    );
     Ok(())
 }
 
@@ -368,20 +389,30 @@ async fn malformed_epoch_does_not_destroy_last_valid_owner_projection() -> TestR
     let mut owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, binding())
         .map_err(|error| format!("{error:?}"))?;
     pair.server_channel.send(&report()).await?;
-    owner.receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
-        .await.map_err(|error| format!("{error:?}"))?;
+    owner
+        .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
+        .await
+        .map_err(|error| format!("{error:?}"))?;
     let valid = owner.visible(SOURCE, now);
 
     let mut bad = report();
     bad.sequence += 1;
-    if let Some(control_envelope::Payload::ReceiverPlaybackDiagnostic(ref mut payload)) = bad.payload {
+    if let Some(control_envelope::Payload::ReceiverPlaybackDiagnostic(ref mut payload)) =
+        bad.payload
+    {
         payload.epoch += 1;
         payload.sequence += 1;
     }
     pair.server_channel.send(&bad).await?;
     assert!(matches!(
-        owner.receive_next(&mut pair.client, &pair.live_auth, || 150,
-            || now + Duration::from_secs(1)).await,
+        owner
+            .receive_next(
+                &mut pair.client,
+                &pair.live_auth,
+                || 150,
+                || now + Duration::from_secs(1)
+            )
+            .await,
         Err(TeacherPlaybackSessionError::Diagnostic(
             TeacherPlaybackDiagnosticError::BindingMismatch
         ))
