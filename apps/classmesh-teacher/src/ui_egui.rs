@@ -1,7 +1,10 @@
 use eframe::egui;
 use std::time::Instant;
 
-use classmesh_protocol::{Capability, control_wire::ControlEnvelope};
+use classmesh_control::teacher_playback_receive::AuthenticatedTeacherControlMessage;
+use classmesh_protocol::Capability;
+#[cfg(test)]
+use classmesh_protocol::control_wire::ControlEnvelope;
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::classroom_grid::{MonitoringGridViewConfig, TeacherMonitoringGridViewModel};
@@ -177,10 +180,40 @@ impl TeacherEguiShell {
         Ok(())
     }
 
-    /// Inputs MUST already be authenticated to the enrolled Service's
-    /// current QUIC PrincipalId; the bounded ledger then verifies replay,
-    /// negotiated protocol and exact presentation session before display.
-    pub fn accept_authenticated_receiver_playback(
+    /// The production control-session owner may deliver ONLY an authenticated
+    /// read result from the live QUIC receive gate. Never accept forged bare
+    /// envelopes through this public GUI path.
+    pub fn accept_verified_receiver_playback(
+        &mut self,
+        source_id: MonitoringSourceId,
+        verified: &AuthenticatedTeacherControlMessage,
+        now: Instant,
+    ) -> Result<TeacherPlaybackCounters, TeacherPlaybackDiagnosticError> {
+        let context = self
+            .teacher_interaction_context
+            .as_ref()
+            .ok_or(TeacherPlaybackDiagnosticError::Inactive)?;
+        let state = self
+            .playback
+            .as_mut()
+            .ok_or(TeacherPlaybackDiagnosticError::Inactive)?;
+        if context.source_id != source_id
+            || state.binding().control_session_id != context.control_session_id
+            || context.version.major != 0
+            || context.version.minor < 8
+            || !context
+                .capabilities
+                .contains(&Capability::ReceiverPlaybackDiagnostics)
+        {
+            return Err(TeacherPlaybackDiagnosticError::BindingMismatch);
+        }
+        state.accept_verified_from_source(source_id, verified, now)
+    }
+
+    /// Internal compatibility path for legacy unit tests only. Production
+    /// ingress must use the verified proof object above.
+    #[cfg(test)]
+    pub(crate) fn accept_authenticated_receiver_playback(
         &mut self,
         envelope: &ControlEnvelope,
         now: Instant,
