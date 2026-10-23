@@ -14,6 +14,10 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateInvariantError {
     InvalidIntent,
+    ActorUnavailable,
+    ActorNotAdministrator,
+    ActorNotAuthorized,
+    ActorCredentialUnavailable,
     TargetUnavailable,
     UnsupportedRolePermission,
     BeforeMismatch,
@@ -32,6 +36,26 @@ pub fn check_classroom_candidate_invariants(
         || intent.previous_grant() == intent.new_grant()
     {
         return Err(CandidateInvariantError::InvalidIntent);
+    }
+    // Structural consistency only. Neither principal identity nor this
+    // caller-supplied baseline is authenticated here: future durable commits
+    // MUST independently bind the enrolled credential to the real actor.
+    let actor = baseline
+        .principal(intent.actor())
+        .filter(|principal| principal.enabled)
+        .ok_or(CandidateInvariantError::ActorUnavailable)?;
+    if actor.kind != PrincipalKind::Administrator {
+        return Err(CandidateInvariantError::ActorNotAdministrator);
+    }
+    if !actor.permissions.contains(&Permission::ManagePolicy) {
+        return Err(CandidateInvariantError::ActorNotAuthorized);
+    }
+    if !actor
+        .credentials
+        .values()
+        .any(|credential| credential.is_accepted_at(intent.checked_at_unix_ms()))
+    {
+        return Err(CandidateInvariantError::ActorCredentialUnavailable);
     }
     let target = baseline
         .principal(intent.target())
