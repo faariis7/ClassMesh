@@ -474,7 +474,17 @@ impl TeacherEguiShell {
                 }
             }
             TeacherUiSection::Diagnostics => {
-                let playback = self.visible_receiver_playback_at(Instant::now());
+                let now = Instant::now();
+                // Retire stale counters even when the teacher does not
+                // interact with the GUI after the last valid report.
+                if let Some(delay) = self.classroom.selected().and_then(|source| {
+                    self.playback
+                        .as_ref()
+                        .and_then(|projection| projection.repaint_after_expiry(source, now))
+                }) {
+                    ui.ctx().request_repaint_after(delay);
+                }
+                let playback = self.visible_receiver_playback_at(now);
                 if let Some(message) = show_diagnostics(
                     ui,
                     self.classroom.selected(),
