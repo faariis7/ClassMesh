@@ -3,6 +3,7 @@
 pub mod adaptive_media_recovery;
 pub mod authorization;
 pub mod bootstrap;
+pub mod classroom_live_policy_review;
 pub mod client_session;
 pub mod clipboard_execution;
 pub mod clipboard_live_authority;
