@@ -222,20 +222,44 @@ jobs:
             throw "Phase 9 synthetic baseline did not pass its bounded invariants"
           }
 
-      - name: Validate Phase 10 synthetic adaptive baseline
+      - name: Validate Phase 10 synthetic adaptive baseline at all classroom scales
         shell: pwsh
         run: |
           .\target\release\classmesh-adaptive-controller-benchmark.exe --help
-          $output = .\target\release\classmesh-adaptive-controller-benchmark.exe --receivers 30 --rounds 30
-          $output | Write-Host
-          if ($output -notcontains "physical_qualification=false") {
-            throw "Phase 10 synthetic baseline must not claim physical qualification"
-          }
-          if ($output -notcontains "production_default_selected=false") {
-            throw "Phase 10 synthetic baseline must not select a production default"
-          }
-          if ($output -notcontains "synthetic_invariants_passed=true") {
-            throw "Phase 10 synthetic baseline did not pass its adaptive invariants"
+          foreach ($receivers in @(5, 10, 20, 30)) {
+            $output = @( .\target\release\classmesh-adaptive-controller-benchmark.exe --receivers $receivers --rounds 30 )
+            if ($LASTEXITCODE -ne 0) {
+              throw "Phase 10 synthetic benchmark failed at receiver scale $receivers"
+            }
+            $output | Write-Host
+            $healthy = $receivers - 1
+            $required = @(
+              "mode=synthetic-adaptive-controller",
+              "physical_qualification=false",
+              "production_default_selected=false",
+              "receivers=$receivers",
+              "rounds=30",
+              "healthy_high_after_weak_degrade=$healthy",
+              "weak_degraded_tier=Emergency",
+              "weak_recovered_tier=High",
+              "healthy_high_after_silence=$healthy",
+              "silent_receiver_expired_tier=Emergency",
+              "silent_receiver_recovered_tier=High",
+              "silence_timeout_route_changes=1",
+              "silence_repeated_timeout_changes=0",
+              "noisy_receiver_tier_changes=0",
+              "max_routed_receivers=$receivers",
+              "unresolved_transport_blocked=true",
+              "unresolved_rendition_blocked=true",
+              "qualified_switch_required_hysteresis=true",
+              "reliable_fallback_eligible_without_default_selection=true",
+              "synthetic_invariants_passed=true"
+            )
+            foreach ($line in $required) {
+              if ($output -notcontains $line) {
+                throw "Phase 10 synthetic receiver scale $($receivers): missing invariant $line"
+              }
+            }
           }
 
       - name: Validate Phase 7H physical runner
