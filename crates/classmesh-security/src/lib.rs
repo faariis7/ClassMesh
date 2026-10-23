@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod classroom_audit_intent_encoding;
 pub mod classroom_policy_change_stage;
 pub mod classroom_policy_preview;
 pub mod group_media;
