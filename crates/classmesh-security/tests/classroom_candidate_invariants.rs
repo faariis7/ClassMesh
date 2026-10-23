@@ -161,6 +161,60 @@ fn audit_from_another_snapshot_cannot_approve_unrelated_candidate() {
     );
 }
 #[test]
+fn actor_disabled_after_intent_cannot_have_structurally_consistent_evidence() {
+    let source = baseline();
+    let (candidate, audit) = staged(&source, 2, ClassroomPermission::ViewMonitoring, true);
+    let mut changed_source = source.clone();
+    assert!(changed_source.disable(id(1)));
+    assert_eq!(
+        check_classroom_candidate_invariants(&changed_source, &candidate, &audit),
+        Err(CandidateInvariantError::ActorUnavailable),
+    );
+}
+
+#[test]
+fn actor_role_demotion_after_intent_is_detected_before_candidate_comparison() {
+    let source = baseline();
+    let (candidate, audit) = staged(&source, 2, ClassroomPermission::ViewMonitoring, true);
+    let mut changed_source = source.clone();
+    let mut actor = changed_source.principal(id(1)).unwrap().clone();
+    actor.kind = PrincipalKind::Teacher;
+    changed_source.upsert(actor).unwrap();
+    assert_eq!(
+        check_classroom_candidate_invariants(&changed_source, &candidate, &audit),
+        Err(CandidateInvariantError::ActorNotAdministrator),
+    );
+}
+
+#[test]
+fn policy_management_grant_revoked_after_intent_is_detected() {
+    let source = baseline();
+    let (candidate, audit) = staged(&source, 2, ClassroomPermission::ViewMonitoring, true);
+    let mut changed_source = source.clone();
+    let mut actor = changed_source.principal(id(1)).unwrap().clone();
+    assert!(actor.permissions.remove(&Permission::ManagePolicy));
+    changed_source.upsert(actor).unwrap();
+    assert_eq!(
+        check_classroom_candidate_invariants(&changed_source, &candidate, &audit),
+        Err(CandidateInvariantError::ActorNotAuthorized),
+    );
+}
+
+#[test]
+fn no_currently_accepted_actor_credential_cannot_support_audit_intent() {
+    let source = baseline();
+    let (candidate, audit) = staged(&source, 2, ClassroomPermission::ViewMonitoring, true);
+    let mut changed_source = source.clone();
+    let mut actor = changed_source.principal(id(1)).unwrap().clone();
+    actor.revoke_credential(fingerprint(1), 149).unwrap();
+    changed_source.upsert(actor).unwrap();
+    assert_eq!(
+        check_classroom_candidate_invariants(&changed_source, &candidate, &audit),
+        Err(CandidateInvariantError::ActorCredentialUnavailable),
+    );
+}
+
+#[test]
 fn baseline_drift_and_protected_target_fail_closed() {
     let store = baseline();
     let (candidate, audit) = staged(&store, 2, ClassroomPermission::ViewMonitoring, true);
