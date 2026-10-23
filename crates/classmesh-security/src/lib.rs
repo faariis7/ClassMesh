@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod classroom_policy_change_stage;
 pub mod classroom_policy_preview;
 pub mod group_media;
 pub mod group_media_coordinator;
@@ -284,7 +285,7 @@ pub enum AuthorizationStoreError {
     },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AuthorizationStore {
     principals: BTreeMap<PrincipalId, Principal>,
     credential_owners: BTreeMap<CredentialFingerprint, PrincipalId>,
