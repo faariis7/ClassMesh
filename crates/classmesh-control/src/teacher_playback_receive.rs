@@ -31,6 +31,13 @@ impl AuthenticatedTeacherControlMessage {
         self.is_playback.then_some(&self.envelope)
     }
 
+    /// Read-only authenticated envelope view for the central session owner.
+    /// This does not authorize any privileged control action.
+    #[must_use]
+    pub fn envelope(&self) -> &ControlEnvelope {
+        &self.envelope
+    }
+
     /// Give non-playback messages back to the single owning control dispatcher.
     /// The caller must not treat arbitrary messages as authenticated actions:
     /// those need their separate per-command authorization checks.
