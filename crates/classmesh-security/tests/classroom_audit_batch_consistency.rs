@@ -69,9 +69,46 @@ fn record(version: u64, request_id: u64, now: u64) -> ClassroomAuditIntentRecord
     .unwrap();
     ClassroomAuditIntentRecord::from_intent(draft.audit_intent()).unwrap()
 }
+fn revoke(version: u64, request_id: u64, now: u64) -> ClassroomAuditIntentRecord {
+    let mut policy = store();
+    let mut teacher = policy.principal(id(2)).unwrap().clone();
+    teacher.permissions.insert(Permission::ViewMonitoring);
+    policy.upsert(teacher).unwrap();
+    let draft = stage_classroom_permission_change(
+        &policy,
+        credential(1),
+        ClassroomPermissionChange {
+            target: id(2),
+            permission: ClassroomPermission::ViewMonitoring,
+            grant: false,
+            request_id,
+            expected_policy_generation: version,
+        },
+        now,
+    )
+    .unwrap();
+    ClassroomAuditIntentRecord::from_intent(draft.audit_intent()).unwrap()
+}
+fn student_revoke(version: u64, request_id: u64, now: u64) -> ClassroomAuditIntentRecord {
+    let policy = store();
+    let draft = stage_classroom_permission_change(
+        &policy,
+        credential(1),
+        ClassroomPermissionChange {
+            target: id(3),
+            permission: ClassroomPermission::ReceivePresentation,
+            grant: false,
+            request_id,
+            expected_policy_generation: version,
+        },
+        now,
+    )
+    .unwrap();
+    ClassroomAuditIntentRecord::from_intent(draft.audit_intent()).unwrap()
+}
 #[test]
 fn accepts_nonempty_strictly_sequential_version_and_non_decreasing_timestamps() {
-    let entries = vec![record(7, 51, 150), record(8, 52, 150), record(9, 53, 160)];
+    let entries = vec![record(7, 51, 150), revoke(8, 52, 150), record(9, 53, 160)];
     assert_eq!(check_classroom_audit_batch_consistency(7, &entries), Ok(()));
     assert_eq!(
         check_classroom_audit_batch_consistency(7, &entries[..1]),
@@ -127,7 +164,7 @@ fn rejects_repeated_actor_request_tuple_inside_same_batch() {
         Err(AuditBatchConsistencyError::DuplicateRequest { index: 1 }),
     );
     assert_eq!(
-        check_classroom_audit_batch_consistency(7, &[record(7, 51, 150), record(8, 52, 151)]),
+        check_classroom_audit_batch_consistency(7, &[record(7, 51, 150), revoke(8, 52, 151)]),
         Ok(()),
     );
 }
@@ -155,5 +192,47 @@ fn accepts_final_version_before_overflow_and_rejects_unrepresentable_followup() 
             &[record(u64::MAX - 1, 51, 150), record(7, 52, 151)]
         ),
         Err(AuditBatchConsistencyError::GenerationExhausted),
+    );
+}
+
+#[test]
+fn rejects_second_grant_whose_before_state_ignores_previous_batch_entry() {
+    assert_eq!(
+        check_classroom_audit_batch_consistency(7, &[record(7, 51, 150), record(8, 52, 151)]),
+        Err(AuditBatchConsistencyError::ContradictoryPriorPermission { index: 1 }),
+    );
+}
+#[test]
+fn rejects_third_change_when_same_target_permission_history_is_inconsistent() {
+    assert_eq!(
+        check_classroom_audit_batch_consistency(
+            7,
+            &[
+                record(7, 51, 150),
+                student_revoke(8, 52, 151),
+                record(9, 53, 152)
+            ]
+        ),
+        Err(AuditBatchConsistencyError::ContradictoryPriorPermission { index: 2 }),
+    );
+}
+#[test]
+fn independent_target_changes_do_not_interfere() {
+    assert_eq!(
+        check_classroom_audit_batch_consistency(
+            7,
+            &[record(7, 51, 150), student_revoke(8, 52, 150)]
+        ),
+        Ok(()),
+    );
+}
+#[test]
+fn toggling_a_permission_grant_then_revoke_then_grant_is_coherent() {
+    assert_eq!(
+        check_classroom_audit_batch_consistency(
+            7,
+            &[record(7, 51, 150), revoke(8, 52, 150), record(9, 53, 150)]
+        ),
+        Ok(()),
     );
 }
