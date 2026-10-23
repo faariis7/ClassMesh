@@ -169,7 +169,10 @@ impl ClipboardAuthorityLease {
             || guard.protocol_version() != self.version
             || session.negotiated.version != self.version
             || session.negotiated.principal_id != self.principal
-            || guard.last_sequence() < self.sequence
+            // A later authenticated command advances the global sequence.
+            // The earlier ClipboardRead command is no longer current; retain
+            // no one-shot authority even if an outdated pending tuple remains.
+            || guard.last_sequence() != self.sequence
         {
             return Err(ClipboardAuthorityError::SessionChanged);
         }

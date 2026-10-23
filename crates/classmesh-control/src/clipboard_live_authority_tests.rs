@@ -342,6 +342,26 @@ fn wrong_pending_session_or_sequence_is_never_authorized() {
     }
 }
 #[test]
+fn subsequent_authenticated_control_sequence_revokes_clipboard_lease() {
+    let mut f = fixture();
+    let mut lease = issue(&mut f);
+    assert_eq!(f.guard.last_sequence(), 2);
+
+    // A valid newer control envelope on this same authenticated session
+    // means the original request is no longer its current command.
+    f.guard = AuthenticatedControlGuard::new(f.peer.identity, 77, VERSION, 3);
+    assert_eq!(
+        check(&mut lease, &f, 151),
+        Err(ClipboardAuthorityError::SessionChanged)
+    );
+    assert!(!lease.is_pending());
+    assert_eq!(
+        check(&mut lease, &f, 152),
+        Err(ClipboardAuthorityError::AlreadyUsed)
+    );
+}
+
+#[test]
 fn control_lease_does_not_survive_monotonic_deadline_or_cancel() {
     let mut f = fixture();
     let mut lease = issue(&mut f);
