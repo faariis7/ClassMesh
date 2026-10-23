@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod classroom_policy_preview;
 pub mod group_media;
 pub mod group_media_coordinator;
 pub mod persistence;
