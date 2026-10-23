@@ -423,8 +423,8 @@ async fn malformed_epoch_does_not_destroy_last_valid_owner_projection() -> TestR
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replayed_outer_control_sequence_forces_retirement_even_when_message_type_changes() -> TestResult
-{
+async fn replayed_outer_control_sequence_forces_retirement_even_when_message_type_changes()
+-> TestResult {
     use classmesh_teacher::receiver_playback_session::{
         TeacherPlaybackSessionError, TeacherPlaybackSessionOwner,
     };
