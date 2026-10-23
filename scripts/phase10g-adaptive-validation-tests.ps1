@@ -84,6 +84,58 @@ try {
         throw "Evidence hashes must be 64 hex digits"
     }
 
+    # Regression fixtures cover bookkeeping at each required physical scale.
+    # These are synthetic files and NEVER evidence of real receivers or a soak.
+    foreach ($count in @(5, 10, 20, 30)) {
+        $scaleDir = Join-Path $root ("scale-fixture-" + $count)
+        $ids = @(1..$count | ForEach-Object { "device-{0:D2}" -f $_ })
+        $duration = if ($count -eq 30) { 1800 } else { 300 }
+        & $helper -Mode Init -ReceiverCount $count -ReceiverId $ids -DurationSeconds $duration -ResultsDir $scaleDir | Out-Null
+        $teacher = Join-Path $scaleDir "teacher.log"
+        Set-Content -LiteralPath $teacher -Value "SYNTHETIC TEST FIXTURE" -Encoding UTF8
+        foreach ($id in $ids) {
+            Set-Content -LiteralPath (Join-Path (Join-Path $scaleDir "receivers") ($id + ".log")) -Value ("SYNTHETIC ONLY " + $id) -Encoding UTF8
+        }
+        & $helper -Mode ValidateEvidence -ResultsDir $scaleDir | Out-Null
+        $idx = Get-Content -LiteralPath (Join-Path $scaleDir "evidence-index.json") -Raw | ConvertFrom-Json
+        $hash = (Get-FileHash -LiteralPath $teacher -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($idx.receiver_count -ne $count -or $idx.receivers.Count -ne $count -or
+            $idx.duration_seconds -ne $duration -or $idx.teacher.sha256 -cne $hash -or
+            $idx.qualification_passed -ne $null -or $idx.production_default_selected -ne $false) {
+            throw "Synthetic scale evidence index mismatch at count $count"
+        }
+        foreach ($item in $idx.receivers) {
+            if ($ids -cnotcontains $item.receiver_id) { throw "Unexpected receiver in evidence index" }
+            $path = Join-Path (Join-Path $scaleDir "receivers") ($item.receiver_id + ".log")
+            $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($item.sha256 -cne $actual -or $item.bytes -le 0) {
+                throw "Incorrect synthetic receiver evidence SHA-256 or size at count $count"
+            }
+        }
+        $last = Join-Path (Join-Path $scaleDir "receivers") ($ids[-1] + ".log")
+        Remove-Item -LiteralPath $last
+        $message = ""
+        try { & $helper -Mode ValidateEvidence -ResultsDir $scaleDir | Out-Null } catch { $message = $_.Exception.Message }
+        if ($message -notmatch "Missing receiver evidence") { throw "Missing log was not rejected at scale $count" }
+        [System.IO.File]::WriteAllBytes($last, [byte[]]@())
+        $message = ""
+        try { & $helper -Mode ValidateEvidence -ResultsDir $scaleDir | Out-Null } catch { $message = $_.Exception.Message }
+        if ($message -notmatch "Empty receiver evidence") { throw "Empty log was not rejected at scale $count" }
+        Set-Content -LiteralPath $last -Value "SYNTHETIC RESTORED" -Encoding UTF8
+
+        $manifestPath = Join-Path $scaleDir "adaptive-controller-manifest.json"
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        $manifest.qualification_passed = $true
+        $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+        $message = ""
+        try { & $helper -Mode ValidateEvidence -ResultsDir $scaleDir | Out-Null } catch { $message = $_.Exception.Message }
+        if ($message -notmatch "must remain null") { throw "Fabricated qualification was not rejected at scale $count" }
+        $manifest.qualification_passed = $null
+        $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+        & $helper -Mode ValidateEvidence -ResultsDir $scaleDir | Out-Null
+        Write-Host ("PHASE10G_SYNTHETIC_EVIDENCE_SCALE_" + $count + "_PASS")
+    }
+
     # Adversarial manifests must be rejected as invalid IDs *before* any
     # filesystem reads, rather than following parent-directory identifiers.
     $manifestPath = Join-Path $positiveDir "adaptive-controller-manifest.json"
