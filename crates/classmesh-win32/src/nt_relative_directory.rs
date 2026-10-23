@@ -254,8 +254,17 @@ fn open_native_node(
             // Safety: a non-null NT-issued HANDLE must be released on error.
             unsafe { CloseHandle(handle) };
         }
+        // Only this exact one-component, parent-relative FILE_OPEN absence is
+        // usable by the fresh installer. All path, ACL, reparse and sharing
+        // failures remain fail-closed. STATUS_OBJECT_NAME_NOT_FOUND is
+        // 0xC0000034 (MS-ERREF); a missing parent is never inferred here.
+        let kind = if parent.is_some() && creation.is_none() && status as u32 == 0xC000_0034 {
+            io::ErrorKind::NotFound
+        } else {
+            io::ErrorKind::PermissionDenied
+        };
         return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+            kind,
             format!("NT directory open failed: {status:#010x}"),
         ));
     }
