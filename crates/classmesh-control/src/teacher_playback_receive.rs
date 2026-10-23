@@ -55,6 +55,7 @@ pub enum AuthenticatedTeacherReceiveError {
     WrongPrincipalKind,
     NotNegotiated,
     SessionMismatch,
+    ProtocolVersionMismatch,
     PeerIdentity(PeerIdentityError),
     Authorization(LiveAuthorizationError),
     Transport(ControlTransportError),
@@ -119,6 +120,15 @@ pub async fn receive_authenticated_teacher_control(
 
     if envelope.control_session_id != session.established.control_session_id {
         return Err(AuthenticatedTeacherReceiveError::SessionMismatch);
+    }
+    // This channel multiplexes both playback and privileged control.
+    // Never hand a TLS-verified *non-playback* envelope to its separate
+    // dispatcher under a different or missing protocol contract.
+    let negotiated = session.established.negotiated.version;
+    if !envelope.protocol_version.as_ref().is_some_and(|wire| {
+        wire.major == u32::from(negotiated.major) && wire.minor == u32::from(negotiated.minor)
+    }) {
+        return Err(AuthenticatedTeacherReceiveError::ProtocolVersionMismatch);
     }
     let is_playback = matches!(
         envelope.payload,
@@ -447,6 +457,52 @@ mod tests {
             received,
             Err(AuthenticatedTeacherReceiveError::PeerIdentity(_))
         ));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_playback_envelope_must_match_authenticated_negotiated_protocol_version()
+    -> TestResult {
+        let mut pair = pair(true).await?;
+        let mut wrong = report(SESSION);
+        wrong.payload = None;
+        wrong.protocol_version = Some(WireVersion { major: 0, minor: 7 });
+        pair.server_channel.send(&wrong).await?;
+        assert!(matches!(
+            receive_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150
+            )
+            .await,
+            Err(AuthenticatedTeacherReceiveError::ProtocolVersionMismatch)
+        ));
+        let mut missing = wrong;
+        missing.protocol_version = None;
+        pair.server_channel.send(&missing).await?;
+        assert!(matches!(
+            receive_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150
+            )
+            .await,
+            Err(AuthenticatedTeacherReceiveError::ProtocolVersionMismatch)
+        ));
+        let mut good = missing;
+        good.protocol_version = Some(WireVersion { major: 0, minor: 8 });
+        pair.server_channel.send(&good).await?;
+        let authenticated = receive_authenticated_teacher_control(
+            &mut pair.client,
+            &pair.authorization,
+            EXPECTED,
+            || 150,
+        )
+        .await?;
+        assert!(authenticated.receiver_playback().is_none());
+        assert_eq!(authenticated.into_envelope().control_session_id, SESSION);
         Ok(())
     }
 
