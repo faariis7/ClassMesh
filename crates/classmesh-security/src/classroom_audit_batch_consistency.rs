@@ -7,9 +7,9 @@
 //! against a trustworthy Registry policy epoch. Future trusted writers must
 //! validate identity, CAS, epochs and crash-safe policy+audit atomically.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{PrincipalId, classroom_audit_intent_encoding::ClassroomAuditIntentRecord};
+use crate::{Permission, PrincipalId, classroom_audit_intent_encoding::ClassroomAuditIntentRecord};
 
 /// A bounded number of modest audit *intent* metadata records per check.
 pub const MAX_AUDIT_BATCH_ENTRIES: usize = 64;
@@ -31,14 +31,19 @@ pub enum AuditBatchConsistencyError {
     TimestampRegression {
         index: usize,
     },
+    /// A later intent claims an old before-state for the same target permission.
+    ContradictoryPriorPermission {
+        index: usize,
+    },
 }
 
 /// Validate claimed *internal* sequence consistency of <=64 intent records.
 ///
 /// The starting generation, request IDs and timestamps are untrusted inputs.
-/// Replays across batches cannot be recognized here: the future durable
-/// journal must separately deduplicate against persistent authenticated
-/// history and reconcile against an independently protected policy epoch.
+/// Replays and permission-state contradictions across *different batches*
+/// cannot be recognized here: the future durable journal must separately
+/// deduplicate and reconcile authenticated history, actual before-state and
+/// an independently protected policy epoch. Passing is never permission to commit.
 pub fn check_classroom_audit_batch_consistency(
     starting_generation: u64,
     intents: &[ClassroomAuditIntentRecord],
@@ -56,6 +61,9 @@ pub fn check_classroom_audit_batch_consistency(
     let mut expected_generation = starting_generation;
     let mut last_timestamp = 0;
     let mut requests: BTreeSet<(PrincipalId, u64)> = BTreeSet::new();
+    // Batch-only observation: never infer real initial state or a trusted
+    // journal history from this map. A writer must independently verify them.
+    let mut last_permissions: BTreeMap<(PrincipalId, Permission), bool> = BTreeMap::new();
     for (index, intent) in intents.iter().enumerate() {
         if intent.expected_policy_generation() != expected_generation {
             return Err(AuditBatchConsistencyError::VersionGap {
@@ -69,6 +77,13 @@ pub fn check_classroom_audit_batch_consistency(
         }
         if !requests.insert((intent.actor(), intent.request_id())) {
             return Err(AuditBatchConsistencyError::DuplicateRequest { index });
+        }
+        let key = (intent.target(), intent.permission().underlying_permission());
+        if last_permissions
+            .insert(key, intent.new_grant())
+            .is_some_and(|previous| previous != intent.previous_grant())
+        {
+            return Err(AuditBatchConsistencyError::ContradictoryPriorPermission { index });
         }
         last_timestamp = intent.checked_at_unix_ms();
         if index + 1 != intents.len() {
