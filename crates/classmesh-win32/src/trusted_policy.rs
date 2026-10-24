@@ -438,7 +438,12 @@ fn read_trusted_primary<T>(
     let app = open_relative_protected_node(program_data, scope, true)?;
     let child = open_relative_protected_node(&app, directory, true)?;
     let primary = open_relative_protected_node(&child, leaf, false)?;
-    let mut bounded = primary.take(maximum + 1);
+    // The callback may stop early or ignore an extra byte. Enforce the size
+    // contract on the original exclusive HANDLE before it sees any content.
+    if primary.metadata()?.len() > maximum {
+        return Err(denied());
+    }
+    let mut bounded = primary.take(maximum);
     Ok(parse(&mut bounded))
 }
 
@@ -687,7 +692,6 @@ mod tests {
                     classmesh_identity_win::DurableMachineIdentity::parse_from_reader(reader)
                 }
             )
-            .unwrap()
             .is_err()
         );
         std::fs::write(&identity, &bytes).unwrap();
@@ -705,7 +709,7 @@ mod tests {
             .is_err()
         );
         let config_path = root.join("config").join("control-runtime.json");
-        std::fs::write(&config_path, vec![b' '; 64 * 1024 + 1]).unwrap();
+        std::fs::write(&config_path, vec![b' '; 64 * 1024]).unwrap();
         assert_eq!(
             read_trusted_primary(
                 parent,
@@ -720,7 +724,20 @@ mod tests {
                 }
             )
             .unwrap(),
-            64 * 1024 + 1
+            64 * 1024
+        );
+        std::fs::write(&config_path, vec![b' '; 64 * 1024 + 1]).unwrap();
+        assert!(
+            read_trusted_primary(
+                parent,
+                &scope,
+                "config",
+                "control-runtime.json",
+                64 * 1024,
+                |_| panic!("oversized input must not reach the parser")
+            )
+            .is_err(),
+            "the trusted reader must enforce its own size limit"
         );
         std::fs::remove_file(&config_path).unwrap();
         assert!(

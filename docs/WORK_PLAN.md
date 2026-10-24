@@ -1,3 +1,7 @@
+## Active execution checkpoint — trusted input HANDLE bounds (2026-10-24)
+
+PR #618 merged as `4effb466` after exact-head CI `39850005488` passed Portable Rust and Windows Build. The current Phase 12 boundary batch rejects an oversized protected machine-identity or control-config file using metadata from the original exclusive HANDLE before a caller callback can ignore its size sentinel. VM1 x64 native RED reproduced callback acceptance of >64 KiB; GREEN 7/7 trusted-policy tests and feature Clippy passed. Branch `fix/phase12-trusted-input-handle-bounds`; hosted CI pending. Keep the trusted Service opt-in/default-off. Next: merge after exact-head gates, then implement qualified in-process reload/revocation; sudden power loss and physical machines remain separate open gates. Preserve Phase 10 and independent Phase 12F #632.
+
 ## Phase 10 native Worker/Service diagnostic delivery opt-in (2026-10-22)
 
 On the isolated branch \`feat/phase10-native-runtime-v1\` we connect the
