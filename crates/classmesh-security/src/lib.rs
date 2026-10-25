@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod classroom_audit_batch_consistency;
+pub mod classroom_audit_chain_consistency;
 pub mod classroom_audit_intent_encoding;
 pub mod classroom_candidate_invariants;
 pub mod classroom_policy_change_stage;
