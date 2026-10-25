@@ -24,7 +24,7 @@ pub enum AuditBaselineConsistencyError {
 
 // Private hypothetical replay only: the baseline and record source are
 // untrusted. This never grants rights or touches a live Service.
-fn replay_untrusted_batch(
+pub(crate) fn replay_untrusted_batch(
     initial: &AuthorizationStore,
     starting_generation: u64,
     records: &[ClassroomAuditIntentRecord],
