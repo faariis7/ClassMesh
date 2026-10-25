@@ -19,15 +19,16 @@ pub enum AuditBaselineConsistencyError {
     TargetUnavailable { index: usize },
     ActorNotAuthorized { index: usize },
     ActorCredentialUnavailable { index: usize },
+    FinalStateMismatch,
 }
 
-/// Verify a bounded batch against an explicitly untrusted initial policy snapshot.
-/// No OS, Service, network, persistence, or privilege-changing operations occur.
-pub fn check_classroom_audit_batch_against_baseline(
+// Private hypothetical replay only: the baseline and record source are
+// untrusted. This never grants rights or touches a live Service.
+fn replay_untrusted_batch(
     initial: &AuthorizationStore,
     starting_generation: u64,
     records: &[ClassroomAuditIntentRecord],
-) -> Result<(), AuditBaselineConsistencyError> {
+) -> Result<AuthorizationStore, AuditBaselineConsistencyError> {
     check_classroom_audit_batch_consistency(starting_generation, records)
         .map_err(AuditBaselineConsistencyError::Batch)?;
 
@@ -88,6 +89,33 @@ pub fn check_classroom_audit_batch_against_baseline(
         candidate
             .upsert(target)
             .map_err(|_| AuditBaselineConsistencyError::TargetUnavailable { index })?;
+    }
+    Ok(candidate)
+}
+
+/// Verify a bounded batch against an explicitly untrusted initial policy snapshot.
+/// No OS, Service, network, persistence, or privilege-changing operations occur.
+pub fn check_classroom_audit_batch_against_baseline(
+    initial: &AuthorizationStore,
+    starting_generation: u64,
+    records: &[ClassroomAuditIntentRecord],
+) -> Result<(), AuditBaselineConsistencyError> {
+    replay_untrusted_batch(initial, starting_generation, records).map(|_| ())
+}
+
+/// An additional OFFLINE structural check: compare the complete simulated
+/// policy with a caller-provided final snapshot, including credentials,
+/// principal state and credential-owner indexes. Neither side is authenticated
+/// or a policy commit; a successful comparison must not authorize publication.
+pub fn check_classroom_audit_batch_final_state(
+    initial: &AuthorizationStore,
+    claimed_final: &AuthorizationStore,
+    starting_generation: u64,
+    records: &[ClassroomAuditIntentRecord],
+) -> Result<(), AuditBaselineConsistencyError> {
+    let hypothetical = replay_untrusted_batch(initial, starting_generation, records)?;
+    if &hypothetical != claimed_final {
+        return Err(AuditBaselineConsistencyError::FinalStateMismatch);
     }
     Ok(())
 }

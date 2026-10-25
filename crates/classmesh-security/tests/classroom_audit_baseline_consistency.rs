@@ -4,6 +4,7 @@ use classmesh_security::{
     PrincipalId, PrincipalKind,
     classroom_audit_baseline_consistency::{
         AuditBaselineConsistencyError, check_classroom_audit_batch_against_baseline,
+        check_classroom_audit_batch_final_state,
     },
     classroom_audit_batch_consistency::AuditBatchConsistencyError,
     classroom_audit_intent_encoding::ClassroomAuditIntentRecord,
@@ -246,5 +247,135 @@ fn batch_syntax_checks_run_before_baseline_verification() {
                 found: 7,
             }
         ))
+    );
+}
+
+#[test]
+fn exact_final_policy_accepts_only_the_claimed_grant() {
+    let initial = baseline();
+    let grant = intent(
+        &initial,
+        2,
+        ClassroomPermission::ViewMonitoring,
+        true,
+        7,
+        41,
+        150,
+    );
+    let expected_final = teacher_with_monitoring(initial.clone());
+    assert_eq!(
+        check_classroom_audit_batch_final_state(&initial, &expected_final, 7, &[grant]),
+        Ok(())
+    );
+    assert!(!initial.authorize(id(2), Permission::ViewMonitoring));
+}
+
+#[test]
+fn missing_recorded_grant_cannot_match_the_claimed_final_policy() {
+    let initial = baseline();
+    let grant = intent(
+        &initial,
+        2,
+        ClassroomPermission::ViewMonitoring,
+        true,
+        7,
+        41,
+        150,
+    );
+    assert_eq!(
+        check_classroom_audit_batch_final_state(&initial, &initial, 7, &[grant]),
+        Err(AuditBaselineConsistencyError::FinalStateMismatch)
+    );
+}
+
+#[test]
+fn unrelated_privilege_or_service_disable_cannot_hide_in_final_policy() {
+    let initial = baseline();
+    let grant = intent(
+        &initial,
+        2,
+        ClassroomPermission::ViewMonitoring,
+        true,
+        7,
+        41,
+        150,
+    );
+    let mut different = teacher_with_monitoring(initial.clone());
+    let mut student = different.principal(id(3)).unwrap().clone();
+    student.permissions.insert(Permission::ReadClipboard);
+    different.upsert(student).unwrap();
+    assert_eq!(
+        check_classroom_audit_batch_final_state(
+            &initial,
+            &different,
+            7,
+            std::slice::from_ref(&grant)
+        ),
+        Err(AuditBaselineConsistencyError::FinalStateMismatch)
+    );
+    let mut different = teacher_with_monitoring(initial.clone());
+    assert!(different.disable(id(4)));
+    assert_eq!(
+        check_classroom_audit_batch_final_state(&initial, &different, 7, &[grant]),
+        Err(AuditBaselineConsistencyError::FinalStateMismatch)
+    );
+}
+
+#[test]
+fn unauthorized_credential_changes_or_principal_additions_mismatch_final() {
+    let initial = baseline();
+    let grant = intent(
+        &initial,
+        2,
+        ClassroomPermission::ViewMonitoring,
+        true,
+        7,
+        41,
+        150,
+    );
+    let mut different = teacher_with_monitoring(initial.clone());
+    let mut teacher = different.principal(id(2)).unwrap().clone();
+    teacher.revoke_credential(cred(2), 151).unwrap();
+    different.upsert(teacher).unwrap();
+    assert_eq!(
+        check_classroom_audit_batch_final_state(
+            &initial,
+            &different,
+            7,
+            std::slice::from_ref(&grant)
+        ),
+        Err(AuditBaselineConsistencyError::FinalStateMismatch)
+    );
+    let mut different = teacher_with_monitoring(initial.clone());
+    different
+        .upsert(principal(66, PrincipalKind::Teacher, &[]))
+        .unwrap();
+    assert_eq!(
+        check_classroom_audit_batch_final_state(&initial, &different, 7, &[grant]),
+        Err(AuditBaselineConsistencyError::FinalStateMismatch)
+    );
+}
+
+#[test]
+fn invalid_intent_state_is_rejected_before_post_state_comparison() {
+    let initial = baseline();
+    let recorded = intent(
+        &initial,
+        2,
+        ClassroomPermission::ViewMonitoring,
+        true,
+        7,
+        41,
+        150,
+    );
+    let unexpected_initial = teacher_with_monitoring(initial.clone());
+    assert_eq!(
+        check_classroom_audit_batch_final_state(
+            &unexpected_initial,
+            &unexpected_initial,
+            7,
+            &[recorded]
+        ),
+        Err(AuditBaselineConsistencyError::BeforeStateMismatch { index: 0 })
     );
 }
