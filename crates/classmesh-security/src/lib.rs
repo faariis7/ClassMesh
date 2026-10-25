@@ -677,3 +677,5 @@ mod tests {
 }
 
 pub mod classroom_audit_baseline_consistency;
+
+pub mod classroom_audit_chain_baseline_consistency;
