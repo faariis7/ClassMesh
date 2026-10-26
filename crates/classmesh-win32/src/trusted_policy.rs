@@ -591,7 +591,8 @@ mod tests {
         assert!(
             [
                 "ClassMesh-anchor-probe-install-",
-                "ClassMesh-anchor-probe-install-crash-"
+                "ClassMesh-anchor-probe-install-crash-",
+                "ClassMesh-anchor-probe-install-power-"
             ]
             .iter()
             .any(|prefix| scope
@@ -615,6 +616,45 @@ mod tests {
             "committed-exit" => {
                 install_at(&scope, 3, VALID).unwrap();
                 std::process::exit(0);
+            }
+            "power-setup" => {
+                assert!(scope.starts_with("ClassMesh-anchor-probe-install-power-"));
+                provision_at(&scope, 1, VALID).unwrap();
+            }
+            "power-pause" => {
+                assert!(scope.starts_with("ClassMesh-anchor-probe-install-power-"));
+                install_at(&scope, 2, VALID).unwrap();
+            }
+            "power-recover" => {
+                assert!(scope.starts_with("ClassMesh-anchor-probe-install-power-"));
+                let observed_epoch = match open_at(&scope) {
+                    Ok(session) => {
+                        assert!([1, 2].contains(&session.epoch()));
+                        eprintln!("POWER_RECOVERY_VERIFIED_EPOCH={}", session.epoch());
+                        Some(session.epoch())
+                    }
+                    Err(error) => {
+                        eprintln!("POWER_RECOVERY_DENIED={error}");
+                        None
+                    }
+                };
+                assert!(install_at(&scope, 1, VALID).is_err());
+                let root = crate::program_data_known_folder::resolve_os_program_data_path()
+                    .unwrap()
+                    .join(&scope);
+                if observed_epoch == Some(1)
+                    && root.join("state/policy-0000000000000002.json").exists()
+                {
+                    assert!(
+                        install_at(&scope, 2, VALID).is_err(),
+                        "pre-commit staged orphan must not be adopted"
+                    );
+                }
+                if observed_epoch == Some(2) {
+                    assert!(install_at(&scope, 2, VALID).is_err());
+                }
+                crate::registry_epoch::remove_fixture(&scope);
+                std::fs::remove_dir_all(root).unwrap();
             }
             _ => panic!("unknown private fixture mode"),
         }
