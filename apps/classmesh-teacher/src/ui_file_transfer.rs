@@ -23,22 +23,7 @@ pub fn staged_file_candidate_ready(
     selection: Option<MonitoringSourceId>,
     context: Option<&TeacherFilePullContext>,
 ) -> bool {
-    let Some(context) = context else {
-        return false;
-    };
-    if candidate.source_id != context.source_id
-        || candidate.control_session_id != context.control_session_id
-    {
-        return false;
-    }
-    prepare_file_pull_action(
-        candidate.source_id,
-        candidate.transfer_id,
-        candidate.opaque_source_id,
-        selection,
-        Some(context),
-    )
-    .is_ok()
+    prepare_staged_file_pull_action(candidate, selection, context).is_ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +99,32 @@ pub fn prepare_file_pull_action(
     Ok(action)
 }
 
+/// Only the exact staged candidate for the current authenticated control
+/// context can be prepared for the Teacher UI handoff. This does not itself
+/// authenticate candidate provenance or transmit a request.
+pub fn prepare_staged_file_pull_action(
+    candidate: TeacherStagedFileCandidate,
+    selection: Option<MonitoringSourceId>,
+    context: Option<&TeacherFilePullContext>,
+) -> Result<TeacherFilePullAction, TeacherFilePullError> {
+    let context = context.ok_or(TeacherFilePullError::MissingContext)?;
+    if candidate.control_session_id == 0 {
+        return Err(TeacherFilePullError::InvalidSession);
+    }
+    if candidate.source_id != context.source_id
+        || candidate.control_session_id != context.control_session_id
+    {
+        return Err(TeacherFilePullError::StaleContext);
+    }
+    prepare_file_pull_action(
+        candidate.source_id,
+        candidate.transfer_id,
+        candidate.opaque_source_id,
+        selection,
+        Some(context),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +195,47 @@ mod tests {
             Some(MonitoringSourceId(7)),
             Some(&context())
         ));
+    }
+
+    #[test]
+    fn staged_pull_preparation_requires_exact_live_candidate_binding() {
+        let candidate = TeacherStagedFileCandidate {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 22,
+            transfer_id: [1; 16],
+            opaque_source_id: [2; 16],
+        };
+        assert_eq!(
+            prepare_staged_file_pull_action(
+                candidate,
+                Some(MonitoringSourceId(7)),
+                Some(&context()),
+            ),
+            Ok(prepared())
+        );
+        assert_eq!(
+            prepare_staged_file_pull_action(
+                TeacherStagedFileCandidate {
+                    control_session_id: 23,
+                    ..candidate
+                },
+                Some(MonitoringSourceId(7)),
+                Some(&context()),
+            ),
+            Err(TeacherFilePullError::StaleContext)
+        );
+        assert_eq!(
+            prepare_staged_file_pull_action(
+                candidate,
+                Some(MonitoringSourceId(8)),
+                Some(&context()),
+            ),
+            Err(TeacherFilePullError::SelectionChanged)
+        );
+        assert_eq!(
+            prepare_staged_file_pull_action(candidate, Some(MonitoringSourceId(7)), None),
+            Err(TeacherFilePullError::MissingContext)
+        );
     }
 
     #[test]

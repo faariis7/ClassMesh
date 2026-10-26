@@ -24,7 +24,7 @@ use crate::ui_actions::{
 use crate::ui_classroom::show_classroom;
 use crate::ui_diagnostics::{DiagnosticsOverrideDraft, show_diagnostics};
 use crate::ui_file_transfer::{
-    TeacherFilePullContext, TeacherStagedFileCandidate, prepare_file_pull_action,
+    TeacherFilePullContext, TeacherStagedFileCandidate, prepare_staged_file_pull_action,
     staged_file_candidate_ready, validate_file_pull_action,
 };
 use crate::ui_focus::show_focus;
@@ -318,6 +318,20 @@ impl TeacherEguiShell {
                 self.file_pull_context.as_ref(),
             )
             .ok()?;
+            // The candidate must still be present and identical at the
+            // dispatch handoff. Revocation/replacement invalidates a queued
+            // pull; successful handoff consumes it exactly once.
+            let candidate = self.staged_file_candidate?;
+            let expected = prepare_staged_file_pull_action(
+                candidate,
+                self.classroom.selected(),
+                self.file_pull_context.as_ref(),
+            )
+            .ok()?;
+            if pull != &expected {
+                return None;
+            }
+            self.staged_file_candidate = None;
         }
         Some(action)
     }
@@ -343,14 +357,17 @@ impl TeacherEguiShell {
         self.queue_action(TeacherUiAction::TeacherInteraction(action));
     }
 
-    pub fn queue_file_pull_request(&mut self, transfer_id: [u8; 16], source_id: [u8; 16]) {
-        let Some(selected) = self.classroom.selected() else {
+    /// A UI caller cannot invent opaque IDs: only the current staged
+    /// candidate may enter the existing bounded pending-action slot.
+    pub fn queue_staged_file_pull_request(&mut self) {
+        if self.pending_action.is_some() {
+            return;
+        }
+        let Some(candidate) = self.staged_file_candidate else {
             return;
         };
-        let Ok(action) = prepare_file_pull_action(
-            selected,
-            transfer_id,
-            source_id,
+        let Ok(action) = prepare_staged_file_pull_action(
+            candidate,
             self.classroom.selected(),
             self.file_pull_context.as_ref(),
         ) else {
@@ -432,12 +449,7 @@ impl TeacherEguiShell {
                     )
                     .clicked()
                 {
-                    if let Some(candidate) = self.staged_file_candidate {
-                        self.queue_file_pull_request(
-                            candidate.transfer_id,
-                            candidate.opaque_source_id,
-                        );
-                    }
+                    self.queue_staged_file_pull_request();
                 }
             }
             TeacherUiSection::Diagnostics => {
@@ -932,8 +944,15 @@ mod tests {
             version: classmesh_protocol::PROTOCOL_VERSION,
             capabilities: BTreeSet::from([Capability::FileTransfer]),
         };
+        let candidate = TeacherStagedFileCandidate {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            transfer_id: [1; 16],
+            opaque_source_id: [2; 16],
+        };
         app.set_file_pull_context(context.clone());
-        app.queue_file_pull_request([1; 16], [2; 16]);
+        app.set_staged_file_candidate(candidate);
+        app.queue_staged_file_pull_request();
         app.set_file_pull_context(TeacherFilePullContext {
             control_session_id: 78,
             ..context.clone()
@@ -941,17 +960,63 @@ mod tests {
         assert_eq!(app.take_pending_action(), None);
 
         app.set_file_pull_context(context.clone());
-        app.queue_file_pull_request([1; 16], [2; 16]);
+        app.set_staged_file_candidate(candidate);
+        app.queue_staged_file_pull_request();
         app.classroom.select(None).unwrap();
         assert_eq!(app.take_pending_action(), None);
 
         app.classroom.select(Some(MonitoringSourceId(7))).unwrap();
         app.set_file_pull_context(context);
-        app.queue_file_pull_request([1; 16], [2; 16]);
+        app.set_staged_file_candidate(candidate);
+        app.queue_staged_file_pull_request();
         assert!(matches!(
             app.take_pending_action(),
             Some(TeacherUiAction::FilePull(_))
         ));
+    }
+
+    #[test]
+    fn staged_file_pull_requires_current_candidate_and_consumes_it_once() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let context = TeacherFilePullContext {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            version: classmesh_protocol::PROTOCOL_VERSION,
+            capabilities: BTreeSet::from([Capability::FileTransfer]),
+        };
+        let candidate = TeacherStagedFileCandidate {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            transfer_id: [1; 16],
+            opaque_source_id: [2; 16],
+        };
+        app.set_file_pull_context(context);
+        app.queue_staged_file_pull_request();
+        assert_eq!(app.take_pending_action(), None);
+
+        app.set_staged_file_candidate(candidate);
+        app.queue_staged_file_pull_request();
+        app.clear_staged_file_candidate();
+        assert_eq!(app.take_pending_action(), None);
+
+        app.set_staged_file_candidate(candidate);
+        app.queue_staged_file_pull_request();
+        app.set_staged_file_candidate(TeacherStagedFileCandidate {
+            transfer_id: [3; 16],
+            ..candidate
+        });
+        assert_eq!(app.take_pending_action(), None);
+
+        app.set_staged_file_candidate(candidate);
+        app.queue_staged_file_pull_request();
+        assert!(matches!(
+            app.take_pending_action(),
+            Some(TeacherUiAction::FilePull(_))
+        ));
+        assert_eq!(app.staged_file_candidate, None);
+        app.queue_staged_file_pull_request();
+        assert_eq!(app.take_pending_action(), None);
     }
 
     #[test]
