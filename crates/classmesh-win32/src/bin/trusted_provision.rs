@@ -23,13 +23,24 @@ fn main() {
     fn run() -> io::Result<()> {
         let args: Vec<_> = std::env::args().collect();
         let mode = args.get(1).map(String::as_str);
+        if mode == Some("--verify-policy") && args.len() == 2 {
+            // An ambiguous update result is resolved only by reopening the
+            // fixed installed namespace under its exclusive lifetime lease.
+            // This proves the anchored policy, not identity/config readiness.
+            let session = classmesh_win32::trusted_policy::TrustedPolicySession::open_installed()?;
+            println!(
+                "Verified committed policy epoch {}; startup identity and config not checked.",
+                session.epoch()
+            );
+            return Ok(());
+        }
         if !matches!(
             (mode, args.len()),
             (Some("--fresh"), 6) | (Some("--update"), 4)
         ) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "usage: classmesh-trusted-provision --fresh <epoch> <policy.json> <identity.json> <control-runtime.json> | --update <epoch> <policy.json>",
+                "usage: classmesh-trusted-provision --fresh <epoch> <policy.json> <identity.json> <control-runtime.json> | --update <epoch> <policy.json> | --verify-policy",
             ));
         }
         let epoch = args[2].parse::<u64>().map_err(|_| {
@@ -55,7 +66,13 @@ fn main() {
         Ok(())
     }
     if let Err(error) = run() {
-        eprintln!("Trusted policy installation rejected: {error}");
+        if std::env::args().nth(1).as_deref() == Some("--verify-policy") {
+            eprintln!("Trusted committed policy verification failed closed: {error}");
+        } else {
+            eprintln!(
+                "Trusted policy operation was not acknowledged: {error}. Stop the Service and run --verify-policy before choosing a new epoch; never retry an old policy blindly."
+            );
+        }
         std::process::exit(1);
     }
 }
