@@ -6,6 +6,8 @@
 
 **Phase 13 cleanup regression:** VM1 Session 1 RED used a wrong-window executable with `-LeaveRunning`; the failed smoke rejected it but left one process alive. GREEN final helper still rejected it and left zero survivors, while a reindexed real Teacher UI bundle again passed a 7-second responsive-window smoke. Only successful smoke can honor `-LeaveRunning`.
 
+**Phase 13 stale-evidence regression:** VM1 RED wrong-window retry left an older `launch-smoke-evidence.json` in place. GREEN clears the helper-owned fixed-name file before checks; the same failed retry left zero processes and no success evidence. A separate final-script real UI rerun passed with a responsive window and fresh evidence.
+
 ## Historical checkpoint — offline trusted startup inspection (2026-10-29)
 
 #640 merged as `952d45b2` after exact-head CI `40795113425` passed Portable Rust and Windows Build. The new `codex/phase12-startup-inspector` batch adds `classmesh-trusted-provision --verify-startup`: while the Service is stopped, acquire the fixed protected policy lease and verify the Registry-bound policy, fixed protected machine identity, its active policy credential/principal, certificate expiry, non-exportable matching CNG key, and protected control config. It never starts the Service or repairs an installation. VM1 x64 elevated trusted-policy suite 9/9 passed, including valid startup, malformed identity/config, revoked machine policy, and active lease exclusion; feature Clippy passed. Mac workspace tests/Clippy and Rustfmt passed. Exact-head CI 40848542126 passed and #641 merged as 15fa6b69. This is an offline recovery preflight, not live reload, default activation, or physical qualification. VM2 remains unavailable with an obsolete saved password; preserve Phase 10 files.

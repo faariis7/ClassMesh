@@ -47,6 +47,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-s
 
 The helper checks the x64 runtime, requires the process to remain alive for the bounded startup interval, and requires a responsive **ClassMesh Teacher** top-level window in the same session before writing `evidence\launch-smoke-evidence.json`. `main_window_observed` is always `true` on success. The old `-RequireResponsiveWindow` switch remains accepted for existing commands, but the window check is now mandatory. A successful launch smoke does **not** set visual/accessibility acceptance.
 
+Each smoke attempt clears its previous fixed-name launch evidence before validation. A failed attempt leaves no success file; a failed window check also terminates the process even when `-LeaveRunning` was requested.
+
 ## Visual and accessibility review
 
 While the process remains open, review the UI-specific surfaces:

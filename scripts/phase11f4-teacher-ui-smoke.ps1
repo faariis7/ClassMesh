@@ -270,6 +270,12 @@ switch ($Mode) {
     }
 
     "Smoke" {
+        # This fixed filename is managed output. A failed retry must never
+        # leave a previous successful launch record looking current.
+        $evidencePath = Join-Path $EvidenceDir "launch-smoke-evidence.json"
+        if (Test-Path -LiteralPath $evidencePath -PathType Leaf) {
+            Remove-Item -LiteralPath $evidencePath -Force
+        }
         if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
             throw "Smoke mode requires Windows"
         }
@@ -287,7 +293,6 @@ switch ($Mode) {
         $exeHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
 
         New-Item -ItemType Directory -Path $EvidenceDir -Force | Out-Null
-        $evidencePath = Join-Path $EvidenceDir "launch-smoke-evidence.json"
 
         $process = $null
         $smokeSucceeded = $false

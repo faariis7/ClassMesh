@@ -11,6 +11,8 @@
 
 **Phase 13 cleanup regression:** VM1 Session 1 RED used a wrong-window executable with `-LeaveRunning`; the failed smoke rejected it but left one process alive. GREEN final helper still rejected it and left zero survivors, while a reindexed real Teacher UI bundle again passed a 7-second responsive-window smoke. Only successful smoke can honor `-LeaveRunning`.
 
+**Phase 13 stale-evidence regression:** VM1 RED wrong-window retry left an older `launch-smoke-evidence.json` in place. GREEN clears the helper-owned fixed-name file before checks; the same failed retry left zero processes and no success evidence. A separate final-script real UI rerun passed with a responsive window and fresh evidence.
+
 ## Previous ASTRA WORK HANDOFF — 2026-10-29 offline startup inspection
 
 - Latest merged main: #640 squash `952d45b2454972d66497440269a03c1b76190df8`, exact-head CI `40795113425` Portable Rust and Windows Build PASS. Merged branch `codex/phase12-startup-inspector` in `/Users/ahmed/.codex/worktrees/phase12-startup-inspector/ClassMesh-phase12` changes only Win32 trusted-policy/installer CLI and these living docs. All Phase 10 worktrees/files are preserved.
