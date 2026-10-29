@@ -9,6 +9,8 @@
 
 **PR #642 latest evidence:** VM1 built the real x64 release Teacher UI and non-admin Session 1 Smoke observed its responsive ClassMesh Teacher window after 7 seconds. Evidence: `C:\Users\ahmed\ClassMesh-phase13-teacher-real-20261029\evidence\launch-smoke-evidence.json` at 2026-10-29T09:46:24Z; EXE SHA-256 `1d1a43aad52cc63bc06a3fefb9e1f8bec3967d04e2b3b46192da76dc5bf436fc`, importing VCRUNTIME140.dll. The final architecture guard accepts x64/ARM64 and rejects x86 in macOS/VM1 focused tests; reindexed local real-UI bundle passed final-head non-admin Session 1 Smoke on VM1 with responsive window, Arm64, 7 seconds. PR #642 exact-head CI/review still pending. This local build is not the GitHub artifact or fresh-clean Windows evidence.
 
+**Phase 13 cleanup regression:** VM1 Session 1 RED used a wrong-window executable with `-LeaveRunning`; the failed smoke rejected it but left one process alive. GREEN final helper still rejected it and left zero survivors, while a reindexed real Teacher UI bundle again passed a 7-second responsive-window smoke. Only successful smoke can honor `-LeaveRunning`.
+
 ## Previous ASTRA WORK HANDOFF — 2026-10-29 offline startup inspection
 
 - Latest merged main: #640 squash `952d45b2454972d66497440269a03c1b76190df8`, exact-head CI `40795113425` Portable Rust and Windows Build PASS. Merged branch `codex/phase12-startup-inspector` in `/Users/ahmed/.codex/worktrees/phase12-startup-inspector/ClassMesh-phase12` changes only Win32 trusted-policy/installer CLI and these living docs. All Phase 10 worktrees/files are preserved.

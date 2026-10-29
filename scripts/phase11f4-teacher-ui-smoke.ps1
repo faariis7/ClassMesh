@@ -290,6 +290,7 @@ switch ($Mode) {
         $evidencePath = Join-Path $EvidenceDir "launch-smoke-evidence.json"
 
         $process = $null
+        $smokeSucceeded = $false
         try {
             $process = Start-Process -FilePath $exeItem.FullName -PassThru
             Start-Sleep -Seconds $StartupSeconds
@@ -327,6 +328,7 @@ switch ($Mode) {
                 physical_media_transport_qualified = $null
                 note = "Launch smoke only. Visual/accessibility acceptance and unrelated physical qualification remain separate."
             } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $evidencePath -Encoding utf8
+            $smokeSucceeded = $true
 
             Write-Host "launch_smoke_passed=true"
             Write-Host "process_id=$($process.Id)"
@@ -336,7 +338,7 @@ switch ($Mode) {
             Write-Host "visual_accessibility_reviewed=undetermined"
         }
         finally {
-            if ($null -ne $process -and -not $LeaveRunning) {
+            if ($null -ne $process -and (-not $LeaveRunning -or -not $smokeSucceeded)) {
                 $process.Refresh()
                 if (-not $process.HasExited) {
                     # Use the retained process object; a recycled PID must not
