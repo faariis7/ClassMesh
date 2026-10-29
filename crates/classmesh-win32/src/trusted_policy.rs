@@ -113,11 +113,18 @@ impl TrustedPolicySession {
         &self,
         parse: impl FnOnce(&mut dyn Read) -> T,
     ) -> io::Result<T> {
+        self.read_machine_identity_at("ClassMesh", parse)
+    }
+    fn read_machine_identity_at<T>(
+        &self,
+        scope: &str,
+        parse: impl FnOnce(&mut dyn Read) -> T,
+    ) -> io::Result<T> {
         let index = self._directories.len().checked_sub(3).ok_or_else(denied)?;
         let program_data = self._directories.get(index).ok_or_else(denied)?;
         read_trusted_primary(
             program_data,
-            "ClassMesh",
+            scope,
             "state",
             "machine-identity.json",
             MAX_IDENTITY_BYTES as u64,
@@ -127,11 +134,18 @@ impl TrustedPolicySession {
     /// Read only the fixed protected ClassMesh/config primary through the same
     /// trusted ProgramData HANDLE. No environment path or backup fallback.
     pub fn read_control_config<T>(&self, parse: impl FnOnce(&mut dyn Read) -> T) -> io::Result<T> {
+        self.read_control_config_at("ClassMesh", parse)
+    }
+    fn read_control_config_at<T>(
+        &self,
+        scope: &str,
+        parse: impl FnOnce(&mut dyn Read) -> T,
+    ) -> io::Result<T> {
         let index = self._directories.len().checked_sub(3).ok_or_else(denied)?;
         let program_data = self._directories.get(index).ok_or_else(denied)?;
         read_trusted_primary(
             program_data,
-            "ClassMesh",
+            scope,
             "config",
             "control-runtime.json",
             MAX_CONFIG_BYTES as u64,
@@ -182,6 +196,12 @@ pub fn provision_fresh_install(
 /// recovery must reopen the anchor, never retry with the old expected record.
 pub fn install_policy(epoch: u64, bytes: &[u8]) -> io::Result<()> {
     install_at(INSTALLED_SCOPE, epoch, bytes)
+}
+/// Offline inspection of the fixed installed policy, identity, protected CNG
+/// key and control config under one exclusive Service lifetime lease. The
+/// Service must be stopped. This does not start network or Worker runtimes.
+pub fn verify_installed_startup() -> io::Result<u64> {
+    verify_startup_at(INSTALLED_SCOPE, "ClassMesh")
 }
 fn denied() -> io::Error {
     io::Error::new(
@@ -271,6 +291,12 @@ fn preflight_fresh_install(
     let identity = classmesh_identity_win::DurableMachineIdentity::parse_from_reader(identity)
         .map_err(|_| denied())?;
     parse_control_config(config)?;
+    verify_identity_authorization(identity, &authorization)
+}
+fn verify_identity_authorization(
+    identity: classmesh_identity_win::MachineIdentityBundle,
+    authorization: &AuthorizationStore,
+) -> io::Result<()> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| denied())?;
@@ -297,6 +323,18 @@ fn preflight_fresh_install(
         .collect();
     classmesh_identity_win::cng_server_cert_resolver(chain, key).map_err(|_| denied())?;
     Ok(())
+}
+fn verify_startup_at(policy_scope: &str, startup_scope: &str) -> io::Result<u64> {
+    let mut session = open_at(policy_scope)?;
+    let identity = session
+        .read_machine_identity_at(startup_scope, |reader| {
+            classmesh_identity_win::DurableMachineIdentity::parse_from_reader(reader)
+        })?
+        .map_err(|_| denied())?;
+    let authorization = session.take_authorization()?;
+    verify_identity_authorization(identity, &authorization)?;
+    session.read_control_config_at(startup_scope, |reader| parse_control_config(reader))??;
+    Ok(session.epoch())
 }
 fn provision_fresh_at(
     policy_scope: &str,
@@ -1217,6 +1255,37 @@ mod tests {
         assert!(policy_root.exists());
         assert!(startup_root.join("state/machine-identity.json").exists());
         assert_eq!(open_at(&policy_scope).unwrap().epoch(), 1);
+        assert_eq!(
+            verify_startup_at(&policy_scope, &startup_scope).unwrap(),
+            1,
+            "offline startup inspection must validate the installed inputs"
+        );
+        let active = open_at(&policy_scope).unwrap();
+        assert!(
+            verify_startup_at(&policy_scope, &startup_scope).is_err(),
+            "inspection cannot race an active Service lease"
+        );
+        drop(active);
+        let config_path = startup_root.join("config/control-runtime.json");
+        std::fs::write(&config_path, b"bad config").unwrap();
+        assert!(verify_startup_at(&policy_scope, &startup_scope).is_err());
+        std::fs::write(&config_path, config).unwrap();
+        let identity_path = startup_root.join("state/machine-identity.json");
+        let original_identity = std::fs::read(&identity_path).unwrap();
+        std::fs::write(&identity_path, b"bad identity").unwrap();
+        assert!(verify_startup_at(&policy_scope, &startup_scope).is_err());
+        std::fs::write(&identity_path, original_identity).unwrap();
+        assert_eq!(verify_startup_at(&policy_scope, &startup_scope).unwrap(), 1);
+        install_at(
+            &policy_scope,
+            2,
+            &serde_json::to_vec(&wrong_policy).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            verify_startup_at(&policy_scope, &startup_scope).is_err(),
+            "a policy update revoking the installed machine must fail startup inspection"
+        );
         assert!(
             provision_fresh_at(&policy_scope, &startup_scope, 1, &policy, &identity, config)
                 .is_err()

@@ -1,5 +1,13 @@
 # ClassMesh Agent Handoff
 
+## ASTRA WORK HANDOFF — 2026-10-29 offline startup inspection
+
+- Latest merged main: #640 squash `952d45b2454972d66497440269a03c1b76190df8`, exact-head CI `40795113425` Portable Rust and Windows Build PASS. Current branch `codex/phase12-startup-inspector` in `/Users/ahmed/.codex/worktrees/phase12-startup-inspector/ClassMesh-phase12` changes only Win32 trusted-policy/installer CLI and these living docs. All Phase 10 worktrees/files are preserved.
+- `--verify-startup` acquires the fixed protected lease and verifies the committed policy plus protected identity, active credential/principal, certificate expiry, matching non-exportable CNG key and protected config. It reports the committed epoch on success; no repair, policy publication, Service launch or network binding. The existing `--verify-policy` remains available for ambiguous epoch outcomes even when startup inputs are invalid.
+- VM1 x64 elevated trusted-policy suite 9/9 passed: valid installation, altered identity/config, a policy update disabling the installed machine and active lease exclusion. Feature Clippy PASS. Mac workspace tests, Clippy and Rustfmt PASS. Hosted exact-head CI and structured security review pending. VM2 stopped with obsolete VMPal password.
+- Security limits: inspection is point-in-time while the Service is stopped; it does not certify network/Worker readiness, live revocation or physical power-loss behavior. The trusted feature remains default-off. Next: push one PR, require exact-head Portable Rust and Windows Build, review then squash. The highest remaining Phase 12 gate is Service-owned live publication with cancellation of already queued privileged work; do not simply publish an authorization snapshot.
+
+
 ## ASTRA WORK HANDOFF — 2026-10-29 file-stage power-cut qualification
 
 - Latest merged main at branch start: #639 squash `a8e862e3aa620929c313da0f5a8e77b1750ca99b`, exact-head CI `40416079197` Portable Rust and Windows Build PASS; #638 previously merged as `266a0694`. Active worktree `/Users/ahmed/.codex/worktrees/phase12-stage-powercut/ClassMesh-phase12`, branch `codex/phase12-file-stage-powercut`. It changes only `crates/classmesh-win32/src/trusted_policy.rs` plus these three living status docs; preserve all other worktrees and Phase 10 files.
