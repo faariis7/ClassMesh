@@ -361,7 +361,11 @@ fn stage(parent: &File, epoch: u64, bytes: &[u8], record: &[u8; 48]) -> io::Resu
     let name = classmesh_security::policy_blob_stage::policy_blob_filename(epoch)?;
     let mut file = create_relative_protected_file(parent, &name)?;
     file.write_all(bytes)?;
+    #[cfg(test)]
+    pause_for_file_power_cut("before-file-flush")?;
     file.sync_all()?;
+    #[cfg(test)]
+    pause_for_file_power_cut("after-file-flush")?;
     file.seek(SeekFrom::Start(0))?;
     // Exact bounded readback and parsing from the ORIGINAL exclusive writer.
     DurableAuthorizationState::parse_bound_primary_from_readers(
@@ -371,6 +375,27 @@ fn stage(parent: &File, epoch: u64, bytes: &[u8], record: &[u8; 48]) -> io::Resu
     )
     .map_err(|_| denied())?;
     Ok(file)
+}
+
+#[cfg(test)]
+fn pause_for_file_power_cut(stage: &str) -> io::Result<()> {
+    if std::env::var("CLASSMESH_POLICY_FILE_POWER_CUT_STAGE").as_deref() != Ok(stage) {
+        return Ok(());
+    }
+    let marker = std::env::var_os("CLASSMESH_POLICY_FILE_POWER_CUT_MARKER").ok_or_else(denied)?;
+    // A private native test worker signals the host at the exact file-stage
+    // boundary. A normal test kills this process; a VM run cuts machine power.
+    let mut signal = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker)?;
+    signal.write_all(stage.as_bytes())?;
+    signal.sync_all()?;
+    std::thread::sleep(std::time::Duration::from_secs(120));
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "file-stage VM power-cut probe was not interrupted",
+    ))
 }
 fn provision_at(scope: &str, epoch: u64, bytes: &[u8]) -> io::Result<()> {
     let record = validate(epoch, bytes)?;
@@ -584,6 +609,73 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn native_install_rejects_unflushed_stage_after_process_exit() {
+        let scope = format!(
+            "ClassMesh-anchor-probe-install-unflushed-{}",
+            std::process::id()
+        );
+        provision_at(&scope, 1, VALID).unwrap();
+        worker(&scope, "unflushed-exit");
+        assert_eq!(open_at(&scope).unwrap().epoch(), 1);
+        assert!(install_at(&scope, 2, VALID).is_err(), "never adopt orphan");
+        install_at(&scope, 3, VALID).unwrap();
+        assert_eq!(open_at(&scope).unwrap().epoch(), 3);
+        let root = crate::program_data_known_folder::resolve_os_program_data_path()
+            .unwrap()
+            .join(&scope);
+        crate::registry_epoch::remove_fixture(&scope);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn native_install_rejects_interrupted_file_stage_before_registry_commit() {
+        let scope = format!(
+            "ClassMesh-anchor-probe-install-power-{}",
+            std::process::id()
+        );
+        let marker = std::env::temp_dir().join(format!(
+            "classmesh-file-stage-cut-{}.marker",
+            std::process::id()
+        ));
+        assert!(!marker.exists(), "private marker must be absent");
+        provision_at(&scope, 1, VALID).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "trusted_policy::tests::native_install_process_worker",
+                "--nocapture",
+            ])
+            .env("CLASSMESH_INSTALL_SCOPE", &scope)
+            .env("CLASSMESH_INSTALL_MODE", "power-pause")
+            .env("CLASSMESH_POLICY_FILE_POWER_CUT_STAGE", "before-file-flush")
+            .env("CLASSMESH_POLICY_FILE_POWER_CUT_MARKER", &marker)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let signalled = marker.exists();
+        let _ = child.kill();
+        child.wait().unwrap();
+        assert!(
+            signalled,
+            "file-stage cut hook did not signal before commit"
+        );
+        assert_eq!(open_at(&scope).unwrap().epoch(), 1);
+        assert!(install_at(&scope, 2, VALID).is_err(), "orphan not adopted");
+        install_at(&scope, 3, VALID).unwrap();
+        assert_eq!(open_at(&scope).unwrap().epoch(), 3);
+        std::fs::remove_file(marker).unwrap();
+        let root = crate::program_data_known_folder::resolve_os_program_data_path()
+            .unwrap()
+            .join(&scope);
+        crate::registry_epoch::remove_fixture(&scope);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn native_install_process_worker() {
         let Ok(scope) = std::env::var("CLASSMESH_INSTALL_SCOPE") else {
             return;
@@ -592,6 +684,7 @@ mod tests {
             [
                 "ClassMesh-anchor-probe-install-",
                 "ClassMesh-anchor-probe-install-crash-",
+                "ClassMesh-anchor-probe-install-unflushed-",
                 "ClassMesh-anchor-probe-install-power-"
             ]
             .iter()
@@ -612,6 +705,16 @@ mod tests {
                 let record = validate(2, VALID).unwrap();
                 let _blob = stage(state(&dirs).unwrap(), 2, VALID, &record).unwrap();
                 std::process::exit(0); // No Rust destructors, OS releases all handles.
+            }
+            "unflushed-exit" => {
+                assert!(scope.starts_with("ClassMesh-anchor-probe-install-unflushed-"));
+                let dirs = pin(&scope, false).unwrap();
+                let _lock = open_relative_exclusive_file(state(&dirs).unwrap(), LOCK_NAME).unwrap();
+                let name = classmesh_security::policy_blob_stage::policy_blob_filename(2).unwrap();
+                let mut file =
+                    create_relative_protected_file(state(&dirs).unwrap(), &name).unwrap();
+                file.write_all(VALID).unwrap();
+                std::process::exit(0); // Deliberately no flush or Registry commit.
             }
             "committed-exit" => {
                 install_at(&scope, 3, VALID).unwrap();
