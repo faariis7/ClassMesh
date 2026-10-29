@@ -16,13 +16,21 @@ The bundle contains:
 - `PHASE11_TEACHER_UI_SMOKE_RESULTS.md`
 - generated `teacher-ui-bundle-index.json`
 
-The index records bounded file metadata and SHA-256 hashes. Validate it before launch:
+The schema-2 index records bounded file metadata, SHA-256 hashes and the CI host's MSVC toolset version. Validate it before launch:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-smoke.ps1 -Mode ValidateBundle -BundleDir .
 ```
 
 `-ExecutionPolicy Bypass` is process-local here; it does not change the machine or user execution policy.
+
+Check the installed **x64** Visual C++ Redistributable before launching the UI:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-smoke.ps1 -Mode PreflightRuntime -BundleDir .
+```
+
+The helper requires x64 Windows or Windows ARM64 with x64 emulation, then reads the x64 runtime version from the Windows Registry and requires it to be at least the bundle's recorded MSVC toolset version. Missing, malformed, conflicting or older runtime records fail with an actionable diagnostic; it never installs software. Microsoft documents the [same-or-later version rule and x64 package for ARM64 devices](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) and the [runtime Registry values](https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files). Registry presence is a prerequisite check; the launch smoke below still verifies a real window.
 
 ## Interactive launch smoke
 
@@ -37,9 +45,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-s
   -LeaveRunning
 ```
 
-The helper requires the process to remain alive for the bounded startup interval and writes `evidence\launch-smoke-evidence.json`. A successful launch smoke does **not** set visual/accessibility acceptance.
+The helper checks the x64 runtime, requires the process to remain alive for the bounded startup interval, and requires a responsive **ClassMesh Teacher** top-level window in the same session before writing `evidence\launch-smoke-evidence.json`. `main_window_observed` is always `true` on success. The old `-RequireResponsiveWindow` switch remains accepted for existing commands, but the window check is now mandatory. A successful launch smoke does **not** set visual/accessibility acceptance.
 
-On Windows machines where runtime prerequisites have been installed, add `-RequireResponsiveWindow` to require a live **ClassMesh Teacher** top-level window (same interactive session, non-zero window handle, responsive process) before reporting launch success. This optional gate rejects common loader-error dialogs such as a missing `VCRUNTIME140.dll`. When the switch is not supplied, `main_window_observed` is `null`, not a passing visual result. Even when the switch succeeds, **visual/accessibility acceptance remains separate** and must be reviewed manually.
+Each smoke attempt clears its previous fixed-name launch evidence before validation. A failed attempt leaves no success file; a failed window check also terminates the process even when `-LeaveRunning` was requested.
 
 ## Visual and accessibility review
 

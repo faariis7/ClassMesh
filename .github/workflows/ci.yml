@@ -134,7 +134,9 @@ jobs:
 
       - name: Validate Phase 11F4 Teacher UI smoke helper
         shell: pwsh
-        run: .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode Help
+        run: |
+          .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode Help
+          .\scripts\tests\phase13_vc_runtime_preflight.ps1
 
       - name: Validate Phase 12B4 system-action qualification helper
         shell: pwsh
@@ -543,6 +545,7 @@ jobs:
           Copy-Item docs/PHASE11_TEACHER_UI_SMOKE_RESULTS.md phase11f4-teacher-ui-bundle/
           .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode IndexBundle -BundleDir phase11f4-teacher-ui-bundle
           .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode ValidateBundle -BundleDir phase11f4-teacher-ui-bundle
+          .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode PreflightRuntime -BundleDir phase11f4-teacher-ui-bundle
 
       - name: Upload Phase 11F4 Teacher UI bundle
         uses: actions/upload-artifact@v4
