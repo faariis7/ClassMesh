@@ -98,6 +98,7 @@ function Get-X64VcRuntimeVersion {
     if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
         throw 'Visual C++ runtime preflight requires Windows'
     }
+    Assert-X64CompatibleArchitecture ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)
     $versions = @()
     foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
         $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
@@ -118,6 +119,14 @@ function Get-X64VcRuntimeVersion {
     $versions[0]
 }
 
+function Assert-X64CompatibleArchitecture {
+    param([System.Runtime.InteropServices.Architecture]$Architecture)
+    if ($Architecture -ne [System.Runtime.InteropServices.Architecture]::X64 -and
+        $Architecture -ne [System.Runtime.InteropServices.Architecture]::Arm64) {
+        throw "The Windows x64 Teacher UI bundle requires x64 Windows or Windows ARM64 with x64 emulation; found $Architecture"
+    }
+}
+
 function Assert-BundleRuntime {
     param([Parameter(Mandatory = $true)]$Index)
     $minimum = Parse-VcVersion ([string]$Index.minimum_vc_runtime_version)
@@ -125,6 +134,7 @@ function Assert-BundleRuntime {
     Assert-RuntimeSatisfiesToolset $minimum $installed
     Write-Host "vc_runtime_x64_version=$installed"
     Write-Host "minimum_vc_runtime_version=$minimum"
+    Write-Host "os_architecture=$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
     $installed
 }
 
@@ -305,6 +315,7 @@ switch ($Mode) {
                 executable_sha256 = $exeHash
                 minimum_vc_runtime_version = [string]$index.minimum_vc_runtime_version
                 installed_vc_runtime_version = $runtimeVersion.ToString()
+                os_architecture = [string][System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
                 startup_seconds = $StartupSeconds
                 process_id = $process.Id
                 process_alive_after_startup = $true

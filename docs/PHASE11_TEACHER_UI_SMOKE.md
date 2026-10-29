@@ -30,7 +30,7 @@ Check the installed **x64** Visual C++ Redistributable before launching the UI:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-smoke.ps1 -Mode PreflightRuntime -BundleDir .
 ```
 
-The helper reads the x64 runtime version from the Windows Registry and requires it to be at least the bundle's recorded MSVC toolset version. Missing, malformed, conflicting or older runtime records fail with an actionable diagnostic; it never installs software. Microsoft documents the [same-or-later version rule and x64 package for ARM64 devices](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) and the [runtime Registry values](https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files). Registry presence is a prerequisite check; the launch smoke below still verifies a real window.
+The helper requires x64 Windows or Windows ARM64 with x64 emulation, then reads the x64 runtime version from the Windows Registry and requires it to be at least the bundle's recorded MSVC toolset version. Missing, malformed, conflicting or older runtime records fail with an actionable diagnostic; it never installs software. Microsoft documents the [same-or-later version rule and x64 package for ARM64 devices](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) and the [runtime Registry values](https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files). Registry presence is a prerequisite check; the launch smoke below still verifies a real window.
 
 ## Interactive launch smoke
 

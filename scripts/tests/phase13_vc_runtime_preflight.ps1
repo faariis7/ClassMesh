@@ -15,6 +15,9 @@ Assert-RuntimeSatisfiesToolset $toolset $runtime
 Assert-RuntimeSatisfiesToolset $toolset (Parse-VcVersion '14.44.35207.0')
 Assert-Throws { Assert-RuntimeSatisfiesToolset $toolset (Parse-VcVersion '14.44.35206.9') } 'older runtime passed'
 Assert-Throws { Assert-RuntimeSatisfiesToolset $toolset $null } 'missing runtime passed'
+Assert-X64CompatibleArchitecture ([System.Runtime.InteropServices.Architecture]::X64)
+Assert-X64CompatibleArchitecture ([System.Runtime.InteropServices.Architecture]::Arm64)
+Assert-Throws { Assert-X64CompatibleArchitecture ([System.Runtime.InteropServices.Architecture]::X86) } 'x86 Windows architecture passed'
 foreach ($invalid in @('', '14.44', '14.44.x', '15.0.0.0', '14.44.35207.0.1', '14.44.35207-beta')) {
     Assert-Throws { Parse-VcVersion $invalid | Out-Null } "invalid version passed: $invalid"
 }
