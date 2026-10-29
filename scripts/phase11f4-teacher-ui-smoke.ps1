@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("Help", "IndexBundle", "ValidateBundle", "Smoke")]
+    [ValidateSet("Help", "IndexBundle", "ValidateBundle", "PreflightRuntime", "Smoke")]
     [string]$Mode,
 
     [string]$BundleDir = "phase11f4-teacher-ui-bundle",
@@ -17,7 +17,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$SchemaVersion = 1
+$SchemaVersion = 2
 $Target = "windows-x64"
 $ExecutableName = "classmesh-teacher-ui.exe"
 $IndexName = "teacher-ui-bundle-index.json"
@@ -62,6 +62,72 @@ function File-Evidence {
     }
 }
 
+function Parse-VcVersion {
+    param([AllowEmptyString()][string]$Text)
+    if ($Text -notmatch '^v?(14)\.(\d+)\.(\d+)(?:\.(\d+))?$') {
+        throw "Invalid Visual C++ runtime/toolset version: $Text"
+    }
+    $revision = if ($Matches[4]) { $Matches[4] } else { '0' }
+    [version]::Parse("$($Matches[1]).$($Matches[2]).$($Matches[3]).$revision")
+}
+
+function Assert-RuntimeSatisfiesToolset {
+    param([version]$Minimum, [AllowNull()][version]$Installed)
+    if ($null -eq $Installed) {
+        throw "Microsoft Visual C++ x64 Redistributable is missing. Install the current Microsoft-signed x64 package: https://aka.ms/vc14/vc_redist.x64.exe"
+    }
+    if ($Installed -lt $Minimum) {
+        throw "Microsoft Visual C++ x64 Redistributable $Installed is older than this bundle's MSVC toolset $Minimum. Update from https://aka.ms/vc14/vc_redist.x64.exe"
+    }
+}
+
+function Get-BuildToolsetVersion {
+    if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        throw 'Bundle indexing requires the Windows MSVC build host'
+    }
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw 'vswhere.exe is missing' }
+    $installation = (& $vswhere -latest -products '*' -property installationPath | Select-Object -First 1)
+    if (-not $installation) { throw 'MSVC x64 build tools are missing' }
+    $versionPath = Join-Path $installation 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt'
+    if (-not (Test-Path -LiteralPath $versionPath -PathType Leaf)) { throw 'MSVC toolset version file is missing' }
+    Parse-VcVersion ((Get-Content -LiteralPath $versionPath -Raw).Trim())
+}
+
+function Get-X64VcRuntimeVersion {
+    if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        throw 'Visual C++ runtime preflight requires Windows'
+    }
+    $versions = @()
+    foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
+        $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+        try {
+            $key = $root.OpenSubKey('SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64')
+            if ($null -eq $key) { continue }
+            try {
+                if ([int]$key.GetValue('Installed', 0) -eq 1) {
+                    $versions += Parse-VcVersion ([string]$key.GetValue('Version', ''))
+                }
+            } finally { $key.Close() }
+        } finally { $root.Close() }
+    }
+    if ($versions.Count -eq 0) { return $null }
+    if ($versions.Count -eq 2 -and $versions[0] -ne $versions[1]) {
+        throw 'Conflicting Visual C++ x64 Redistributable registry versions'
+    }
+    $versions[0]
+}
+
+function Assert-BundleRuntime {
+    param([Parameter(Mandatory = $true)]$Index)
+    $minimum = Parse-VcVersion ([string]$Index.minimum_vc_runtime_version)
+    $installed = Get-X64VcRuntimeVersion
+    Assert-RuntimeSatisfiesToolset $minimum $installed
+    Write-Host "vc_runtime_x64_version=$installed"
+    Write-Host "minimum_vc_runtime_version=$minimum"
+    $installed
+}
+
 function Show-Help {
 @"
 ClassMesh Phase 11F4 Teacher UI smoke helper
@@ -70,6 +136,7 @@ Modes:
   Help
   IndexBundle
   ValidateBundle
+  PreflightRuntime
   Smoke
 
 CI usage:
@@ -78,16 +145,17 @@ CI usage:
 
 Interactive Windows usage from the extracted artifact:
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-smoke.ps1 -Mode ValidateBundle -BundleDir .
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-smoke.ps1 -Mode Smoke -BundleDir . -EvidenceDir .\evidence -StartupSeconds 5 -RequireResponsiveWindow -LeaveRunning
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-smoke.ps1 -Mode PreflightRuntime -BundleDir .
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-smoke.ps1 -Mode Smoke -BundleDir . -EvidenceDir .\evidence -StartupSeconds 5 -LeaveRunning
 
 The Bypass flag applies only to the launched PowerShell process; it does not change machine/user execution policy.
 
 Smoke mode:
   - requires an interactive Windows user session (Session 0 is rejected);
   - verifies the exact artifact SHA-256 before launch;
-  - starts classmesh-teacher-ui.exe and requires it to remain alive for StartupSeconds;
-  - optional -RequireResponsiveWindow checks the process owns a responsive ClassMesh Teacher window in the same interactive session;
-  - writes launch-smoke-evidence.json; a null main_window_observed means the window check was not requested;
+  - checks the installed x64 Visual C++ Redistributable against the bundle's MSVC toolset version;
+  - starts classmesh-teacher-ui.exe and requires a responsive ClassMesh Teacher window in the same interactive session;
+  - writes launch-smoke-evidence.json only after the window check passes;
   - does NOT mark visual/accessibility review complete;
   - does NOT qualify any Phase 4/6/7/8/9/10 physical media or transport gate.
 "@ | Write-Host
@@ -105,6 +173,7 @@ function Validate-Bundle {
     if ([int]$index.schema_version -ne $SchemaVersion) {
         throw "Unsupported bundle schema version: $($index.schema_version)"
     }
+    $null = Parse-VcVersion ([string]$index.minimum_vc_runtime_version)
     if ([string]$index.target -ne $Target) {
         throw "Bundle target must be $Target"
     }
@@ -142,7 +211,9 @@ function Validate-Bundle {
 
     Write-Host "bundle_valid=true"
     Write-Host "target=$Target"
+    Write-Host "minimum_vc_runtime_version=$($index.minimum_vc_runtime_version)"
     Write-Host "visual_accessibility_reviewed=undetermined"
+    $index
 }
 
 switch ($Mode) {
@@ -164,6 +235,7 @@ switch ($Mode) {
             schema_version = $SchemaVersion
             generated_utc = (Get-Date).ToUniversalTime().ToString("o")
             target = $Target
+            minimum_vc_runtime_version = (Get-BuildToolsetVersion).ToString()
             ui_scope_only = $true
             visual_accessibility_reviewed = $null
             files = $files
@@ -178,7 +250,13 @@ switch ($Mode) {
     }
 
     "ValidateBundle" {
-        Validate-Bundle
+        $null = Validate-Bundle
+    }
+
+    "PreflightRuntime" {
+        $index = Validate-Bundle
+        $null = Assert-BundleRuntime -Index $index
+        Write-Host 'runtime_preflight_passed=true'
     }
 
     "Smoke" {
@@ -186,7 +264,8 @@ switch ($Mode) {
             throw "Smoke mode requires Windows"
         }
 
-        Validate-Bundle
+        $index = Validate-Bundle
+        $runtimeVersion = Assert-BundleRuntime -Index $index
 
         $sessionId = (Get-Process -Id $PID).SessionId
         if ($sessionId -eq 0) {
@@ -210,14 +289,12 @@ switch ($Mode) {
                 throw "Teacher UI exited during bounded startup smoke with exit code $($process.ExitCode)"
             }
 
-            if ($RequireResponsiveWindow) {
-                if ($process.SessionId -ne $sessionId) {
-                    throw "Teacher UI window smoke rejected: process session does not match the interactive caller"
-                }
-                $windowTitle = [string]$process.MainWindowTitle
-                if ($process.MainWindowHandle -eq [IntPtr]::Zero -or -not $process.Responding -or $windowTitle -cne "ClassMesh Teacher") {
-                    throw "Teacher UI window smoke failed: no responsive ClassMesh Teacher window; inspect Windows loader errors and runtime prerequisites"
-                }
+            if ($process.SessionId -ne $sessionId) {
+                throw "Teacher UI window smoke rejected: process session does not match the interactive caller"
+            }
+            $windowTitle = [string]$process.MainWindowTitle
+            if ($process.MainWindowHandle -eq [IntPtr]::Zero -or -not $process.Responding -or $windowTitle -cne "ClassMesh Teacher") {
+                throw "Teacher UI window smoke failed: no responsive ClassMesh Teacher window; inspect Windows loader errors and runtime prerequisites"
             }
 
             [ordered]@{
@@ -226,10 +303,12 @@ switch ($Mode) {
                 ui_scope_only = $true
                 executable = $ExecutableName
                 executable_sha256 = $exeHash
+                minimum_vc_runtime_version = [string]$index.minimum_vc_runtime_version
+                installed_vc_runtime_version = $runtimeVersion.ToString()
                 startup_seconds = $StartupSeconds
                 process_id = $process.Id
                 process_alive_after_startup = $true
-                main_window_observed = if ($RequireResponsiveWindow) { $true } else { $null }
+                main_window_observed = $true
                 session_id = $sessionId
                 user = [System.Environment]::UserName
                 left_running = [bool]$LeaveRunning
@@ -241,14 +320,23 @@ switch ($Mode) {
             Write-Host "launch_smoke_passed=true"
             Write-Host "process_id=$($process.Id)"
             Write-Host "session_id=$sessionId"
-            Write-Host "main_window_observed=$(if ($RequireResponsiveWindow) { 'true' } else { 'not_checked' })"
+            Write-Host 'main_window_observed=true'
             Write-Host "evidence=$evidencePath"
             Write-Host "visual_accessibility_reviewed=undetermined"
         }
         finally {
-            if ($null -ne $process -and -not $LeaveRunning -and -not $process.HasExited) {
-                Stop-Process -Id $process.Id -Force
-                $process.WaitForExit(5000) | Out-Null
+            if ($null -ne $process -and -not $LeaveRunning) {
+                $process.Refresh()
+                if (-not $process.HasExited) {
+                    # Use the retained process object; a recycled PID must not
+                    # allow smoke cleanup to terminate an unrelated process.
+                    try { $process.Kill() }
+                    catch {
+                        $process.Refresh()
+                        if (-not $process.HasExited) { throw }
+                    }
+                    $process.WaitForExit(5000) | Out-Null
+                }
             }
         }
     }
