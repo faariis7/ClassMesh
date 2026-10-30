@@ -1,7 +1,7 @@
 //! Monotonic idle recovery for a live Service-owned file pull.
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FilePullIdleLease {
     last_progress: Instant,
 }
