@@ -42,6 +42,7 @@ pub mod receiver_telemetry_stream_framing;
 pub mod receiver_telemetry_transport;
 pub mod stream;
 pub mod system_action_execution;
+pub mod teacher_file_pull_receive;
 pub mod x509_issuance;
 
 use std::collections::BTreeSet;
