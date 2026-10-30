@@ -13,7 +13,7 @@ use classmesh_protocol::control_wire::{
 use classmesh_protocol::file_transfer::{
     FileTransferError, file_transfer_pull_available, validate_pull_request,
 };
-use classmesh_security::{PrincipalId, PrincipalKind};
+use classmesh_security::{Permission, PrincipalId, PrincipalKind};
 
 use crate::client_session::ClientControlSession;
 use crate::live_authorization::{LiveAuthorizationError, LiveAuthorizationStore};
@@ -30,6 +30,7 @@ pub enum TeacherFilePullTransportError {
     SequenceExhausted,
     WrongPrincipal,
     WrongPrincipalKind,
+    TeacherNotAuthorized,
     Authorization(LiveAuthorizationError),
     PeerIdentity(PeerIdentityError),
     Transport(ControlTransportError),
@@ -60,11 +61,19 @@ fn verify_enrolled_student(
     if store.principal(expected_student).map(|p| p.kind) != Some(PrincipalKind::StudentDevice) {
         return Err(TeacherFilePullTransportError::WrongPrincipalKind);
     }
+    let current_teacher = session.established.negotiated.principal_id;
+    if store.principal(current_teacher).map(|p| p.kind) != Some(PrincipalKind::Teacher)
+        || !store.authorize(current_teacher, Permission::ReceiveFile)
+    {
+        return Err(TeacherFilePullTransportError::TeacherNotAuthorized);
+    }
     Ok(())
 }
 
 /// Send one validated Teacher pull request over an already enrolled QUIC client.
 /// No GUI context, raw file path or unauthenticated discovery ID can authorize it.
+/// The current local Teacher principal must have ReceiveFile permission in a
+/// fresh trusted policy snapshot, in addition to the exact enrolled Student.
 ///
 /// The *single owning dispatcher* supplies its current sequence and a unique
 /// nonzero request ID. This call claims the next outbound sequence before I/O
@@ -242,6 +251,16 @@ mod tests {
                 credentials,
             })
             .map_err(|e| format!("{e:?}"))?;
+        let mut teacher_allowed = store.clone();
+        teacher_allowed
+            .upsert(Principal {
+                id: PrincipalId([8; 32]),
+                kind: PrincipalKind::Teacher,
+                enabled: true,
+                permissions: BTreeSet::from([Permission::ReceiveFile]),
+                credentials: BTreeMap::new(),
+            })
+            .expect("authorized Teacher fixture");
         let live = LiveAuthorizationStore::new(store);
         let mut seq = 1;
         let mut invalid = request();
@@ -310,6 +329,24 @@ mod tests {
             Err(TeacherFilePullTransportError::WrongPrincipal)
         ));
         assert_eq!(seq, 1);
+        // A valid Student certificate does not authorize a Teacher that lacks
+        // the ReceiveFile permission on the live local policy.
+        assert!(matches!(
+            send_authenticated_file_pull_request(
+                &mut session,
+                &live,
+                EXPECTED,
+                &request(),
+                &mut seq,
+                11,
+                || 150,
+            )
+            .await,
+            Err(TeacherFilePullTransportError::TeacherNotAuthorized)
+        ));
+        assert_eq!(seq, 1);
+        live.publish_if_version(1, teacher_allowed)
+            .expect("publish authorized Teacher policy");
         send_authenticated_file_pull_request(
             &mut session,
             &live,
@@ -332,7 +369,7 @@ mod tests {
         ));
         // A newer trusted policy may revoke the peer while the session is
         // connected; no second file identifier may leave after that update.
-        live.publish_if_version(1, AuthorizationStore::default())
+        live.publish_if_version(2, AuthorizationStore::default())
             .expect("publish newer trusted test policy");
         assert!(matches!(
             send_authenticated_file_pull_request(
