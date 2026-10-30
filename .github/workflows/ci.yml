@@ -123,6 +123,9 @@ jobs:
       - name: Build Phase 12B4 Service qualification binary
         run: cargo build -p classmesh-service --release
 
+      - name: Build Phase 13 Worker deployment candidate
+        run: cargo build -p classmesh-worker --bin classmesh-worker --release
+
       - name: Build Teacher UI shell
         run: cargo build -p classmesh-teacher --bin classmesh-teacher-ui --release
 
@@ -137,6 +140,7 @@ jobs:
         run: |
           .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode Help
           .\scripts\tests\phase13_vc_runtime_preflight.ps1
+          .\scripts\tests\phase13_service_worker_bundle.ps1
 
       - name: Validate Phase 12B4 system-action qualification helper
         shell: pwsh
@@ -541,6 +545,7 @@ jobs:
           New-Item -ItemType Directory -Path phase11f4-teacher-ui-bundle -Force | Out-Null
           Copy-Item target/release/classmesh-teacher-ui.exe phase11f4-teacher-ui-bundle/
           Copy-Item scripts/phase11f4-teacher-ui-smoke.ps1 phase11f4-teacher-ui-bundle/
+          Copy-Item scripts/phase13-vc-runtime.ps1 phase11f4-teacher-ui-bundle/
           Copy-Item docs/PHASE11_TEACHER_UI_SMOKE.md phase11f4-teacher-ui-bundle/
           Copy-Item docs/PHASE11_TEACHER_UI_SMOKE_RESULTS.md phase11f4-teacher-ui-bundle/
           .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode IndexBundle -BundleDir phase11f4-teacher-ui-bundle
@@ -552,6 +557,27 @@ jobs:
         with:
           name: classmesh-phase11f4-teacher-ui-windows-x64
           path: phase11f4-teacher-ui-bundle/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
+
+      - name: Stage Phase 13 Service and Worker prerequisite bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path phase13-service-worker-bundle -Force | Out-Null
+          Copy-Item target/release/classmesh-service.exe phase13-service-worker-bundle/
+          Copy-Item target/release/classmesh-worker.exe phase13-service-worker-bundle/
+          Copy-Item scripts/phase13-service-worker-bundle.ps1 phase13-service-worker-bundle/
+          Copy-Item scripts/phase13-vc-runtime.ps1 phase13-service-worker-bundle/
+          Copy-Item docs/PHASE13_SERVICE_WORKER_PREREQUISITES.md phase13-service-worker-bundle/
+          .\scripts\phase13-service-worker-bundle.ps1 -Mode IndexBundle -BundleDir phase13-service-worker-bundle
+          .\scripts\phase13-service-worker-bundle.ps1 -Mode ValidateBundle -BundleDir phase13-service-worker-bundle
+          .\scripts\phase13-service-worker-bundle.ps1 -Mode PreflightRuntime -BundleDir phase13-service-worker-bundle
+
+      - name: Upload Phase 13 Service and Worker prerequisite bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-phase13-service-worker-windows-x64
+          path: phase13-service-worker-bundle/
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 

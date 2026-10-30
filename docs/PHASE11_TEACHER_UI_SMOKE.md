@@ -12,11 +12,12 @@ The bundle contains:
 
 - `classmesh-teacher-ui.exe`
 - `phase11f4-teacher-ui-smoke.ps1`
+- `phase13-vc-runtime.ps1`
 - this guide
 - `PHASE11_TEACHER_UI_SMOKE_RESULTS.md`
 - generated `teacher-ui-bundle-index.json`
 
-The schema-2 index records bounded file metadata, SHA-256 hashes and the CI host's MSVC toolset version. Validate it before launch:
+The schema-3 index records bounded file metadata, SHA-256 hashes and the CI host's MSVC toolset version. Validate it before launch:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase11f4-teacher-ui-smoke.ps1 -Mode ValidateBundle -BundleDir .
