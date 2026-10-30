@@ -1,6 +1,16 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path (Join-Path $PSScriptRoot '..') 'phase13-service-worker-bundle.ps1') -Mode Help | Out-Null
 
+$index = [pscustomobject]@{ runtime_prerequisites = @(
+    [pscustomobject]@{ path = 'classmesh-service.exe'; minimum_vc_runtime_version = '14.44.35207.0' },
+    [pscustomobject]@{ path = 'classmesh-worker.exe'; minimum_vc_runtime_version = '14.44.35207.0' }
+) }
+if ((Read-RuntimePrerequisites -Index $index).Count -ne 2) { throw 'per-executable prerequisites were lost' }
+$index.runtime_prerequisites = @($index.runtime_prerequisites[0])
+$rejected = $false
+try { $null = Read-RuntimePrerequisites -Index $index } catch { $rejected = $true }
+if (-not $rejected) { throw 'missing Worker prerequisite was accepted' }
+
 $fixture = Join-Path ([System.IO.Path]::GetTempPath()) "classmesh-phase13-pe-$PID.bin"
 try {
     $bytes = [byte[]]::new(128)

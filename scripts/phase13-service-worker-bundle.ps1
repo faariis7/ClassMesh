@@ -10,7 +10,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'phase13-vc-runtime.ps1')
 
-$SchemaVersion = 1
+$SchemaVersion = 2
 $Target = 'windows-x64'
 $IndexName = 'service-worker-bundle-index.json'
 $Executables = @('classmesh-service.exe', 'classmesh-worker.exe')
@@ -71,6 +71,24 @@ function File-Evidence {
     }
 }
 
+function Read-RuntimePrerequisites {
+    param([Parameter(Mandatory = $true)]$Index)
+    $items = @($Index.runtime_prerequisites)
+    if ($items.Count -ne $Executables.Count) {
+        throw 'Service/Worker runtime prerequisite count mismatch'
+    }
+    foreach ($name in $Executables) {
+        $matches = @($items | Where-Object { [string]$_.path -ceq $name })
+        if ($matches.Count -ne 1) {
+            throw "Service/Worker runtime prerequisite missing or duplicated: $name"
+        }
+        [pscustomobject]@{
+            path = $name
+            minimum = Parse-VcVersion ([string]$matches[0].minimum_vc_runtime_version)
+        }
+    }
+}
+
 function Validate-Bundle {
     $path = Bundle-Path -Name $IndexName
     Assert-NonEmptyFile -Path $path | Out-Null
@@ -78,7 +96,7 @@ function Validate-Bundle {
     if ([int]$index.schema_version -ne $SchemaVersion -or [string]$index.target -ne $Target) {
         throw 'Unsupported Service/Worker bundle schema or target'
     }
-    $null = Parse-VcVersion ([string]$index.minimum_vc_runtime_version)
+    $prerequisites = @(Read-RuntimePrerequisites -Index $index)
     $files = @($index.files)
     if ($files.Count -ne $RequiredFiles.Count) { throw 'Service/Worker bundle file count mismatch' }
     foreach ($name in $RequiredFiles) {
@@ -93,7 +111,9 @@ function Validate-Bundle {
     }
     foreach ($name in $Executables) { Assert-X64Pe -Path (Bundle-Path -Name $name) }
     Write-Host 'bundle_valid=true'
-    Write-Host "minimum_vc_runtime_version=$($index.minimum_vc_runtime_version)"
+    foreach ($item in $prerequisites) {
+        Write-Host "minimum_vc_runtime_version[$($item.path)]=$($item.minimum)"
+    }
     $index
 }
 
@@ -110,10 +130,13 @@ switch ($Mode) {
         foreach ($name in $RequiredFiles) {
             $files += File-Evidence -Path (Bundle-Path -Name $name) -RelativePath $name
         }
+        $toolsetVersion = (Get-BuildToolsetVersion).ToString()
         [ordered]@{
             schema_version = $SchemaVersion
             target = $Target
-            minimum_vc_runtime_version = (Get-BuildToolsetVersion).ToString()
+            runtime_prerequisites = @($Executables | ForEach-Object {
+                [ordered]@{ path = $_; minimum_vc_runtime_version = $toolsetVersion }
+            })
             files = $files
             note = 'Integrity and runtime prerequisite diagnostic only. No installation or security authority.'
         } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Bundle-Path -Name $IndexName) -Encoding utf8
@@ -122,7 +145,11 @@ switch ($Mode) {
     'ValidateBundle' { $null = Validate-Bundle }
     'PreflightRuntime' {
         $index = Validate-Bundle
-        $null = Assert-BundleRuntime -Index $index
+        $installed = Get-X64VcRuntimeVersion
+        foreach ($item in @(Read-RuntimePrerequisites -Index $index)) {
+            Assert-RuntimeSatisfiesToolset $item.minimum $installed
+        }
+        Write-Host "vc_runtime_x64_version=$installed"
         Write-Host 'runtime_preflight_passed=true'
     }
 }
