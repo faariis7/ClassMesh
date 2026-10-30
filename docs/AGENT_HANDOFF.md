@@ -27,6 +27,8 @@
 - VM1 Windows ARM64 local x64 release Service and Worker builds PASS; both `dumpbin /dependents` show `VCRUNTIME140.dll` and PE x64. Native Service/Worker bundle Index/Validate/Preflight PASS with toolset `14.44.35207.0`, runtime `14.51.36247.0`; one-byte Worker tamper rejected and restored bundle revalidated. Teacher schema-3 local bundle using prior exact CI EXE passed Index/Validate/Preflight and seven-second non-admin Session 1 responsive-window Smoke. macOS and VM1 focused PowerShell tests PASS. Exact new CI artifact, hosted CI and review pending.
 - Open: actual installer, signed update manifest/package hashes, staged rollback, SCM/firewall/Worker deployment, fresh-clean Windows, physical two-PC and Phase 12 in-process revocation. VM2 saved password obsolete. Next: exact-head CI and review, VM1 hosted Service/Worker artifact validation, then signed installer/update authority design.
 
+**Registry value-kind regression:** VM1 HKCU disposable RED failed because the shared record reader was absent; GREEN rejects text `Installed=1`, DWORD `Version`, and accepts only the documented DWORD/REG_SZ kinds. The test deletes its exact HKCU key. Both VM1 bundles reindexed and passed real HKLM preflight after the change. Hosted CI on the final head remains required.
+
 ## Previous ASTRA WORK HANDOFF — 2026-10-29 offline startup inspection
 
 - Latest merged main: #640 squash `952d45b2454972d66497440269a03c1b76190df8`, exact-head CI `40795113425` Portable Rust and Windows Build PASS. Merged branch `codex/phase12-startup-inspector` in `/Users/ahmed/.codex/worktrees/phase12-startup-inspector/ClassMesh-phase12` changes only Win32 trusted-policy/installer CLI and these living docs. All Phase 10 worktrees/files are preserved.

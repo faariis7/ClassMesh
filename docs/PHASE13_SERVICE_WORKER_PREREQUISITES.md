@@ -9,7 +9,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase13-service-worker
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\phase13-service-worker-bundle.ps1 -Mode PreflightRuntime -BundleDir .
 ```
 
-Validation checks every required file's size and SHA-256, and checks both executables have an x64 PE machine header. The preflight reads the installed x64 Visual C++ Redistributable version in both Windows Registry views and requires it to be at least the CI build toolset version. Missing, malformed, conflicting, or older runtime state fails with Microsoft's installer link. The script neither downloads nor installs anything, creates no Service, and changes no firewall rule. Bundle hashes are delivery integrity evidence, not a signature or a security trust anchor.
+Validation checks every required file's size and SHA-256, and checks both executables have an x64 PE machine header. The preflight reads the installed x64 Visual C++ Redistributable version in both Windows Registry views and requires it to be at least the CI build toolset version. Missing, malformed value kinds, conflicting, or older runtime state fails with Microsoft's installer link. The script neither downloads nor installs anything, creates no Service, and changes no firewall rule. Bundle hashes are delivery integrity evidence, not a signature or a security trust anchor.
 
 This is a point-in-time check. A future installer must verify a signed release manifest and revalidate the exact files it installs before SCM registration; a prior preflight result cannot authorize later bytes.
 

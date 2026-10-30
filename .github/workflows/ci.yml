@@ -141,6 +141,7 @@ jobs:
           .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode Help
           .\scripts\tests\phase13_vc_runtime_preflight.ps1
           .\scripts\tests\phase13_service_worker_bundle.ps1
+          .\scripts\tests\phase13_vc_runtime_registry.ps1
 
       - name: Validate Phase 12B4 system-action qualification helper
         shell: pwsh

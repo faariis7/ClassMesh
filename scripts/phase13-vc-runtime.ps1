@@ -33,6 +33,20 @@ function Get-BuildToolsetVersion {
     Parse-VcVersion ((Get-Content -LiteralPath $versionPath -Raw).Trim())
 }
 
+function Read-VcRuntimeRecord {
+    param([Parameter(Mandatory = $true)][Microsoft.Win32.RegistryKey]$Key)
+    $installed = $Key.GetValue('Installed', $null)
+    if ($null -eq $installed) { return $null }
+    if ($Key.GetValueKind('Installed') -ne [Microsoft.Win32.RegistryValueKind]::DWord) {
+        throw 'Visual C++ x64 Redistributable Installed registry value must be DWORD'
+    }
+    if ([int]$installed -ne 1) { return $null }
+    if ($Key.GetValueKind('Version') -ne [Microsoft.Win32.RegistryValueKind]::String) {
+        throw 'Visual C++ x64 Redistributable Version registry value must be REG_SZ'
+    }
+    Parse-VcVersion ([string]$Key.GetValue('Version', ''))
+}
+
 function Get-X64VcRuntimeVersion {
     if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
         throw 'Visual C++ runtime preflight requires Windows'
@@ -45,9 +59,8 @@ function Get-X64VcRuntimeVersion {
             $key = $root.OpenSubKey('SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64')
             if ($null -eq $key) { continue }
             try {
-                if ([int]$key.GetValue('Installed', 0) -eq 1) {
-                    $versions += Parse-VcVersion ([string]$key.GetValue('Version', ''))
-                }
+                $version = Read-VcRuntimeRecord $key
+                if ($null -ne $version) { $versions += $version }
             } finally { $key.Close() }
         } finally { $root.Close() }
     }
