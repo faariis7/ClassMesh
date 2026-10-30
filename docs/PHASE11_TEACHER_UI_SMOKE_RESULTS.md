@@ -2,6 +2,14 @@
 
 Status: **Pass — Phase 11 UI closeout complete**
 
+## Phase 13 exact CI artifact prerequisite retest — 2026-10-29
+
+PR #642 merged as `4dead76a8ba2f6004e9b5a9d03dee455210a5376`. Exact-head CI run `40853923424` passed Portable Rust and Windows Build and produced `classmesh-phase11f4-teacher-ui-windows-x64` (artifact id `12889571162`). The downloaded bundle index SHA-256 is `cc6f6eb144d43d8a34b27efb3c627a228443c5d0cd036b6f897e3d61f833d6ab`; its executable SHA-256 is `42c813446240afb6ab48923f38fa6c0fdb0cfc1fd91c29274b372adaad3db894`.
+
+On VM1, the unchanged CI bundle passed schema-2 hash validation and `PreflightRuntime`. Its build toolset requires x64 Visual C++ runtime `14.51.36231.0`; the installed runtime was `14.51.36247.0` on Windows ARM64. Non-admin Session 1 `Smoke` passed after seven seconds with a responsive **ClassMesh Teacher** window and `main_window_observed=true`. The retained local smoke JSON SHA-256 is `53cb7007052aee6b8eec1d26485d402620e7a5e4ff00e1e68a94925084fa1ec0` (observed 2026-10-29T10:18:07Z); the process was cleaned up.
+
+The same exact CI executable was then launched through the visible VM1 Windows desktop. The window appeared; Tab/Enter navigation reached Classroom, Focus, Presentation, Device Actions and Diagnostics. Empty-state text showed zero enrolled devices, idle presentation and no fabricated device diagnostics. Alt+F4 closed the visible test window. This is a limited current-artifact VM visual/keyboard retest. The earlier Phase 11 closeout below remains its own evidence. Fresh-clean Windows first-launch, full accessibility review for this artifact, signed installer deployment, Service/Worker prerequisite matrix and physical classroom qualification are still open.
+
 ## Initial 11F4b review
 
 The initial green-CI artifact passed integrity and Session 1 launch smoke, keyboard traversal/activation, visible focus and truthful empty-state review on the connected Windows 11 ARM64 VM at 100% DPI. It found one blocking defect: the Diagnostics navigation label was clipped at the default window size.
