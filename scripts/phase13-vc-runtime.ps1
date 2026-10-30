@@ -89,4 +89,3 @@ function Assert-BundleRuntime {
     Write-Host "os_architecture=$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
     $installed
 }
-
