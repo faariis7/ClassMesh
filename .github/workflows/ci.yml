@@ -580,6 +580,10 @@ jobs:
           .\scripts\phase13-release-manifest.ps1 -Mode Help
           .\scripts\tests\phase13_signed_release_manifest.ps1 -BundleDir phase13-service-worker-bundle
 
+      - name: Test Phase 13 create-only release manifest signing
+        shell: pwsh
+        run: .\scripts\tests\phase13_release_signing.ps1 -BundleDir phase13-service-worker-bundle
+
       - name: Upload Phase 13 Service and Worker prerequisite bundle
         uses: actions/upload-artifact@v4
         with:
