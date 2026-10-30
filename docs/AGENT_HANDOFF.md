@@ -1,6 +1,13 @@
 # ClassMesh Agent Handoff
 
-## ASTRA WORK HANDOFF — 2026-10-29 exact CI Teacher UI artifact
+## ASTRA WORK HANDOFF — 2026-10-31 signed manifest foundation
+
+- Latest merged main `ce6fe692992b788be6cc2fd10399fe1c48aa26ce` from PR #644; exact-head CI `41138625385` Portable Rust + Windows Build passed. Earlier #641 `15fa6b69`, #642 `4dead76a`, #643 `fb229088` merged. Current isolated worktree `/Users/ahmed/.codex/worktrees/phase13-signed-release-manifest/ClassMesh-phase12`, branch `codex/phase13-signed-release-manifest`. Do not alter Phase 10 or concurrent Phase 12D4 PR #645+ files.
+- Exact #644 Service/Worker artifact id `13018638145`: VM1 index validation and preflight passed; required runtime `14.51.36231.0`, installed `14.51.36247.0`; both exact EXEs are `NotSigned`. Exact Teacher artifact id `13018093504`: VM1 schema-3 validation/preflight and seven-second Session 1 responsive window PASS; visual accessibility remains undetermined. Artifact hashes and limits are in `PHASE13_SERVICE_WORKER_PREREQUISITES.md`.
+- This branch adds `scripts/phase13-release-manifest.ps1`, a bounded fixed-file verifier for detached CMS signed metadata with an independent SHA-256 certificate pin and SHA-2 digest. VM1 Windows PowerShell 5.1 RED lacked verifier; GREEN signed temporary certificate, wrong pin, SHA-1, changed Worker and changed manifest cases pass. CI test runs after Service/Worker bundle staging; exact-head CI and review are pending. Temporary test certificate and files were deleted.
+- Security decision: the signer pin must come from trusted administrator/protected installer state, never the bundle. This verifier neither signs current unsigned binaries nor installs them, pins files through installer copy, persists release sequence, or certifies fresh Windows/physical machines. Phase 12 trusted Service remains default-off; in-process policy revocation is open. Next: final native test and CI/review/merge this branch, then protected signer enrollment plus signed release production pipeline and staged exact-byte install, or coordinate a safe Phase 12 reload boundary without touching concurrent runtime files.
+
+## Previous ASTRA WORK HANDOFF — 2026-10-29 exact CI Teacher UI artifact
 
 - Latest main: #642 squash `4dead76a8ba2f6004e9b5a9d03dee455210a5376`; exact-head CI run `40853923424` Portable Rust and Windows Build PASS. #641 previously merged `15fa6b69`. Current branch `codex/phase13-exact-artifact-qualification` only records post-merge evidence; no Phase 10 or production files touched.
 - Downloaded exact `classmesh-phase11f4-teacher-ui-windows-x64` artifact id `12889571162` to `/Users/ahmed/Developer/ClassMesh-phase13-artifact-40853923424`. Bundle index SHA-256 `cc6f6eb144d43d8a34b27efb3c627a228443c5d0cd036b6f897e3d61f833d6ab`; EXE SHA-256 `42c813446240afb6ab48923f38fa6c0fdb0cfc1fd91c29274b372adaad3db894`. VM1 copy at `C:\Users\ahmed\ClassMesh-phase13-CI-40853923424` retained.
