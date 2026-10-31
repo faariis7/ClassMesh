@@ -8,7 +8,6 @@ use classmesh_control::{
         ControlChannel, DEFAULT_IO_TIMEOUT, accept, client_config_with_roots,
         server_config_with_certificate,
     },
-    teacher_file_pull_receive::TeacherFilePullInbox,
 };
 use classmesh_core::recovery::RecoveryPolicy;
 use classmesh_protocol::{
@@ -23,6 +22,11 @@ use classmesh_security::{
     PrincipalId, PrincipalKind,
 };
 use classmesh_teacher::file_inbox::TeacherFileInbox;
+use classmesh_teacher::file_pull_runtime::{
+    TeacherFilePullRuntimeError, run_authenticated_teacher_file_pull,
+};
+use classmesh_teacher::ui_file_transfer::{TeacherFilePullContext, prepare_file_pull_action};
+use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 use quinn::Endpoint;
 use rcgen::generate_simple_self_signed;
 use rustls::{
@@ -94,6 +98,15 @@ async fn authenticated_quic_to_teacher_app_inbox_publishes_only_after_verified_f
         )
         .await
         .map_err(|e| e.to_string())?;
+        let request = channel.receive().await.map_err(|e| e.to_string())?;
+        assert_eq!(request.request_id, 11);
+        assert_eq!(request.control_session_id, 77);
+        assert!(matches!(
+            request.payload,
+            Some(control_envelope::Payload::FileTransferPullRequest(ref pull))
+                if pull.transfer_id == ID.to_vec()
+                    && pull.source_id == [8; 16].to_vec()
+        ));
         let offer = FileTransferOffer {
             transfer_id: ID.to_vec(),
             filename: "lesson.pdf".into(),
@@ -187,22 +200,133 @@ async fn authenticated_quic_to_teacher_app_inbox_publishes_only_after_verified_f
             credentials,
         })
         .map_err(|e| format!("{e:?}"))?;
+    store
+        .upsert(Principal {
+            id: PrincipalId([8; 32]),
+            kind: PrincipalKind::Teacher,
+            enabled: true,
+            permissions: BTreeSet::from([Permission::ReceiveFile]),
+            credentials: BTreeMap::new(),
+        })
+        .map_err(|e| format!("{e:?}"))?;
     let live = LiveAuthorizationStore::new(store);
-    let sink = TeacherFileInbox::new(&root).expect("precreated Teacher inbox");
-    let mut inbox = TeacherFilePullInbox::new(&client, STUDENT, 11, ID, 1, sink)?;
+    let context = TeacherFilePullContext {
+        source_id: MonitoringSourceId(7),
+        control_session_id: 77,
+        version: VERSION,
+        capabilities: BTreeSet::from([Capability::FileTransfer]),
+    };
+    let action = prepare_file_pull_action(
+        MonitoringSourceId(7),
+        ID,
+        [8; 16],
+        Some(MonitoringSourceId(7)),
+        Some(&context),
+    )
+    .map_err(|error| format!("{error:?}"))?;
     let mut outbound = 1;
-    for wanted in [
-        FileTransferState::Accepted,
-        FileTransferState::Progress,
-        FileTransferState::Completed,
-    ] {
-        let status = inbox
-            .receive_and_reply(&mut client, &live, &mut outbound, || 150)
-            .await?;
-        assert_eq!(status.state, wanted as i32);
-    }
+    // The GUI selection must be validated again at dispatch, even after
+    // the action was originally prepared for a real authenticated session.
+    assert!(matches!(
+        run_authenticated_teacher_file_pull(
+            &action,
+            Some(MonitoringSourceId(8)),
+            &context,
+            &mut client,
+            &live,
+            STUDENT,
+            1,
+            &mut outbound,
+            11,
+            TeacherFileInbox::new(&root).expect("precreated inbox"),
+            || 150,
+            |_| {},
+        )
+        .await,
+        Err(TeacherFilePullRuntimeError::Ui(_))
+    ));
+    assert_eq!(outbound, 1);
+    assert_eq!(fs::read_dir(&root)?.count(), 0);
+
+    // The GUI's once-valid selection and context cannot authorize an
+    // unrelated live control session or a revoked negotiated capability.
+    client.established.control_session_id = 78;
+    assert!(matches!(
+        run_authenticated_teacher_file_pull(
+            &action,
+            Some(MonitoringSourceId(7)),
+            &context,
+            &mut client,
+            &live,
+            STUDENT,
+            1,
+            &mut outbound,
+            11,
+            TeacherFileInbox::new(&root).expect("precreated inbox"),
+            || 150,
+            |_| {},
+        )
+        .await,
+        Err(TeacherFilePullRuntimeError::StaleControlSession)
+    ));
+    client.established.control_session_id = 77;
+    client.established.negotiated.capabilities.clear();
+    assert!(matches!(
+        run_authenticated_teacher_file_pull(
+            &action,
+            Some(MonitoringSourceId(7)),
+            &context,
+            &mut client,
+            &live,
+            STUDENT,
+            1,
+            &mut outbound,
+            11,
+            TeacherFileInbox::new(&root).expect("precreated inbox"),
+            || 150,
+            |_| {},
+        )
+        .await,
+        Err(TeacherFilePullRuntimeError::CapabilityChanged)
+    ));
+    client
+        .established
+        .negotiated
+        .capabilities
+        .insert(Capability::FileTransfer);
+    assert_eq!(outbound, 1);
+    assert_eq!(fs::read_dir(&root)?.count(), 0);
+    let sink = TeacherFileInbox::new(&root).expect("precreated Teacher inbox");
+    let mut statuses = Vec::new();
+    let outcome = run_authenticated_teacher_file_pull(
+        &action,
+        Some(MonitoringSourceId(7)),
+        &context,
+        &mut client,
+        &live,
+        STUDENT,
+        1,
+        &mut outbound,
+        11,
+        sink,
+        || 150,
+        |status| statuses.push(status.state),
+    )
+    .await?;
+    assert_eq!(
+        statuses,
+        vec![
+            FileTransferState::Accepted as i32,
+            FileTransferState::Progress as i32,
+            FileTransferState::Completed as i32,
+        ]
+    );
+    assert_eq!(outcome.completed_path, path);
+    assert_eq!(outcome.total_size, data.len() as u64);
+    assert_eq!(outcome.last_inbound_sequence, 4);
     server_task.await??;
-    assert_eq!(outbound, 4);
+    // Outbound stream includes the authenticated PullRequest plus three status acknowledgements.
+    assert_eq!(outbound, 5);
     assert_eq!(fs::read(&path)?, data);
     fs::remove_dir_all(&root)?;
     Ok(())
