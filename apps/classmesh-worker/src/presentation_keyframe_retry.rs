@@ -64,7 +64,12 @@ impl PresentationKeyframeSilence {
             self.last_authenticated_frame_id = frame_id;
             self.has_authenticated_frame = true;
             self.sent_recovery_requests = 0;
-        } else if self.last_authenticated_at.is_none_or(|last| now >= last) {
+        } else if (!self.has_authenticated_frame || frame_id > self.last_authenticated_frame_id)
+            && self.last_authenticated_at.is_none_or(|last| now >= last)
+        {
+            // Only forward progress in this authenticated presentation can
+            // postpone silence recovery or replenish its bounded retry budget.
+            // Reordered/duplicate frame IDs are not evidence of fresh playback.
             self.last_authenticated_at = Some(now);
             self.last_authenticated_frame_id = frame_id;
             self.has_authenticated_frame = true;
@@ -314,6 +319,41 @@ mod tests {
         assert_eq!(
             watch.due(binding(2), start + Duration::from_secs(22), true),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn stale_authenticated_frame_ids_cannot_rearm_silence_or_recovery_budget() {
+        let start = Instant::now();
+        let mut watch = PresentationKeyframeSilence::default();
+        watch.note_authenticated_frame(binding(1), 100, start);
+
+        assert_eq!(
+            watch.due(binding(1), start + Duration::from_secs(2), true),
+            Some(100)
+        );
+        watch.note_request_sent(binding(1));
+
+        // Authenticated but duplicate/out-of-order media is not new playback
+        // progress: it must not postpone a recovery request or reset its budget.
+        watch.note_authenticated_frame(binding(1), 100, start + Duration::from_secs(3));
+        assert_eq!(
+            watch.due(binding(1), start + Duration::from_secs(4), true),
+            Some(100)
+        );
+        watch.note_request_sent(binding(1));
+
+        watch.note_authenticated_frame(binding(1), 99, start + Duration::from_secs(5));
+        assert_eq!(
+            watch.due(binding(1), start + Duration::from_secs(6), true),
+            Some(100)
+        );
+        watch.note_request_sent(binding(1));
+
+        watch.note_authenticated_frame(binding(1), 99, start + Duration::from_secs(7));
+        assert_eq!(
+            watch.due(binding(1), start + Duration::from_secs(20), true),
+            None
         );
     }
 
