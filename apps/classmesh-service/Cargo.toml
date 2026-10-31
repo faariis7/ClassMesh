@@ -32,5 +32,8 @@ sha2 = "0.10.9"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 windows-service = "0.8.1"
 
+[dev-dependencies]
+classmesh-protocol = { path = "../../crates/classmesh-protocol" }
+
 [lints]
 workspace = true
