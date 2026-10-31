@@ -53,8 +53,12 @@ impl TeacherFileInbox {
     }
 
     fn root_ready(root: &Path) -> bool {
-        fs::symlink_metadata(root)
-            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        // Never retain a cwd-relative inbox: another thread can change the
+        // process working directory after admission, redirecting future
+        // authenticated chunks to a different root.
+        root.is_absolute()
+            && fs::symlink_metadata(root)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
     }
 
     #[must_use]
@@ -324,6 +328,17 @@ mod tests {
         );
         assert_eq!(fs::read(final_file).unwrap(), b"important existing file");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inbox_rejects_relative_root_even_when_directory_exists() {
+        // The process working directory is global and may change between
+        // admission and a later chunk. A relative AppInbox could redirect
+        // authenticated file bytes to an unintended location.
+        assert!(matches!(
+            TeacherFileInbox::new("."),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
     }
 
     #[cfg(unix)]
