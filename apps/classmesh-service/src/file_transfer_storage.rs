@@ -22,9 +22,10 @@ pub enum WindowsOutboxSourceError {
     Io,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct RegisteredOutboxFile {
     path: PathBuf,
+    file: File,
     metadata: FileTransferSourceMetadata,
 }
 
@@ -60,7 +61,8 @@ impl WindowsFileTransferOutboxSource {
         validate_filename(display_filename)
             .map_err(|_| WindowsOutboxSourceError::InvalidDisplayName)?;
         let path = self.root.join(format!("{}.bin", source_id_stem(source_id)));
-        let metadata = fs::metadata(&path).map_err(|_| WindowsOutboxSourceError::MissingSource)?;
+        let mut file = File::open(&path).map_err(|_| WindowsOutboxSourceError::MissingSource)?;
+        let metadata = file.metadata().map_err(|_| WindowsOutboxSourceError::Io)?;
         if !metadata.is_file() {
             return Err(WindowsOutboxSourceError::MissingSource);
         }
@@ -69,7 +71,6 @@ impl WindowsFileTransferOutboxSource {
             return Err(WindowsOutboxSourceError::FileTooLarge);
         }
 
-        let mut file = File::open(&path).map_err(|_| WindowsOutboxSourceError::Io)?;
         let mut digest = Sha256::new();
         let mut buffer = vec![0_u8; MAX_FILE_CHUNK_BYTES];
         let mut hashed = 0_u64;
@@ -96,6 +97,7 @@ impl WindowsFileTransferOutboxSource {
             source_id,
             RegisteredOutboxFile {
                 path,
+                file,
                 metadata: FileTransferSourceMetadata {
                     filename: display_filename.to_owned(),
                     total_size,
@@ -149,7 +151,7 @@ impl FileTransferOutboxSource for WindowsFileTransferOutboxSource {
         self.ensure_staged_source_registered(source_id)?;
         let registered = self
             .registered
-            .get(&source_id)
+            .get_mut(&source_id)
             .ok_or(WindowsOutboxSourceError::MissingSource)?;
         if offset >= registered.metadata.total_size {
             return Err(WindowsOutboxSourceError::InvalidOffset);
@@ -158,24 +160,33 @@ impl FileTransferOutboxSource for WindowsFileTransferOutboxSource {
         let remaining = registered.metadata.total_size - offset;
         let length = max_bytes
             .min(usize::try_from(remaining).map_err(|_| WindowsOutboxSourceError::InvalidOffset)?);
-        let mut file = File::open(&registered.path).map_err(|_| WindowsOutboxSourceError::Io)?;
-        let current_size = file
+        // Always read the original hashed HANDLE: a replaced opaque staging
+        // path must never redirect bytes to another file.
+        let current_size = registered
+            .file
             .metadata()
             .map_err(|_| WindowsOutboxSourceError::Io)?
             .len();
         if current_size != registered.metadata.total_size {
             return Err(WindowsOutboxSourceError::Io);
         }
-        file.seek(SeekFrom::Start(offset))
+        registered
+            .file
+            .seek(SeekFrom::Start(offset))
             .map_err(|_| WindowsOutboxSourceError::Io)?;
         let mut output = vec![0_u8; length];
-        file.read_exact(&mut output)
+        registered
+            .file
+            .read_exact(&mut output)
             .map_err(|_| WindowsOutboxSourceError::Io)?;
         Ok(output)
     }
 
     fn close(&mut self, source_id: FileSourceId) {
         if let Some(registered) = self.registered.remove(&source_id) {
+            // Release the pinned read handle before deleting the staged name,
+            // including on Windows where open-handle sharing can prevent unlink.
+            drop(registered.file);
             let _ = fs::remove_file(registered.path);
         }
     }
@@ -417,6 +428,35 @@ mod tests {
 
         source.close(id);
         assert!(!staged.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn outbox_reads_the_registered_file_even_if_its_path_is_replaced() {
+        let root = test_root("outbox-replaced-path");
+        fs::create_dir_all(&root).expect("root");
+        let mut source = WindowsFileTransferOutboxSource::new(&root);
+        let id = source_id();
+        let staged = source.staged_path(id);
+        let moved = root.join("original-stage.bin");
+        fs::write(&staged, b"trusted-stage").expect("stage");
+        source
+            .register_staged_file(id, "lesson.pdf")
+            .expect("register");
+
+        // An authorized staging process may atomically rotate the path while
+        // the Service is streaming. It must never switch to the new file.
+        fs::rename(&staged, &moved).expect("rotate registered file");
+        fs::write(&staged, b"foreign-stage").expect("replace name");
+        assert_eq!(
+            source
+                .read_at(id, 0, MAX_FILE_CHUNK_BYTES)
+                .expect("read original handle"),
+            b"trusted-stage"
+        );
+
+        source.close(id);
+        let _ = fs::remove_file(moved);
         let _ = fs::remove_dir_all(root);
     }
 

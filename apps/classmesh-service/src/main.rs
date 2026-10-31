@@ -1,6 +1,6 @@
 #[cfg(windows)]
 mod control_runtime;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 pub mod file_transfer_storage;
 #[cfg(windows)]
 pub mod monitoring;
