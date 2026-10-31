@@ -1015,3 +1015,29 @@ revoke playback projection on disconnect or trust failure. **The eframe Teacher
 GUI is not yet wired to this adapter**, so this is not an enabled production
 Teacher subscription. Never infer RTT, packet loss, adaptive quality or Phase
 10G physical-qualification results from receiver playback counters.
+
+## Teacher playback projection: verified-only public ingress
+
+The read-only Teacher projection and Windows eframe shell now expose a public
+receiver-playback ingress that requires an AuthenticatedTeacherControlMessage
+from the authenticated QUIC receiver above. This proof object has no public
+constructor. The caller must supply the authenticated connection's selected
+MonitoringSourceId, which must match the projection's current device, and
+the current Teacher interaction context must match source, control session,
+v0.8 and capability 18. The ledger revalidates exact presentation, stream,
+epoch, receiver generation, sequence, frame counters and local freshness.
+
+Raw ControlEnvelope mutation paths used by historical ledger/UI tests are
+crate-private, and the Windows GUI legacy helper is built only for tests.
+Non-playback control messages cannot become receiver counters. On the
+verified live-QUIC to projection integration tests, source mismatch does not
+consume a valid report, same-report replay fails, a wrong presentation epoch
+cannot replace the previous counters, display expires after ten seconds,
+and exact revocation removes visible observations.
+
+**Not an automatically launched client:** the production Teacher UI main
+loop does not yet open a registered QUIC connection, own the central envelope
+dispatcher, or establish the PrincipalId-to-monitoring-source identity mapping.
+A trusted session owner must supply the context and feed the verified result;
+without it, the panel remains inactive. There is no production opt-in change,
+RTT/loss/quality inference, physical two-host test or Phase 10G completion.
