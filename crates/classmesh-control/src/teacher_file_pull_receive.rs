@@ -12,7 +12,7 @@ use classmesh_protocol::file_transfer::{
     FileTransferError, file_transfer_pull_available, validate_status, validate_transfer_id,
 };
 use classmesh_protocol::{ControlRole, ProtocolVersion};
-use classmesh_security::PrincipalId;
+use classmesh_security::{Permission, PrincipalId, PrincipalKind};
 
 use crate::client_session::ClientControlSession;
 use crate::file_transfer_receiver::{
@@ -28,6 +28,7 @@ use crate::teacher_playback_receive::{
 pub enum TeacherFilePullReceiveError {
     InvalidBinding,
     NotNegotiated,
+    TeacherPermissionRevoked,
     InvalidTransfer(FileTransferError),
     AlreadyCompleted,
     WrongSession,
@@ -48,6 +49,27 @@ impl Display for TeacherFilePullReceiveError {
     }
 }
 impl Error for TeacherFilePullReceiveError {}
+
+fn verify_current_teacher_permission(
+    session: &ClientControlSession,
+    authorization: &LiveAuthorizationStore,
+) -> Result<(), TeacherFilePullReceiveError> {
+    // This read must be fresh at every frame boundary. A valid Student TLS
+    // certificate does not reinstate a revoked local Teacher ReceiveFile role.
+    let snapshot = authorization
+        .snapshot()
+        .map_err(|_| TeacherFilePullReceiveError::TeacherPermissionRevoked)?;
+    let current_teacher = session.established.negotiated.principal_id;
+    if snapshot.store().principal(current_teacher).map(|p| p.kind) == Some(PrincipalKind::Teacher)
+        && snapshot
+            .store()
+            .authorize(current_teacher, Permission::ReceiveFile)
+    {
+        Ok(())
+    } else {
+        Err(TeacherFilePullReceiveError::TeacherPermissionRevoked)
+    }
+}
 
 /// Exact, one-transfer inbox owned by the same Teacher control dispatcher
 /// that established the session and submitted the pull request.
@@ -207,6 +229,7 @@ impl<S: FileTransferInboxSink> TeacherFilePullInbox<S> {
         }
 
         let result = async {
+            verify_current_teacher_permission(session, authorization)?;
             let message = receive_authenticated_teacher_control(
                 session,
                 authorization,
@@ -215,7 +238,11 @@ impl<S: FileTransferInboxSink> TeacherFilePullInbox<S> {
             )
             .await
             .map_err(TeacherFilePullReceiveError::AuthenticatedRead)?;
+            // Authority can be withdrawn while awaiting an incoming QUIC
+            // frame; deny before writing any bytes or committing the file.
+            verify_current_teacher_permission(session, authorization)?;
             let status = self.apply_verified_frame(message.into_envelope())?;
+            verify_current_teacher_permission(session, authorization)?;
             let sequence = outbound_sequence
                 .checked_add(1)
                 .ok_or(TeacherFilePullReceiveError::SequenceMismatch)?;
@@ -470,6 +497,15 @@ mod tests {
                 enabled: true,
                 permissions: BTreeSet::from([Permission::ReceivePresentation]),
                 credentials,
+            })
+            .map_err(|e| format!("{e:?}"))?;
+        store
+            .upsert(Principal {
+                id: PrincipalId([8; 32]),
+                kind: PrincipalKind::Teacher,
+                enabled: true,
+                permissions: BTreeSet::from([Permission::ReceiveFile]),
+                credentials: BTreeMap::new(),
             })
             .map_err(|e| format!("{e:?}"))?;
         let live = LiveAuthorizationStore::new(store);

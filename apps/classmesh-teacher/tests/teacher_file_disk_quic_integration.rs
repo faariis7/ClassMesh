@@ -8,6 +8,7 @@ use classmesh_control::{
         ControlChannel, DEFAULT_IO_TIMEOUT, accept, client_config_with_roots,
         server_config_with_certificate,
     },
+    teacher_file_pull_receive::TeacherFilePullReceiveError,
 };
 use classmesh_core::recovery::RecoveryPolicy;
 use classmesh_protocol::{
@@ -56,12 +57,15 @@ fn frame(sequence: u64, payload: control_envelope::Payload) -> ControlEnvelope {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn authenticated_quic_to_teacher_app_inbox_publishes_only_after_verified_finish() -> TestResult
-{
+async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> TestResult {
     let root = std::env::temp_dir().join(format!(
-        "classmesh-teacher-quic-inbox-{}",
-        std::process::id()
+        "classmesh-teacher-quic-inbox-{}-{}",
+        std::process::id(),
+        if revoke_teacher_after_accept {
+            "revoked"
+        } else {
+            "valid"
+        }
     ));
     fs::create_dir(&root)?;
     let data = b"actual classroom bytes".to_vec();
@@ -127,7 +131,11 @@ async fn authenticated_quic_to_teacher_app_inbox_publishes_only_after_verified_f
             if s.state==FileTransferState::Accepted as i32)
         );
         assert!(!remote_path.exists());
-        assert!(remote_partial.exists());
+        // After the Accepted reply the Teacher may immediately revoke the
+        // transfer and remove the .part before this server checks the path.
+        if !revoke_teacher_after_accept {
+            assert!(remote_partial.exists());
+        }
         channel
             .send(&frame(
                 3,
@@ -139,6 +147,11 @@ async fn authenticated_quic_to_teacher_app_inbox_publishes_only_after_verified_f
             ))
             .await
             .map_err(|e| e.to_string())?;
+        if revoke_teacher_after_accept {
+            // A revoked Teacher must not acknowledge the next chunk or
+            // publish its final file even after the remote sent real bytes.
+            return Ok::<_, String>(());
+        }
         let status = channel.receive().await.map_err(|e| e.to_string())?;
         assert!(
             matches!(status.payload,Some(control_envelope::Payload::FileTransferStatus(s))
@@ -206,6 +219,16 @@ async fn authenticated_quic_to_teacher_app_inbox_publishes_only_after_verified_f
             kind: PrincipalKind::Teacher,
             enabled: true,
             permissions: BTreeSet::from([Permission::ReceiveFile]),
+            credentials: BTreeMap::new(),
+        })
+        .map_err(|e| format!("{e:?}"))?;
+    let mut revoked = store.clone();
+    revoked
+        .upsert(Principal {
+            id: PrincipalId([8; 32]),
+            kind: PrincipalKind::Teacher,
+            enabled: true,
+            permissions: BTreeSet::new(),
             credentials: BTreeMap::new(),
         })
         .map_err(|e| format!("{e:?}"))?;
@@ -298,7 +321,7 @@ async fn authenticated_quic_to_teacher_app_inbox_publishes_only_after_verified_f
     assert_eq!(fs::read_dir(&root)?.count(), 0);
     let sink = TeacherFileInbox::new(&root).expect("precreated Teacher inbox");
     let mut statuses = Vec::new();
-    let outcome = run_authenticated_teacher_file_pull(
+    let result = run_authenticated_teacher_file_pull(
         &action,
         Some(MonitoringSourceId(7)),
         &context,
@@ -310,9 +333,36 @@ async fn authenticated_quic_to_teacher_app_inbox_publishes_only_after_verified_f
         11,
         sink,
         || 150,
-        |status| statuses.push(status.state),
+        |status| {
+            statuses.push(status.state);
+            if revoke_teacher_after_accept && status.state == FileTransferState::Accepted as i32 {
+                live.publish_if_version(1, revoked.clone())
+                    .expect("trusted test authority revokes Teacher during transfer");
+            }
+        },
     )
-    .await?;
+    .await;
+    if revoke_teacher_after_accept {
+        assert!(matches!(
+            result,
+            Err(TeacherFilePullRuntimeError::Receive(
+                TeacherFilePullReceiveError::TeacherPermissionRevoked
+            ))
+        ));
+        assert_eq!(statuses, vec![FileTransferState::Accepted as i32]);
+        assert!(
+            !path.exists(),
+            "revoked Teacher may not publish a final file"
+        );
+        assert!(
+            !partial.exists(),
+            "revoked Teacher must clean the partial file"
+        );
+        server_task.await??;
+        fs::remove_dir_all(&root)?;
+        return Ok(());
+    }
+    let outcome = result?;
     assert_eq!(
         statuses,
         vec![
@@ -330,4 +380,16 @@ async fn authenticated_quic_to_teacher_app_inbox_publishes_only_after_verified_f
     assert_eq!(fs::read(&path)?, data);
     fs::remove_dir_all(&root)?;
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authenticated_quic_to_teacher_app_inbox_publishes_only_after_verified_finish() -> TestResult
+{
+    run_teacher_disk_transfer_case(false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn teacher_role_revocation_during_transfer_aborts_partial_without_completed_ack() -> TestResult
+{
+    run_teacher_disk_transfer_case(true).await
 }
