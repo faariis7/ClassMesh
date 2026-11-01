@@ -362,6 +362,18 @@ impl TeacherFileInbox {
         sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
         after_readback: impl FnOnce(),
     ) -> Result<(), TeacherFileInboxError> {
+        self.complete_with_post_cleanup_hook(id, sync_directory, after_readback, || {})
+    }
+
+    // Test-only mutation hook runs at the final cleanup boundary of the same
+    // production completion path. Production always supplies a no-op.
+    fn complete_with_post_cleanup_hook(
+        &mut self,
+        id: &[u8; 16],
+        sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
+        after_readback: impl FnOnce(),
+        after_cleanup: impl FnOnce(),
+    ) -> Result<(), TeacherFileInboxError> {
         let Some(active) = self.active.as_ref() else {
             return Err(TeacherFileInboxError::WrongTransfer);
         };
@@ -448,13 +460,38 @@ impl TeacherFileInbox {
             self.rollback_published_if_owned(active);
             return Err(TeacherFileInboxError::Io);
         }
+        // The final .part unlink is another filesystem operation where a
+        // local mutator can replace the root or the published name. Retain
+        // the published file identity across cleanup so the caller cannot
+        // receive Completed for a different destination after that window.
+        // If identity inspection fails, keep the active HANDLE for the
+        // receiver's abort path instead of abandoning an unacknowledged .bin.
+        let published_identity = self
+            .active
+            .as_ref()
+            .and_then(|active| open_file_identity(&active.file))
+            .ok_or(TeacherFileInboxError::Io)?;
         let active = self
             .active
             .take()
             .ok_or(TeacherFileInboxError::WrongTransfer)?;
+        let final_path = active.final_path.clone();
         // The .bin is committed. A failed best-effort unlink leaves a stale
         // .part; never unlink a replacement file at that name.
         self.cleanup_partial(active);
+        after_cleanup();
+        if !self.root_unchanged()
+            || !fs::symlink_metadata(&final_path).is_ok_and(|metadata| {
+                metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && !is_reparse_point(&metadata)
+            })
+            || path_identity(&final_path) != Some(published_identity)
+        {
+            // The retained file handle has been closed by cleanup. Do not
+            // unlink a potentially substituted name or directory here.
+            return Err(TeacherFileInboxError::Io);
+        }
         Ok(())
     }
 }
@@ -799,6 +836,60 @@ mod tests {
         sink.abort(&ID);
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(moved).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_replacement_during_final_partial_cleanup_must_not_ack_completed() {
+        // Final .part cleanup happens after the last destination identity
+        // check. A local directory mutator must not redirect the Completed
+        // path during that cleanup window.
+        let root = temp_root("cleanup-root-swap");
+        let moved = temp_root("cleanup-root-original");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"data").unwrap();
+
+        let result = sink.complete_with_post_cleanup_hook(
+            &ID,
+            super::sync_inbox_directory,
+            || {},
+            || {
+                fs::rename(&root, &moved).unwrap();
+                fs::create_dir(&root).unwrap();
+            },
+        );
+        assert_eq!(result, Err(TeacherFileInboxError::Io));
+        assert!(!sink.completed_path(&ID).exists());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(moved).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn published_name_replacement_during_final_cleanup_must_not_ack_completed() {
+        let root = temp_root("cleanup-name-swap");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"data").unwrap();
+        let published = sink.completed_path(&ID);
+        let displaced = root.join("original-displaced.bin");
+
+        let result = sink.complete_with_post_cleanup_hook(
+            &ID,
+            super::sync_inbox_directory,
+            || {},
+            || {
+                fs::rename(&published, &displaced).unwrap();
+                fs::write(&published, b"decoy").unwrap();
+            },
+        );
+        assert_eq!(result, Err(TeacherFileInboxError::Io));
+        assert_eq!(fs::read(&published).unwrap(), b"decoy");
+        assert_eq!(fs::read(&displaced).unwrap(), b"data");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
