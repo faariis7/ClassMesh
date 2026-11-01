@@ -2265,9 +2265,7 @@ mod windows_service_app {
                         // Recheck the live enrolled grant at the final Service
                         // source boundary, not only at QUIC ingress.
                         if !unix_time_ms().is_ok_and(|now| dispatch.authorize_queued_file_pull(now))
-                        {
-                            FileTransferDispatchOutcome::SourceUnavailable
-                        } else if pending_file_pull.is_some()
+                            || pending_file_pull.is_some()
                             || !file_pull_owner.try_acquire(dispatch.control_session_id)
                         {
                             FileTransferDispatchOutcome::SourceUnavailable
