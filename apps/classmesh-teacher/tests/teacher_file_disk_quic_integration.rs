@@ -24,7 +24,7 @@ use classmesh_security::{
 };
 use classmesh_teacher::file_inbox::TeacherFileInbox;
 use classmesh_teacher::file_pull_runtime::{
-    TeacherFilePullRuntimeError, run_authenticated_teacher_file_pull,
+    TeacherFilePullRuntimeError, VerifiedSelectedStudent, run_authenticated_teacher_file_pull,
 };
 use classmesh_teacher::ui_file_transfer::{TeacherFilePullContext, prepare_file_pull_action};
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
@@ -256,6 +256,13 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
         Some(&context),
     )
     .map_err(|error| format!("{error:?}"))?;
+    // The owning Teacher dispatcher must derive this from its live,
+    // authenticated monitoring-source registry, never from the GUI action.
+    let verified_selection = VerifiedSelectedStudent {
+        source_id: MonitoringSourceId(7),
+        control_session_id: 77,
+        principal_id: STUDENT,
+    };
     let mut outbound = 1;
     // The GUI selection must be validated again at dispatch, even after
     // the action was originally prepared for a real authenticated session.
@@ -266,6 +273,7 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
             &context,
             &mut client,
             &live,
+            verified_selection,
             STUDENT,
             1,
             &mut outbound,
@@ -290,6 +298,7 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
             &context,
             &mut client,
             &live,
+            verified_selection,
             STUDENT,
             1,
             &mut outbound,
@@ -310,6 +319,7 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
             &context,
             &mut client,
             &live,
+            verified_selection,
             STUDENT,
             1,
             &mut outbound,
@@ -328,6 +338,64 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
         .insert(Capability::FileTransfer);
     assert_eq!(outbound, 1);
     assert_eq!(fs::read_dir(&root)?.count(), 0);
+    // A stale/cross-device source->principal mapping must not send a pull,
+    // even when the QUIC peer itself is a valid enrolled Student.
+    assert!(matches!(
+        run_authenticated_teacher_file_pull(
+            &action,
+            Some(MonitoringSourceId(7)),
+            &context,
+            &mut client,
+            &live,
+            VerifiedSelectedStudent {
+                principal_id: PrincipalId([6; 32]),
+                ..verified_selection
+            },
+            STUDENT,
+            1,
+            &mut outbound,
+            11,
+            TeacherFileInbox::new(&root).expect("precreated inbox"),
+            || 150,
+            |_| {},
+        )
+        .await,
+        Err(TeacherFilePullRuntimeError::SelectionIdentityChanged)
+    ));
+    assert_eq!(outbound, 1);
+    assert_eq!(fs::read_dir(&root)?.count(), 0);
+    for stale_binding in [
+        VerifiedSelectedStudent {
+            source_id: MonitoringSourceId(8),
+            ..verified_selection
+        },
+        VerifiedSelectedStudent {
+            control_session_id: 78,
+            ..verified_selection
+        },
+    ] {
+        assert!(matches!(
+            run_authenticated_teacher_file_pull(
+                &action,
+                Some(MonitoringSourceId(7)),
+                &context,
+                &mut client,
+                &live,
+                stale_binding,
+                STUDENT,
+                1,
+                &mut outbound,
+                11,
+                TeacherFileInbox::new(&root).expect("precreated inbox"),
+                || 150,
+                |_| {},
+            )
+            .await,
+            Err(TeacherFilePullRuntimeError::SelectionIdentityChanged)
+        ));
+        assert_eq!(outbound, 1);
+        assert_eq!(fs::read_dir(&root)?.count(), 0);
+    }
     let sink = TeacherFileInbox::new(&root).expect("precreated Teacher inbox");
     let mut statuses = Vec::new();
     let result = run_authenticated_teacher_file_pull(
@@ -336,6 +404,7 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
         &context,
         &mut client,
         &live,
+        verified_selection,
         STUDENT,
         1,
         &mut outbound,
