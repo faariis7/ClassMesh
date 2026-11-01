@@ -350,6 +350,18 @@ impl TeacherFileInbox {
         id: &[u8; 16],
         sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
     ) -> Result<(), TeacherFileInboxError> {
+        self.complete_with_post_readback_hook(id, sync_directory, || {})
+    }
+
+    // The production complete path and the deterministic post-readback race
+    // tests use the same commit implementation. The callback is a no-op in
+    // production and models a concurrent local filesystem mutator in tests.
+    fn complete_with_post_readback_hook(
+        &mut self,
+        id: &[u8; 16],
+        sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
+        after_readback: impl FnOnce(),
+    ) -> Result<(), TeacherFileInboxError> {
         let Some(active) = self.active.as_ref() else {
             return Err(TeacherFileInboxError::WrongTransfer);
         };
@@ -425,6 +437,16 @@ impl TeacherFileInbox {
             // retained file in the original root.
             self.rollback_published_if_owned(active);
             return Err(error);
+        }
+        after_readback();
+        // The final disk digest authenticates the retained inode, but an
+        // attacker may exchange the published name or its root while that
+        // bounded readback is in progress. Check the destination binding once
+        // more before returning Completed to the authenticated receiver.
+        if !self.root_unchanged() || !Self::path_matches_open_file(&active.final_path, &active.file)
+        {
+            self.rollback_published_if_owned(active);
+            return Err(TeacherFileInboxError::Io);
         }
         let active = self
             .active
@@ -730,6 +752,53 @@ mod tests {
         );
         sink.abort(&ID);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaced_published_name_after_final_readback_must_not_report_completed() {
+        // The last readback proves the retained inode's bytes, not that the
+        // destination name still points to that inode at ACK time.
+        let root = temp_root("final-readback-name-swap");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"data").unwrap();
+        let published = sink.completed_path(&ID);
+        let displaced = root.join("original-displaced.bin");
+
+        let result =
+            sink.complete_with_post_readback_hook(&ID, super::sync_inbox_directory, || {
+                fs::rename(&published, &displaced).unwrap();
+                fs::write(&published, b"decoy").unwrap();
+            });
+        assert_eq!(result, Err(TeacherFileInboxError::Io));
+        assert_eq!(fs::read(&published).unwrap(), b"decoy");
+        assert_eq!(fs::read(&displaced).unwrap(), b"data");
+        sink.abort(&ID);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaced_root_after_final_readback_must_not_report_completed() {
+        let root = temp_root("final-readback-root-swap");
+        let moved = temp_root("final-readback-root-original");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"data").unwrap();
+
+        let result =
+            sink.complete_with_post_readback_hook(&ID, super::sync_inbox_directory, || {
+                fs::rename(&root, &moved).unwrap();
+                fs::create_dir(&root).unwrap();
+            });
+        assert_eq!(result, Err(TeacherFileInboxError::Io));
+        assert!(!sink.completed_path(&ID).exists());
+        sink.abort(&ID);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(moved).unwrap();
     }
 
     #[cfg(unix)]
