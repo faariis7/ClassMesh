@@ -16,6 +16,7 @@ use classmesh_control::diagnostics::{
 use classmesh_control::dispatch::{
     AuthorizedSystemAction, PrivilegedControlCommand, dispatch_privileged_command,
 };
+use classmesh_control::file_transfer_source::authorize_file_pull_status;
 use classmesh_control::group_media_feedback::build_presentation_feedback_envelope;
 use classmesh_control::group_media_key::{
     InstalledPresentationKeyBinding, build_presentation_key_ack_from_binding,
@@ -3163,12 +3164,21 @@ async fn run_established_session(
                             connection.close(0_u32.into(), b"file transfer status invalid");
                             return;
                         }
-                        if let Err(error) = guard.validate_envelope(&envelope) {
+                        // A valid sequence alone is insufficient: Progress
+                        // triggers another Service-owned source read. Recheck
+                        // the live ReceiveFile grant on every status, including
+                        // after a policy reload that revokes the original grant.
+                        if let Err(error) = authorize_file_pull_status(
+                            &mut guard,
+                            authorization,
+                            &envelope,
+                            current_unix_ms,
+                        ) {
                             eprintln!(
                                 "ClassMesh file transfer status rejected: {}",
                                 command_authorization_diagnostic_code(&error)
                             );
-                            connection.close(0_u32.into(), b"invalid file transfer status");
+                            connection.close(0_u32.into(), b"file transfer status unauthorized");
                             return;
                         }
                         FileTransferDispatchPayload::Status(status.clone())

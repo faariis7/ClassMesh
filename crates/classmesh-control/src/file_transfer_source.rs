@@ -1,3 +1,4 @@
+use classmesh_protocol::control_wire::ControlEnvelope;
 use classmesh_protocol::control_wire::{
     FileDestinationPolicy, FileTransferCancel, FileTransferChunk, FileTransferFinish,
     FileTransferOffer,
@@ -7,7 +8,9 @@ use classmesh_protocol::file_transfer::{
     validate_offer, validate_transfer_id,
 };
 
+use crate::authorization::{AuthenticatedControlGuard, CommandAuthorizationError};
 use crate::file_transfer_receiver::FileTransferPeer;
+use classmesh_security::{AuthorizationStore, Permission};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileSourceId([u8; 16]);
@@ -267,6 +270,25 @@ impl<S: FileTransferOutboxSource> Drop for FileTransferSourceSession<S> {
     }
 }
 
+/// Recheck the live ReceiveFile grant for each authenticated pull status.
+/// A status is not a new pull request, but it can trigger the next source
+/// read. Envelope-only validation would permit reads after grant revocation.
+/// The guard consumes denied sequence numbers so a later grant cannot replay
+/// the same status.
+pub fn authorize_file_pull_status(
+    guard: &mut AuthenticatedControlGuard,
+    authorization: &AuthorizationStore,
+    envelope: &ControlEnvelope,
+    now_unix_ms: u64,
+) -> Result<(), CommandAuthorizationError> {
+    guard.authorize(
+        authorization,
+        envelope,
+        Permission::ReceiveFile,
+        now_unix_ms,
+    )
+}
+
 fn validate_peer(peer: FileTransferPeer) -> Result<(), SourceError> {
     if peer.control_session_id == 0 {
         return Err(SourceError::InvalidBinding);
@@ -376,6 +398,87 @@ mod tests {
 
     fn transfer_id() -> [u8; 16] {
         [9; 16]
+    }
+
+    #[test]
+    fn file_pull_status_requires_live_receive_file_permission_and_consumes_revoked_sequence() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use crate::authorization::{AuthenticatedControlGuard, CommandAuthorizationError};
+        use crate::peer_identity::AuthenticatedPeerIdentity;
+        use classmesh_protocol::PROTOCOL_VERSION;
+        use classmesh_protocol::control_wire::{
+            ControlEnvelope, FileTransferState, FileTransferStatus,
+            ProtocolVersion as WireProtocolVersion, control_envelope,
+        };
+        use classmesh_security::{
+            AuthorizationStore, CredentialFingerprint, CredentialRecord, Permission, Principal,
+            PrincipalKind,
+        };
+
+        let identity = AuthenticatedPeerIdentity {
+            principal_id: PrincipalId([7; 32]),
+            credential_fingerprint: CredentialFingerprint([9; 32]),
+        };
+        let store_with = |permissions: BTreeSet<Permission>| {
+            let mut credentials = BTreeMap::new();
+            credentials.insert(
+                identity.credential_fingerprint,
+                CredentialRecord::active(identity.credential_fingerprint, 100),
+            );
+            let mut store = AuthorizationStore::default();
+            store
+                .upsert(Principal {
+                    id: identity.principal_id,
+                    kind: PrincipalKind::Teacher,
+                    enabled: true,
+                    permissions,
+                    credentials,
+                })
+                .expect("valid enrolled teacher");
+            store
+        };
+        let allowed = store_with(BTreeSet::from([Permission::ReceiveFile]));
+        let revoked = store_with(BTreeSet::from([Permission::SendFile]));
+        let mut guard = AuthenticatedControlGuard::new(identity, 77, PROTOCOL_VERSION, 0);
+        let status = |sequence| ControlEnvelope {
+            control_session_id: 77,
+            sequence,
+            protocol_version: Some(WireProtocolVersion {
+                major: u32::from(PROTOCOL_VERSION.major),
+                minor: u32::from(PROTOCOL_VERSION.minor),
+            }),
+            request_id: 41,
+            payload: Some(control_envelope::Payload::FileTransferStatus(
+                FileTransferStatus {
+                    transfer_id: vec![9; 16],
+                    state: FileTransferState::Progress as i32,
+                    next_offset: 3,
+                    diagnostic: String::new(),
+                },
+            )),
+        };
+
+        assert_eq!(
+            authorize_file_pull_status(&mut guard, &allowed, &status(1), 150),
+            Ok(())
+        );
+        assert_eq!(
+            authorize_file_pull_status(&mut guard, &revoked, &status(2), 150),
+            Err(CommandAuthorizationError::Unauthorized {
+                permission: Permission::ReceiveFile,
+            }),
+            "SendFile alone must not authorize a pull Progress status"
+        );
+        assert_eq!(guard.last_sequence(), 2, "denied sequence is consumed");
+        assert!(matches!(
+            authorize_file_pull_status(&mut guard, &allowed, &status(2), 150),
+            Err(CommandAuthorizationError::NonIncreasingSequence { .. })
+        ));
+        assert_eq!(
+            authorize_file_pull_status(&mut guard, &allowed, &status(3), 150),
+            Ok(())
+        );
     }
 
     #[test]
