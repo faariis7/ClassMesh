@@ -185,8 +185,24 @@ pub struct TeacherFileInbox {
 
 impl TeacherFileInbox {
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, TeacherFileInboxError> {
+        Self::new_with_post_admission_hook(root, || {})
+    }
+
+    // Production and deterministic admission-race tests share this path.
+    fn new_with_post_admission_hook(
+        root: impl Into<PathBuf>,
+        after_admission: impl FnOnce(),
+    ) -> Result<Self, TeacherFileInboxError> {
         let root = root.into();
         if !Self::root_ready(&root) {
+            return Err(TeacherFileInboxError::InvalidRoot);
+        }
+        let admitted_identity = path_identity(&root).ok_or(TeacherFileInboxError::InvalidRoot)?;
+        after_admission();
+        // The caller's original path must still identify the admitted root.
+        // Otherwise an attacker can replace it with a symlink or a different
+        // directory between the first check and canonicalization.
+        if !Self::root_ready(&root) || path_identity(&root) != Some(admitted_identity) {
             return Err(TeacherFileInboxError::InvalidRoot);
         }
         // Resolve ancestor symlinks once at admission. Retaining the caller's
@@ -194,11 +210,16 @@ impl TeacherFileInbox {
         // begin/complete and silently redirect verified file bytes. This is
         // defense in depth, NOT a Windows handle-based anti-reparse guarantee
         // against an attacker able to replace actual directory ancestors.
-        let root = fs::canonicalize(&root).map_err(|_| TeacherFileInboxError::InvalidRoot)?;
-        if !Self::root_ready(&root) {
+        let resolved = fs::canonicalize(&root).map_err(|_| TeacherFileInboxError::InvalidRoot)?;
+        if !Self::root_ready(&root)
+            || path_identity(&root) != Some(admitted_identity)
+            || !Self::root_ready(&resolved)
+            || path_identity(&resolved) != Some(admitted_identity)
+        {
             return Err(TeacherFileInboxError::InvalidRoot);
         }
-        let root_identity = path_identity(&root).ok_or(TeacherFileInboxError::InvalidRoot)?;
+        let root = resolved;
+        let root_identity = admitted_identity;
         Ok(Self {
             root,
             root_identity,
@@ -1430,6 +1451,47 @@ mod tests {
             TeacherFileInbox::new("."),
             Err(TeacherFileInboxError::InvalidRoot)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_rejects_root_swapped_to_symlink_during_admission() {
+        // A trusted root can be replaced after the first metadata check but
+        // before canonicalize. Do not silently admit the attacker's target.
+        let root = temp_root("admission-root");
+        let displaced = temp_root("admission-original");
+        let decoy = temp_root("admission-decoy");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&decoy).unwrap();
+        let outcome = TeacherFileInbox::new_with_post_admission_hook(&root, || {
+            fs::rename(&root, &displaced).unwrap();
+            std::os::unix::fs::symlink(&decoy, &root).unwrap();
+        });
+        assert!(matches!(outcome, Err(TeacherFileInboxError::InvalidRoot)));
+        fs::remove_file(root).unwrap();
+        fs::remove_dir_all(displaced).unwrap();
+        fs::remove_dir_all(decoy).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_rejects_ancestor_symlink_retargeted_during_admission() {
+        // A preexisting alias can point at a trusted leaf during the first
+        // check and at a different leaf by the time canonicalize resolves it.
+        let original_parent = temp_root("admission-original-parent");
+        let decoy_parent = temp_root("admission-decoy-parent");
+        let alias = temp_root("admission-parent-alias");
+        fs::create_dir_all(original_parent.join("inbox")).unwrap();
+        fs::create_dir_all(decoy_parent.join("inbox")).unwrap();
+        std::os::unix::fs::symlink(&original_parent, &alias).unwrap();
+        let result = TeacherFileInbox::new_with_post_admission_hook(alias.join("inbox"), || {
+            fs::remove_file(&alias).unwrap();
+            std::os::unix::fs::symlink(&decoy_parent, &alias).unwrap();
+        });
+        assert!(matches!(result, Err(TeacherFileInboxError::InvalidRoot)));
+        fs::remove_file(alias).unwrap();
+        fs::remove_dir_all(original_parent).unwrap();
+        fs::remove_dir_all(decoy_parent).unwrap();
     }
 
     #[cfg(unix)]
