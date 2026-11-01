@@ -264,9 +264,13 @@ impl TeacherFileInbox {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let file = options
-            .open(&temp_path)
-            .map_err(|_| TeacherFileInboxError::ExistingTransfer)?;
+        let file = options.open(&temp_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                TeacherFileInboxError::ExistingTransfer
+            } else {
+                TeacherFileInboxError::Io
+            }
+        })?;
         // Admission must bind the newly opened .part HANDLE to the same
         // trusted root and name, not just validate the directory before I/O.
         // An ancestor or .part may be exchanged while create_new is opening.
@@ -362,8 +366,13 @@ impl TeacherFileInbox {
         // Atomic create-if-absent publishing: unlike rename, hard_link never
         // replaces an existing .bin. Retain the original file handle while
         // linking, then verify the new name still identifies that same file.
-        fs::hard_link(&active.temp_path, &active.final_path)
-            .map_err(|_| TeacherFileInboxError::ExistingTransfer)?;
+        fs::hard_link(&active.temp_path, &active.final_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                TeacherFileInboxError::ExistingTransfer
+            } else {
+                TeacherFileInboxError::Io
+            }
+        })?;
         if !self.root_unchanged() || !Self::path_matches_open_file(&active.final_path, &active.file)
         {
             return Err(TeacherFileInboxError::Io);
@@ -998,6 +1007,41 @@ mod tests {
         assert_eq!(sink.append(&ID, 4, b"evil"), Err(TeacherFileInboxError::Io),);
         assert_eq!(fs::read(displaced).unwrap(), b"good");
         assert_eq!(fs::read(part).unwrap(), b"decoy");
+        sink.abort(&ID);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readonly_inbox_root_is_io_failure_not_duplicate_offer() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("readonly-begin");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = sink.begin(&ID, "lesson.pdf", 4);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(result, Err(TeacherFileInboxError::Io));
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readonly_inbox_root_at_publish_is_io_failure_not_duplicate() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("readonly-publish");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"data").unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = sink.complete(&ID);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(result, Err(TeacherFileInboxError::Io));
+        assert!(!sink.completed_path(&ID).exists());
         sink.abort(&ID);
         fs::remove_dir_all(root).unwrap();
     }
