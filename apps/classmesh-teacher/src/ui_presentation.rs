@@ -58,7 +58,7 @@ pub fn show_presentation(
 fn metrics(ui: &mut egui::Ui, state: PresentationViewState) {
     let metrics = state.metrics;
     egui::Grid::new("classmesh_presentation_metrics")
-        .num_columns(2)
+        .num_columns(1)
         .show(ui, |ui| {
             metric(ui, "Captured", metrics.captured_frames);
             metric(ui, "Submitted", metrics.submitted_frames);
@@ -74,8 +74,31 @@ fn metrics(ui: &mut egui::Ui, state: PresentationViewState) {
         });
 }
 
+// Keep the name and its value in one accessibility node. Two separate
+// widgets read as an unlabelled number in some screen-reader navigation modes.
+fn metric_readout(label: &str, value: impl std::fmt::Display) -> String {
+    format!("{label}: {value}")
+}
+
 fn metric(ui: &mut egui::Ui, label: &str, value: impl std::fmt::Display) {
-    ui.label(label);
-    ui.monospace(value.to_string());
+    ui.monospace(metric_readout(label, value));
     ui.end_row();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presentation_metric_readout_keeps_label_and_full_value_together() {
+        assert_eq!(metric_readout("Captured", 0_u64), "Captured: 0");
+        assert_eq!(
+            metric_readout("Encoded bytes", u64::MAX),
+            format!("Encoded bytes: {}", u64::MAX)
+        );
+        assert_eq!(
+            metric_readout("Multicast queued", 42_usize),
+            "Multicast queued: 42"
+        );
+    }
 }
