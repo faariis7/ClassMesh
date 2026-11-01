@@ -1605,6 +1605,38 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn inbox_rejects_root_swapped_to_junction_during_admission() {
+        use std::process::Command;
+
+        // Windows reparse points must not replace a checked AppInbox root
+        // between its first metadata check and canonicalization.
+        let root = temp_root("windows-admission-root");
+        let original = temp_root("windows-admission-original");
+        let decoy = temp_root("windows-admission-decoy");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&decoy).unwrap();
+        let result = TeacherFileInbox::new_with_post_admission_hook(&root, || {
+            fs::rename(&root, &original).unwrap();
+            let output = Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&root)
+                .arg(&decoy)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "Windows junction fixture failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        });
+        assert!(matches!(result, Err(TeacherFileInboxError::InvalidRoot)));
+        fs::remove_dir(root).unwrap();
+        fs::remove_dir_all(original).unwrap();
+        fs::remove_dir_all(decoy).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn inbox_rejects_junction_in_untrusted_ancestor_before_canonicalizing() {
         use std::process::Command;
 
