@@ -390,6 +390,27 @@ impl TeacherFileInbox {
         {
             return Err(TeacherFileInboxError::Io);
         }
+        // A same-inode writer can change .bin bytes *during* the directory
+        // flush, after the earlier disk readback. Rehash from the retained
+        // file HANDLE before ACKing Completed; inode identity alone cannot
+        // establish content integrity. This is a bounded second pass, not a
+        // substitute for trusted ACLs / exclusive Windows HANDLE admission.
+        let post_sync_error = match Self::disk_matches_received_bytes(active) {
+            Ok(true) => None,
+            Ok(false) => Some(TeacherFileInboxError::CorruptFile),
+            Err(error) => Some(error),
+        };
+        if let Some(error) = post_sync_error {
+            // Roll back only our own published name, never an attacker
+            // replacement. Best-effort flush the unlink for crash recovery.
+            if self.root_unchanged()
+                && Self::path_matches_open_file(&active.final_path, &active.file)
+                && fs::remove_file(&active.final_path).is_ok()
+            {
+                let _ = sync_inbox_directory(&self.root);
+            }
+            return Err(error);
+        }
         let active = self
             .active
             .take()
@@ -662,6 +683,37 @@ mod tests {
         assert!(!sink.completed_path(&ID).exists());
         sink.abort(&ID);
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_publish_same_inode_mutation_during_directory_sync_is_not_completed() {
+        use std::io::Write as _;
+
+        // The first disk readback passes before hard_link. A local writer can
+        // still alter the *same inode* via its newly published .bin name while
+        // directory sync is in progress. Identity-only checks must not ACK it.
+        let root = temp_root("post-publish-same-inode-mutation");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"good").unwrap();
+        let published = sink.completed_path(&ID);
+
+        let outcome = sink.complete_with_directory_sync(&ID, |_root| {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&published)?
+                .write_all(b"evil")?;
+            Ok(())
+        });
+        assert_eq!(outcome, Err(TeacherFileInboxError::CorruptFile));
+        assert!(
+            !published.exists(),
+            "corrupt published name must be rolled back"
+        );
+        sink.abort(&ID);
         fs::remove_dir_all(root).unwrap();
     }
 
