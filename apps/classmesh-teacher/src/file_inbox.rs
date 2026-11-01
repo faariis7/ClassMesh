@@ -381,7 +381,7 @@ impl TeacherFileInbox {
     fn complete_with_directory_sync(
         &mut self,
         id: &[u8; 16],
-        sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
+        sync_directory: impl FnMut(&Path) -> std::io::Result<()>,
     ) -> Result<(), TeacherFileInboxError> {
         self.complete_with_post_readback_hook(id, sync_directory, || {})
     }
@@ -392,7 +392,7 @@ impl TeacherFileInbox {
     fn complete_with_post_readback_hook(
         &mut self,
         id: &[u8; 16],
-        sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
+        sync_directory: impl FnMut(&Path) -> std::io::Result<()>,
         after_readback: impl FnOnce(),
     ) -> Result<(), TeacherFileInboxError> {
         self.complete_with_post_cleanup_hook(id, sync_directory, after_readback, || {})
@@ -403,7 +403,7 @@ impl TeacherFileInbox {
     fn complete_with_post_cleanup_hook(
         &mut self,
         id: &[u8; 16],
-        sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
+        mut sync_directory: impl FnMut(&Path) -> std::io::Result<()>,
         after_readback: impl FnOnce(),
         after_cleanup: impl FnOnce(),
     ) -> Result<(), TeacherFileInboxError> {
@@ -493,6 +493,15 @@ impl TeacherFileInbox {
             fs::symlink_metadata(&active.temp_path),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound
         ) {
+            self.rollback_published_if_owned(active);
+            return Err(TeacherFileInboxError::Io);
+        }
+
+        // The .bin link was flushed above, but unlinking its former writable
+        // .part name is a SECOND namespace mutation. Flush the directory
+        // again before Completed, otherwise a crash can resurrect that alias.
+        // Keep the original file HANDLE for safe rollback on sync failure.
+        if !self.root_unchanged() || sync_directory(&self.root).is_err() {
             self.rollback_published_if_owned(active);
             return Err(TeacherFileInboxError::Io);
         }
@@ -791,6 +800,34 @@ mod tests {
             }),
             Err(TeacherFileInboxError::Io),
         );
+        assert!(!sink.completed_path(&ID).exists());
+        sink.abort(&ID);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_post_unlink_directory_sync_must_not_ack_completed() {
+        // A durable .bin link is insufficient if removing its writable .part
+        // alias was never flushed. A crash can resurrect that alias.
+        // Inject failure only on the *second* directory sync.
+        let root = temp_root("post-unlink-sync-failure");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"data").unwrap();
+        let mut sync_calls = 0;
+        let outcome = sink.complete_with_directory_sync(&ID, |path| {
+            sync_calls += 1;
+            if sync_calls == 2 {
+                Err(std::io::Error::other("injected post-unlink sync failure"))
+            } else {
+                super::sync_inbox_directory(path)
+            }
+        });
+        assert_eq!(sync_calls, 2, "both link and unlink must be durable");
+        assert_eq!(outcome, Err(TeacherFileInboxError::Io));
         assert!(!sink.completed_path(&ID).exists());
         sink.abort(&ID);
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
