@@ -502,9 +502,75 @@ mod tests {
 
     use crate::classroom_view::{ClassroomDeviceRow, ClassroomDeviceSnapshot};
     use crate::device_diagnostics::{DEFAULT_MAX_DIAGNOSTIC_CODES, DeviceDiagnosticsError};
-    use crate::ui_shell::TeacherFocusUiAction;
+    use crate::ui_shell::{TeacherFocusUiAction, TeacherPresentationUiAction};
 
     use super::*;
+
+    #[test]
+    fn queued_presentation_start_is_dropped_if_a_stream_appears_before_handoff() {
+        let mut app = TeacherEguiShell::default();
+        app.queue_action(TeacherUiAction::Presentation(TeacherPresentationUiAction::Start));
+        app.set_presentation_snapshot(PresentationRuntimeSnapshot {
+            binding: Some(crate::presentation_view::PresentationBindingView {
+                presentation_id: 9,
+                stream_id: 4,
+                epoch: 1,
+            }),
+            ..PresentationRuntimeSnapshot::default()
+        });
+        assert_eq!(app.take_pending_action(), None);
+    }
+
+    #[test]
+    fn queued_presentation_stop_is_dropped_if_binding_changes_or_stops() {
+        let original = crate::presentation_view::PresentationBindingView {
+            presentation_id: 9,
+            stream_id: 4,
+            epoch: 1,
+        };
+        for replacement in [
+            Some(crate::presentation_view::PresentationBindingView {
+                epoch: 2,
+                ..original
+            }),
+            None,
+        ] {
+            let mut app = TeacherEguiShell::default();
+            app.set_presentation_snapshot(PresentationRuntimeSnapshot {
+                binding: Some(original),
+                ..PresentationRuntimeSnapshot::default()
+            });
+            app.queue_action(TeacherUiAction::Presentation(
+                TeacherPresentationUiAction::Stop { binding: original },
+            ));
+            app.set_presentation_snapshot(PresentationRuntimeSnapshot {
+                binding: replacement,
+                ..PresentationRuntimeSnapshot::default()
+            });
+            assert_eq!(app.take_pending_action(), None);
+        }
+    }
+
+    #[test]
+    fn queued_presentation_actions_survive_when_runtime_binding_is_unchanged() {
+        let mut app = TeacherEguiShell::default();
+        let start = TeacherUiAction::Presentation(TeacherPresentationUiAction::Start);
+        app.queue_action(start.clone());
+        assert_eq!(app.take_pending_action(), Some(start));
+
+        let binding = crate::presentation_view::PresentationBindingView {
+            presentation_id: 9,
+            stream_id: 4,
+            epoch: 1,
+        };
+        app.set_presentation_snapshot(PresentationRuntimeSnapshot {
+            binding: Some(binding),
+            ..PresentationRuntimeSnapshot::default()
+        });
+        let stop = TeacherUiAction::Presentation(TeacherPresentationUiAction::Stop { binding });
+        app.queue_action(stop.clone());
+        assert_eq!(app.take_pending_action(), Some(stop));
+    }
 
     #[test]
     fn teacher_ui_viewport_has_explicit_default_and_minimum_size() {
