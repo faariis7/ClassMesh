@@ -307,7 +307,9 @@ pub fn authorize_queued_file_pull(
 }
 
 fn validate_peer(peer: FileTransferPeer) -> Result<(), SourceError> {
-    if peer.control_session_id == 0 {
+    // An all-zero principal is not an enrolled identity. Never resolve an
+    // app-owned source for an absent authenticated caller binding.
+    if peer.control_session_id == 0 || peer.principal.0.iter().all(|byte| *byte == 0) {
         return Err(SourceError::InvalidBinding);
     }
     Ok(())
@@ -665,6 +667,27 @@ mod tests {
             session.chunk(peer(), &transfer_id(), 0),
             Err(SourceError::ReadTooLarge)
         );
+    }
+
+    #[test]
+    fn zero_principal_is_rejected_before_opening_or_reading_a_source() {
+        let mut session = FileTransferSourceSession::new(RecordingSource::new(b"abc".to_vec()));
+        let unauthenticated = FileTransferPeer {
+            principal: PrincipalId([0; 32]),
+            control_session_id: 31,
+        };
+        assert_eq!(
+            session.offer(unauthenticated, &transfer_id(), source_id()),
+            Err(SourceError::InvalidBinding)
+        );
+        assert_eq!(session.source().metadata_calls, 0);
+
+        session.offer(peer(), &transfer_id(), source_id()).unwrap();
+        assert_eq!(
+            session.chunk(unauthenticated, &transfer_id(), 0),
+            Err(SourceError::InvalidBinding)
+        );
+        assert!(session.source().reads.is_empty());
     }
 
     #[test]
