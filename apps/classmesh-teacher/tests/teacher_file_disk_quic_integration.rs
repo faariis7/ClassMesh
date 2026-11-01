@@ -136,7 +136,7 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
         if !revoke_teacher_after_accept {
             assert!(remote_partial.exists());
         }
-        channel
+        let chunk_send = channel
             .send(&frame(
                 3,
                 control_envelope::Payload::FileTransferChunk(FileTransferChunk {
@@ -145,13 +145,14 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
                     content: remote_bytes.clone(),
                 }),
             ))
-            .await
-            .map_err(|e| e.to_string())?;
+            .await;
         if revoke_teacher_after_accept {
-            // A revoked Teacher must not acknowledge the next chunk or
-            // publish its final file even after the remote sent real bytes.
+            // Revocation closes QUIC immediately. The Student may observe
+            // connection loss during this send, not just after it; neither
+            // outcome permits a Completed acknowledgement or published file.
             return Ok::<_, String>(());
         }
+        chunk_send.map_err(|e| e.to_string())?;
         let status = channel.receive().await.map_err(|e| e.to_string())?;
         assert!(
             matches!(status.payload,Some(control_envelope::Payload::FileTransferStatus(s))
@@ -371,7 +372,11 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
             FileTransferState::Completed as i32,
         ]
     );
-    assert_eq!(outcome.completed_path, path);
+    // The inbox pins a canonical root to avoid mutable ancestor aliases.
+    assert_eq!(
+        outcome.completed_path,
+        fs::canonicalize(&root)?.join(path.file_name().unwrap())
+    );
     assert_eq!(outcome.total_size, data.len() as u64);
     assert_eq!(outcome.last_inbound_sequence, 4);
     server_task.await??;

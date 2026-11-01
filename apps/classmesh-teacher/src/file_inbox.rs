@@ -49,6 +49,15 @@ impl TeacherFileInbox {
         if !Self::root_ready(&root) {
             return Err(TeacherFileInboxError::InvalidRoot);
         }
+        // Resolve ancestor symlinks once at admission. Retaining the caller's
+        // absolute spelling would let an ancestor alias be retargeted before
+        // begin/complete and silently redirect verified file bytes. This is
+        // defense in depth, NOT a Windows handle-based anti-reparse guarantee
+        // against an attacker able to replace actual directory ancestors.
+        let root = fs::canonicalize(&root).map_err(|_| TeacherFileInboxError::InvalidRoot)?;
+        if !Self::root_ready(&root) {
+            return Err(TeacherFileInboxError::InvalidRoot);
+        }
         Ok(Self { root, active: None })
     }
 
@@ -339,6 +348,36 @@ mod tests {
             TeacherFileInbox::new("."),
             Err(TeacherFileInboxError::InvalidRoot)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_pins_resolved_root_when_an_ancestor_symlink_changes() {
+        // An absolute path is not enough: an attacker who can retarget an
+        // ancestor symlink between construction and begin can redirect bytes.
+        let original_parent = temp_root("original-parent");
+        let decoy_parent = temp_root("decoy-parent");
+        let alias = temp_root("parent-alias");
+        let original = original_parent.join("inbox");
+        let decoy = decoy_parent.join("inbox");
+        fs::create_dir_all(&original).unwrap();
+        fs::create_dir_all(&decoy).unwrap();
+        std::os::unix::fs::symlink(&original_parent, &alias).unwrap();
+
+        let mut sink = TeacherFileInbox::new(alias.join("inbox")).unwrap();
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&decoy_parent, &alias).unwrap();
+
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"data").unwrap();
+        sink.complete(&ID).unwrap();
+
+        let filename = format!("{}.bin", "71".repeat(16));
+        assert_eq!(fs::read(original.join(&filename)).unwrap(), b"data");
+        assert!(!decoy.join(filename).exists());
+        fs::remove_file(alias).unwrap();
+        fs::remove_dir_all(original_parent).unwrap();
+        fs::remove_dir_all(decoy_parent).unwrap();
     }
 
     #[cfg(unix)]
