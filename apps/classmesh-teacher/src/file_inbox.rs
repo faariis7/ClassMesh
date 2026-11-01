@@ -444,36 +444,11 @@ impl TeacherFileInbox {
             self.rollback_published_if_owned(active);
             return Err(TeacherFileInboxError::Io);
         }
-        // A same-inode writer can change .bin bytes *during* the directory
-        // flush, after the earlier disk readback. Rehash from the retained
-        // file HANDLE before ACKing Completed; inode identity alone cannot
-        // establish content integrity. This is a bounded second pass, not a
-        // substitute for trusted ACLs / exclusive Windows HANDLE admission.
-        let post_sync_error = match Self::disk_matches_received_bytes(active) {
-            Ok(true) => None,
-            Ok(false) => Some(TeacherFileInboxError::CorruptFile),
-            Err(error) => Some(error),
-        };
-        if let Some(error) = post_sync_error {
-            // Revoke the published name only when it still identifies the
-            // retained file in the original root.
-            self.rollback_published_if_owned(active);
-            return Err(error);
-        }
-        after_readback();
-        // The final disk digest authenticates the retained inode, but an
-        // attacker may exchange the published name or its root while that
-        // bounded readback is in progress. Check the destination binding once
-        // more before returning Completed to the authenticated receiver.
-        if !self.root_unchanged() || !Self::path_matches_open_file(&active.final_path, &active.file)
-        {
-            self.rollback_published_if_owned(active);
-            return Err(TeacherFileInboxError::Io);
-        }
-        // The final .part unlink is another filesystem operation where a
-        // local mutator can replace the root or the published name. Keep
-        // the original HANDLE and active transfer until the final check;
-        // otherwise a late failure cannot safely retract its own .bin.
+        // Unlink the private .part name BEFORE the final disk readback.
+        // Otherwise a same-inode writer can mutate the published .bin during
+        // this last filesystem operation, after the last digest, while the
+        // final name/identity checks still pass. Keep the original HANDLE
+        // and active transfer for safe rollback if any later check fails.
         let active = self
             .active
             .as_ref()
@@ -485,6 +460,25 @@ impl TeacherFileInbox {
         // unlink a replacement file at that name.
         self.unlink_partial_before_final_check(active);
         after_cleanup();
+
+        // The directory sync and .part unlink can take time. A local writer
+        // may change the *same inode* via .bin without changing its file ID.
+        // This final bounded digest must run after both operations, before
+        // acknowledging Completed. Windows exclusive-handle/ACL qualification
+        // remains a separate production gate.
+        let post_sync_error = match Self::disk_matches_received_bytes(active) {
+            Ok(true) => None,
+            Ok(false) => Some(TeacherFileInboxError::CorruptFile),
+            Err(error) => Some(error),
+        };
+        if let Some(error) = post_sync_error {
+            self.rollback_published_if_owned(active);
+            return Err(error);
+        }
+        after_readback();
+        // A final digest authenticates the retained inode, not a pathname.
+        // Check the exact published destination binding after the readback,
+        // without performing another mutating filesystem operation afterward.
         if !self.root_unchanged()
             || !fs::symlink_metadata(&final_path).is_ok_and(|metadata| {
                 metadata.is_file()
@@ -493,13 +487,11 @@ impl TeacherFileInbox {
             })
             || path_identity(&final_path) != Some(published_identity)
         {
-            // Roll back only when the published name still identifies the
-            // original retained HANDLE. Preserve active for receiver abort
-            // and never remove a substituted .bin or root.
+            // Preserve active for receiver abort and never remove a
+            // substituted .bin or root.
             self.rollback_published_if_owned(active);
             return Err(TeacherFileInboxError::Io);
         }
-        // No further path-based filesystem operation after this final check.
         self.active.take();
         Ok(())
     }
@@ -898,6 +890,43 @@ mod tests {
         assert_eq!(result, Err(TeacherFileInboxError::Io));
         assert_eq!(fs::read(&published).unwrap(), b"decoy");
         assert_eq!(fs::read(&displaced).unwrap(), b"data");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_inode_mutation_during_partial_cleanup_must_not_ack_completed() {
+        use std::io::Write as _;
+
+        // Removing .part happens after the previous disk readback. A writer
+        // using the published .bin name can change bytes without changing
+        // the inode identity while that cleanup runs.
+        let root = temp_root("cleanup-same-inode-corruption");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"good").unwrap();
+        let published = sink.completed_path(&ID);
+
+        let result = sink.complete_with_post_cleanup_hook(
+            &ID,
+            super::sync_inbox_directory,
+            || {},
+            || {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(&published)
+                    .unwrap()
+                    .write_all(b"evil")
+                    .unwrap();
+            },
+        );
+        assert_eq!(result, Err(TeacherFileInboxError::CorruptFile));
+        assert!(
+            !published.exists(),
+            "corrupted published bytes must never be acknowledged"
+        );
+        sink.abort(&ID);
         fs::remove_dir_all(root).unwrap();
     }
 
