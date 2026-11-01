@@ -96,6 +96,28 @@ fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
 }
 
+// Check the caller's ORIGINAL spelling before canonicalization can hide an
+// ancestor junction/symlink. Repeat on the resolved path at every boundary.
+// This detects static reparse ancestors but does not replace retained
+// directory HANDLEs, trusted owner/DACL checks or native Windows evidence.
+#[cfg(windows)]
+fn root_ancestors_safe(root: &Path) -> bool {
+    root.ancestors()
+        .filter(|ancestor| ancestor.has_root())
+        .all(|ancestor| {
+            fs::symlink_metadata(ancestor).is_ok_and(|metadata| {
+                metadata.is_dir()
+                    && !metadata.file_type().is_symlink()
+                    && !is_reparse_point(&metadata)
+            })
+        })
+}
+
+#[cfg(not(windows))]
+fn root_ancestors_safe(_root: &Path) -> bool {
+    true
+}
+
 // Publishing a hard link is not a durable commit until its containing
 // directory entry is flushed. Windows directory flush/ACL qualification is a
 // separate acceptance gate; do not infer Windows crash durability here.
@@ -188,6 +210,7 @@ impl TeacherFileInbox {
         // Never retain a cwd-relative inbox. Also reject Windows junctions
         // and other direct reparse points, not only symbolic links.
         root.is_absolute()
+            && root_ancestors_safe(root)
             && fs::symlink_metadata(root).is_ok_and(|metadata| {
                 metadata.is_dir()
                     && !metadata.file_type().is_symlink()
@@ -460,6 +483,19 @@ impl TeacherFileInbox {
         // unlink a replacement file at that name.
         self.unlink_partial_before_final_check(active);
         after_cleanup();
+
+        // A successful publish must not leave a second writable name for
+        // the same inode. If cleanup failed, or a local actor recreated a
+        // .part alias during cleanup, never acknowledge Completed while the
+        // published bytes can still be mutated through that alias. An
+        // unexpected metadata error also fails closed, not as NotFound.
+        if !matches!(
+            fs::symlink_metadata(&active.temp_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ) {
+            self.rollback_published_if_owned(active);
+            return Err(TeacherFileInboxError::Io);
+        }
 
         // The directory sync and .part unlink can take time. A local writer
         // may change the *same inode* via .bin without changing its file ID.
@@ -1373,6 +1409,61 @@ mod tests {
         fs::remove_file(alias).unwrap();
         fs::remove_dir_all(original_parent).unwrap();
         fs::remove_dir_all(decoy_parent).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recreated_partial_hardlink_after_cleanup_must_not_ack_completed() {
+        // A same-user writer can reintroduce an alias to the published inode
+        // during final cleanup. Reporting Completed would leave a writable
+        // .part alias to the verified .bin after the receiver has finished.
+        let root = temp_root("partial-relinked-after-cleanup");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"data").unwrap();
+        let published = sink.completed_path(&ID);
+        let partial = root.join(format!("{}.part", "71".repeat(16)));
+        let result = sink.complete_with_post_cleanup_hook(
+            &ID,
+            super::sync_inbox_directory,
+            || {},
+            || fs::hard_link(&published, &partial).unwrap(),
+        );
+        assert_eq!(result, Err(TeacherFileInboxError::Io));
+        assert!(!published.exists(), "unacknowledged .bin must be retracted");
+        sink.abort(&ID);
+        assert!(!partial.exists(), "abort must remove the retained partial");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inbox_rejects_junction_in_untrusted_ancestor_before_canonicalizing() {
+        use std::process::Command;
+
+        // A junction in an ancestor can redirect a seemingly ordinary
+        // AppInbox leaf. Canonicalizing first erases evidence of the junction.
+        let real_parent = temp_root("windows-real-parent");
+        let alias = temp_root("windows-ancestor-junction");
+        fs::create_dir_all(real_parent.join("inbox")).unwrap();
+        let output = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&alias)
+            .arg(&real_parent)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Windows junction fixture failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(matches!(
+            TeacherFileInbox::new(alias.join("inbox")),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
+        fs::remove_dir(&alias).unwrap();
+        fs::remove_dir_all(real_parent).unwrap();
     }
 
     #[cfg(unix)]
