@@ -604,6 +604,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match group_media_keys.install(install) {
                         Ok(installed) => {
                             debug_assert_eq!(installed, binding);
+                            if group_media_keys.take_decoder_resync() {
+                                // A new SFrame epoch cannot inherit the old H.264
+                                // decoder reference pictures or recovery timers.
+                                // The next accepted media must be a fresh IDR.
+                                presentation_keyframe_request_retry.reset();
+                                presentation_silence.reset();
+                                presentation_delivery_telemetry.reset();
+                                if let Some(decoder) = presentation_decode.as_mut() {
+                                    decoder.recover_after_loss();
+                                }
+                            }
                             classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Installed
                         }
                         Err(error) => {

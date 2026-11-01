@@ -85,6 +85,9 @@ pub struct WorkerGroupMediaAuthenticationStats {
 pub struct WorkerGroupMediaKeyState {
     installed: Option<InstalledWorkerGroupMediaKey>,
     authentication_stats: WorkerGroupMediaAuthenticationStats,
+    // A successful in-place key epoch rotation invalidates decoder reference
+    // frames even when the presentation/stream identity stays unchanged.
+    decoder_resync_pending: bool,
 }
 
 impl WorkerGroupMediaKeyState {
@@ -96,6 +99,13 @@ impl WorkerGroupMediaKeyState {
     #[must_use]
     pub fn is_installed(&self) -> bool {
         self.installed.is_some()
+    }
+
+    /// Consume the one-shot decoder flush required after a successful key
+    /// rotation. The caller must run this on the live Worker media thread;
+    /// this state never performs GPU operations itself.
+    pub fn take_decoder_resync(&mut self) -> bool {
+        std::mem::take(&mut self.decoder_resync_pending)
     }
 
     /// A snapshot belongs only to the currently installed media key epoch.
@@ -124,6 +134,7 @@ impl WorkerGroupMediaKeyState {
             }
         }
 
+        let replacing_existing_key = self.installed.is_some();
         let (binding, mut key_bytes) = install.into_parts();
         let epoch = GroupMediaEpoch::new(binding.epoch)?;
         let key_material = GroupMediaKeyMaterial::import_received_wire(&mut key_bytes[..])?;
@@ -131,6 +142,7 @@ impl WorkerGroupMediaKeyState {
 
         self.installed = Some(InstalledWorkerGroupMediaKey { binding, receiver });
         self.authentication_stats = WorkerGroupMediaAuthenticationStats::default();
+        self.decoder_resync_pending |= replacing_existing_key;
         Ok(binding)
     }
 
@@ -218,6 +230,7 @@ impl WorkerGroupMediaKeyState {
         let cleared = self.installed.take().is_some();
         if cleared {
             self.authentication_stats = WorkerGroupMediaAuthenticationStats::default();
+            self.decoder_resync_pending = false;
         }
         cleared
     }
@@ -495,6 +508,57 @@ mod tests {
                 .open_frame(&received(&sealed))
                 .expect("old receiver retained"),
             b"still-current"
+        );
+    }
+
+    #[test]
+    fn key_rotation_requests_one_decoder_resync_only_after_successful_install() {
+        let mut state = WorkerGroupMediaKeyState::default();
+        assert!(!state.take_decoder_resync());
+
+        state
+            .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x37))
+            .expect("first install");
+        assert!(
+            !state.take_decoder_resync(),
+            "first key has no prior decoder state"
+        );
+
+        assert!(
+            state
+                .install(sensitive(77, 45, PRESENTATION_ID, STREAM_ID, 3, 0x38))
+                .is_err()
+        );
+        assert!(
+            !state.take_decoder_resync(),
+            "rejected key must not flush playback"
+        );
+
+        state
+            .install(sensitive(77, 46, PRESENTATION_ID, STREAM_ID, 4, 0x39))
+            .expect("rotate live presentation");
+        assert!(
+            state.take_decoder_resync(),
+            "new epoch must flush old H264 references"
+        );
+        assert!(
+            !state.take_decoder_resync(),
+            "resync is consumed exactly once"
+        );
+
+        state
+            .install(sensitive(77, 47, PRESENTATION_ID, STREAM_ID, 5, 0x40))
+            .expect("rotate again");
+        assert!(state.clear_if_matches(ServicePresentationKeyClear {
+            control_session_id: 77,
+            request_id: 47,
+            presentation_id: PRESENTATION_ID,
+            stream_id: STREAM_ID,
+            epoch: 5,
+        }));
+        assert!(
+            !state.take_decoder_resync(),
+            "key clear cancels pending resync"
         );
     }
 
