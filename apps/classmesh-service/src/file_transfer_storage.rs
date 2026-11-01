@@ -207,13 +207,16 @@ fn open_registered_source(path: &Path) -> std::io::Result<File> {
 
     const GENERIC_READ: u32 = 0x8000_0000;
     const DELETE: u32 = 0x0001_0000;
-    const FILE_SHARE_READ_WRITE_DELETE: u32 = 0x0000_0007;
+    // The registered bytes were already SHA-256 hashed. Refuse new writers
+    // while this pinned source is active; sharing WRITE permits same-size
+    // in-place mutation after the digest was recorded.
+    const FILE_SHARE_READ_DELETE: u32 = 0x0000_0005;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
     let file = OpenOptions::new()
         .read(true)
         .access_mode(GENERIC_READ | DELETE)
-        .share_mode(FILE_SHARE_READ_WRITE_DELETE)
+        .share_mode(FILE_SHARE_READ_DELETE)
         // Open the link itself, never a reparse target outside the staging root.
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
@@ -618,6 +621,38 @@ mod tests {
             staged.exists(),
             "portable close fails closed without unlink"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn outbox_pinned_hash_rejects_in_place_writer_until_close() {
+        let root = test_root("outbox-deny-in-place-writer");
+        fs::create_dir_all(&root).expect("root");
+        let mut source = WindowsFileTransferOutboxSource::new(&root);
+        let id = source_id();
+        let staged = source.staged_path(id);
+        fs::write(&staged, b"trusted-stage").expect("stage");
+        source
+            .register_staged_file(id, "lesson.pdf")
+            .expect("register immutable source");
+
+        // Before restricting FILE_SHARE_WRITE this succeeds on Windows and
+        // lets a new writer replace same-size bytes after SHA-256 hashing.
+        let writer = OpenOptions::new().write(true).open(&staged);
+        assert!(
+            writer.is_err(),
+            "a new writer must not mutate hashed bytes while pinned"
+        );
+        assert_eq!(
+            source
+                .read_at(id, 0, MAX_FILE_CHUNK_BYTES)
+                .expect("pinned read"),
+            b"trusted-stage"
+        );
+
+        source.close(id);
+        assert!(!staged.exists(), "close removes the exact pinned object");
         let _ = fs::remove_dir_all(root);
     }
 
