@@ -563,6 +563,99 @@ mod tests {
     }
 
     #[test]
+    fn epoch_rotation_rejects_old_ciphertext_and_keeps_new_epoch_silence_bounded() {
+        use crate::presentation_keyframe_retry::PresentationKeyframeSilence;
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let mut state = WorkerGroupMediaKeyState::default();
+        let old_binding = state
+            .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x61))
+            .expect("old key installed");
+        let old_sealed = sealed(3, 0x61, 100, 1_000, true, b"old epoch frame");
+        let old_unit = state
+            .open_access_unit(received(&old_sealed))
+            .expect("old epoch frame authenticates before rotation");
+        let mut silence = PresentationKeyframeSilence::default();
+        silence.note_authenticated_frame(old_binding, old_unit.frame_id, start);
+        assert_eq!(
+            silence.due(old_binding, start + Duration::from_secs(2), true),
+            Some(100)
+        );
+
+        let new_binding = state
+            .install(sensitive(77, 45, PRESENTATION_ID, STREAM_ID, 4, 0x62))
+            .expect("monotonic epoch rotation");
+        assert!(state.take_decoder_resync());
+        // Exactly as the live Worker key-install handler does after a rotation.
+        silence.reset();
+        assert_eq!(
+            silence.due(new_binding, start + Duration::from_secs(3), true),
+            None
+        );
+        assert!(
+            state.open_access_unit(received(&old_sealed)).is_err(),
+            "a previously valid old-epoch frame must not reach the new decoder or silence clock"
+        );
+        assert_eq!(
+            silence.due(new_binding, start + Duration::from_secs(5), true),
+            Some(0)
+        );
+
+        let mut key_bytes = vec![0x62; GROUP_MEDIA_KEY_BYTES];
+        let material = GroupMediaKeyMaterial::import_received_wire(&mut key_bytes)
+            .expect("new epoch sender key");
+        let epoch = GroupMediaEpoch::new(4).expect("new epoch");
+        let mut sender = GroupMediaSender::new(epoch, &material).expect("new epoch sender");
+        let first = GroupMediaFrameBinding::new(PRESENTATION_ID, STREAM_ID, epoch, 10, 2_000, true)
+            .expect("first new binding");
+        let new_sealed = sender
+            .seal_bound_frame(b"new epoch frame", first)
+            .expect("seal new");
+        let new_unit = state
+            .open_access_unit(received(&new_sealed))
+            .expect("new epoch authenticates");
+        silence.note_authenticated_frame(
+            new_binding,
+            new_unit.frame_id,
+            start + Duration::from_secs(6),
+        );
+        assert_eq!(
+            silence.due(new_binding, start + Duration::from_secs(8), true),
+            Some(10)
+        );
+
+        // The cryptographic counter advances, but an authenticated *frame ID*
+        // regresses; #656 must not count this as fresh recovery progress.
+        let regressed =
+            GroupMediaFrameBinding::new(PRESENTATION_ID, STREAM_ID, epoch, 9, 2_001, false)
+                .expect("regressed frame ID binding");
+        let regressed_sealed = sender
+            .seal_bound_frame(b"reordered frame", regressed)
+            .expect("seal regressed frame ID");
+        let regressed_unit = state
+            .open_access_unit(received(&regressed_sealed))
+            .expect("distinct authenticated SFrame counter with older frame ID");
+        silence.note_authenticated_frame(
+            new_binding,
+            regressed_unit.frame_id,
+            start + Duration::from_millis(8_500),
+        );
+        assert_eq!(
+            silence.due(new_binding, start + Duration::from_millis(8_500), true),
+            Some(10)
+        );
+        for _ in 0..3 {
+            silence.note_request_sent(new_binding);
+        }
+        assert_eq!(
+            silence.due(new_binding, start + Duration::from_secs(30), true),
+            None,
+            "old/reordered frames must not replenish exhausted new-epoch recovery budget"
+        );
+    }
+
+    #[test]
     fn higher_epoch_replaces_receiver_for_exact_live_binding() {
         let mut state = WorkerGroupMediaKeyState::default();
         state
