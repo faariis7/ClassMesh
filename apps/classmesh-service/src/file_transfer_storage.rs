@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 pub enum WindowsOutboxSourceError {
     InvalidDisplayName,
     MissingSource,
+    AlreadyRegistered,
     FileTooLarge,
     ReadTooLarge,
     InvalidOffset,
@@ -59,6 +60,12 @@ impl WindowsFileTransferOutboxSource {
     ) -> Result<(), WindowsOutboxSourceError> {
         validate_filename(display_filename)
             .map_err(|_| WindowsOutboxSourceError::InvalidDisplayName)?;
+        // Never replace an active pinned HANDLE or its hashed metadata. A
+        // staging-path swap followed by re-registration must not redirect the
+        // already authenticated transfer to a different file object.
+        if self.registered.contains_key(&source_id) {
+            return Err(WindowsOutboxSourceError::AlreadyRegistered);
+        }
         let path = self.root.join(format!("{}.bin", source_id_stem(source_id)));
         let mut file =
             open_registered_source(&path).map_err(|_| WindowsOutboxSourceError::MissingSource)?;
@@ -541,6 +548,45 @@ mod tests {
         // reused the same staging pathname while the source was active.
         assert_eq!(
             fs::read(&staged).expect("replacement must survive source close"),
+            b"foreign-stage"
+        );
+        let _ = fs::remove_file(moved);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn outbox_rejects_reregistration_after_staging_path_substitution() {
+        let root = test_root("outbox-rebind");
+        fs::create_dir_all(&root).expect("root");
+        let mut source = WindowsFileTransferOutboxSource::new(&root);
+        let id = source_id();
+        let staged = source.staged_path(id);
+        let moved = root.join("original-stage.bin");
+        fs::write(&staged, b"trusted-stage").expect("stage");
+        source
+            .register_staged_file(id, "lesson.pdf")
+            .expect("register");
+
+        fs::rename(&staged, &moved).expect("rotate original");
+        fs::write(&staged, b"foreign-stage").expect("replace original path");
+        assert_eq!(
+            source.register_staged_file(id, "lesson.pdf"),
+            Err(WindowsOutboxSourceError::AlreadyRegistered),
+            "a second registration must not replace the pinned source handle"
+        );
+        assert_eq!(
+            source
+                .read_at(id, 0, MAX_FILE_CHUNK_BYTES)
+                .expect("pinned read"),
+            b"trusted-stage"
+        );
+        assert_eq!(
+            source.metadata(id).expect("pinned metadata").sha256,
+            <[u8; 32]>::from(Sha256::digest(b"trusted-stage"))
+        );
+        source.close(id);
+        assert_eq!(
+            fs::read(&staged).expect("foreign source survives"),
             b"foreign-stage"
         );
         let _ = fs::remove_file(moved);
