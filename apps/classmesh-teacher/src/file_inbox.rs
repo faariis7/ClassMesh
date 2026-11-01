@@ -212,6 +212,16 @@ impl TeacherFileInbox {
         from_handle.is_some() && from_handle == from_name
     }
 
+    fn unlink_partial_before_final_check(&self, active: &ActiveFile) {
+        // Keep the published inode HANDLE alive through the final destination
+        // check, so a late rejection can retract the original .bin safely.
+        // Removing .part while the handle is open is best-effort; a failed
+        // unlink leaves a stale private partial, never a false Completed.
+        if self.root_unchanged() && Self::path_matches_open_file(&active.temp_path, &active.file) {
+            let _ = fs::remove_file(&active.temp_path);
+        }
+    }
+
     fn cleanup_partial(&self, active: ActiveFile) {
         // Never unlink a replacement .part or a file in a substituted root.
         let owned =
@@ -461,24 +471,19 @@ impl TeacherFileInbox {
             return Err(TeacherFileInboxError::Io);
         }
         // The final .part unlink is another filesystem operation where a
-        // local mutator can replace the root or the published name. Retain
-        // the published file identity across cleanup so the caller cannot
-        // receive Completed for a different destination after that window.
-        // If identity inspection fails, keep the active HANDLE for the
-        // receiver's abort path instead of abandoning an unacknowledged .bin.
-        let published_identity = self
-            .active
-            .as_ref()
-            .and_then(|active| open_file_identity(&active.file))
-            .ok_or(TeacherFileInboxError::Io)?;
+        // local mutator can replace the root or the published name. Keep
+        // the original HANDLE and active transfer until the final check;
+        // otherwise a late failure cannot safely retract its own .bin.
         let active = self
             .active
-            .take()
+            .as_ref()
             .ok_or(TeacherFileInboxError::WrongTransfer)?;
+        let published_identity =
+            open_file_identity(&active.file).ok_or(TeacherFileInboxError::Io)?;
         let final_path = active.final_path.clone();
-        // The .bin is committed. A failed best-effort unlink leaves a stale
-        // .part; never unlink a replacement file at that name.
-        self.cleanup_partial(active);
+        // A failed best-effort unlink leaves a stale private .part; never
+        // unlink a replacement file at that name.
+        self.unlink_partial_before_final_check(active);
         after_cleanup();
         if !self.root_unchanged()
             || !fs::symlink_metadata(&final_path).is_ok_and(|metadata| {
@@ -488,10 +493,14 @@ impl TeacherFileInbox {
             })
             || path_identity(&final_path) != Some(published_identity)
         {
-            // The retained file handle has been closed by cleanup. Do not
-            // unlink a potentially substituted name or directory here.
+            // Roll back only when the published name still identifies the
+            // original retained HANDLE. Preserve active for receiver abort
+            // and never remove a substituted .bin or root.
+            self.rollback_published_if_owned(active);
             return Err(TeacherFileInboxError::Io);
         }
+        // No further path-based filesystem operation after this final check.
+        self.active.take();
         Ok(())
     }
 }
@@ -889,6 +898,37 @@ mod tests {
         assert_eq!(result, Err(TeacherFileInboxError::Io));
         assert_eq!(fs::read(&published).unwrap(), b"decoy");
         assert_eq!(fs::read(&displaced).unwrap(), b"data");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_permission_revocation_after_partial_cleanup_rolls_back_unacknowledged_bin() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A permission change at the final cleanup boundary must not leave
+        // a published .bin when the receiver will reject Completed.
+        let root = temp_root("root-mode-revoked-after-cleanup");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"data").unwrap();
+        let published = sink.completed_path(&ID);
+
+        let result = sink.complete_with_post_cleanup_hook(
+            &ID,
+            super::sync_inbox_directory,
+            || {},
+            || fs::set_permissions(&root, fs::Permissions::from_mode(0o777)).unwrap(),
+        );
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(result, Err(TeacherFileInboxError::Io));
+        assert!(
+            !published.exists(),
+            "a rejected final commit must retract its own published name"
+        );
+        sink.abort(&ID);
         fs::remove_dir_all(root).unwrap();
     }
 
