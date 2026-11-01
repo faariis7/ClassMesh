@@ -300,9 +300,43 @@ impl TeacherEguiShell {
         self.diagnostics_draft = DiagnosticsOverrideDraft::default();
     }
 
+    /// A queued Focus intent is only a UI hint. Recheck the current
+    /// selection and observed session state at handoff; the engine still
+    /// performs its authoritative live permission and session checks.
+    fn focus_action_still_current(&self, focus: crate::ui_shell::TeacherFocusUiAction) -> bool {
+        let source_id = focus.source_id();
+        if self.classroom.selected() != Some(source_id) {
+            return false;
+        }
+        let Some(row) = self
+            .classroom
+            .rows()
+            .into_iter()
+            .find(|row| row.source_id == source_id)
+        else {
+            return false;
+        };
+        match focus {
+            crate::ui_shell::TeacherFocusUiAction::RequestInteractive { .. } => {
+                !row.interactive_active
+                    && row.health.presence == classmesh_core::presence::PresenceState::Online
+                    && row.health.service_ready
+                    && row.health.worker_ready
+            }
+            // Returning to local monitoring is still useful during a
+            // disconnect; never require network readiness for cleanup.
+            crate::ui_shell::TeacherFocusUiAction::ResumeThumbnail { .. } => row.interactive_active,
+        }
+    }
+
     #[must_use]
     pub fn take_pending_action(&mut self) -> Option<TeacherUiAction> {
         let action = self.pending_action.take()?;
+        if let TeacherUiAction::Focus(focus) = &action {
+            if !self.focus_action_still_current(*focus) {
+                return None;
+            }
+        }
         if let TeacherUiAction::TeacherInteraction(interaction) = &action {
             validate_teacher_interaction_ui_action(
                 interaction,
@@ -505,6 +539,95 @@ mod tests {
     use crate::ui_shell::TeacherFocusUiAction;
 
     use super::*;
+
+    #[test]
+    fn queued_focus_start_is_dropped_after_selection_or_device_readiness_changes() {
+        for (presence, service_ready, worker_ready, selected) in [
+            (PresenceState::Offline, true, true, true),
+            (PresenceState::Connecting, true, true, true),
+            (PresenceState::ControlRecovering, true, true, true),
+            (PresenceState::Online, false, true, true),
+            (PresenceState::Online, true, false, true),
+            (PresenceState::Online, true, true, false),
+        ] {
+            let mut app = TeacherEguiShell::default();
+            select_test_device(&mut app);
+            app.queue_action(TeacherUiAction::Focus(
+                TeacherFocusUiAction::RequestInteractive {
+                    source_id: MonitoringSourceId(7),
+                },
+            ));
+            if selected {
+                app.classroom
+                    .upsert(ClassroomDeviceSnapshot {
+                        source_id: MonitoringSourceId(7),
+                        display_name: "Student 07".to_owned(),
+                        health: DeviceHealth {
+                            presence,
+                            media: MediaState::Recovering,
+                            service_ready,
+                            worker_ready,
+                        },
+                        quality_tier: None,
+                        thumbnail_available: false,
+                        interactive_active: false,
+                    })
+                    .unwrap();
+            } else {
+                app.classroom.select(None).unwrap();
+            }
+            assert_eq!(
+                app.take_pending_action(),
+                None,
+                "stale Focus start must be retired: {presence:?}, service={service_ready}, worker={worker_ready}, selected={selected}"
+            );
+        }
+    }
+
+    #[test]
+    fn queued_focus_handoff_requires_matching_interactive_state_but_allows_offline_resume() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let start = TeacherUiAction::Focus(TeacherFocusUiAction::RequestInteractive {
+            source_id: MonitoringSourceId(7),
+        });
+        app.queue_action(start.clone());
+        assert_eq!(app.take_pending_action(), Some(start.clone()));
+
+        let resume = TeacherUiAction::Focus(TeacherFocusUiAction::ResumeThumbnail {
+            source_id: MonitoringSourceId(7),
+        });
+        app.queue_action(resume.clone());
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "no active session to resume"
+        );
+
+        app.classroom
+            .upsert(ClassroomDeviceSnapshot {
+                source_id: MonitoringSourceId(7),
+                display_name: "Student 07".to_owned(),
+                health: DeviceHealth {
+                    presence: PresenceState::Offline,
+                    media: MediaState::Recovering,
+                    service_ready: false,
+                    worker_ready: false,
+                },
+                quality_tier: None,
+                thumbnail_available: false,
+                interactive_active: true,
+            })
+            .unwrap();
+        app.queue_action(resume.clone());
+        assert_eq!(app.take_pending_action(), Some(resume));
+        app.queue_action(start);
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "active session must not start twice"
+        );
+    }
 
     #[test]
     fn teacher_ui_viewport_has_explicit_default_and_minimum_size() {
