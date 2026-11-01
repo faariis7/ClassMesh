@@ -311,6 +311,21 @@ impl TeacherEguiShell {
             )
             .ok()?;
         }
+        // UI snapshots are not authorization, but a newer local lifecycle
+        // observation must retire obsolete Start/Stop intents before handoff.
+        // The actual presentation lifecycle still revalidates at apply time.
+        if let TeacherUiAction::Presentation(presentation) = &action {
+            let current = self.presentation.binding;
+            let still_current = match presentation {
+                crate::ui_shell::TeacherPresentationUiAction::Start => current.is_none(),
+                crate::ui_shell::TeacherPresentationUiAction::Stop { binding } => {
+                    current == Some(*binding)
+                }
+            };
+            if !still_current {
+                return None;
+            }
+        }
         if let TeacherUiAction::FilePull(pull) = &action {
             validate_file_pull_action(
                 pull,
