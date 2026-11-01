@@ -235,6 +235,15 @@ impl TeacherFileInbox {
         from_handle.is_some() && from_handle == from_name
     }
 
+    fn partial_name_absent(active: &ActiveFile) -> bool {
+        // Permission and metadata errors are not proof that the writable
+        // alias is gone. Only a definite NotFound can permit Completed.
+        matches!(
+            fs::symlink_metadata(&active.temp_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    }
+
     fn unlink_partial_before_final_check(&self, active: &ActiveFile) {
         // Keep the published inode HANDLE alive through the final destination
         // check, so a late rejection can retract the original .bin safely.
@@ -489,10 +498,7 @@ impl TeacherFileInbox {
         // .part alias during cleanup, never acknowledge Completed while the
         // published bytes can still be mutated through that alias. An
         // unexpected metadata error also fails closed, not as NotFound.
-        if !matches!(
-            fs::symlink_metadata(&active.temp_path),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound
-        ) {
+        if !Self::partial_name_absent(active) {
             self.rollback_published_if_owned(active);
             return Err(TeacherFileInboxError::Io);
         }
@@ -502,6 +508,13 @@ impl TeacherFileInbox {
         // again before Completed, otherwise a crash can resurrect that alias.
         // Keep the original file HANDLE for safe rollback on sync failure.
         if !self.root_unchanged() || sync_directory(&self.root).is_err() {
+            self.rollback_published_if_owned(active);
+            return Err(TeacherFileInboxError::Io);
+        }
+        // The directory flush itself can race with recreation of .part.
+        // Revalidate the alias after the flush before trusting the final
+        // disk digest, rather than only checking immediately after unlink.
+        if !Self::partial_name_absent(active) {
             self.rollback_published_if_owned(active);
             return Err(TeacherFileInboxError::Io);
         }
@@ -525,6 +538,7 @@ impl TeacherFileInbox {
         // Check the exact published destination binding after the readback,
         // without performing another mutating filesystem operation afterward.
         if !self.root_unchanged()
+            || !Self::partial_name_absent(active)
             || !fs::symlink_metadata(&final_path).is_ok_and(|metadata| {
                 metadata.is_file()
                     && !metadata.file_type().is_symlink()
@@ -1471,6 +1485,59 @@ mod tests {
         assert!(!published.exists(), "unacknowledged .bin must be retracted");
         sink.abort(&ID);
         assert!(!partial.exists(), "abort must remove the retained partial");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relinked_partial_during_second_directory_sync_must_not_complete() {
+        // A concurrent writer can recreate the writable .part alias after
+        // the pre-sync absence check, while the unlink durability flush runs.
+        // The same production complete path must not acknowledge this alias.
+        let root = temp_root("partial-relinked-during-second-sync");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"data").unwrap();
+        let published = sink.completed_path(&ID);
+        let partial = root.join(format!("{}.part", "71".repeat(16)));
+        let mut sync_calls = 0;
+        let result = sink.complete_with_directory_sync(&ID, |path| {
+            sync_calls += 1;
+            let outcome = super::sync_inbox_directory(path);
+            if sync_calls == 2 {
+                fs::hard_link(&published, &partial).unwrap();
+            }
+            outcome
+        });
+        assert_eq!(sync_calls, 2);
+        assert_eq!(result, Err(TeacherFileInboxError::Io));
+        assert!(!published.exists(), "must retract unacknowledged .bin");
+        sink.abort(&ID);
+        assert!(!partial.exists(), "abort must remove owned .part alias");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relinked_partial_after_final_readback_must_not_complete() {
+        // Even the last disk digest does not establish that the .part alias
+        // remains absent at the final Completed decision boundary.
+        let root = temp_root("partial-relinked-after-final-readback");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"data").unwrap();
+        let published = sink.completed_path(&ID);
+        let partial = root.join(format!("{}.part", "71".repeat(16)));
+        let result =
+            sink.complete_with_post_readback_hook(&ID, super::sync_inbox_directory, || {
+                fs::hard_link(&published, &partial).unwrap()
+            });
+        assert_eq!(result, Err(TeacherFileInboxError::Io));
+        assert!(!published.exists(), "must retract unacknowledged .bin");
+        sink.abort(&ID);
+        assert!(!partial.exists(), "abort must remove owned .part alias");
         fs::remove_dir_all(root).unwrap();
     }
 
