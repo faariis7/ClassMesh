@@ -225,9 +225,17 @@ impl FileTransferInboxSink for TeacherFileInbox {
         if fs::symlink_metadata(&final_path).is_ok() {
             return Err(TeacherFileInboxError::ExistingTransfer);
         }
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        // On Unix, OpenOptions defaults to mode 0666 before the process umask.
+        // A normal 022 umask leaves classroom files readable by other users.
+        // The verified .bin is a hard link to this same private inode.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
             .open(&temp_path)
             .map_err(|_| TeacherFileInboxError::ExistingTransfer)?;
         self.active = Some(ActiveFile {
@@ -417,6 +425,32 @@ mod tests {
             expected
         );
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn received_file_remains_private_before_and_after_publication() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("private-mode");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        let part = root.join(format!("{}.part", "71".repeat(16)));
+        assert_eq!(
+            fs::metadata(&part).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "authenticated file chunks must not be readable by other local users",
+        );
+        sink.append(&ID, 0, b"data").unwrap();
+        sink.complete(&ID).unwrap();
+        let published = sink.completed_path(&ID);
+        assert_eq!(
+            fs::metadata(&published).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "publishing must not relax private file permissions",
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
