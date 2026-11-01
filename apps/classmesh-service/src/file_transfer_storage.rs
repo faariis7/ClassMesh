@@ -24,7 +24,6 @@ pub enum WindowsOutboxSourceError {
 
 #[derive(Debug)]
 struct RegisteredOutboxFile {
-    path: PathBuf,
     file: File,
     metadata: FileTransferSourceMetadata,
 }
@@ -61,7 +60,8 @@ impl WindowsFileTransferOutboxSource {
         validate_filename(display_filename)
             .map_err(|_| WindowsOutboxSourceError::InvalidDisplayName)?;
         let path = self.root.join(format!("{}.bin", source_id_stem(source_id)));
-        let mut file = File::open(&path).map_err(|_| WindowsOutboxSourceError::MissingSource)?;
+        let mut file =
+            open_registered_source(&path).map_err(|_| WindowsOutboxSourceError::MissingSource)?;
         let metadata = file.metadata().map_err(|_| WindowsOutboxSourceError::Io)?;
         if !metadata.is_file() {
             return Err(WindowsOutboxSourceError::MissingSource);
@@ -96,7 +96,6 @@ impl WindowsFileTransferOutboxSource {
         self.registered.insert(
             source_id,
             RegisteredOutboxFile {
-                path,
                 file,
                 metadata: FileTransferSourceMetadata {
                     filename: display_filename.to_owned(),
@@ -184,12 +183,88 @@ impl FileTransferOutboxSource for WindowsFileTransferOutboxSource {
 
     fn close(&mut self, source_id: FileSourceId) {
         if let Some(registered) = self.registered.remove(&source_id) {
-            // Release the pinned read handle before deleting the staged name,
-            // including on Windows where open-handle sharing can prevent unlink.
-            drop(registered.file);
-            let _ = fs::remove_file(registered.path);
+            // Never unlink an untrusted pathname after releasing the pinned
+            // handle: the name may now belong to a different staged file.
+            cleanup_registered_source(registered);
         }
     }
+}
+
+// Windows opens the registered file with DELETE access so close can mark the
+// exact hashed HANDLE for deletion, even if its original name was replaced.
+// A denied DELETE grant fails registration closed rather than falling back to
+// an unsafe pathname unlink.
+#[cfg(windows)]
+fn open_registered_source(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const DELETE: u32 = 0x0001_0000;
+    const FILE_SHARE_READ_WRITE_DELETE: u32 = 0x0000_0007;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let file = OpenOptions::new()
+        .read(true)
+        .access_mode(GENERIC_READ | DELETE)
+        .share_mode(FILE_SHARE_READ_WRITE_DELETE)
+        // Open the link itself, never a reparse target outside the staging root.
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "staged source must not be a reparse point",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(windows))]
+fn open_registered_source(path: &Path) -> std::io::Result<File> {
+    File::open(path)
+}
+
+#[cfg(windows)]
+fn cleanup_registered_source(registered: RegisteredOutboxFile) {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+
+    // FILE_INFO_BY_HANDLE_CLASS::FileDispositionInfo (4). The Win32 kernel
+    // applies this disposition to the open file object, never to a reused name.
+    #[repr(C)]
+    struct FileDispositionInfo {
+        delete_file: u8, // BOOLEAN
+    }
+    #[link(name = "Kernel32")]
+    unsafe extern "system" {
+        #[link_name = "SetFileInformationByHandle"]
+        fn set_file_information_by_handle(
+            file: *mut c_void,
+            information_class: u32,
+            information: *const c_void,
+            information_size: u32,
+        ) -> i32;
+    }
+    let disposition = FileDispositionInfo { delete_file: 1 };
+    // Failure leaves the original staged object behind; it must not trigger
+    // a fallback DeleteFile(path) against a possibly substituted pathname.
+    // SAFETY: the borrowed HANDLE is live for the synchronous Win32 call;
+    // the disposition pointer references a correctly laid-out BOOLEAN value.
+    let _ = unsafe {
+        set_file_information_by_handle(
+            registered.file.as_raw_handle(),
+            4,
+            (&raw const disposition).cast(),
+            std::mem::size_of::<FileDispositionInfo>() as u32,
+        )
+    };
+}
+
+#[cfg(not(windows))]
+fn cleanup_registered_source(_registered: RegisteredOutboxFile) {
+    // There is no portable atomic unlink-by-open-handle API. On test hosts,
+    // deliberately leave the staged file for its trusted owner to reclaim;
+    // a metadata-check-then-unlink would still have a pathname swap race.
 }
 
 fn source_id_stem(source_id: FileSourceId) -> String {
@@ -427,7 +502,13 @@ mod tests {
         );
 
         source.close(id);
+        #[cfg(windows)]
         assert!(!staged.exists());
+        #[cfg(not(windows))]
+        assert!(
+            staged.exists(),
+            "portable close fails closed without unlink"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -456,6 +537,12 @@ mod tests {
         );
 
         source.close(id);
+        // Closing a pinned source must never unlink a different file that
+        // reused the same staging pathname while the source was active.
+        assert_eq!(
+            fs::read(&staged).expect("replacement must survive source close"),
+            b"foreign-stage"
+        );
         let _ = fs::remove_file(moved);
         let _ = fs::remove_dir_all(root);
     }
@@ -478,7 +565,13 @@ mod tests {
         );
 
         source.close(id);
+        #[cfg(windows)]
         assert!(!staged.exists());
+        #[cfg(not(windows))]
+        assert!(
+            staged.exists(),
+            "portable close fails closed without unlink"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
