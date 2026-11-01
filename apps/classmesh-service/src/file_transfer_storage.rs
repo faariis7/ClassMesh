@@ -507,15 +507,16 @@ mod tests {
 
     fn test_root(name: &str) -> PathBuf {
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        // macOS /var is commonly a symlink to /private/var; use the
-        // physical temp root so the parent-chain check tests our fixture.
-        std::env::temp_dir()
-            .canonicalize()
-            .expect("canonical temp root")
-            .join(format!(
-                "classmesh-file-inbox-{}-{name}-{id}",
-                std::process::id()
-            ))
+        let temp_root = std::env::temp_dir();
+        // macOS /var is commonly a symlink to /private/var. Windows
+        // canonicalize returns an extended-length path which cmd/mklink may
+        // not accept when creating the junction regression fixture.
+        #[cfg(unix)]
+        let temp_root = temp_root.canonicalize().expect("canonical temp root");
+        temp_root.join(format!(
+            "classmesh-file-inbox-{}-{name}-{id}",
+            std::process::id()
+        ))
     }
 
     fn transfer_id() -> [u8; 16] {
