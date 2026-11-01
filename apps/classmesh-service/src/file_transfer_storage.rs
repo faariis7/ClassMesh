@@ -67,6 +67,9 @@ impl WindowsFileTransferOutboxSource {
             return Err(WindowsOutboxSourceError::AlreadyRegistered);
         }
         let path = self.root.join(format!("{}.bin", source_id_stem(source_id)));
+        // A final-component OPEN_REPARSE_POINT flag does not protect against
+        // intermediate directory junctions redirecting this opaque source.
+        validate_staged_parent_chain(&path).map_err(|_| WindowsOutboxSourceError::MissingSource)?;
         let mut file =
             open_registered_source(&path).map_err(|_| WindowsOutboxSourceError::MissingSource)?;
         let metadata = file.metadata().map_err(|_| WindowsOutboxSourceError::Io)?;
@@ -195,6 +198,40 @@ impl FileTransferOutboxSource for WindowsFileTransferOutboxSource {
             cleanup_registered_source(registered);
         }
     }
+}
+
+// Reject existing symlink/junction ancestors before opening the staged file.
+// This is defense in depth, NOT a substitute for trusted root ACLs or a
+// handle-relative traversal: a concurrently writable ancestor remains a
+// rename/reparse race until the directory ownership is independently secured.
+fn validate_staged_parent_chain(path: &Path) -> std::io::Result<()> {
+    if !path.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "staged source must use an absolute path",
+        ));
+    }
+    for parent in path.ancestors().skip(1) {
+        let metadata = fs::symlink_metadata(parent)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "staged source parent must be a real directory",
+            ));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "staged source parent must not be a junction/reparse point",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 // Windows opens the registered file with DELETE access so close can mark the
@@ -470,10 +507,15 @@ mod tests {
 
     fn test_root(name: &str) -> PathBuf {
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "classmesh-file-inbox-{}-{name}-{id}",
-            std::process::id()
-        ))
+        // macOS /var is commonly a symlink to /private/var; use the
+        // physical temp root so the parent-chain check tests our fixture.
+        std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join(format!(
+                "classmesh-file-inbox-{}-{name}-{id}",
+                std::process::id()
+            ))
     }
 
     fn transfer_id() -> [u8; 16] {
@@ -593,6 +635,49 @@ mod tests {
             b"foreign-stage"
         );
         let _ = fs::remove_file(moved);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn outbox_rejects_reparse_directory_in_staged_source_parent_chain() {
+        let root = test_root("outbox-parent-alias");
+        let trusted_parent = root.join("trusted");
+        let trusted = trusted_parent.join("state").join("file-outbox");
+        let alias = root.join("alias");
+        let aliased_root = alias.join("state").join("file-outbox");
+        fs::create_dir_all(&trusted).expect("trusted root");
+        let id = source_id();
+        let trusted_source = WindowsFileTransferOutboxSource::new(&trusted);
+        fs::write(trusted_source.staged_path(id), b"trusted-source").expect("seed source");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&trusted_parent, &alias).expect("create parent symlink");
+        #[cfg(windows)]
+        {
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&alias)
+                .arg(&trusted_parent)
+                .status()
+                .expect("invoke junction creation");
+            assert!(status.success(), "create parent junction");
+        }
+
+        let mut source = WindowsFileTransferOutboxSource::new(&aliased_root);
+        assert_eq!(
+            source.register_staged_file(id, "lesson.pdf"),
+            Err(WindowsOutboxSourceError::MissingSource),
+            "an ancestor junction/symlink must not redirect a staged source open"
+        );
+        assert_eq!(
+            fs::read(trusted_source.staged_path(id)).expect("trusted source survives"),
+            b"trusted-source"
+        );
+        #[cfg(unix)]
+        fs::remove_file(&alias).expect("unlink symlink only");
+        #[cfg(windows)]
+        fs::remove_dir(&alias).expect("unlink junction only");
         let _ = fs::remove_dir_all(root);
     }
 
