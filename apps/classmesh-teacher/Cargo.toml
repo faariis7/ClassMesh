@@ -18,6 +18,8 @@ classmesh-windows-runtime = { path = "../../crates/classmesh-windows-runtime" }
 classmesh-capture-win = { path = "../../crates/classmesh-capture-win" }
 classmesh-worker = { path = "../classmesh-worker" }
 eframe = { version = "=0.32.3", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+# Stable Win32 HANDLE file identity; std MetadataExt file_index remains unstable.
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 sha2 = "0.10.9"

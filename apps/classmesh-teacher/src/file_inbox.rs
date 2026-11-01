@@ -1,14 +1,98 @@
 //! Teacher AppInbox storage backed by an explicitly prepared local directory.
 //!
 //! The caller must supply a pre-provisioned, appropriately protected root.
-//! This does not establish trusted Windows root ancestry or anti-reparse
-//! guarantees against an adversary able to replace directory ancestors.
+//! OS file-ID checks reject observed root/partial-file replacement, but
+//! they do not establish trusted Windows ACL/ancestor-handle anti-reparse
+//! guarantees or close same-user mutation races between checks and publish.
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use classmesh_control::file_transfer_receiver::FileTransferInboxSink;
 use classmesh_protocol::file_transfer::MAX_FILE_TRANSFER_BYTES;
+
+// OS file IDs are stronger than canonical path spelling: a directory or a
+// .part name can be replaced with a different object at the same path.
+type FileIdentity = (u64, u64);
+
+#[cfg(unix)]
+fn path_identity(path: &Path) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(path).ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(unix)]
+fn open_file_identity(file: &File) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata().ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn open_file_identity(file: &File) -> Option<FileIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    let mut info = BY_HANDLE_FILE_INFORMATION {
+        dwFileAttributes: 0,
+        ftCreationTime: Default::default(),
+        ftLastAccessTime: Default::default(),
+        ftLastWriteTime: Default::default(),
+        dwVolumeSerialNumber: 0,
+        nFileSizeHigh: 0,
+        nFileSizeLow: 0,
+        nNumberOfLinks: 0,
+        nFileIndexHigh: 0,
+        nFileIndexLow: 0,
+    };
+    // SAFETY: File retains ownership of the live HANDLE and info is writable.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
+        return None;
+    }
+    Some((
+        u64::from(info.dwVolumeSerialNumber),
+        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    ))
+}
+
+#[cfg(windows)]
+fn path_identity(path: &Path) -> Option<FileIdentity> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // Open the named object itself, including a directory, not a reparse target.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()?;
+    open_file_identity(&file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn path_identity(_path: &Path) -> Option<FileIdentity> {
+    None // Unknown filesystem identity: fail closed.
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_file_identity(_file: &File) -> Option<FileIdentity> {
+    None
+}
+
+#[cfg(windows)]
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeacherFileInboxError {
@@ -40,6 +124,7 @@ struct ActiveFile {
 #[derive(Debug)]
 pub struct TeacherFileInbox {
     root: PathBuf,
+    root_identity: FileIdentity,
     active: Option<ActiveFile>,
 }
 
@@ -58,16 +143,49 @@ impl TeacherFileInbox {
         if !Self::root_ready(&root) {
             return Err(TeacherFileInboxError::InvalidRoot);
         }
-        Ok(Self { root, active: None })
+        let root_identity = path_identity(&root).ok_or(TeacherFileInboxError::InvalidRoot)?;
+        Ok(Self {
+            root,
+            root_identity,
+            active: None,
+        })
     }
 
     fn root_ready(root: &Path) -> bool {
-        // Never retain a cwd-relative inbox: another thread can change the
-        // process working directory after admission, redirecting future
-        // authenticated chunks to a different root.
+        // Never retain a cwd-relative inbox. Also reject Windows junctions
+        // and other direct reparse points, not only symbolic links.
         root.is_absolute()
-            && fs::symlink_metadata(root)
-                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            && fs::symlink_metadata(root).is_ok_and(|metadata| {
+                metadata.is_dir()
+                    && !metadata.file_type().is_symlink()
+                    && !is_reparse_point(&metadata)
+            })
+    }
+
+    fn root_unchanged(&self) -> bool {
+        Self::root_ready(&self.root) && path_identity(&self.root) == Some(self.root_identity)
+    }
+
+    fn path_matches_open_file(path: &Path, file: &File) -> bool {
+        let from_handle = open_file_identity(file);
+        let from_name = fs::symlink_metadata(path).ok().and_then(|m| {
+            if m.is_file() && !m.file_type().is_symlink() && !is_reparse_point(&m) {
+                path_identity(path)
+            } else {
+                None
+            }
+        });
+        from_handle.is_some() && from_handle == from_name
+    }
+
+    fn cleanup_partial(&self, active: ActiveFile) {
+        // Never unlink a replacement .part or a file in a substituted root.
+        let owned =
+            self.root_unchanged() && Self::path_matches_open_file(&active.temp_path, &active.file);
+        drop(active.file);
+        if owned {
+            let _ = fs::remove_file(active.temp_path);
+        }
     }
 
     #[must_use]
@@ -97,7 +215,7 @@ impl FileTransferInboxSink for TeacherFileInbox {
         if self.active.is_some() {
             return Err(TeacherFileInboxError::Busy);
         }
-        if !Self::root_ready(&self.root) {
+        if !self.root_unchanged() {
             return Err(TeacherFileInboxError::InvalidRoot);
         }
         let temp_path = self.part_path(id);
@@ -158,26 +276,39 @@ impl FileTransferInboxSink for TeacherFileInbox {
         if active.received != active.declared_size {
             return Err(TeacherFileInboxError::Incomplete);
         }
+        // A path-only check at admission is insufficient: the directory or
+        // .part name may have been substituted after we wrote verified chunks.
+        if !self.root_unchanged() {
+            return Err(TeacherFileInboxError::InvalidRoot);
+        }
+        if !Self::path_matches_open_file(&active.temp_path, &active.file) {
+            return Err(TeacherFileInboxError::Io);
+        }
+        active
+            .file
+            .sync_all()
+            .map_err(|_| TeacherFileInboxError::Io)?;
+        if !self.root_unchanged() || !Self::path_matches_open_file(&active.temp_path, &active.file)
+        {
+            return Err(TeacherFileInboxError::Io);
+        }
+
+        // Atomic create-if-absent publishing: unlike rename, hard_link never
+        // replaces an existing .bin. Retain the original file handle while
+        // linking, then verify the new name still identifies that same file.
+        fs::hard_link(&active.temp_path, &active.final_path)
+            .map_err(|_| TeacherFileInboxError::ExistingTransfer)?;
+        if !self.root_unchanged() || !Self::path_matches_open_file(&active.final_path, &active.file)
+        {
+            return Err(TeacherFileInboxError::Io);
+        }
         let active = self
             .active
             .take()
             .ok_or(TeacherFileInboxError::WrongTransfer)?;
-        if active.file.sync_all().is_err() {
-            drop(active.file);
-            let _ = fs::remove_file(active.temp_path);
-            return Err(TeacherFileInboxError::Io);
-        }
-        drop(active.file);
-
-        // Atomic create-if-absent publishing: unlike rename, hard_link never
-        // replaces an existing .bin even if another process races publication.
-        if fs::hard_link(&active.temp_path, &active.final_path).is_err() {
-            let _ = fs::remove_file(active.temp_path);
-            return Err(TeacherFileInboxError::ExistingTransfer);
-        }
-        // The .bin is committed. A failed best-effort unlink leaves a harmless
-        // stale .part, not an unverified published file.
-        let _ = fs::remove_file(active.temp_path);
+        // The .bin is committed. A failed best-effort unlink leaves a stale
+        // .part; never unlink a replacement file at that name.
+        self.cleanup_partial(active);
         Ok(())
     }
 
@@ -189,16 +320,14 @@ impl FileTransferInboxSink for TeacherFileInbox {
             self.active = Some(active);
             return;
         }
-        drop(active.file);
-        let _ = fs::remove_file(active.temp_path);
+        self.cleanup_partial(active);
     }
 }
 
 impl Drop for TeacherFileInbox {
     fn drop(&mut self) {
         if let Some(active) = self.active.take() {
-            drop(active.file);
-            let _ = fs::remove_file(active.temp_path);
+            self.cleanup_partial(active);
         }
     }
 }
@@ -336,6 +465,68 @@ mod tests {
             Err(TeacherFileInboxError::ExistingTransfer)
         );
         assert_eq!(fs::read(final_file).unwrap(), b"important existing file");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inbox_rejects_replaced_root_before_creating_partial_file() {
+        // A canonical absolute path can still be replaced with a different
+        // directory after admission. No bytes may enter the replacement root.
+        let root = temp_root("root-replaced");
+        let moved = temp_root("root-moved");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        fs::rename(&root, &moved).unwrap();
+        fs::create_dir(&root).unwrap();
+
+        assert_eq!(
+            sink.begin(&ID, "lesson.pdf", 4),
+            Err(TeacherFileInboxError::InvalidRoot)
+        );
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(moved).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_rejects_replaced_root_during_transfer_without_deleting_decoy() {
+        let root = temp_root("root-swap-active");
+        let moved = temp_root("root-swap-original");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"good").unwrap();
+        fs::rename(&root, &moved).unwrap();
+        fs::create_dir(&root).unwrap();
+        let decoy_part = root.join(format!("{}.part", "71".repeat(16)));
+        fs::write(&decoy_part, b"decoy").unwrap();
+
+        assert_eq!(sink.complete(&ID), Err(TeacherFileInboxError::InvalidRoot));
+        sink.abort(&ID);
+        assert_eq!(fs::read(&decoy_part).unwrap(), b"decoy");
+        assert!(!sink.completed_path(&ID).exists());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(moved).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_never_publishes_replaced_partial_file_as_verified_bytes() {
+        // A peer's bytes were written to an open file, but a same-user
+        // directory mutator replaces the .part name before commit.
+        let root = temp_root("part-replaced");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"good").unwrap();
+        let part = root.join(format!("{}.part", "71".repeat(16)));
+        let displaced = root.join("displaced.part");
+        fs::rename(&part, &displaced).unwrap();
+        fs::write(&part, b"evil").unwrap();
+
+        assert_eq!(sink.complete(&ID), Err(TeacherFileInboxError::Io));
+        assert!(!sink.completed_path(&ID).exists());
         fs::remove_dir_all(root).unwrap();
     }
 
