@@ -323,6 +323,36 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_out_of_order_frame_cannot_rewind_silence_cursor_or_retry_budget() {
+        let start = Instant::now();
+        let key = binding(1);
+        let mut watch = PresentationKeyframeSilence::default();
+        watch.note_authenticated_frame(key, 101, start);
+        // A delayed, still-authenticated earlier frame is not forward playback
+        // progress and must not postpone a freeze recovery or rewind its cursor.
+        watch.note_authenticated_frame(key, 100, start + Duration::from_secs(1));
+        assert_eq!(
+            watch.due(key, start + Duration::from_secs(2), true),
+            Some(101)
+        );
+
+        for _ in 0..3 {
+            watch.note_request_sent(key);
+        }
+        watch.note_authenticated_frame(key, 100, start + Duration::from_secs(3));
+        assert_eq!(
+            watch.due(key, start + Duration::from_secs(5), true),
+            None,
+            "old authenticated frames must not replenish exhausted recovery attempts"
+        );
+        watch.note_authenticated_frame(key, 102, start + Duration::from_secs(6));
+        assert_eq!(
+            watch.due(key, start + Duration::from_secs(8), true),
+            Some(102)
+        );
+    }
+
+    #[test]
     fn stale_authenticated_frame_ids_cannot_rearm_silence_or_recovery_budget() {
         let start = Instant::now();
         let mut watch = PresentationKeyframeSilence::default();
