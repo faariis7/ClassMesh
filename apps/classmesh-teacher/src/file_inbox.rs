@@ -222,6 +222,22 @@ impl TeacherFileInbox {
         }
     }
 
+    fn rollback_published_if_owned(&self, active: &ActiveFile) {
+        // A root may become group/world-writable *after* hard_link. Its
+        // permissions are then unsafe for Completed, but we can still try
+        // to retract our own unacknowledged name if the root's OS identity
+        // and the published inode both remain the originals. Never follow
+        // a substituted root or unlink a different file at the same name.
+        // This remains best-effort: hostile same-user name races require
+        // retained directory handles and qualified ACLs before activation.
+        if path_identity(&self.root) == Some(self.root_identity)
+            && Self::path_matches_open_file(&active.final_path, &active.file)
+            && fs::remove_file(&active.final_path).is_ok()
+        {
+            let _ = sync_inbox_directory(&self.root);
+        }
+    }
+
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
@@ -375,20 +391,14 @@ impl TeacherFileInbox {
         })?;
         if !self.root_unchanged() || !Self::path_matches_open_file(&active.final_path, &active.file)
         {
+            self.rollback_published_if_owned(active);
             return Err(TeacherFileInboxError::Io);
         }
         // File::sync_all above persists bytes and inode metadata, but not
         // the new .bin directory entry. Do not acknowledge Completed before
         // the containing directory has been flushed on supported Unix hosts.
         if sync_directory(&self.root).is_err() {
-            // Best-effort rollback only if the name still belongs to our
-            // retained, verified inode. Never unlink an attacker replacement.
-            if self.root_unchanged()
-                && Self::path_matches_open_file(&active.final_path, &active.file)
-            {
-                let _ = fs::remove_file(&active.final_path);
-                let _ = sync_inbox_directory(&self.root);
-            }
+            self.rollback_published_if_owned(active);
             return Err(TeacherFileInboxError::Io);
         }
         // Directory synchronization may take time. Revalidate the committed
@@ -397,6 +407,7 @@ impl TeacherFileInbox {
         // HANDLE guarantee against an active same-user directory mutator.
         if !self.root_unchanged() || !Self::path_matches_open_file(&active.final_path, &active.file)
         {
+            self.rollback_published_if_owned(active);
             return Err(TeacherFileInboxError::Io);
         }
         // A same-inode writer can change .bin bytes *during* the directory
@@ -410,14 +421,9 @@ impl TeacherFileInbox {
             Err(error) => Some(error),
         };
         if let Some(error) = post_sync_error {
-            // Roll back only our own published name, never an attacker
-            // replacement. Best-effort flush the unlink for crash recovery.
-            if self.root_unchanged()
-                && Self::path_matches_open_file(&active.final_path, &active.file)
-                && fs::remove_file(&active.final_path).is_ok()
-            {
-                let _ = sync_inbox_directory(&self.root);
-            }
+            // Revoke the published name only when it still identifies the
+            // retained file in the original root.
+            self.rollback_published_if_owned(active);
             return Err(error);
         }
         let active = self
@@ -722,6 +728,59 @@ mod tests {
             !published.exists(),
             "corrupt published name must be rolled back"
         );
+        sink.abort(&ID);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_permission_revocation_during_publish_must_not_leave_unacknowledged_bin() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Publication has already created the hard link when the directory
+        // sync hook runs. Revoking the private-root invariant must not leave
+        // an unacknowledged .bin even when the root inode is unchanged.
+        let root = temp_root("root-mode-revoked-on-sync");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"data").unwrap();
+        let published = sink.completed_path(&ID);
+
+        let result = sink.complete_with_directory_sync(&ID, |_root| {
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o777))?;
+            Ok(())
+        });
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(result, Err(TeacherFileInboxError::Io));
+        assert!(
+            !published.exists(),
+            "a rejected commit must not retain a published file in the same root"
+        );
+        sink.abort(&ID);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_never_deletes_a_replacement_published_name() {
+        let root = temp_root("postlink-decoy");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"data").unwrap();
+        let published = sink.completed_path(&ID);
+        let displaced = root.join("displaced.bin");
+
+        let result = sink.complete_with_directory_sync(&ID, |_root| {
+            fs::rename(&published, &displaced)?;
+            fs::write(&published, b"decoy")?;
+            Ok(())
+        });
+        assert_eq!(result, Err(TeacherFileInboxError::Io));
+        assert_eq!(fs::read(&published).unwrap(), b"decoy");
+        assert_eq!(fs::read(&displaced).unwrap(), b"data");
         sink.abort(&ID);
         fs::remove_dir_all(root).unwrap();
     }
