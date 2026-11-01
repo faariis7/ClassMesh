@@ -377,17 +377,49 @@ impl TeacherEguiShell {
         let _ = self.shell.handle(TeacherUiMessage::Navigate(section));
     }
 
+    fn handle_navigation_shortcuts(&mut self, ctx: &egui::Context) {
+        // AltGr is reported as Ctrl+Alt on some Windows keyboard layouts.
+        // Require bare Alt so text input and platform shortcuts are untouched.
+        let bare_alt = ctx.input(|input| {
+            input.modifiers.alt
+                && !input.modifiers.ctrl
+                && !input.modifiers.shift
+                && !input.modifiers.command
+                && !input.modifiers.mac_cmd
+        });
+        if !bare_alt {
+            return;
+        }
+
+        for (key, section) in [
+            (egui::Key::Num1, TeacherUiSection::Classroom),
+            (egui::Key::Num2, TeacherUiSection::Focus),
+            (egui::Key::Num3, TeacherUiSection::Presentation),
+            (egui::Key::Num4, TeacherUiSection::DeviceActions),
+            (egui::Key::Num5, TeacherUiSection::Diagnostics),
+        ] {
+            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, key)) {
+                self.navigate(section);
+                break;
+            }
+        }
+    }
+
     fn navigation(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            for (section, label) in [
-                (TeacherUiSection::Classroom, "Classroom"),
-                (TeacherUiSection::Focus, "Focus"),
-                (TeacherUiSection::Presentation, "Presentation"),
-                (TeacherUiSection::DeviceActions, "Device Actions"),
-                (TeacherUiSection::Diagnostics, "Diagnostics"),
+            for (section, label, shortcut) in [
+                (TeacherUiSection::Classroom, "Classroom", "Alt+1"),
+                (TeacherUiSection::Focus, "Focus", "Alt+2"),
+                (TeacherUiSection::Presentation, "Presentation", "Alt+3"),
+                (TeacherUiSection::DeviceActions, "Device Actions", "Alt+4"),
+                (TeacherUiSection::Diagnostics, "Diagnostics", "Alt+5"),
             ] {
                 let selected = self.shell.active_section() == section;
-                if ui.selectable_label(selected, label).clicked() {
+                if ui
+                    .selectable_label(selected, label)
+                    .on_hover_text(format!("Keyboard shortcut: {shortcut}"))
+                    .clicked()
+                {
                     self.navigate(section);
                 }
             }
@@ -475,6 +507,7 @@ impl TeacherEguiShell {
 
 impl eframe::App for TeacherEguiShell {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_navigation_shortcuts(ctx);
         egui::TopBottomPanel::top("classmesh_teacher_navigation").show(ctx, |ui| {
             self.navigation(ui);
         });
@@ -526,6 +559,68 @@ mod tests {
     use crate::ui_shell::TeacherFocusUiAction;
 
     use super::*;
+
+    fn send_navigation_key(
+        app: &mut TeacherEguiShell,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+        pressed: bool,
+    ) {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            modifiers,
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.handle_navigation_shortcuts(ctx));
+    }
+
+    #[test]
+    fn alt_digit_shortcuts_navigate_all_five_teacher_sections() {
+        let mut app = TeacherEguiShell::default();
+        for (key, expected) in [
+            (egui::Key::Num2, TeacherUiSection::Focus),
+            (egui::Key::Num3, TeacherUiSection::Presentation),
+            (egui::Key::Num4, TeacherUiSection::DeviceActions),
+            (egui::Key::Num5, TeacherUiSection::Diagnostics),
+            (egui::Key::Num1, TeacherUiSection::Classroom),
+        ] {
+            send_navigation_key(&mut app, key, egui::Modifiers::ALT, true);
+            assert_eq!(app.shell.active_section(), expected);
+        }
+    }
+
+    #[test]
+    fn navigation_shortcuts_do_not_intercept_typing_or_altgr() {
+        let mut app = TeacherEguiShell::default();
+        app.navigate(TeacherUiSection::Diagnostics);
+        for modifiers in [
+            egui::Modifiers::NONE,
+            egui::Modifiers::CTRL,
+            egui::Modifiers::SHIFT,
+            egui::Modifiers {
+                alt: true,
+                ctrl: true,
+                ..Default::default()
+            },
+            egui::Modifiers {
+                alt: true,
+                shift: true,
+                ..Default::default()
+            },
+        ] {
+            send_navigation_key(&mut app, egui::Key::Num1, modifiers, true);
+            assert_eq!(app.shell.active_section(), TeacherUiSection::Diagnostics);
+        }
+        send_navigation_key(&mut app, egui::Key::Num1, egui::Modifiers::ALT, false);
+        assert_eq!(app.shell.active_section(), TeacherUiSection::Diagnostics);
+    }
 
     #[test]
     fn long_teacher_sections_have_a_scroll_owner_at_the_minimum_viewport() {
