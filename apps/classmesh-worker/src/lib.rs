@@ -1,5 +1,6 @@
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 
+pub mod capture_cadence;
 pub mod clipboard_native;
 pub mod clipboard_read_fallback;
 pub mod clipboard_read_guarded;
