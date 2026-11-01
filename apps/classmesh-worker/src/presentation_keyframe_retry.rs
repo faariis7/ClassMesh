@@ -64,7 +64,12 @@ impl PresentationKeyframeSilence {
             self.last_authenticated_frame_id = frame_id;
             self.has_authenticated_frame = true;
             self.sent_recovery_requests = 0;
-        } else if self.last_authenticated_at.is_none_or(|last| now >= last) {
+        } else if self.last_authenticated_at.is_none_or(|last| now >= last)
+            && (!self.has_authenticated_frame || frame_id > self.last_authenticated_frame_id)
+        {
+            // Authenticated, out-of-order frames are not new playback progress.
+            // They must not defer a stalled stream's IDR recovery, rewind its
+            // request cursor or replenish its bounded silence retry budget.
             self.last_authenticated_at = Some(now);
             self.last_authenticated_frame_id = frame_id;
             self.has_authenticated_frame = true;
@@ -263,6 +268,36 @@ mod tests {
         assert_eq!(
             watch.due(binding(1), start + Duration::from_secs(12), true),
             Some(17)
+        );
+    }
+
+    #[test]
+    fn authenticated_out_of_order_frame_cannot_rewind_silence_cursor_or_retry_budget() {
+        let start = Instant::now();
+        let key = binding(1);
+        let mut watch = PresentationKeyframeSilence::default();
+        watch.note_authenticated_frame(key, 101, start);
+        // A delayed, still-authenticated earlier frame is not forward playback
+        // progress and must not postpone a freeze recovery or rewind its cursor.
+        watch.note_authenticated_frame(key, 100, start + Duration::from_secs(1));
+        assert_eq!(
+            watch.due(key, start + Duration::from_secs(2), true),
+            Some(101)
+        );
+
+        for _ in 0..3 {
+            watch.note_request_sent(key);
+        }
+        watch.note_authenticated_frame(key, 100, start + Duration::from_secs(3));
+        assert_eq!(
+            watch.due(key, start + Duration::from_secs(5), true),
+            None,
+            "old authenticated frames must not replenish exhausted recovery attempts"
+        );
+        watch.note_authenticated_frame(key, 102, start + Duration::from_secs(6));
+        assert_eq!(
+            watch.due(key, start + Duration::from_secs(8), true),
+            Some(102)
         );
     }
 
