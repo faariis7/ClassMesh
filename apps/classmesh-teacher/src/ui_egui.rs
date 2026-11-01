@@ -509,7 +509,9 @@ mod tests {
     #[test]
     fn queued_presentation_start_is_dropped_if_a_stream_appears_before_handoff() {
         let mut app = TeacherEguiShell::default();
-        app.queue_action(TeacherUiAction::Presentation(TeacherPresentationUiAction::Start));
+        app.queue_action(TeacherUiAction::Presentation(
+            TeacherPresentationUiAction::Start,
+        ));
         app.set_presentation_snapshot(PresentationRuntimeSnapshot {
             binding: Some(crate::presentation_view::PresentationBindingView {
                 presentation_id: 9,
