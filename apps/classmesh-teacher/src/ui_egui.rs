@@ -39,6 +39,20 @@ const APP_TITLE: &str = "ClassMesh Teacher";
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [800.0, 600.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [600.0, 420.0];
 
+// Keep each non-Classroom section independently scrollable at the minimum
+// viewport. Classroom already owns its responsive Devices/Monitoring scroller.
+// Separate salts prevent switching sections from inheriting another page's
+// previous scroll offset (and appearing empty until scrolled to the top).
+fn section_scroll_salt(section: TeacherUiSection) -> Option<&'static str> {
+    match section {
+        TeacherUiSection::Classroom => None,
+        TeacherUiSection::Focus => Some("classmesh_teacher_focus_scroll"),
+        TeacherUiSection::Presentation => Some("classmesh_teacher_presentation_scroll"),
+        TeacherUiSection::DeviceActions => Some("classmesh_teacher_device_actions_scroll"),
+        TeacherUiSection::Diagnostics => Some("classmesh_teacher_diagnostics_scroll"),
+    }
+}
+
 #[derive(Debug)]
 pub struct TeacherEguiShell {
     shell: TeacherUiShellState,
@@ -481,7 +495,14 @@ impl eframe::App for TeacherEguiShell {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            self.section_body(ui);
+            if let Some(salt) = section_scroll_salt(self.shell.active_section()) {
+                egui::ScrollArea::vertical()
+                    .id_salt(salt)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.section_body(ui));
+            } else {
+                self.section_body(ui);
+            }
         });
     }
 }
@@ -520,6 +541,26 @@ mod tests {
     use crate::ui_shell::{TeacherFocusUiAction, TeacherPresentationUiAction};
 
     use super::*;
+
+    #[test]
+    fn long_teacher_sections_have_a_scroll_owner_at_the_minimum_viewport() {
+        // Classroom owns its own responsive scroll area; other sections
+        // must remain reachable when their content exceeds 420 points.
+        assert_eq!(section_scroll_salt(TeacherUiSection::Classroom), None);
+        let mut unique_scroll_ids = BTreeSet::new();
+        for section in [
+            TeacherUiSection::Focus,
+            TeacherUiSection::Presentation,
+            TeacherUiSection::DeviceActions,
+            TeacherUiSection::Diagnostics,
+        ] {
+            let salt = section_scroll_salt(section).expect("section must scroll");
+            assert!(
+                unique_scroll_ids.insert(salt),
+                "{section:?} reused a scroll ID"
+            );
+        }
+    }
 
     #[test]
     fn queued_presentation_start_is_dropped_if_a_stream_appears_before_handoff() {
