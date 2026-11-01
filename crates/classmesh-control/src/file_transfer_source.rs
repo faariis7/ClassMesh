@@ -79,12 +79,24 @@ pub enum SourceError {
     ReadPastDeclaredSize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceReadMode {
+    Unset,
+    Direct,
+    Acknowledged,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ActiveSource {
     peer: FileTransferPeer,
     transfer_id: [u8; 16],
     source_id: FileSourceId,
     metadata: FileTransferSourceMetadata,
+    // Direct offsets and receiver ACK-driven reads cannot share a history.
+    read_mode: SourceReadMode,
+    // ACK-driven reads must only advance to the end of a real emitted chunk.
+    next_expected_offset: u64,
+    next_finish_emitted: bool,
 }
 
 #[derive(Debug)]
@@ -148,6 +160,9 @@ impl<S: FileTransferOutboxSource> FileTransferSourceSession<S> {
             transfer_id: id,
             source_id,
             metadata,
+            read_mode: SourceReadMode::Unset,
+            next_expected_offset: 0,
+            next_finish_emitted: false,
         });
         Ok(candidate)
     }
@@ -158,7 +173,26 @@ impl<S: FileTransferOutboxSource> FileTransferSourceSession<S> {
         transfer_id: &[u8],
         offset: u64,
     ) -> Result<FileTransferChunk, SourceError> {
+        if self.bound_active(peer, transfer_id)?.read_mode == SourceReadMode::Acknowledged {
+            return Err(SourceError::InvalidOffset);
+        }
+        let chunk = self.read_chunk(peer, transfer_id, offset)?;
+        if let Some(active) = self.active.as_mut() {
+            active.read_mode = SourceReadMode::Direct;
+        }
+        Ok(chunk)
+    }
+
+    fn read_chunk(
+        &mut self,
+        peer: FileTransferPeer,
+        transfer_id: &[u8],
+        offset: u64,
+    ) -> Result<FileTransferChunk, SourceError> {
         let active = self.bound_active(peer, transfer_id)?.clone();
+        if active.next_finish_emitted {
+            return Err(SourceError::InvalidOffset);
+        }
         if offset >= active.metadata.total_size {
             return Err(SourceError::InvalidOffset);
         }
@@ -197,29 +231,45 @@ impl<S: FileTransferOutboxSource> FileTransferSourceSession<S> {
         transfer_id: &[u8],
         next_offset: u64,
     ) -> Result<FileTransferSourceFrame, SourceError> {
-        let total_size = self.bound_active(peer, transfer_id)?.metadata.total_size;
-        if next_offset > total_size {
+        let active = self.bound_active(peer, transfer_id)?;
+        if active.read_mode == SourceReadMode::Direct
+            || active.next_finish_emitted
+            || next_offset != active.next_expected_offset
+        {
             return Err(SourceError::InvalidOffset);
         }
-        if next_offset == total_size {
+        if next_offset == active.metadata.total_size {
             return self
                 .finish(peer, transfer_id)
                 .map(FileTransferSourceFrame::Finish);
         }
-        self.chunk(peer, transfer_id, next_offset)
-            .map(FileTransferSourceFrame::Chunk)
+
+        let chunk = self.read_chunk(peer, transfer_id, next_offset)?;
+        if let Some(active) = self.active.as_mut() {
+            active.read_mode = SourceReadMode::Acknowledged;
+            active.next_expected_offset = next_offset + chunk.content.len() as u64;
+        }
+        Ok(FileTransferSourceFrame::Chunk(chunk))
     }
 
     pub fn finish(
-        &self,
+        &mut self,
         peer: FileTransferPeer,
         transfer_id: &[u8],
     ) -> Result<FileTransferFinish, SourceError> {
         let active = self.bound_active(peer, transfer_id)?;
+        // Finish is a state transition: it cannot be fabricated before
+        // the source emitted all declared bytes or replayed after success.
+        if active.next_finish_emitted || active.next_expected_offset != active.metadata.total_size {
+            return Err(SourceError::InvalidOffset);
+        }
         let finish = FileTransferFinish {
             transfer_id: active.transfer_id.to_vec(),
         };
         validate_finish(&finish).map_err(SourceError::InvalidPayload)?;
+        if let Some(active) = self.active.as_mut() {
+            active.next_finish_emitted = true;
+        }
         Ok(finish)
     }
 
@@ -231,6 +281,11 @@ impl<S: FileTransferOutboxSource> FileTransferSourceSession<S> {
         let active = self.bound_active(peer, transfer_id)?.clone();
         self.source.close(active.source_id);
         self.active = None;
+        // Completed is a receiver claim, not proof that the Service emitted
+        // Finish. Release the resource even when the claim is premature.
+        if !active.next_finish_emitted {
+            return Err(SourceError::InvalidOffset);
+        }
         Ok(())
     }
 
@@ -608,6 +663,161 @@ mod tests {
     }
 
     #[test]
+    fn next_rejects_skipped_or_replayed_offsets_without_reading_source() {
+        let mut session = FileTransferSourceSession::new(RecordingSource::new(b"abcdef".to_vec()));
+        session.offer(peer(), &transfer_id(), source_id()).unwrap();
+
+        // An ACK for bytes never produced must not generate Finish.
+        assert_eq!(
+            session.next(peer(), &transfer_id(), 6),
+            Err(SourceError::InvalidOffset)
+        );
+        assert_eq!(
+            session.next(peer(), &transfer_id(), 3),
+            Err(SourceError::InvalidOffset)
+        );
+        assert!(session.source().reads.is_empty());
+
+        assert!(matches!(
+            session.next(peer(), &transfer_id(), 0),
+            Ok(FileTransferSourceFrame::Chunk(_))
+        ));
+        assert_eq!(session.source().reads.len(), 1);
+        assert_eq!(
+            session.next(peer(), &transfer_id(), 0),
+            Err(SourceError::InvalidOffset)
+        );
+        assert_eq!(session.source().reads.len(), 1);
+
+        assert!(matches!(
+            session.next(peer(), &transfer_id(), 6),
+            Ok(FileTransferSourceFrame::Finish(_))
+        ));
+        assert_eq!(
+            session.next(peer(), &transfer_id(), 6),
+            Err(SourceError::InvalidOffset)
+        );
+        assert_eq!(session.source().reads.len(), 1);
+    }
+
+    #[test]
+    fn next_requires_exact_previous_chunk_end_across_multiple_chunks() {
+        let data = vec![7; MAX_FILE_CHUNK_BYTES + 3];
+        let mut session = FileTransferSourceSession::new(RecordingSource::new(data));
+        session.offer(peer(), &transfer_id(), source_id()).unwrap();
+        assert!(matches!(
+            session.next(peer(), &transfer_id(), 0),
+            Ok(FileTransferSourceFrame::Chunk(_))
+        ));
+        assert_eq!(
+            session.next(peer(), &transfer_id(), (MAX_FILE_CHUNK_BYTES + 3) as u64),
+            Err(SourceError::InvalidOffset)
+        );
+        assert_eq!(session.source().reads.len(), 1);
+        assert!(matches!(
+            session.next(peer(), &transfer_id(), MAX_FILE_CHUNK_BYTES as u64),
+            Ok(FileTransferSourceFrame::Chunk(_))
+        ));
+        assert!(matches!(
+            session.next(peer(), &transfer_id(), (MAX_FILE_CHUNK_BYTES + 3) as u64),
+            Ok(FileTransferSourceFrame::Finish(_))
+        ));
+        assert_eq!(session.source().reads.len(), 2);
+    }
+
+    #[test]
+    fn direct_and_ack_driven_reads_cannot_mix_or_replay_source_bytes() {
+        // Direct reads and Service ACK-driven reads have incompatible
+        // progress contracts; interleaving them cannot manufacture progress.
+        let mut direct = FileTransferSourceSession::new(RecordingSource::new(b"abcdef".to_vec()));
+        direct.offer(peer(), &transfer_id(), source_id()).unwrap();
+        direct.chunk(peer(), &transfer_id(), 0).unwrap();
+        assert_eq!(
+            direct.next(peer(), &transfer_id(), 0),
+            Err(SourceError::InvalidOffset)
+        );
+        assert_eq!(direct.source().reads.len(), 1);
+        assert!(direct.cancel(peer(), &transfer_id()).is_ok());
+
+        let mut sequenced =
+            FileTransferSourceSession::new(RecordingSource::new(b"abcdef".to_vec()));
+        sequenced
+            .offer(peer(), &transfer_id(), source_id())
+            .unwrap();
+        assert!(matches!(
+            sequenced.next(peer(), &transfer_id(), 0),
+            Ok(FileTransferSourceFrame::Chunk(_))
+        ));
+        assert_eq!(
+            sequenced.chunk(peer(), &transfer_id(), 0),
+            Err(SourceError::InvalidOffset)
+        );
+        assert_eq!(sequenced.source().reads.len(), 1);
+        assert!(matches!(
+            sequenced.next(peer(), &transfer_id(), 6),
+            Ok(FileTransferSourceFrame::Finish(_))
+        ));
+        assert_eq!(sequenced.complete(peer(), &transfer_id()), Ok(()));
+    }
+
+    #[test]
+    fn completed_before_finish_is_rejected_and_releases_source() {
+        let closes = Arc::new(AtomicUsize::new(0));
+        let mut source = RecordingSource::new(b"abcdef".to_vec());
+        source.closes = Arc::clone(&closes);
+        let mut session = FileTransferSourceSession::new(source);
+        session.offer(peer(), &transfer_id(), source_id()).unwrap();
+
+        assert_eq!(
+            session.complete(peer(), &transfer_id()),
+            Err(SourceError::InvalidOffset)
+        );
+        assert_eq!(closes.load(Ordering::Relaxed), 1);
+
+        let second = [10; 16];
+        session.offer(peer(), &second, source_id()).unwrap();
+        assert!(matches!(
+            session.next(peer(), &second, 0),
+            Ok(FileTransferSourceFrame::Chunk(_))
+        ));
+        assert_eq!(
+            session.complete(peer(), &second),
+            Err(SourceError::InvalidOffset)
+        );
+        assert_eq!(closes.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn finish_requires_emitted_bytes_and_is_one_shot() {
+        let mut session = FileTransferSourceSession::new(RecordingSource::new(b"abcdef".to_vec()));
+        session.offer(peer(), &transfer_id(), source_id()).unwrap();
+        assert_eq!(
+            session.finish(peer(), &transfer_id()),
+            Err(SourceError::InvalidOffset)
+        );
+        assert!(session.source().reads.is_empty());
+        assert!(matches!(
+            session.next(peer(), &transfer_id(), 0),
+            Ok(FileTransferSourceFrame::Chunk(_))
+        ));
+        assert!(session.finish(peer(), &transfer_id()).is_ok());
+        assert_eq!(
+            session.finish(peer(), &transfer_id()),
+            Err(SourceError::InvalidOffset)
+        );
+        assert_eq!(
+            session.next(peer(), &transfer_id(), 6),
+            Err(SourceError::InvalidOffset)
+        );
+        assert_eq!(
+            session.chunk(peer(), &transfer_id(), 0),
+            Err(SourceError::InvalidOffset)
+        );
+        assert_eq!(session.source().reads.len(), 1);
+        assert_eq!(session.complete(peer(), &transfer_id()), Ok(()));
+    }
+
+    #[test]
     fn wrong_peer_or_transfer_rejects_before_source_read() {
         let mut session = FileTransferSourceSession::new(RecordingSource::new(b"abcdef".to_vec()));
         session.offer(peer(), &transfer_id(), source_id()).unwrap();
@@ -638,6 +848,8 @@ mod tests {
         assert_eq!(closes.load(Ordering::Relaxed), 1);
 
         session.offer(peer(), &transfer_id(), source_id()).unwrap();
+        session.next(peer(), &transfer_id(), 0).unwrap();
+        session.next(peer(), &transfer_id(), 3).unwrap();
         session.complete(peer(), &transfer_id()).unwrap();
         assert_eq!(closes.load(Ordering::Relaxed), 2);
 
