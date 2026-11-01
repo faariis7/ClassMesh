@@ -94,6 +94,19 @@ fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
 }
 
+// Publishing a hard link is not a durable commit until its containing
+// directory entry is flushed. Windows directory flush/ACL qualification is a
+// separate acceptance gate; do not infer Windows crash durability here.
+#[cfg(unix)]
+fn sync_inbox_directory(root: &Path) -> std::io::Result<()> {
+    File::open(root)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_inbox_directory(_root: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 // A group/other-writable inbox lets another local principal replace a
 // transfer's .part/.bin names between identity checks. The directory is
 // provisioned by the caller; never silently chmod a shared directory.
@@ -220,6 +233,77 @@ impl TeacherFileInbox {
     fn part_path(&self, id: &[u8; 16]) -> PathBuf {
         self.root.join(format!("{}.part", id_stem(id)))
     }
+    fn complete_with_directory_sync(
+        &mut self,
+        id: &[u8; 16],
+        sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<(), TeacherFileInboxError> {
+        let Some(active) = self.active.as_ref() else {
+            return Err(TeacherFileInboxError::WrongTransfer);
+        };
+        if active.id != *id {
+            return Err(TeacherFileInboxError::WrongTransfer);
+        }
+        if active.received != active.declared_size {
+            return Err(TeacherFileInboxError::Incomplete);
+        }
+        // A path-only check at admission is insufficient: the directory or
+        // .part name may have been substituted after we wrote verified chunks.
+        if !self.root_unchanged() {
+            return Err(TeacherFileInboxError::InvalidRoot);
+        }
+        if !Self::path_matches_open_file(&active.temp_path, &active.file) {
+            return Err(TeacherFileInboxError::Io);
+        }
+        active
+            .file
+            .sync_all()
+            .map_err(|_| TeacherFileInboxError::Io)?;
+        if !self.root_unchanged() || !Self::path_matches_open_file(&active.temp_path, &active.file)
+        {
+            return Err(TeacherFileInboxError::Io);
+        }
+
+        // Atomic create-if-absent publishing: unlike rename, hard_link never
+        // replaces an existing .bin. Retain the original file handle while
+        // linking, then verify the new name still identifies that same file.
+        fs::hard_link(&active.temp_path, &active.final_path)
+            .map_err(|_| TeacherFileInboxError::ExistingTransfer)?;
+        if !self.root_unchanged() || !Self::path_matches_open_file(&active.final_path, &active.file)
+        {
+            return Err(TeacherFileInboxError::Io);
+        }
+        // File::sync_all above persists bytes and inode metadata, but not
+        // the new .bin directory entry. Do not acknowledge Completed before
+        // the containing directory has been flushed on supported Unix hosts.
+        if sync_directory(&self.root).is_err() {
+            // Best-effort rollback only if the name still belongs to our
+            // retained, verified inode. Never unlink an attacker replacement.
+            if self.root_unchanged()
+                && Self::path_matches_open_file(&active.final_path, &active.file)
+            {
+                let _ = fs::remove_file(&active.final_path);
+                let _ = sync_inbox_directory(&self.root);
+            }
+            return Err(TeacherFileInboxError::Io);
+        }
+        // Directory synchronization may take time. Revalidate the committed
+        // name and root identity after it returns, not only before it starts.
+        // This is still path-based defense in depth, not a retained-ancestor
+        // HANDLE guarantee against an active same-user directory mutator.
+        if !self.root_unchanged() || !Self::path_matches_open_file(&active.final_path, &active.file)
+        {
+            return Err(TeacherFileInboxError::Io);
+        }
+        let active = self
+            .active
+            .take()
+            .ok_or(TeacherFileInboxError::WrongTransfer)?;
+        // The .bin is committed. A failed best-effort unlink leaves a stale
+        // .part; never unlink a replacement file at that name.
+        self.cleanup_partial(active);
+        Ok(())
+    }
 }
 
 impl FileTransferInboxSink for TeacherFileInbox {
@@ -292,49 +376,7 @@ impl FileTransferInboxSink for TeacherFileInbox {
     }
 
     fn complete(&mut self, id: &[u8; 16]) -> Result<(), Self::Error> {
-        let Some(active) = self.active.as_ref() else {
-            return Err(TeacherFileInboxError::WrongTransfer);
-        };
-        if active.id != *id {
-            return Err(TeacherFileInboxError::WrongTransfer);
-        }
-        if active.received != active.declared_size {
-            return Err(TeacherFileInboxError::Incomplete);
-        }
-        // A path-only check at admission is insufficient: the directory or
-        // .part name may have been substituted after we wrote verified chunks.
-        if !self.root_unchanged() {
-            return Err(TeacherFileInboxError::InvalidRoot);
-        }
-        if !Self::path_matches_open_file(&active.temp_path, &active.file) {
-            return Err(TeacherFileInboxError::Io);
-        }
-        active
-            .file
-            .sync_all()
-            .map_err(|_| TeacherFileInboxError::Io)?;
-        if !self.root_unchanged() || !Self::path_matches_open_file(&active.temp_path, &active.file)
-        {
-            return Err(TeacherFileInboxError::Io);
-        }
-
-        // Atomic create-if-absent publishing: unlike rename, hard_link never
-        // replaces an existing .bin. Retain the original file handle while
-        // linking, then verify the new name still identifies that same file.
-        fs::hard_link(&active.temp_path, &active.final_path)
-            .map_err(|_| TeacherFileInboxError::ExistingTransfer)?;
-        if !self.root_unchanged() || !Self::path_matches_open_file(&active.final_path, &active.file)
-        {
-            return Err(TeacherFileInboxError::Io);
-        }
-        let active = self
-            .active
-            .take()
-            .ok_or(TeacherFileInboxError::WrongTransfer)?;
-        // The .bin is committed. A failed best-effort unlink leaves a stale
-        // .part; never unlink a replacement file at that name.
-        self.cleanup_partial(active);
-        Ok(())
+        self.complete_with_directory_sync(id, sync_inbox_directory)
     }
 
     fn abort(&mut self, id: &[u8; 16]) {
@@ -443,6 +485,55 @@ mod tests {
         );
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_directory_commit_sync_cannot_leave_an_unacknowledged_published_file() {
+        // A verified .part inode alone is not a crash-durable committed
+        // directory entry. A failed post-link directory flush must not
+        // report Completed or leave a visible .bin on the ordinary path.
+        let root = temp_root("directory-sync-failure");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"data").unwrap();
+
+        assert_eq!(
+            sink.complete_with_directory_sync(&ID, |_root| {
+                Err(std::io::Error::other("injected directory sync failure"))
+            }),
+            Err(TeacherFileInboxError::Io),
+        );
+        assert!(!sink.completed_path(&ID).exists());
+        sink.abort(&ID);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_replacement_during_directory_sync_must_not_report_completed() {
+        // A retained file inode does not bind the root pathname. If a
+        // directory mutator replaces the root during the commit flush,
+        // reporting Completed would point the caller to a different inbox.
+        let root = temp_root("root-swap-on-sync");
+        let moved = temp_root("root-swap-on-sync-original");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"data").unwrap();
+
+        let outcome = sink.complete_with_directory_sync(&ID, |_root| {
+            fs::rename(&root, &moved)?;
+            fs::create_dir(&root)?;
+            Ok(())
+        });
+        assert_eq!(outcome, Err(TeacherFileInboxError::Io));
+        assert!(!sink.completed_path(&ID).exists());
+        sink.abort(&ID);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(moved).unwrap();
     }
 
     #[cfg(unix)]
