@@ -16,7 +16,9 @@ use classmesh_control::diagnostics::{
 use classmesh_control::dispatch::{
     AuthorizedSystemAction, PrivilegedControlCommand, dispatch_privileged_command,
 };
-use classmesh_control::file_transfer_source::authorize_file_pull_status;
+use classmesh_control::file_transfer_source::{
+    authorize_file_pull_status, authorize_queued_file_pull,
+};
 use classmesh_control::group_media_feedback::build_presentation_feedback_envelope;
 use classmesh_control::group_media_key::{
     InstalledPresentationKeyBinding, build_presentation_key_ack_from_binding,
@@ -27,6 +29,7 @@ use classmesh_control::handshake::{
     server_hello_enrolled,
 };
 use classmesh_control::live_authorization::LiveAuthorizationStore;
+use classmesh_control::peer_identity::AuthenticatedPeerIdentity;
 use classmesh_control::presentation_state::{PresentationOwnership, PresentationOwnershipError};
 use classmesh_control::quic::{
     ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
@@ -290,6 +293,8 @@ impl FileTransferDispatchPayload {
 #[derive(Debug)]
 pub(crate) struct FileTransferDispatch {
     principal_id: PrincipalId,
+    authenticated_peer: AuthenticatedPeerIdentity,
+    authorization: Arc<LiveAuthorizationStore>,
     pub(crate) control_session_id: u64,
     pub(crate) request_id: u64,
     payload: FileTransferDispatchPayload,
@@ -304,6 +309,10 @@ impl FileTransferDispatch {
 
     pub(crate) fn payload(&self) -> &FileTransferDispatchPayload {
         &self.payload
+    }
+
+    pub(crate) fn authorize_queued_file_pull(&self, now_unix_ms: u64) -> bool {
+        authorize_queued_file_pull(&self.authorization, self.authenticated_peer, now_unix_ms)
     }
 }
 
@@ -1703,7 +1712,7 @@ async fn run_listener(
                                 &session,
                                 peer,
                                 EstablishedSessionRuntime {
-                                    authorization: authorization.as_ref(),
+                                    authorization: Arc::clone(&authorization),
                                     input: &input,
                                     system_actions: &system_actions,
                                     teacher_interactions: &teacher_interactions,
@@ -1746,9 +1755,9 @@ async fn run_listener(
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct EstablishedSessionRuntime<'a> {
-    authorization: &'a LiveAuthorizationStore,
+    authorization: Arc<LiveAuthorizationStore>,
     input: &'a InputDispatchState,
     system_actions: &'a SystemActionDispatchChannels,
     teacher_interactions: &'a TeacherInteractionDispatchChannels,
@@ -1815,6 +1824,9 @@ async fn run_established_session(
         presentation,
         multicast_interface,
     } = runtime;
+    // Retain the live publisher separately from per-envelope immutable
+    // AuthorizationStore snapshots, which shadow the local name below.
+    let live_authorization = Arc::clone(&authorization);
 
     let mut guard = AuthenticatedControlGuard::new(
         peer.identity,
@@ -3234,6 +3246,8 @@ async fn run_established_session(
                 let (reply_tx, mut reply_rx) = oneshot::channel();
                 let dispatch = FileTransferDispatch {
                     principal_id: peer.identity.principal_id(),
+                    authenticated_peer: peer.identity,
+                    authorization: Arc::clone(&live_authorization),
                     control_session_id: session.control_session_id,
                     request_id,
                     payload,

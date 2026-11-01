@@ -2262,7 +2262,12 @@ mod windows_service_app {
                             ))
                         }),
                     FileTransferDispatchPayload::PullRequest(request) => {
-                        if pending_file_pull.is_some()
+                        // Recheck the live enrolled grant at the final Service
+                        // source boundary, not only at QUIC ingress.
+                        if !unix_time_ms().is_ok_and(|now| dispatch.authorize_queued_file_pull(now))
+                        {
+                            FileTransferDispatchOutcome::SourceUnavailable
+                        } else if pending_file_pull.is_some()
                             || !file_pull_owner.try_acquire(dispatch.control_session_id)
                         {
                             FileTransferDispatchOutcome::SourceUnavailable
@@ -2311,6 +2316,21 @@ mod windows_service_app {
                             dispatch.request_id,
                             &status.transfer_id,
                         ) {
+                            let _ = dispatch
+                                .reply_tx
+                                .send(FileTransferDispatchOutcome::NoResponse);
+                            continue;
+                        }
+
+                        // The policy can change while a valid status waits in
+                        // the bounded dispatch queue. Recheck immediately before
+                        // any source progress; denial cancels the exact pending
+                        // owner instead of leaking another chunk.
+                        if !unix_time_ms().is_ok_and(|now| dispatch.authorize_queued_file_pull(now))
+                        {
+                            let _ = file_source.cancel(peer, &status.transfer_id);
+                            let _ = file_pull_owner.release(dispatch.control_session_id);
+                            pending_file_pull = None;
                             let _ = dispatch
                                 .reply_tx
                                 .send(FileTransferDispatchOutcome::NoResponse);

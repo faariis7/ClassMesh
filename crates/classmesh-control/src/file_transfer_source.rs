@@ -10,6 +10,8 @@ use classmesh_protocol::file_transfer::{
 
 use crate::authorization::{AuthenticatedControlGuard, CommandAuthorizationError};
 use crate::file_transfer_receiver::FileTransferPeer;
+use crate::live_authorization::LiveAuthorizationStore;
+use crate::peer_identity::AuthenticatedPeerIdentity;
 use classmesh_security::{AuthorizationStore, Permission};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -289,6 +291,21 @@ pub fn authorize_file_pull_status(
     )
 }
 
+/// Final Service-dispatch authorization for a queued file pull. Unlike an
+/// ingress snapshot, this is sampled immediately before the Service-owned
+/// source read; a revoked grant or poisoned publisher fails closed.
+/// A future trusted policy publisher must still serialize publication with
+/// source reads if it requires zero concurrent-revocation exposure.
+pub fn authorize_queued_file_pull(
+    authorization: &LiveAuthorizationStore,
+    identity: AuthenticatedPeerIdentity,
+    now_unix_ms: u64,
+) -> bool {
+    authorization.snapshot().is_ok_and(|snapshot| {
+        identity.authorize(snapshot.store(), Permission::ReceiveFile, now_unix_ms)
+    })
+}
+
 fn validate_peer(peer: FileTransferPeer) -> Result<(), SourceError> {
     if peer.control_session_id == 0 {
         return Err(SourceError::InvalidBinding);
@@ -398,6 +415,49 @@ mod tests {
 
     fn transfer_id() -> [u8; 16] {
         [9; 16]
+    }
+
+    #[test]
+    fn queued_file_pull_rechecks_live_authority_after_status_admission() {
+        use crate::live_authorization::LiveAuthorizationStore;
+        use crate::peer_identity::AuthenticatedPeerIdentity;
+        use classmesh_security::{
+            AuthorizationStore, CredentialFingerprint, CredentialRecord, Permission, Principal,
+            PrincipalKind,
+        };
+        use std::collections::{BTreeMap, BTreeSet};
+        let identity = AuthenticatedPeerIdentity {
+            principal_id: PrincipalId([7; 32]),
+            credential_fingerprint: CredentialFingerprint([9; 32]),
+        };
+        let policy = |permissions: BTreeSet<Permission>| {
+            let mut credentials = BTreeMap::new();
+            credentials.insert(
+                identity.credential_fingerprint,
+                CredentialRecord::active(identity.credential_fingerprint, 100),
+            );
+            let mut store = AuthorizationStore::default();
+            store
+                .upsert(Principal {
+                    id: identity.principal_id,
+                    kind: PrincipalKind::Teacher,
+                    enabled: true,
+                    permissions,
+                    credentials,
+                })
+                .unwrap();
+            store
+        };
+        let live = LiveAuthorizationStore::new(policy(BTreeSet::from([Permission::ReceiveFile])));
+        assert!(authorize_queued_file_pull(&live, identity, 150));
+        // A queued ACK was valid at ingress, but policy changes before the
+        // Service main loop consumes it: no further source read is permitted.
+        live.publish_if_version(1, policy(BTreeSet::from([Permission::SendFile])))
+            .unwrap();
+        assert!(!authorize_queued_file_pull(&live, identity, 150));
+        live.publish_if_version(2, policy(BTreeSet::from([Permission::ReceiveFile])))
+            .unwrap();
+        assert!(authorize_queued_file_pull(&live, identity, 150));
     }
 
     #[test]
