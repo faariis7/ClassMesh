@@ -371,6 +371,21 @@ impl TeacherEguiShell {
             )
             .ok()?;
         }
+        // UI snapshots are not authorization, but a newer local lifecycle
+        // observation must retire obsolete Start/Stop intents before handoff.
+        // The actual presentation lifecycle still revalidates at apply time.
+        if let TeacherUiAction::Presentation(presentation) = &action {
+            let current = self.presentation.binding;
+            let still_current = match presentation {
+                crate::ui_shell::TeacherPresentationUiAction::Start => current.is_none(),
+                crate::ui_shell::TeacherPresentationUiAction::Stop { binding } => {
+                    current == Some(*binding)
+                }
+            };
+            if !still_current {
+                return None;
+            }
+        }
         if let TeacherUiAction::FilePull(pull) = &action {
             validate_file_pull_action(
                 pull,
@@ -602,7 +617,7 @@ mod tests {
 
     use crate::classroom_view::{ClassroomDeviceRow, ClassroomDeviceSnapshot};
     use crate::device_diagnostics::{DEFAULT_MAX_DIAGNOSTIC_CODES, DeviceDiagnosticsError};
-    use crate::ui_shell::TeacherFocusUiAction;
+    use crate::ui_shell::{TeacherFocusUiAction, TeacherPresentationUiAction};
 
     use super::*;
 
@@ -686,6 +701,74 @@ mod tests {
                 "{section:?} reused a scroll ID"
             );
         }
+    }
+
+    #[test]
+    fn queued_presentation_start_is_dropped_if_a_stream_appears_before_handoff() {
+        let mut app = TeacherEguiShell::default();
+        app.queue_action(TeacherUiAction::Presentation(
+            TeacherPresentationUiAction::Start,
+        ));
+        app.set_presentation_snapshot(PresentationRuntimeSnapshot {
+            binding: Some(crate::presentation_view::PresentationBindingView {
+                presentation_id: 9,
+                stream_id: 4,
+                epoch: 1,
+            }),
+            ..PresentationRuntimeSnapshot::default()
+        });
+        assert_eq!(app.take_pending_action(), None);
+    }
+
+    #[test]
+    fn queued_presentation_stop_is_dropped_if_binding_changes_or_stops() {
+        let original = crate::presentation_view::PresentationBindingView {
+            presentation_id: 9,
+            stream_id: 4,
+            epoch: 1,
+        };
+        for replacement in [
+            Some(crate::presentation_view::PresentationBindingView {
+                epoch: 2,
+                ..original
+            }),
+            None,
+        ] {
+            let mut app = TeacherEguiShell::default();
+            app.set_presentation_snapshot(PresentationRuntimeSnapshot {
+                binding: Some(original),
+                ..PresentationRuntimeSnapshot::default()
+            });
+            app.queue_action(TeacherUiAction::Presentation(
+                TeacherPresentationUiAction::Stop { binding: original },
+            ));
+            app.set_presentation_snapshot(PresentationRuntimeSnapshot {
+                binding: replacement,
+                ..PresentationRuntimeSnapshot::default()
+            });
+            assert_eq!(app.take_pending_action(), None);
+        }
+    }
+
+    #[test]
+    fn queued_presentation_actions_survive_when_runtime_binding_is_unchanged() {
+        let mut app = TeacherEguiShell::default();
+        let start = TeacherUiAction::Presentation(TeacherPresentationUiAction::Start);
+        app.queue_action(start.clone());
+        assert_eq!(app.take_pending_action(), Some(start));
+
+        let binding = crate::presentation_view::PresentationBindingView {
+            presentation_id: 9,
+            stream_id: 4,
+            epoch: 1,
+        };
+        app.set_presentation_snapshot(PresentationRuntimeSnapshot {
+            binding: Some(binding),
+            ..PresentationRuntimeSnapshot::default()
+        });
+        let stop = TeacherUiAction::Presentation(TeacherPresentationUiAction::Stop { binding });
+        app.queue_action(stop.clone());
+        assert_eq!(app.take_pending_action(), Some(stop));
     }
 
     #[test]
