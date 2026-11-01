@@ -233,6 +233,59 @@ impl TeacherFileInbox {
     fn part_path(&self, id: &[u8; 16]) -> PathBuf {
         self.root.join(format!("{}.part", id_stem(id)))
     }
+    fn begin_with_post_create(
+        &mut self,
+        id: &[u8; 16],
+        size: u64,
+        after_create: impl FnOnce(),
+    ) -> Result<(), TeacherFileInboxError> {
+        if size == 0 || size > MAX_FILE_TRANSFER_BYTES || id.iter().all(|b| *b == 0) {
+            return Err(TeacherFileInboxError::InvalidSize);
+        }
+        if self.active.is_some() {
+            return Err(TeacherFileInboxError::Busy);
+        }
+        if !self.root_unchanged() {
+            return Err(TeacherFileInboxError::InvalidRoot);
+        }
+        let temp_path = self.part_path(id);
+        let final_path = self.completed_path(id);
+        if fs::symlink_metadata(&final_path).is_ok() {
+            return Err(TeacherFileInboxError::ExistingTransfer);
+        }
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&temp_path)
+            .map_err(|_| TeacherFileInboxError::ExistingTransfer)?;
+        // Admission must bind the newly opened .part HANDLE to the same
+        // trusted root and name, not just validate the directory before I/O.
+        // An ancestor or .part may be exchanged while create_new is opening.
+        after_create();
+        let active = ActiveFile {
+            id: *id,
+            file,
+            temp_path,
+            final_path,
+            received: 0,
+            declared_size: size,
+        };
+        if !self.root_unchanged() {
+            self.cleanup_partial(active);
+            return Err(TeacherFileInboxError::InvalidRoot);
+        }
+        if !Self::path_matches_open_file(&active.temp_path, &active.file) {
+            self.cleanup_partial(active);
+            return Err(TeacherFileInboxError::Io);
+        }
+        self.active = Some(active);
+        Ok(())
+    }
     fn complete_with_directory_sync(
         &mut self,
         id: &[u8; 16],
@@ -310,44 +363,7 @@ impl FileTransferInboxSink for TeacherFileInbox {
     type Error = TeacherFileInboxError;
 
     fn begin(&mut self, id: &[u8; 16], _filename: &str, size: u64) -> Result<(), Self::Error> {
-        if size == 0 || size > MAX_FILE_TRANSFER_BYTES || id.iter().all(|b| *b == 0) {
-            return Err(TeacherFileInboxError::InvalidSize);
-        }
-        if self.active.is_some() {
-            return Err(TeacherFileInboxError::Busy);
-        }
-        if !self.root_unchanged() {
-            return Err(TeacherFileInboxError::InvalidRoot);
-        }
-        let temp_path = self.part_path(id);
-        let final_path = self.completed_path(id);
-        // create_new guarantees that a pre-existing .part (including a
-        // dangling symlink) can never be followed or overwritten.
-        if fs::symlink_metadata(&final_path).is_ok() {
-            return Err(TeacherFileInboxError::ExistingTransfer);
-        }
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        // On Unix, OpenOptions defaults to mode 0666 before the process umask.
-        // A normal 022 umask leaves classroom files readable by other users.
-        // The verified .bin is a hard link to this same private inode.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options
-            .open(&temp_path)
-            .map_err(|_| TeacherFileInboxError::ExistingTransfer)?;
-        self.active = Some(ActiveFile {
-            id: *id,
-            file,
-            temp_path,
-            final_path,
-            received: 0,
-            declared_size: size,
-        });
-        Ok(())
+        self.begin_with_post_create(id, size, || {})
     }
 
     fn append(&mut self, id: &[u8; 16], offset: u64, content: &[u8]) -> Result<(), Self::Error> {
@@ -626,6 +642,46 @@ mod tests {
             Err(TeacherFileInboxError::InvalidRoot),
         );
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_rejects_root_swap_between_partial_create_and_offer_acceptance() {
+        let root = temp_root("begin-root-swap");
+        let moved = temp_root("begin-root-original");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        assert_eq!(
+            sink.begin_with_post_create(&ID, 4, || {
+                fs::rename(&root, &moved).unwrap();
+                fs::create_dir(&root).unwrap();
+            }),
+            Err(TeacherFileInboxError::InvalidRoot),
+            "a moved inbox must not return Accepted after a partial file was created",
+        );
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(moved).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_rejects_part_swap_between_create_and_offer_acceptance() {
+        let root = temp_root("begin-part-swap");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        let part = root.join(format!("{}.part", "71".repeat(16)));
+        let displaced = root.join("displaced.part");
+        assert_eq!(
+            sink.begin_with_post_create(&ID, 4, || {
+                fs::rename(&part, &displaced).unwrap();
+                fs::write(&part, b"decoy").unwrap();
+            }),
+            Err(TeacherFileInboxError::Io),
+            "an exchanged .part must not return Accepted",
+        );
+        assert_eq!(fs::read(&part).unwrap(), b"decoy");
         fs::remove_dir_all(root).unwrap();
     }
 
