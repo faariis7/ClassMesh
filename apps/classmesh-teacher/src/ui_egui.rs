@@ -119,6 +119,11 @@ impl TeacherEguiShell {
             != Some((context.source_id, context.control_session_id))
         {
             reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
+            // Focus carries a device ID but no session epoch. A new authenticated
+            // session must not inherit a previously queued UI intent.
+            if matches!(self.pending_action, Some(TeacherUiAction::Focus(_))) {
+                self.pending_action = None;
+            }
         }
         // A new control session, source or missing optional v0.8
         // diagnostics capability invalidates all previously visible data.
@@ -137,6 +142,13 @@ impl TeacherEguiShell {
     }
 
     pub fn clear_teacher_interaction_context(&mut self) {
+        // Retire any intent queued under the old authenticated session.
+        // A new offline ResumeThumbnail click can still be queued afterward.
+        if self.teacher_interaction_context.is_some()
+            && matches!(self.pending_action, Some(TeacherUiAction::Focus(_)))
+        {
+            self.pending_action = None;
+        }
         self.teacher_interaction_context = None;
         self.playback = None;
         reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
@@ -539,6 +551,64 @@ mod tests {
     use crate::ui_shell::TeacherFocusUiAction;
 
     use super::*;
+
+    #[test]
+    fn queued_focus_start_is_retired_on_control_session_replacement_but_not_refresh() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let old = interaction_context(BTreeSet::new());
+        app.set_teacher_interaction_context(old.clone());
+        let start = TeacherUiAction::Focus(TeacherFocusUiAction::RequestInteractive {
+            source_id: MonitoringSourceId(7),
+        });
+        app.queue_action(start.clone());
+        app.set_teacher_interaction_context(old);
+        assert_eq!(app.take_pending_action(), Some(start.clone()));
+
+        app.queue_action(start);
+        let mut replacement = interaction_context(BTreeSet::new());
+        replacement.control_session_id = 78;
+        app.set_teacher_interaction_context(replacement);
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "a queued Focus start must not survive a new control session"
+        );
+    }
+
+    #[test]
+    fn queued_focus_intent_is_retired_on_disconnect_but_new_offline_cleanup_is_allowed() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
+        let start = TeacherUiAction::Focus(TeacherFocusUiAction::RequestInteractive {
+            source_id: MonitoringSourceId(7),
+        });
+        app.queue_action(start);
+        app.clear_teacher_interaction_context();
+        assert_eq!(app.take_pending_action(), None);
+
+        app.classroom
+            .upsert(ClassroomDeviceSnapshot {
+                source_id: MonitoringSourceId(7),
+                display_name: "Student 07".to_owned(),
+                health: DeviceHealth {
+                    presence: PresenceState::Offline,
+                    media: MediaState::Recovering,
+                    service_ready: false,
+                    worker_ready: false,
+                },
+                quality_tier: None,
+                thumbnail_available: false,
+                interactive_active: true,
+            })
+            .unwrap();
+        let cleanup = TeacherUiAction::Focus(TeacherFocusUiAction::ResumeThumbnail {
+            source_id: MonitoringSourceId(7),
+        });
+        app.queue_action(cleanup.clone());
+        assert_eq!(app.take_pending_action(), Some(cleanup));
+    }
 
     #[test]
     fn queued_focus_start_is_dropped_after_selection_or_device_readiness_changes() {
