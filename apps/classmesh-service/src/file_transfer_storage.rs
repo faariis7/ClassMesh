@@ -27,6 +27,9 @@ pub enum WindowsOutboxSourceError {
 struct RegisteredOutboxFile {
     file: File,
     metadata: FileTransferSourceMetadata,
+    // Bounded per-chunk fingerprints detect same-size mutation through a
+    // pre-existing writable mapping even after the HANDLE was pinned.
+    chunk_hashes: Vec<[u8; 32]>,
 }
 
 #[derive(Debug)]
@@ -83,23 +86,27 @@ impl WindowsFileTransferOutboxSource {
 
         let mut digest = Sha256::new();
         let mut buffer = vec![0_u8; MAX_FILE_CHUNK_BYTES];
+        let mut chunk_hashes = Vec::new();
         let mut hashed = 0_u64;
-        loop {
-            let count = file
-                .read(&mut buffer)
+        while hashed < total_size {
+            let count = (total_size - hashed).min(MAX_FILE_CHUNK_BYTES as u64) as usize;
+            file.read_exact(&mut buffer[..count])
                 .map_err(|_| WindowsOutboxSourceError::Io)?;
-            if count == 0 {
-                break;
-            }
-            hashed = hashed
-                .checked_add(count as u64)
-                .ok_or(WindowsOutboxSourceError::FileTooLarge)?;
-            if hashed > MAX_FILE_TRANSFER_BYTES {
-                return Err(WindowsOutboxSourceError::FileTooLarge);
-            }
             digest.update(&buffer[..count]);
+            chunk_hashes.push(Sha256::digest(&buffer[..count]).into());
+            hashed += count as u64;
         }
-        if hashed != total_size {
+        // A concurrent append must not be accepted with the earlier length.
+        if file
+            .read(&mut buffer[..1])
+            .map_err(|_| WindowsOutboxSourceError::Io)?
+            != 0
+            || file
+                .metadata()
+                .map_err(|_| WindowsOutboxSourceError::Io)?
+                .len()
+                != total_size
+        {
             return Err(WindowsOutboxSourceError::Io);
         }
 
@@ -112,6 +119,7 @@ impl WindowsFileTransferOutboxSource {
                     total_size,
                     sha256: digest.finalize().into(),
                 },
+                chunk_hashes,
             },
         );
         Ok(())
@@ -179,15 +187,43 @@ impl FileTransferOutboxSource for WindowsFileTransferOutboxSource {
         if current_size != registered.metadata.total_size {
             return Err(WindowsOutboxSourceError::Io);
         }
-        registered
-            .file
-            .seek(SeekFrom::Start(offset))
-            .map_err(|_| WindowsOutboxSourceError::Io)?;
-        let mut output = vec![0_u8; length];
-        registered
-            .file
-            .read_exact(&mut output)
-            .map_err(|_| WindowsOutboxSourceError::Io)?;
+        // Verify each original hashed chunk before returning any of its
+        // bytes. A request is bounded to MAX_FILE_CHUNK_BYTES, so even an
+        // unaligned request spans at most two chunks. This avoids an O(file
+        // size) rehash for every network frame while rejecting same-size
+        // mutations through an already-established writable mapping.
+        let end = offset + length as u64;
+        let chunk_size = MAX_FILE_CHUNK_BYTES as u64;
+        let first = offset / chunk_size;
+        let last = (end - 1) / chunk_size;
+        let mut output = Vec::with_capacity(length);
+        for chunk_index in first..=last {
+            let chunk_start = chunk_index * chunk_size;
+            let chunk_len = (registered.metadata.total_size - chunk_start).min(chunk_size) as usize;
+            let mut chunk = vec![0_u8; chunk_len];
+            registered
+                .file
+                .seek(SeekFrom::Start(chunk_start))
+                .map_err(|_| WindowsOutboxSourceError::Io)?;
+            registered
+                .file
+                .read_exact(&mut chunk)
+                .map_err(|_| WindowsOutboxSourceError::Io)?;
+            let index = usize::try_from(chunk_index).map_err(|_| WindowsOutboxSourceError::Io)?;
+            let expected = registered
+                .chunk_hashes
+                .get(index)
+                .ok_or(WindowsOutboxSourceError::Io)?;
+            if <[u8; 32]>::from(Sha256::digest(&chunk)) != *expected {
+                return Err(WindowsOutboxSourceError::Io);
+            }
+            let from = (offset.max(chunk_start) - chunk_start) as usize;
+            let to = (end.min(chunk_start + chunk_len as u64) - chunk_start) as usize;
+            output.extend_from_slice(&chunk[from..to]);
+        }
+        if output.len() != length {
+            return Err(WindowsOutboxSourceError::Io);
+        }
         Ok(output)
     }
 
@@ -739,6 +775,70 @@ mod tests {
 
         source.close(id);
         assert!(!staged.exists(), "close removes the exact pinned object");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn outbox_rejects_same_size_mutation_after_source_hashing() {
+        let root = test_root("outbox-same-size-mutation");
+        fs::create_dir_all(&root).expect("root");
+        let mut source = WindowsFileTransferOutboxSource::new(&root);
+        let id = source_id();
+        let staged = source.staged_path(id);
+        fs::write(&staged, b"trusted-stage").expect("stage");
+        source
+            .register_staged_file(id, "lesson.pdf")
+            .expect("register");
+        // A portable host can modify a pinned file in place without changing
+        // its length. Windows writable mappings can pose a related threat.
+        fs::write(&staged, b"changed-stage").expect("same-size mutation");
+        assert_eq!(
+            source.read_at(id, 0, MAX_FILE_CHUNK_BYTES),
+            Err(WindowsOutboxSourceError::Io),
+            "source reads must not disclose bytes that differ from the pinned hash"
+        );
+        source.close(id);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn outbox_verifies_both_chunks_of_an_unaligned_read() {
+        let root = test_root("outbox-cross-chunk");
+        fs::create_dir_all(&root).expect("root");
+        let mut source = WindowsFileTransferOutboxSource::new(&root);
+        let id = source_id();
+        let staged = source.staged_path(id);
+        let mut bytes = vec![b'a'; MAX_FILE_CHUNK_BYTES];
+        bytes.extend_from_slice(b"second-chunk");
+        fs::write(&staged, &bytes).expect("stage");
+        source
+            .register_staged_file(id, "lesson.pdf")
+            .expect("register");
+
+        let offset = MAX_FILE_CHUNK_BYTES as u64 - 4;
+        assert_eq!(
+            source.read_at(id, offset, 10).expect("cross-chunk read"),
+            b"aaaasecond"
+        );
+
+        #[cfg(not(windows))]
+        {
+            let mut writer = OpenOptions::new()
+                .write(true)
+                .open(&staged)
+                .expect("portable in-place writer");
+            writer
+                .seek(SeekFrom::Start(MAX_FILE_CHUNK_BYTES as u64))
+                .expect("seek");
+            writer.write_all(b"CHANGE").expect("mutate second chunk");
+            assert_eq!(
+                source.read_at(id, offset, 10),
+                Err(WindowsOutboxSourceError::Io),
+                "an unaligned read must verify the second chunk too"
+            );
+        }
+        source.close(id);
         let _ = fs::remove_dir_all(root);
     }
 
