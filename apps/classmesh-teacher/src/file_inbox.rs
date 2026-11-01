@@ -5,7 +5,9 @@
 //! they do not establish trusted Windows ACL/ancestor-handle anti-reparse
 //! guarantees or close same-user mutation races between checks and publish.
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
+
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 use classmesh_control::file_transfer_receiver::FileTransferInboxSink;
@@ -132,6 +134,7 @@ pub enum TeacherFileInboxError {
     WrongTransfer,
     InvalidOffset,
     Incomplete,
+    CorruptFile,
     Io,
 }
 
@@ -143,6 +146,7 @@ struct ActiveFile {
     final_path: PathBuf,
     received: u64,
     declared_size: u64,
+    streamed_sha256: Sha256,
 }
 
 /// Persist a single authenticated Teacher file into opaque, transfer-ID named
@@ -254,7 +258,7 @@ impl TeacherFileInbox {
             return Err(TeacherFileInboxError::ExistingTransfer);
         }
         let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
+        options.read(true).write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -274,6 +278,7 @@ impl TeacherFileInbox {
             final_path,
             received: 0,
             declared_size: size,
+            streamed_sha256: Sha256::new(),
         };
         if !self.root_unchanged() {
             self.cleanup_partial(active);
@@ -286,6 +291,40 @@ impl TeacherFileInbox {
         self.active = Some(active);
         Ok(())
     }
+    // The network receiver hashes the incoming chunks, but that does not
+    // prove that the disk still contains those bytes. A local writer can
+    // modify an existing .part inode without changing its OS file identity.
+    // Read back the same retained HANDLE, in bounded memory, before publish.
+    fn disk_matches_received_bytes(active: &ActiveFile) -> Result<bool, TeacherFileInboxError> {
+        let mut reader = active
+            .file
+            .try_clone()
+            .map_err(|_| TeacherFileInboxError::Io)?;
+        reader
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| TeacherFileInboxError::Io)?;
+        let mut on_disk = Sha256::new();
+        let mut length = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = reader
+                .read(&mut buffer)
+                .map_err(|_| TeacherFileInboxError::Io)?;
+            if count == 0 {
+                break;
+            }
+            length = length
+                .checked_add(count as u64)
+                .ok_or(TeacherFileInboxError::CorruptFile)?;
+            if length > active.declared_size {
+                return Ok(false);
+            }
+            on_disk.update(&buffer[..count]);
+        }
+        Ok(length == active.received
+            && on_disk.finalize() == active.streamed_sha256.clone().finalize())
+    }
+
     fn complete_with_directory_sync(
         &mut self,
         id: &[u8; 16],
@@ -312,6 +351,9 @@ impl TeacherFileInbox {
             .file
             .sync_all()
             .map_err(|_| TeacherFileInboxError::Io)?;
+        if !Self::disk_matches_received_bytes(active)? {
+            return Err(TeacherFileInboxError::CorruptFile);
+        }
         if !self.root_unchanged() || !Self::path_matches_open_file(&active.temp_path, &active.file)
         {
             return Err(TeacherFileInboxError::Io);
@@ -411,10 +453,12 @@ impl FileTransferInboxSink for TeacherFileInbox {
         if !Self::path_matches_open_file(&active.temp_path, &active.file) {
             return Err(TeacherFileInboxError::Io);
         }
-        self.active
+        let active = self
+            .active
             .as_mut()
-            .ok_or(TeacherFileInboxError::WrongTransfer)?
-            .received = end;
+            .ok_or(TeacherFileInboxError::WrongTransfer)?;
+        active.received = end;
+        active.streamed_sha256.update(content);
         Ok(())
     }
 
@@ -527,6 +571,73 @@ mod tests {
             expected
         );
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn same_inode_disk_corruption_after_chunk_must_not_publish_completed() {
+        use std::io::Write as _;
+
+        // The network receiver hashes authenticated bytes, but another local
+        // writer can alter the same .part inode without changing its file ID.
+        // Do not acknowledge Completed for bytes other than those received.
+        let root = temp_root("same-inode-corruption");
+        fs::create_dir(&root).unwrap();
+        let expected = b"authenticated classroom lesson";
+        let mut receiver = FileTransferReceiver::new(TeacherFileInbox::new(&root).unwrap());
+        receiver.offer(peer(), &offer(expected)).unwrap();
+        receiver
+            .chunk(
+                peer(),
+                &FileTransferChunk {
+                    transfer_id: ID.to_vec(),
+                    offset: 0,
+                    content: expected.to_vec(),
+                },
+            )
+            .unwrap();
+
+        let partial = root.join(format!("{}.part", "71".repeat(16)));
+        let mut same_inode_writer = fs::OpenOptions::new().write(true).open(&partial).unwrap();
+        same_inode_writer
+            .write_all(&vec![b'X'; expected.len()])
+            .unwrap();
+        drop(same_inode_writer);
+
+        assert_eq!(
+            receiver.finish(
+                peer(),
+                &FileTransferFinish {
+                    transfer_id: ID.to_vec(),
+                },
+            ),
+            Err(ReceiveError::SinkFailure),
+            "the received stream hash must not stand in for disk readback",
+        );
+        assert!(!receiver.sink().completed_path(&ID).exists());
+        assert!(!partial.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn truncated_same_inode_is_reported_as_corrupt_not_completed() {
+        let root = temp_root("truncated-part");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 8).unwrap();
+        sink.append(&ID, 0, b"original").unwrap();
+
+        let partial = root.join(format!("{}.part", "71".repeat(16)));
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&partial)
+            .unwrap()
+            .set_len(3)
+            .unwrap();
+        assert_eq!(sink.complete(&ID), Err(TeacherFileInboxError::CorruptFile));
+        assert!(!sink.completed_path(&ID).exists());
+        sink.abort(&ID);
+        assert!(!partial.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
