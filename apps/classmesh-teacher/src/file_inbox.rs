@@ -94,6 +94,22 @@ fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
 }
 
+// A group/other-writable inbox lets another local principal replace a
+// transfer's .part/.bin names between identity checks. The directory is
+// provisioned by the caller; never silently chmod a shared directory.
+#[cfg(unix)]
+fn root_permissions_safe(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o022 == 0
+}
+
+// Windows needs separate trusted owner/DACL and retained ancestor-HANDLE
+// validation before production use; Unix mode bits cannot stand in for ACLs.
+#[cfg(not(unix))]
+fn root_permissions_safe(_metadata: &fs::Metadata) -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeacherFileInboxError {
     InvalidRoot,
@@ -159,6 +175,7 @@ impl TeacherFileInbox {
                 metadata.is_dir()
                     && !metadata.file_type().is_symlink()
                     && !is_reparse_point(&metadata)
+                    && root_permissions_safe(&metadata)
             })
     }
 
@@ -451,6 +468,46 @@ mod tests {
             0o600,
             "publishing must not relax private file permissions",
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_rejects_group_or_world_writable_root_even_if_it_is_preexisting() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("untrusted-root-mode");
+        fs::create_dir(&root).unwrap();
+        for mode in [0o770, 0o777] {
+            fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(
+                matches!(
+                    TeacherFileInbox::new(&root),
+                    Err(TeacherFileInboxError::InvalidRoot)
+                ),
+                "an inbox writable by other local principals must be rejected (mode {mode:o})",
+            );
+        }
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(TeacherFileInbox::new(&root).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_rejects_root_that_becomes_group_writable_before_begin() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("root-mode-changed");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o770)).unwrap();
+        assert_eq!(
+            sink.begin(&ID, "lesson.pdf", 4),
+            Err(TeacherFileInboxError::InvalidRoot),
+        );
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         fs::remove_dir_all(root).unwrap();
     }
 
