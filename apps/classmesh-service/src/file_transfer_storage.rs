@@ -693,8 +693,23 @@ mod tests {
             source.read_at(id, 0, MAX_FILE_CHUNK_BYTES + 1),
             Err(WindowsOutboxSourceError::ReadTooLarge)
         );
-        fs::write(&staged, b"changed-size").expect("mutate");
-        assert_eq!(source.read_at(id, 0, 4), Err(WindowsOutboxSourceError::Io));
+        // Windows pins hashed bytes with FILE_SHARE_READ | FILE_SHARE_DELETE:
+        // a new writer must be denied rather than changing the source size.
+        // Portable hosts lack this share-mode contract, so they still verify
+        // that an actual size mutation is rejected at the read boundary.
+        #[cfg(windows)]
+        {
+            assert!(
+                fs::write(&staged, b"changed-size").is_err(),
+                "Windows must deny mutation of the pinned hashed source"
+            );
+            assert_eq!(source.read_at(id, 0, 4).expect("pinned read"), b"abcd");
+        }
+        #[cfg(not(windows))]
+        {
+            fs::write(&staged, b"changed-size").expect("portable mutate");
+            assert_eq!(source.read_at(id, 0, 4), Err(WindowsOutboxSourceError::Io));
+        }
         source.close(id);
         let _ = fs::remove_dir_all(root);
     }
