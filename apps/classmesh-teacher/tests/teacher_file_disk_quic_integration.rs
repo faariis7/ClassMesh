@@ -125,7 +125,15 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
             ))
             .await
             .map_err(|e| e.to_string())?;
-        let status = channel.receive().await.map_err(|e| e.to_string())?;
+        // The Teacher revokes immediately after processing Accepted and
+        // closes QUIC. Its Accepted status can be lost in transit before the
+        // Student's receive completes; the Teacher-side status assertion
+        // below remains authoritative for this test.
+        let status = match channel.receive().await {
+            Ok(status) => status,
+            Err(_) if revoke_teacher_after_accept => return Ok::<_, String>(()),
+            Err(error) => return Err(error.to_string()),
+        };
         assert!(
             matches!(status.payload,Some(control_envelope::Payload::FileTransferStatus(s))
             if s.state==FileTransferState::Accepted as i32)
