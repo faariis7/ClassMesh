@@ -353,7 +353,7 @@ impl FileTransferInboxSink for TeacherFileInbox {
     fn append(&mut self, id: &[u8; 16], offset: u64, content: &[u8]) -> Result<(), Self::Error> {
         let active = self
             .active
-            .as_mut()
+            .as_ref()
             .ok_or(TeacherFileInboxError::WrongTransfer)?;
         if active.id != *id {
             return Err(TeacherFileInboxError::WrongTransfer);
@@ -367,11 +367,38 @@ impl FileTransferInboxSink for TeacherFileInbox {
         if end > active.declared_size {
             return Err(TeacherFileInboxError::InvalidSize);
         }
-        active
+        // The sink's retained File HANDLE does not authorize continuing to
+        // write when its inbox root or .part pathname has been substituted.
+        // Recheck at each chunk boundary, not only begin/complete, so an
+        // attacker cannot keep receiving bytes into a displaced directory.
+        if !self.root_unchanged() {
+            return Err(TeacherFileInboxError::InvalidRoot);
+        }
+        if !Self::path_matches_open_file(&active.temp_path, &active.file) {
+            return Err(TeacherFileInboxError::Io);
+        }
+        self.active
+            .as_mut()
+            .ok_or(TeacherFileInboxError::WrongTransfer)?
             .file
             .write_all(content)
             .map_err(|_| TeacherFileInboxError::Io)?;
-        active.received = end;
+        // A rename or permission change can race with write_all; fail the
+        // chunk instead of acknowledging Progress if detected afterward.
+        let active = self
+            .active
+            .as_ref()
+            .ok_or(TeacherFileInboxError::WrongTransfer)?;
+        if !self.root_unchanged() {
+            return Err(TeacherFileInboxError::InvalidRoot);
+        }
+        if !Self::path_matches_open_file(&active.temp_path, &active.file) {
+            return Err(TeacherFileInboxError::Io);
+        }
+        self.active
+            .as_mut()
+            .ok_or(TeacherFileInboxError::WrongTransfer)?
+            .received = end;
         Ok(())
     }
 
@@ -709,6 +736,50 @@ mod tests {
 
         assert_eq!(sink.complete(&ID), Err(TeacherFileInboxError::Io));
         assert!(!sink.completed_path(&ID).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_refuses_chunk_after_root_replacement_without_writing_to_old_inode() {
+        let root = temp_root("chunk-root-replaced");
+        let moved = temp_root("chunk-root-moved");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 8).unwrap();
+        sink.append(&ID, 0, b"good").unwrap();
+        fs::rename(&root, &moved).unwrap();
+        fs::create_dir(&root).unwrap();
+
+        assert_eq!(
+            sink.append(&ID, 4, b"evil"),
+            Err(TeacherFileInboxError::InvalidRoot),
+        );
+        let old_part = moved.join(format!("{}.part", "71".repeat(16)));
+        assert_eq!(fs::read(old_part).unwrap(), b"good");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        sink.abort(&ID);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(moved).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_refuses_chunk_after_partial_name_replacement() {
+        let root = temp_root("chunk-part-replaced");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 8).unwrap();
+        sink.append(&ID, 0, b"good").unwrap();
+        let part = root.join(format!("{}.part", "71".repeat(16)));
+        let displaced = root.join("displaced.part");
+        fs::rename(&part, &displaced).unwrap();
+        fs::write(&part, b"decoy").unwrap();
+
+        assert_eq!(sink.append(&ID, 4, b"evil"), Err(TeacherFileInboxError::Io),);
+        assert_eq!(fs::read(displaced).unwrap(), b"good");
+        assert_eq!(fs::read(part).unwrap(), b"decoy");
+        sink.abort(&ID);
         fs::remove_dir_all(root).unwrap();
     }
 
