@@ -16,7 +16,6 @@ mod telemetry_native;
 #[cfg(windows)]
 mod windows_service_app {
     use std::ffi::OsString;
-    use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
     use std::sync::{Arc, mpsc};
