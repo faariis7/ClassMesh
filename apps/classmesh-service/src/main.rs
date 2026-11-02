@@ -137,7 +137,7 @@ mod windows_service_app {
         TeacherInteractionDispatchChannels, TeacherInteractionDispatchOutcome,
         WorkerCapabilityState,
     };
-    use crate::file_pull_idle::FilePullIdleLease;
+    use crate::file_pull_idle::{FilePullAckLedger, FilePullIdleLease};
     use crate::file_transfer_readiness::FileTransferReadiness;
     use crate::file_transfer_storage::{
         WindowsFileTransferInboxSink, WindowsFileTransferOutboxSource,
@@ -216,6 +216,7 @@ mod windows_service_app {
         request_id: u64,
         transfer_id: [u8; 16],
         idle: FilePullIdleLease,
+        acks: FilePullAckLedger,
     }
 
     impl PendingFilePull {
@@ -230,6 +231,27 @@ mod windows_service_app {
                 && self.control_session_id == control_session_id
                 && self.request_id == request_id
                 && self.transfer_id.as_slice() == transfer_id
+        }
+    }
+
+    // This is the final in-process delivery boundary for Service source frames.
+    // A produced Chunk/Finish is NOT delivered when the QUIC reply receiver
+    // disappeared. Reclaim the exact source instead of keeping ACK progress.
+    fn send_file_transfer_reply(
+        reply_tx: tokio::sync::oneshot::Sender<FileTransferDispatchOutcome>,
+        outcome: FileTransferDispatchOutcome,
+        on_undelivered_source: impl FnOnce(),
+    ) {
+        let source_frame = matches!(
+            &outcome,
+            FileTransferDispatchOutcome::Outbound(
+                FileTransferOutboundPayload::Offer(_)
+                    | FileTransferOutboundPayload::Chunk(_)
+                    | FileTransferOutboundPayload::Finish(_)
+            )
+        );
+        if reply_tx.send(outcome).is_err() && source_frame {
+            on_undelivered_source();
         }
     }
 
@@ -2344,7 +2366,10 @@ mod windows_service_app {
                             ))
                         }),
                     FileTransferDispatchPayload::PullRequest(request) => {
-                        if pending_file_pull.is_some()
+                        // Recheck the live enrolled grant at the final Service
+                        // source boundary, not only at QUIC ingress.
+                        if !unix_time_ms().is_ok_and(|now| dispatch.authorize_queued_file_pull(now))
+                            || pending_file_pull.is_some()
                             || !file_pull_owner.try_acquire(dispatch.control_session_id)
                         {
                             FileTransferDispatchOutcome::SourceUnavailable
@@ -2367,6 +2392,7 @@ mod windows_service_app {
                                         request_id: dispatch.request_id,
                                         transfer_id: exact_transfer_id,
                                         idle: FilePullIdleLease::new(Instant::now()),
+                                        acks: FilePullAckLedger::new(offer.total_size),
                                     });
                                     FileTransferDispatchOutcome::Outbound(
                                         FileTransferOutboundPayload::Offer(offer),
@@ -2398,25 +2424,88 @@ mod windows_service_app {
                             continue;
                         }
 
+                        // The policy can change while a valid status waits in
+                        // the bounded dispatch queue. Recheck immediately before
+                        // any source progress; denial cancels the exact pending
+                        // owner instead of leaking another chunk.
+                        if !unix_time_ms().is_ok_and(|now| dispatch.authorize_queued_file_pull(now))
+                        {
+                            let _ = file_source.cancel(peer, &status.transfer_id);
+                            let _ = file_pull_owner.release(dispatch.control_session_id);
+                            pending_file_pull = None;
+                            let _ = dispatch
+                                .reply_tx
+                                .send(FileTransferDispatchOutcome::NoResponse);
+                            continue;
+                        }
+
+                        // A correlated but stale/forged acknowledgement must never
+                        // reset the idle timer or cause Finish to be replayed.
+                        if let Ok(
+                            state @ (FileTransferState::Accepted
+                            | FileTransferState::Progress
+                            | FileTransferState::Completed),
+                        ) = FileTransferState::try_from(status.state)
+                            && !pending_file_pull.as_mut().is_some_and(|active| {
+                                active.acks.accept_status(state, status.next_offset)
+                            })
+                        {
+                            let _ = file_source.cancel(peer, &status.transfer_id);
+                            let _ = file_pull_owner.release(dispatch.control_session_id);
+                            pending_file_pull = None;
+                            let _ = dispatch
+                                .reply_tx
+                                .send(FileTransferDispatchOutcome::NoResponse);
+                            continue;
+                        }
+
                         match FileTransferState::try_from(status.state) {
                             Ok(FileTransferState::Accepted | FileTransferState::Progress) => {
-                                if let Some(active) = pending_file_pull.as_mut() {
-                                    active.idle.refresh(Instant::now());
-                                }
                                 match file_source.next(
                                     peer,
                                     &status.transfer_id,
                                     status.next_offset,
                                 ) {
                                     Ok(FileTransferSourceFrame::Chunk(chunk)) => {
-                                        FileTransferDispatchOutcome::Outbound(
-                                            FileTransferOutboundPayload::Chunk(chunk),
-                                        )
+                                        let chunk_end =
+                                            chunk.offset.checked_add(chunk.content.len() as u64);
+                                        if chunk_end.is_some_and(|end| {
+                                            pending_file_pull.as_mut().is_some_and(|active| {
+                                                active.acks.record_chunk_end(end)
+                                            })
+                                        }) {
+                                            if let Some(active) = pending_file_pull.as_mut() {
+                                                active.idle.refresh(Instant::now());
+                                            }
+                                            FileTransferDispatchOutcome::Outbound(
+                                                FileTransferOutboundPayload::Chunk(chunk),
+                                            )
+                                        } else {
+                                            let _ = file_source.cancel(peer, &status.transfer_id);
+                                            let _ = file_pull_owner
+                                                .release(dispatch.control_session_id);
+                                            pending_file_pull = None;
+                                            FileTransferDispatchOutcome::NoResponse
+                                        }
                                     }
                                     Ok(FileTransferSourceFrame::Finish(finish)) => {
-                                        FileTransferDispatchOutcome::Outbound(
-                                            FileTransferOutboundPayload::Finish(finish),
-                                        )
+                                        if pending_file_pull
+                                            .as_mut()
+                                            .is_some_and(|active| active.acks.mark_finish_sent())
+                                        {
+                                            if let Some(active) = pending_file_pull.as_mut() {
+                                                active.idle.refresh(Instant::now());
+                                            }
+                                            FileTransferDispatchOutcome::Outbound(
+                                                FileTransferOutboundPayload::Finish(finish),
+                                            )
+                                        } else {
+                                            let _ = file_source.cancel(peer, &status.transfer_id);
+                                            let _ = file_pull_owner
+                                                .release(dispatch.control_session_id);
+                                            pending_file_pull = None;
+                                            FileTransferDispatchOutcome::NoResponse
+                                        }
                                     }
                                     Err(_) => {
                                         let outbound = file_source
@@ -2455,7 +2544,25 @@ mod windows_service_app {
                         }
                     }
                 };
-                let _ = dispatch.reply_tx.send(outcome);
+                let request_id = dispatch.request_id;
+                let pending_binding = pending_file_pull;
+                send_file_transfer_reply(dispatch.reply_tx, outcome, || {
+                    if pending_binding.is_some_and(|active| {
+                        active.matches(
+                            peer.principal,
+                            peer.control_session_id,
+                            request_id,
+                            &transfer_id,
+                        )
+                    }) {
+                        // A closed reply channel cannot deliver the Offer,
+                        // Chunk, or Finish. Cancel the exact Service source;
+                        // never retain a ledger claiming those bytes were sent.
+                        let _ = file_source.cancel(peer, &transfer_id);
+                        let _ = file_pull_owner.release(peer.control_session_id);
+                        pending_file_pull = None;
+                    }
+                });
             }
 
             if let Some(pending) = pending_clipboard_read.as_ref() {
@@ -3567,6 +3674,42 @@ mod windows_service_app {
         use super::*;
 
         #[test]
+        fn failed_source_reply_reclaims_only_undelivered_frames() {
+            let mut reclaimed = 0;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            drop(rx);
+            send_file_transfer_reply(
+                tx,
+                FileTransferDispatchOutcome::Outbound(FileTransferOutboundPayload::Finish(
+                    Default::default(),
+                )),
+                || reclaimed += 1,
+            );
+            assert_eq!(reclaimed, 1, "closed receiver must reclaim source");
+
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            drop(rx);
+            send_file_transfer_reply(tx, FileTransferDispatchOutcome::NoResponse, || {
+                reclaimed += 1;
+            });
+            assert_eq!(reclaimed, 1, "unrelated status must not reclaim source");
+
+            let (tx, mut rx) = tokio::sync::oneshot::channel();
+            send_file_transfer_reply(
+                tx,
+                FileTransferDispatchOutcome::Outbound(FileTransferOutboundPayload::Chunk(
+                    Default::default(),
+                )),
+                || reclaimed += 1,
+            );
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(FileTransferDispatchOutcome::Outbound(_))
+            ));
+            assert_eq!(reclaimed, 1, "successful channel delivery retains source");
+        }
+
+        #[test]
         fn file_receive_status_maps_failures_to_bounded_states() {
             let id = vec![7_u8; 16];
 
@@ -3597,6 +3740,7 @@ mod windows_service_app {
                 request_id: 44,
                 transfer_id: [9; 16],
                 idle: FilePullIdleLease::new(Instant::now()),
+                acks: FilePullAckLedger::new(7),
             };
 
             assert!(pending.matches(PrincipalId([7; 32]), 77, 44, &[9; 16]));
@@ -3629,6 +3773,7 @@ mod windows_service_app {
                 request_id: 44,
                 transfer_id: [9; 16],
                 idle: FilePullIdleLease::new(Instant::now()),
+                acks: FilePullAckLedger::new(7),
             };
             let peer = FileTransferPeer {
                 principal: pending.principal_id,
