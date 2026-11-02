@@ -3,6 +3,8 @@ mod control_runtime;
 #[cfg(any(windows, test))]
 mod file_pull_idle;
 #[cfg(windows)]
+mod file_transfer_acl;
+#[cfg(any(windows, test))]
 pub mod file_transfer_storage;
 #[cfg(windows)]
 pub mod monitoring;
@@ -16,7 +18,6 @@ mod telemetry_native;
 #[cfg(windows)]
 mod windows_service_app {
     use std::ffi::OsString;
-    use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
     use std::sync::{Arc, mpsc};
@@ -2108,17 +2109,19 @@ mod windows_service_app {
         };
         let inbox_root = state_root.join(FILE_INBOX_DIRECTORY);
         let outbox_root = state_root.join(FILE_OUTBOX_DIRECTORY);
-        if let Err(error) =
-            fs::create_dir_all(&inbox_root).and_then(|()| fs::create_dir_all(&outbox_root))
-        {
-            eprintln!("ClassMesh file transfer storage preparation failed: {error}");
-            set_stopped_with_exit(&status_handle, 4)?;
-            return Ok(());
-        }
+        // Optional FileTransfer is disabled when legacy/unsafe ProgramData ACLs
+        // are found. Keep core Service control, Worker and media operational.
+        // The dispatch gate below also prevents any local queued source read.
+        let mut file_transfer_ready =
+            crate::file_transfer_acl::prepare_optional_file_transfer_storage(
+                &inbox_root,
+                &outbox_root,
+            );
         let mut file_receiver =
             FileTransferReceiver::new(WindowsFileTransferInboxSink::new(inbox_root));
-        let mut file_source =
-            FileTransferSourceSession::new(WindowsFileTransferOutboxSource::new(outbox_root));
+        let mut file_source = FileTransferSourceSession::new(WindowsFileTransferOutboxSource::new(
+            outbox_root.clone(),
+        ));
 
         let worker_capabilities = Arc::new(WorkerCapabilityState::default());
         let presentation_feedback = PresentationFeedbackBus::default();
@@ -2129,7 +2132,7 @@ mod windows_service_app {
             presentation_channels,
             presentation_feedback.clone(),
             Arc::clone(&worker_capabilities),
-            true,
+            file_transfer_ready,
         );
         let mut control_runtime =
             match ControlRuntime::start(control_state, control_config, control_dispatch) {
@@ -2231,6 +2234,30 @@ mod windows_service_app {
                     Ok(dispatch) => dispatch,
                     Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
                 };
+                // A previously trusted ProgramData tree can become unsafe
+                // after startup. Revalidate before each queued transfer and
+                // permanently disable this runtime's transfer dispatch if the
+                // protected root changes. Never serve a queued source afterward.
+                if file_transfer_ready
+                    && crate::file_transfer_acl::verify_private_outbox(&outbox_root).is_err()
+                {
+                    file_transfer_ready = false;
+                    eprintln!("ClassMesh FileTransfer disabled: Outbox ACL changed after startup");
+                    if let Some(pending) = pending_file_pull.take() {
+                        let pending_peer = FileTransferPeer {
+                            principal: pending.principal_id,
+                            control_session_id: pending.control_session_id,
+                        };
+                        let _ = file_source.cancel(pending_peer, &pending.transfer_id);
+                        let _ = file_pull_owner.release(pending.control_session_id);
+                    }
+                }
+                if !file_transfer_ready {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(FileTransferDispatchOutcome::SourceUnavailable);
+                    continue;
+                }
                 if dispatch.control_session_id == 0
                     || dispatch.request_id == 0
                     || !dispatch.commit.try_commit()
