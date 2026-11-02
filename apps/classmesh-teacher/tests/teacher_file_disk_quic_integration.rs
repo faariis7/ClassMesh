@@ -40,6 +40,7 @@ use std::{
     error::Error,
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
 };
 
 const VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 8 };
@@ -58,7 +59,8 @@ fn frame(sequence: u64, payload: control_envelope::Payload) -> ControlEnvelope {
 }
 
 async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> TestResult {
-    let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+    // Canonicalize the temporary ancestor: on macOS /var can be a symlink.
+    let root = std::env::temp_dir().canonicalize()?.join(format!(
         "classmesh-teacher-quic-inbox-{}-{}",
         std::process::id(),
         if revoke_teacher_after_accept {
@@ -68,6 +70,11 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
         }
     ));
     fs::create_dir(&root)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+    }
     let data = b"actual classroom bytes".to_vec();
     let path = root.join(format!("{}.bin", "09".repeat(16)));
     let partial = root.join(format!("{}.part", "09".repeat(16)));
@@ -87,6 +94,15 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
     let remote_path = path.clone();
     let remote_partial = partial.clone();
     let remote_bytes = data.clone();
+    // The test authority is handed to the peer only for a trusted revocation
+    // after its authenticated stream has actually consumed Accepted.
+    let (revoke_source_tx, revoke_source_rx) =
+        tokio::sync::oneshot::channel::<(Arc<LiveAuthorizationStore>, AuthorizationStore)>();
+    // Keep the authenticated server connection alive until the Teacher has
+    // actually observed the revoked permission and finished its fail-closed
+    // receive path. Otherwise dropping this task can race the QUIC frame and
+    // replace the intended revocation error with a transport-close error.
+    let (teacher_finished_tx, teacher_finished_rx) = tokio::sync::oneshot::channel::<()>();
     let server_task = tokio::spawn(async move {
         let connection = accept(&server).await.map_err(|e| e.to_string())?;
         let mut channel = ControlChannel::accept(&connection, DEFAULT_IO_TIMEOUT)
@@ -139,6 +155,17 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
             if s.state==FileTransferState::Accepted as i32)
         );
         assert!(!remote_path.exists());
+        // The peer consumed Accepted; a local on_status callback alone does
+        // not guarantee that its asynchronous QUIC write arrived at the peer.
+        // Revoke before the next authenticated Chunk is sent.
+        if revoke_teacher_after_accept {
+            let (trusted_live, revoked_policy) = revoke_source_rx
+                .await
+                .map_err(|_| "missing trusted revocation test authority".to_string())?;
+            trusted_live
+                .publish_if_version(1, revoked_policy)
+                .map_err(|error| format!("trusted test revocation failed: {error:?}"))?;
+        }
         // After the Accepted reply the Teacher may immediately revoke the
         // transfer and remove the .part before this server checks the path.
         if !revoke_teacher_after_accept {
@@ -155,9 +182,10 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
             ))
             .await;
         if revoke_teacher_after_accept {
-            // Revocation closes QUIC immediately. The Student may observe
-            // connection loss during this send, not just after it; neither
-            // outcome permits a Completed acknowledgement or published file.
+            // The packet has been submitted, but keep the QUIC connection
+            // owned by this task until the Teacher's receive path returns.
+            // No Progress or Completed acknowledgement is expected.
+            let _ = teacher_finished_rx.await;
             return Ok::<_, String>(());
         }
         chunk_send.map_err(|e| e.to_string())?;
@@ -222,6 +250,8 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
             credentials,
         })
         .map_err(|e| format!("{e:?}"))?;
+    // A verified Student alone is insufficient: the current Teacher must
+    // also hold live ReceiveFile permission for this actual QUIC flow.
     store
         .upsert(Principal {
             id: PrincipalId([8; 32]),
@@ -241,7 +271,12 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
             credentials: BTreeMap::new(),
         })
         .map_err(|e| format!("{e:?}"))?;
-    let live = LiveAuthorizationStore::new(store);
+    let live = Arc::new(LiveAuthorizationStore::new(store));
+    if revoke_teacher_after_accept {
+        revoke_source_tx
+            .send((Arc::clone(&live), revoked))
+            .expect("revocation peer owns the live Teacher authority");
+    }
     let context = TeacherFilePullContext {
         source_id: MonitoringSourceId(7),
         control_session_id: 77,
@@ -413,14 +448,13 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
         || 150,
         |status| {
             statuses.push(status.state);
-            if revoke_teacher_after_accept && status.state == FileTransferState::Accepted as i32 {
-                live.publish_if_version(1, revoked.clone())
-                    .expect("trusted test authority revokes Teacher during transfer");
-            }
         },
     )
     .await;
     if revoke_teacher_after_accept {
+        // Release the server connection even if the assertion below fails,
+        // avoiding a stranded background task while preserving the error.
+        let _ = teacher_finished_tx.send(());
         assert!(matches!(
             result,
             Err(TeacherFilePullRuntimeError::Receive(

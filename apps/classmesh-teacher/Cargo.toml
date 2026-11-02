@@ -20,13 +20,12 @@ sha2 = "0.10.9"
 classmesh-capture-win = { path = "../../crates/classmesh-capture-win" }
 classmesh-worker = { path = "../classmesh-worker" }
 eframe = { version = "=0.32.3", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
-# Stable Win32 HANDLE file identity; std MetadataExt file_index remains unstable.
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [dev-dependencies]
 quinn = "0.11.12"
 rcgen = { version = "0.14", features = ["x509-parser"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [lints]

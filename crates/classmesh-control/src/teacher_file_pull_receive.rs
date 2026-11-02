@@ -82,6 +82,7 @@ pub struct TeacherFilePullInbox<S: FileTransferInboxSink> {
     last_inbound_sequence: u64,
     terminal: bool,
     completed: bool,
+    local_completion_receipt: Option<FileTransferStatus>,
 }
 
 impl<S: FileTransferInboxSink> TeacherFilePullInbox<S> {
@@ -117,12 +118,23 @@ impl<S: FileTransferInboxSink> TeacherFilePullInbox<S> {
             last_inbound_sequence,
             terminal: false,
             completed: false,
+            local_completion_receipt: None,
         })
     }
 
     #[must_use]
     pub fn sink(&self) -> &S {
         self.receiver.sink()
+    }
+
+    /// In-process evidence that the sink committed a verified transfer, NOT
+    /// evidence that the peer received Completed. The caller must preserve
+    /// its own durable receipt/manifest before treating this as crash-recoverable;
+    /// a lost acknowledgement requires explicit reconciliation, never an
+    /// automatic retry or an unsafe deletion of a published file.
+    #[must_use]
+    pub fn local_completion_receipt(&self) -> Option<&FileTransferStatus> {
+        self.local_completion_receipt.as_ref()
     }
 
     fn apply_verified_frame(
@@ -242,6 +254,15 @@ impl<S: FileTransferInboxSink> TeacherFilePullInbox<S> {
             // frame; deny before writing any bytes or committing the file.
             verify_current_teacher_permission(session, authorization)?;
             let status = self.apply_verified_frame(message.into_envelope())?;
+            // A durable local sink commit precedes the network acknowledgement.
+            // Preserve that fact even if the status send fails ambiguously;
+            // it is NOT proof the peer received Completed, and must not trigger
+            // an automatic retry or an unsafe delete of the committed file.
+            if status.state == FileTransferState::Completed as i32 {
+                self.local_completion_receipt = Some(status.clone());
+            }
+            // Recheck after the sink may have committed. A newly revoked
+            // Teacher must not send a success status to the remote peer.
             verify_current_teacher_permission(session, authorization)?;
             let sequence = outbound_sequence
                 .checked_add(1)
@@ -281,7 +302,11 @@ impl<S: FileTransferInboxSink> TeacherFilePullInbox<S> {
             }
             Err(error) => {
                 self.terminal = true;
-                self.abort_pending();
+                // Never abort a transfer whose sink already committed. Its
+                // receipt must remain available for explicit reconciliation.
+                if self.local_completion_receipt.is_none() {
+                    self.abort_pending();
+                }
                 session
                     .connection
                     .close(0_u32.into(), b"teacher file pull reply invalid");
@@ -332,6 +357,7 @@ mod tests {
         data: Vec<u8>,
         committed: bool,
         aborted: bool,
+        close_on_complete: Option<quinn::Connection>,
     }
     impl FileTransferInboxSink for InboxSink {
         type Error = ();
@@ -353,6 +379,9 @@ mod tests {
         }
         fn complete(&mut self, _id: &[u8; 16]) -> Result<(), ()> {
             self.committed = true;
+            if let Some(connection) = &self.close_on_complete {
+                connection.close(0_u32.into(), b"test: close after sink commit");
+            }
             Ok(())
         }
         fn abort(&mut self, _id: &[u8; 16]) {
@@ -371,9 +400,9 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn authenticated_quic_offer_chunk_finish_persists_bytes_before_completed_status()
-    -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn authenticated_quic_transfer_scenario(
+        close_after_commit: bool,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let cert = generate_simple_self_signed(vec!["classmesh.local".into()])?;
         let certificate = CertificateDer::from(cert.cert);
         let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
@@ -455,14 +484,18 @@ mod tests {
                 ))
                 .await
                 .map_err(|e| e.to_string())?;
-            let completed = channel.receive().await.map_err(|e| e.to_string())?;
-            assert!(matches!(
-                completed.payload,
-                Some(control_envelope::Payload::FileTransferStatus(ref status))
-                if status.state == FileTransferState::Completed as i32
-                    && status.next_offset == bytes.len() as u64
-            ));
-            assert_eq!(completed.sequence, 4);
+            if close_after_commit {
+                assert!(channel.receive().await.is_err());
+            } else {
+                let completed = channel.receive().await.map_err(|e| e.to_string())?;
+                assert!(matches!(
+                    completed.payload,
+                    Some(control_envelope::Payload::FileTransferStatus(ref status))
+                    if status.state == FileTransferState::Completed as i32
+                        && status.next_offset == bytes.len() as u64
+                ));
+                assert_eq!(completed.sequence, 4);
+            }
             Ok::<_, String>(())
         });
 
@@ -509,9 +542,18 @@ mod tests {
             })
             .map_err(|e| format!("{e:?}"))?;
         let live = LiveAuthorizationStore::new(store);
-        let mut inbox =
-            TeacherFilePullInbox::new(&session, EXPECTED, 11, [9; 16], 1, InboxSink::default())
-                .expect("valid negotiated Teacher file-pull session");
+        let mut inbox = TeacherFilePullInbox::new(
+            &session,
+            EXPECTED,
+            11,
+            [9; 16],
+            1,
+            InboxSink {
+                close_on_complete: close_after_commit.then(|| session.connection.clone()),
+                ..InboxSink::default()
+            },
+        )
+        .expect("valid negotiated Teacher file-pull session");
         let mut outbound_seq = 1;
         // These outer envelopes must fail without consuming the expected
         // sequence or admitting an unauthenticated cross-device transfer.
@@ -557,20 +599,65 @@ mod tests {
             .await?;
         assert_eq!(progress.state, FileTransferState::Progress as i32);
         assert!(!inbox.sink().committed);
-        let completed = inbox
-            .receive_and_reply(&mut session, &live, &mut outbound_seq, || 150)
-            .await?;
-        assert_eq!(completed.state, FileTransferState::Completed as i32);
-        assert_eq!(outbound_seq, 4);
-        assert!(inbox.sink().committed);
-        assert_eq!(inbox.sink().data, b"ClassMesh staged file bytes");
-        assert!(matches!(
-            inbox
-                .receive_and_reply(&mut session, &live, &mut outbound_seq, || 150,)
-                .await,
-            Err(TeacherFilePullReceiveError::AlreadyCompleted)
-        ));
+        if close_after_commit {
+            let failed_ack = inbox
+                .receive_and_reply(&mut session, &live, &mut outbound_seq, || 150)
+                .await;
+            assert!(matches!(
+                failed_ack,
+                Err(TeacherFilePullReceiveError::Transport(_))
+            ));
+            assert_eq!(outbound_seq, 4);
+            assert!(inbox.sink().committed);
+            assert!(!inbox.sink().aborted);
+            assert_eq!(
+                inbox
+                    .local_completion_receipt()
+                    .map(|receipt| receipt.next_offset),
+                Some(b"ClassMesh staged file bytes".len() as u64)
+            );
+            assert_eq!(inbox.sink().data, b"ClassMesh staged file bytes");
+            assert!(matches!(
+                inbox
+                    .receive_and_reply(&mut session, &live, &mut outbound_seq, || 150,)
+                    .await,
+                Err(TeacherFilePullReceiveError::InvalidBinding)
+            ));
+        } else {
+            let completed = inbox
+                .receive_and_reply(&mut session, &live, &mut outbound_seq, || 150)
+                .await?;
+            assert_eq!(completed.state, FileTransferState::Completed as i32);
+            assert_eq!(outbound_seq, 4);
+            assert!(inbox.sink().committed);
+            assert!(!inbox.sink().aborted);
+            assert_eq!(
+                inbox
+                    .local_completion_receipt()
+                    .map(|receipt| receipt.next_offset),
+                Some(b"ClassMesh staged file bytes".len() as u64)
+            );
+            assert_eq!(inbox.sink().data, b"ClassMesh staged file bytes");
+            assert!(matches!(
+                inbox
+                    .receive_and_reply(&mut session, &live, &mut outbound_seq, || 150,)
+                    .await,
+                Err(TeacherFilePullReceiveError::AlreadyCompleted)
+            ));
+        }
         server_task.await??;
         Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authenticated_quic_offer_chunk_finish_persists_bytes_before_completed_status()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        authenticated_quic_transfer_scenario(false).await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authenticated_quic_ack_failure_after_sink_commit_exposes_local_receipt()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        authenticated_quic_transfer_scenario(true).await
     }
 }
