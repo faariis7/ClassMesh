@@ -183,9 +183,15 @@ impl FileTransferInboxSink for TeacherFileInbox {
             let _ = fs::remove_file(active.temp_path);
             return Err(TeacherFileInboxError::ExistingTransfer);
         }
-        // The .bin is committed. A failed best-effort unlink leaves a harmless
-        // stale .part, not an unverified published file.
-        let _ = fs::remove_file(active.temp_path);
+        // Do not acknowledge a committed file while a second .part name can
+        // still be opened to modify its bytes. On Windows an unrelated HANDLE
+        // can deny deletion even after the sink closes its own file handle.
+        if fs::remove_file(&active.temp_path).is_err() {
+            // Best-effort rollback: a concurrently held no-share-delete HANDLE
+            // may prevent both unlinks. In that case return Io, never Completed.
+            let _ = fs::remove_file(&active.final_path);
+            return Err(TeacherFileInboxError::Io);
+        }
         Ok(())
     }
 
@@ -366,6 +372,35 @@ mod tests {
         ));
         fs::remove_file(alias).unwrap();
         fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inbox_must_not_ack_completed_if_windows_refuses_part_unlink() {
+        let root = temp_root("blocked-part-unlink");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"DATA").unwrap();
+        let part = root.join(format!("{}.part", "71".repeat(16)));
+        let final_path = sink.completed_path(&ID);
+        use std::os::windows::fs::OpenOptionsExt;
+        // A second local HANDLE that shares read/write but not delete keeps
+        // the hard link publish possible while refusing the .part unlink.
+        let blocker = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2)
+            .open(&part)
+            .unwrap();
+        assert_eq!(sink.complete(&ID), Err(TeacherFileInboxError::Io));
+        drop(blocker);
+        if final_path.exists() {
+            fs::remove_file(&final_path).unwrap();
+        }
+        if part.exists() {
+            fs::remove_file(&part).unwrap();
+        }
+        fs::remove_dir(root).unwrap();
     }
 
     #[cfg(windows)]
