@@ -371,6 +371,25 @@ impl TeacherEguiShell {
             )
             .ok()?;
         }
+        // The Diagnostics page checks readiness when clicked, but a queued
+        // override can outlive selection or device health changes. Retire it
+        // before engine handoff, while still allowing offline Automatic reset.
+        // The engine remains responsible for authoritative authorization and
+        // physical-path evidence at apply time.
+        if let TeacherUiAction::Diagnostics(diagnostics) = &action {
+            if self.classroom.selected() != Some(diagnostics.source_id)
+                || !self.classroom.rows().into_iter().any(|row| {
+                    row.source_id == diagnostics.source_id
+                        && crate::ui_diagnostics::override_action_available(
+                            diagnostics.request,
+                            row.health,
+                            false,
+                        )
+                })
+            {
+                return None;
+            }
+        }
         // UI snapshots are not authorization, but a newer local lifecycle
         // observation must retire obsolete Start/Stop intents before handoff.
         // The actual presentation lifecycle still revalidates at apply time.
