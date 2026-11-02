@@ -239,23 +239,42 @@ mod tests {
         let state = classmesh.join("state");
         let outbox = state.join("file-outbox");
         std::fs::create_dir_all(&outbox).expect("create fixture");
-        // Remove inherited ACEs only on disposable fixture directories, so
-        // the positive control is not dependent on the runner's temp ACL.
+        // Remove inherited ACEs only on disposable fixture directories and
+        // explicitly grant the current service/test identity. Without this
+        // grant a non-admin fixture owner may lose directory traversal.
+        let identity = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+            ])
+            .output()
+            .expect("read current test SID");
+        assert!(identity.status.success(), "test SID unavailable");
+        let sid = String::from_utf8(identity.stdout).expect("SID text");
+        let grant = format!("*{}:(OI)(CI)F", sid.trim());
         for path in [&outbox, &state, &classmesh] {
-            let result = Command::new("icacls")
-                .arg(path)
-                .args(["/inheritance:r"])
-                .output()
-                .expect("icacls available");
-            assert!(
-                result.status.success(),
-                "fixture ACL isolation failed: {:?}",
-                result
-            );
+            for args in [
+                vec!["/inheritance:r".to_owned()],
+                vec!["/grant".to_owned(), grant.clone()],
+            ] {
+                let result = Command::new("icacls")
+                    .arg(path)
+                    .args(&args)
+                    .output()
+                    .expect("icacls available");
+                assert!(
+                    result.status.success(),
+                    "fixture ACL setup failed: {:?}",
+                    result
+                );
+            }
         }
         assert!(
             verify_private_outbox(&outbox).is_ok(),
-            "private Outbox must be accepted"
+            "private Outbox must be accepted: {:?}",
+            verify_private_outbox(&outbox)
         );
         let output = Command::new("icacls")
             .arg(&classmesh)
