@@ -1,10 +1,13 @@
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 
+pub mod capture_cadence;
 pub mod clipboard_native;
 pub mod clipboard_read_fallback;
 pub mod clipboard_read_guarded;
 #[cfg(windows)]
 pub mod encoder_benchmark;
+#[cfg(any(windows, test))]
+mod encoder_benchmark_keyframe_retry;
 pub mod group_media_receive;
 #[cfg(windows)]
 pub mod monitoring;

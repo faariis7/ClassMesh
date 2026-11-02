@@ -38,6 +38,8 @@ pub struct WorkerWatchdog {
     policy: WorkerRestartPolicy,
     process: Option<WorkerProcess>,
     consecutive_failures: u8,
+    /// The failure streak belongs to one interactive Windows session only.
+    failure_session: Option<SessionId>,
 }
 
 impl WorkerWatchdog {
@@ -47,10 +49,15 @@ impl WorkerWatchdog {
             policy,
             process: None,
             consecutive_failures: 0,
+            failure_session: None,
         }
     }
 
     pub fn launched(&mut self, process: WorkerProcess) {
+        if self.failure_session != Some(process.session) {
+            self.consecutive_failures = 0;
+            self.failure_session = None;
+        }
         self.process = Some(process);
     }
 
@@ -65,12 +72,21 @@ impl WorkerWatchdog {
             .is_some_and(|process| process.session == session)
         {
             self.process = None;
+        }
+        // A session may have exhausted its budget without ever launching.
+        // An intentional stop/logoff must rearm that session's next lifecycle.
+        if self.failure_session == Some(session) {
+            self.failure_session = None;
             self.consecutive_failures = 0;
         }
     }
 
     pub fn launch_failed(&mut self, session: SessionId) -> WorkerRestartDecision {
-        self.process = None;
+        // A failed launch attempt cannot invalidate an already-running Worker.
+        // Only an exact process/session exit may retire that process.
+        if self.process.is_some() {
+            return WorkerRestartDecision::Ignore;
+        }
         self.next_failure_decision(session)
     }
 
@@ -100,6 +116,10 @@ impl WorkerWatchdog {
     }
 
     fn next_failure_decision(&mut self, session: SessionId) -> WorkerRestartDecision {
+        if self.failure_session != Some(session) {
+            self.failure_session = Some(session);
+            self.consecutive_failures = 0;
+        }
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
 
         if self.consecutive_failures > self.policy.max_consecutive_failures {
@@ -224,5 +244,76 @@ mod tests {
             }
         );
         assert_eq!(watchdog.consecutive_failures(), 1);
+    }
+    #[test]
+    fn failure_budget_is_not_inherited_by_a_different_windows_session() {
+        let mut watchdog = WorkerWatchdog::new(WorkerRestartPolicy {
+            base_backoff_us: 100,
+            max_backoff_us: 500,
+            reset_after_healthy_us: 10_000,
+            max_consecutive_failures: 1,
+        });
+        let old = SessionId(4);
+        let next = SessionId(5);
+        assert_eq!(
+            watchdog.launch_failed(old),
+            WorkerRestartDecision::RelaunchAfter {
+                session: old,
+                delay_us: 100
+            }
+        );
+        assert_eq!(
+            watchdog.launch_failed(old),
+            WorkerRestartDecision::GiveUp { session: old }
+        );
+        assert_eq!(
+            watchdog.launch_failed(next),
+            WorkerRestartDecision::RelaunchAfter {
+                session: next,
+                delay_us: 100
+            }
+        );
+        assert_eq!(watchdog.consecutive_failures(), 1);
+    }
+
+    #[test]
+    fn intentional_stop_after_give_up_rearms_same_session_restart_budget() {
+        let session = SessionId(6);
+        let mut watchdog = WorkerWatchdog::new(WorkerRestartPolicy {
+            base_backoff_us: 100,
+            max_backoff_us: 500,
+            reset_after_healthy_us: 10_000,
+            max_consecutive_failures: 1,
+        });
+        let _ = watchdog.launch_failed(session);
+        assert_eq!(
+            watchdog.launch_failed(session),
+            WorkerRestartDecision::GiveUp { session }
+        );
+        watchdog.stopped_intentionally(session);
+        assert_eq!(
+            watchdog.launch_failed(session),
+            WorkerRestartDecision::RelaunchAfter {
+                session,
+                delay_us: 100
+            }
+        );
+    }
+
+    #[test]
+    fn stale_other_session_launch_failure_cannot_retire_live_worker() {
+        let active = WorkerProcess {
+            session: SessionId(7),
+            process_id: 42,
+            launched_at_us: 10,
+        };
+        let mut watchdog = WorkerWatchdog::new(WorkerRestartPolicy::default());
+        watchdog.launched(active);
+        assert_eq!(
+            watchdog.launch_failed(SessionId(6)),
+            WorkerRestartDecision::Ignore
+        );
+        assert_eq!(watchdog.process(), Some(active));
+        assert_eq!(watchdog.consecutive_failures(), 0);
     }
 }
