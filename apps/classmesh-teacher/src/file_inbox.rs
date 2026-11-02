@@ -361,8 +361,21 @@ struct ActiveFile {
 // Provisioning belongs to the caller; never silently chmod an existing root.
 #[cfg(unix)]
 fn root_permissions_safe(metadata: &fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o077 == 0
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    // A private mode alone is insufficient: a foreign directory owner can
+    // replace its entries even when other users cannot traverse it. Teacher
+    // storage is a per-user resource, never a privileged/root-owned sink.
+    // Use the effective identity that actually controls filesystem access;
+    // do not silently chown a caller-provisioned directory.
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: geteuid is a side-effect-free POSIX process identity query.
+    let effective_uid = unsafe { geteuid() };
+    effective_uid != 0
+        && metadata.uid() == effective_uid
+        && metadata.permissions().mode() & 0o077 == 0
 }
 
 // A private inbox is not safe beneath a non-sticky group/world-writable
@@ -814,6 +827,50 @@ mod tests {
             "private preprovisioned root remains admissible"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_rejects_foreign_owned_private_root_without_modifying_it() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::process::Command;
+
+        // Existing OS-owned fixtures are inspected read-only. Never chown or
+        // write to a foreign directory to simulate an attacker's AppInbox.
+        let candidates: &[&str] = if cfg!(target_os = "macos") {
+            &["/private/var/db/Spotlight", "/private/var/db/modelmanagerd"]
+        } else if cfg!(target_os = "linux") {
+            &["/root"]
+        } else {
+            &[]
+        };
+        let output = Command::new("id").arg("-u").output().expect("Unix id -u");
+        assert!(output.status.success());
+        let current_uid: u32 = String::from_utf8(output.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let foreign = candidates
+            .iter()
+            .map(std::path::Path::new)
+            .find(|candidate| {
+                fs::symlink_metadata(candidate).is_ok_and(|metadata| {
+                    metadata.is_dir()
+                        && metadata.permissions().mode() & 0o777 == 0o700
+                        && metadata.uid() != current_uid
+                })
+            });
+        let Some(foreign) = foreign else {
+            eprintln!(
+                "No foreign-owned 0700 system directory fixture; skipping fixture-only assertion"
+            );
+            return;
+        };
+        assert!(matches!(
+            TeacherFileInbox::new(foreign),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
     }
 
     #[cfg(unix)]
