@@ -706,8 +706,19 @@ mod tests {
         let inbox = parent.join("inbox");
         fs::create_dir_all(&inbox).unwrap();
         // A mutable intermediate directory must not redirect dot-dot
-        // traversal after the admission checks.
+        // traversal after the admission checks. On Windows, canonicalize()
+        // produces a verbatim \\?\ path: PathBuf::join("..") normalizes
+        // that spelling *before* the inbox sees it. Construct an unnormalized
+        // input to exercise the actual lexical admission gate on Windows.
+        #[cfg(windows)]
+        let ambiguous = std::path::PathBuf::from(format!(r"{}\..\inbox", inbox.display()));
+        #[cfg(not(windows))]
         let ambiguous = inbox.join("..").join("inbox");
+        assert!(
+            ambiguous
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        );
         assert!(matches!(
             TeacherFileInbox::new(ambiguous),
             Err(TeacherFileInboxError::InvalidRoot)
