@@ -5,6 +5,8 @@ mod file_pull_idle;
 #[cfg(windows)]
 mod file_transfer_acl;
 #[cfg(any(windows, test))]
+mod file_transfer_readiness;
+#[cfg(any(windows, test))]
 pub mod file_transfer_storage;
 #[cfg(windows)]
 pub mod monitoring;
@@ -136,6 +138,7 @@ mod windows_service_app {
         WorkerCapabilityState,
     };
     use crate::file_pull_idle::{FilePullAckLedger, FilePullIdleLease};
+    use crate::file_transfer_readiness::FileTransferReadiness;
     use crate::file_transfer_storage::{
         WindowsFileTransferInboxSink, WindowsFileTransferOutboxSource,
     };
@@ -2112,11 +2115,12 @@ mod windows_service_app {
         // Optional FileTransfer is disabled when legacy/unsafe ProgramData ACLs
         // are found. Keep core Service control, Worker and media operational.
         // The dispatch gate below also prevents any local queued source read.
-        let mut file_transfer_ready =
+        let file_transfer_ready = FileTransferReadiness::new(
             crate::file_transfer_acl::prepare_optional_file_transfer_storage(
                 &inbox_root,
                 &outbox_root,
-            );
+            ),
+        );
         let mut file_receiver =
             FileTransferReceiver::new(WindowsFileTransferInboxSink::new(inbox_root.clone()));
         let mut file_source = FileTransferSourceSession::new(WindowsFileTransferOutboxSource::new(
@@ -2132,7 +2136,7 @@ mod windows_service_app {
             presentation_channels,
             presentation_feedback.clone(),
             Arc::clone(&worker_capabilities),
-            file_transfer_ready,
+            file_transfer_ready.clone(),
         );
         let mut control_runtime =
             match ControlRuntime::start(control_state, control_config, control_dispatch) {
@@ -2239,14 +2243,14 @@ mod windows_service_app {
                 // permanently disable this runtime's transfer dispatch if the
                 // protected Inbox or Outbox changes. Never serve or accept a
                 // queued transfer afterward.
-                if file_transfer_ready
+                if file_transfer_ready.is_ready()
                     && crate::file_transfer_acl::verify_private_file_transfer_storage(
                         &inbox_root,
                         &outbox_root,
                     )
                     .is_err()
                 {
-                    file_transfer_ready = false;
+                    file_transfer_ready.disable();
                     eprintln!(
                         "ClassMesh FileTransfer disabled: Inbox/Outbox ACL changed after startup"
                     );
@@ -2259,7 +2263,7 @@ mod windows_service_app {
                         let _ = file_pull_owner.release(pending.control_session_id);
                     }
                 }
-                if !file_transfer_ready {
+                if !file_transfer_ready.is_ready() {
                     let _ = dispatch
                         .reply_tx
                         .send(FileTransferDispatchOutcome::SourceUnavailable);
