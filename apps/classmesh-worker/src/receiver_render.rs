@@ -4,13 +4,13 @@ use classmesh_codec_win::mf_decoder::DecodedGpuFrame;
 use classmesh_render_win::{
     DxgiFailureClass, FlipPresenter, PresentMetrics, ResizeOutcome, classify_dxgi_error,
 };
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, IDC_ARROW, LoadCursorW, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage,
-    RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WM_DESTROY, WM_QUIT, WM_SIZE, WNDCLASSW,
+    DispatchMessageW, GetClientRect, IDC_ARROW, IsWindow, LoadCursorW, MSG, PM_REMOVE,
+    PeekMessageW, RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WM_QUIT, WNDCLASSW,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::{Interface, w};
@@ -83,7 +83,15 @@ impl PresentationWindow {
                 None,
             )?
         };
-        let presenter = FlipPresenter::new(hwnd, device, width, height)?;
+        let presenter = match FlipPresenter::new(hwnd, device, width, height) {
+            Ok(presenter) => presenter,
+            Err(error) => {
+                // The PresentationWindow owner does not exist yet, so its Drop
+                // cannot close this HWND on a failed D3D11/DXGI initialization.
+                let _ = unsafe { DestroyWindow(hwnd) };
+                return Err(error);
+            }
+        };
 
         Ok(Self {
             hwnd,
@@ -182,48 +190,66 @@ impl PresentationWindow {
 
     /// Drains pending Win32 messages without blocking media receive/decode.
     ///
-    /// `WM_SIZE` is consumed as a renderer lifecycle signal. Zero client dimensions suspend
-    /// presentation while the window is minimized; restoring/resizing the window performs a
-    /// bounded `ResizeBuffers` and lazily rebuilds the video processor on the next frame.
+    /// Win32 delivers WM_SIZE synchronously, so queued-message inspection alone misses
+    /// real resizes. After dispatch, read the actual client rectangle and resize the presenter.
+    /// Zero client dimensions suspend rendering while minimized.
     ///
     /// Returns `false` after the presentation window has closed.
     pub fn pump_messages(&mut self) -> bool {
         let mut message = MSG::default();
         while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() } {
             if message.message == WM_QUIT {
+                // WM_QUIT belongs to the thread, not this HWND. It does not
+                // destroy the window; close it before suppressing Drop cleanup.
+                let _ = unsafe { DestroyWindow(self.hwnd) };
                 self.closed = true;
                 break;
-            }
-            if message.message == WM_SIZE && message.hwnd == self.hwnd {
-                let (width, height) = client_size_from_lparam(message.lParam);
-                self.client_size = (width, height);
-                if let Some(presenter) = self.presenter.as_mut() {
-                    match presenter.resize_output(width, height) {
-                        Ok(ResizeOutcome::Resized) => {
-                            eprintln!("student presentation resized to {width}x{height}");
-                        }
-                        Ok(ResizeOutcome::Suspended) => {
-                            eprintln!(
-                                "student presentation suspended while the window is minimized"
-                            );
-                        }
-                        Ok(ResizeOutcome::Unchanged) => {}
-                        Err(error) => {
-                            if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
-                                self.device_lost = true;
-                            }
-                            eprintln!(
-                                "student presentation swap-chain resize failed at {width}x{height}: {error}"
-                            );
-                        }
-                    }
-                } else {
-                    self.device_lost = true;
-                }
             }
             unsafe {
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
+            }
+            // DefWindowProcW destroys this HWND on WM_CLOSE synchronously.
+            // No process/thread-wide WM_QUIT should be posted: the Worker may
+            // later open another presentation on the same interactive thread.
+            if !unsafe { IsWindow(Some(self.hwnd)).as_bool() } {
+                self.closed = true;
+                break;
+            }
+        }
+        if !self.closed {
+            let mut rect = RECT::default();
+            if unsafe { GetClientRect(self.hwnd, &mut rect) }.is_ok() {
+                let width = u32::try_from(rect.right - rect.left).unwrap_or(0);
+                let height = u32::try_from(rect.bottom - rect.top).unwrap_or(0);
+                if self.client_size != (width, height) {
+                    self.client_size = (width, height);
+                    if let Some(presenter) = self.presenter.as_mut() {
+                        match presenter.resize_output(width, height) {
+                            Ok(ResizeOutcome::Resized) => {
+                                eprintln!("student presentation resized to {width}x{height}");
+                            }
+                            Ok(ResizeOutcome::Suspended) => {
+                                eprintln!(
+                                    "student presentation suspended while the window is minimized"
+                                );
+                            }
+                            Ok(ResizeOutcome::Unchanged) => {}
+                            Err(error) => {
+                                if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
+                                    self.device_lost = true;
+                                }
+                                eprintln!(
+                                    "student presentation swap-chain resize failed at {width}x{height}: {error}"
+                                );
+                            }
+                        }
+                    } else {
+                        self.device_lost = true;
+                    }
+                }
+            } else if !unsafe { IsWindow(Some(self.hwnd)).as_bool() } {
+                self.closed = true;
             }
         }
         !self.closed
@@ -251,23 +277,14 @@ impl Drop for PresentationWindow {
     }
 }
 
-fn client_size_from_lparam(lparam: LPARAM) -> (u32, u32) {
-    let packed = lparam.0 as usize;
-    let width = u32::try_from(packed & 0xffff).unwrap_or(0);
-    let height = u32::try_from((packed >> 16) & 0xffff).unwrap_or(0);
-    (width, height)
-}
-
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if message == WM_DESTROY {
-        unsafe { PostQuitMessage(0) };
-        return LRESULT(0);
-    }
+    // WM_DESTROY is scoped to this presentation HWND. Do not call
+    // PostQuitMessage: it would poison the Worker thread for later sessions.
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
@@ -276,16 +293,258 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_client_size_from_wm_size_lparam() {
-        let packed = (720usize << 16) | 1280usize;
-        assert_eq!(
-            client_size_from_lparam(LPARAM(packed as isize)),
-            (1280, 720)
-        );
+    fn destroying_receiver_window_does_not_post_global_thread_quit() {
+        // A Worker can close one presentation and start another on the same
+        // interactive thread. Its HWND must not terminate that thread's queue.
+        std::thread::spawn(|| {
+            let module = unsafe { GetModuleHandleW(None).unwrap() };
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: module.into(),
+                lpszClassName: WINDOW_CLASS,
+                ..Default::default()
+            };
+            let _ = unsafe { RegisterClassW(&class) };
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    WINDOW_CLASS,
+                    WINDOW_TITLE,
+                    WS_OVERLAPPEDWINDOW,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    320,
+                    180,
+                    None,
+                    None,
+                    Some(module.into()),
+                    None,
+                )
+                .unwrap()
+            };
+            unsafe { DestroyWindow(hwnd).unwrap() };
+            let mut message = MSG::default();
+            let mut posted_quit = false;
+            while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() } {
+                posted_quit |= message.message == WM_QUIT;
+            }
+            assert!(
+                !posted_quit,
+                "closing one presentation must not quit the Worker thread"
+            );
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
-    fn zero_wm_size_dimensions_are_preserved_for_minimize() {
-        assert_eq!(client_size_from_lparam(LPARAM(0)), (0, 0));
+    fn closing_receiver_window_is_observed_without_global_quit() {
+        std::thread::spawn(|| {
+            let module = unsafe { GetModuleHandleW(None).unwrap() };
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: module.into(),
+                lpszClassName: WINDOW_CLASS,
+                ..Default::default()
+            };
+            let _ = unsafe { RegisterClassW(&class) };
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    WINDOW_CLASS,
+                    WINDOW_TITLE,
+                    WS_OVERLAPPEDWINDOW,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    320,
+                    180,
+                    None,
+                    None,
+                    Some(module.into()),
+                    None,
+                )
+                .unwrap()
+            };
+            let mut receiver = PresentationWindow {
+                hwnd,
+                presenter: None,
+                closed: false,
+                client_size: (320, 180),
+                device_lost: false,
+            };
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    Some(hwnd),
+                    windows::Win32::UI::WindowsAndMessaging::WM_CLOSE,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+                .unwrap()
+            };
+            assert!(
+                !receiver.pump_messages(),
+                "closing HWND must stop the presentation"
+            );
+            assert!(receiver.closed);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn thread_quit_must_not_leave_presentation_hwnd_after_drop() {
+        // A thread-wide quit can originate outside this HWND. Marking the
+        // presentation closed must not suppress its final HWND cleanup.
+        std::thread::spawn(|| {
+            let module = unsafe { GetModuleHandleW(None).unwrap() };
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: module.into(),
+                lpszClassName: WINDOW_CLASS,
+                ..Default::default()
+            };
+            let _ = unsafe { RegisterClassW(&class) };
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    WINDOW_CLASS,
+                    WINDOW_TITLE,
+                    WS_OVERLAPPEDWINDOW,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    320,
+                    180,
+                    None,
+                    None,
+                    Some(module.into()),
+                    None,
+                )
+                .unwrap()
+            };
+            let mut receiver = PresentationWindow {
+                hwnd,
+                presenter: None,
+                closed: false,
+                client_size: (320, 180),
+                device_lost: false,
+            };
+            unsafe { windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0) };
+            assert!(!receiver.pump_messages());
+            assert!(receiver.closed);
+            drop(receiver);
+            let leaked = unsafe { IsWindow(Some(hwnd)).as_bool() };
+            if leaked {
+                // Clean up even on RED so the regression cannot leak test HWNDs.
+                let _ = unsafe { DestroyWindow(hwnd) };
+            }
+            assert!(!leaked, "WM_QUIT must not leak the presentation HWND");
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn failed_presenter_initialization_destroys_its_new_window() {
+        use classmesh_codec_win::d3d11::create_default_video_device;
+        use windows::Win32::UI::WindowsAndMessaging::{EnumThreadWindows, GetClassNameW};
+        use windows::core::BOOL;
+        use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+
+        unsafe extern "system" fn count_window(hwnd: HWND, state: LPARAM) -> BOOL {
+            let mut class = [0u16; 64];
+            let len = unsafe { GetClassNameW(hwnd, &mut class) };
+            let expected: Vec<u16> = "ClassMeshMediaReceiverWindow".encode_utf16().collect();
+            if len > 0 && class[..len as usize] == expected {
+                let count = unsafe { &mut *(state.0 as *mut usize) };
+                *count += 1;
+            }
+            BOOL(1)
+        }
+
+        fn thread_window_count() -> usize {
+            let mut count = 0usize;
+            let thread_id = unsafe { GetCurrentThreadId() };
+            let _ = unsafe {
+                EnumThreadWindows(
+                    thread_id,
+                    Some(count_window),
+                    LPARAM((&raw mut count) as isize),
+                )
+            };
+            count
+        }
+
+        // Use a dedicated Win32 thread so unrelated test windows cannot mask
+        // the leaked HWND. Zero output width fails inside FlipPresenter::new,
+        // after PresentationWindow::new has already created its HWND.
+        std::thread::spawn(|| {
+            let device = create_default_video_device().expect("D3D11 test device");
+            let before = thread_window_count();
+            assert!(PresentationWindow::new(&device, 0, 720).is_err());
+            assert_eq!(
+                thread_window_count(),
+                before,
+                "failed presenter initialization must not leave a live HWND"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn synchronous_win32_resize_updates_presentation_client_size() {
+        use windows::Win32::UI::WindowsAndMessaging::{SWP_NOMOVE, SWP_NOZORDER, SetWindowPos};
+
+        std::thread::spawn(|| {
+            let module = unsafe { GetModuleHandleW(None).unwrap() };
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: module.into(),
+                lpszClassName: WINDOW_CLASS,
+                ..Default::default()
+            };
+            let _ = unsafe { RegisterClassW(&class) };
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    WINDOW_CLASS,
+                    WINDOW_TITLE,
+                    WS_OVERLAPPEDWINDOW,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    320,
+                    180,
+                    None,
+                    None,
+                    Some(module.into()),
+                    None,
+                )
+                .unwrap()
+            };
+            let mut receiver = PresentationWindow {
+                hwnd,
+                presenter: None,
+                closed: false,
+                client_size: (320, 180),
+                device_lost: false,
+            };
+            // SetWindowPos delivers WM_SIZE synchronously, not necessarily as a
+            // queued message returned by PeekMessageW.
+            unsafe { SetWindowPos(hwnd, None, 0, 0, 640, 480, SWP_NOMOVE | SWP_NOZORDER).unwrap() };
+            let mut rect = RECT::default();
+            unsafe { GetClientRect(hwnd, &mut rect).unwrap() };
+            let actual = (
+                (rect.right - rect.left) as u32,
+                (rect.bottom - rect.top) as u32,
+            );
+            assert_ne!(actual, (320, 180));
+            assert!(receiver.pump_messages());
+            assert_eq!(
+                receiver.client_size, actual,
+                "synchronous WM_SIZE must update presentation dimensions"
+            );
+        })
+        .join()
+        .unwrap();
     }
 }

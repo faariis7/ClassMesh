@@ -85,6 +85,9 @@ pub struct WorkerGroupMediaAuthenticationStats {
 pub struct WorkerGroupMediaKeyState {
     installed: Option<InstalledWorkerGroupMediaKey>,
     authentication_stats: WorkerGroupMediaAuthenticationStats,
+    // A successful in-place key epoch rotation invalidates decoder reference
+    // frames even when the presentation/stream identity stays unchanged.
+    decoder_resync_pending: bool,
 }
 
 impl WorkerGroupMediaKeyState {
@@ -96,6 +99,13 @@ impl WorkerGroupMediaKeyState {
     #[must_use]
     pub fn is_installed(&self) -> bool {
         self.installed.is_some()
+    }
+
+    /// Consume the one-shot decoder flush required after a successful key
+    /// rotation. The caller must run this on the live Worker media thread;
+    /// this state never performs GPU operations itself.
+    pub fn take_decoder_resync(&mut self) -> bool {
+        std::mem::take(&mut self.decoder_resync_pending)
     }
 
     /// A snapshot belongs only to the currently installed media key epoch.
@@ -124,6 +134,7 @@ impl WorkerGroupMediaKeyState {
             }
         }
 
+        let replacing_existing_key = self.installed.is_some();
         let (binding, mut key_bytes) = install.into_parts();
         let epoch = GroupMediaEpoch::new(binding.epoch)?;
         let key_material = GroupMediaKeyMaterial::import_received_wire(&mut key_bytes[..])?;
@@ -131,6 +142,7 @@ impl WorkerGroupMediaKeyState {
 
         self.installed = Some(InstalledWorkerGroupMediaKey { binding, receiver });
         self.authentication_stats = WorkerGroupMediaAuthenticationStats::default();
+        self.decoder_resync_pending |= replacing_existing_key;
         Ok(binding)
     }
 
@@ -218,6 +230,7 @@ impl WorkerGroupMediaKeyState {
         let cleared = self.installed.take().is_some();
         if cleared {
             self.authentication_stats = WorkerGroupMediaAuthenticationStats::default();
+            self.decoder_resync_pending = false;
         }
         cleared
     }
@@ -495,6 +508,150 @@ mod tests {
                 .open_frame(&received(&sealed))
                 .expect("old receiver retained"),
             b"still-current"
+        );
+    }
+
+    #[test]
+    fn key_rotation_requests_one_decoder_resync_only_after_successful_install() {
+        let mut state = WorkerGroupMediaKeyState::default();
+        assert!(!state.take_decoder_resync());
+
+        state
+            .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x37))
+            .expect("first install");
+        assert!(
+            !state.take_decoder_resync(),
+            "first key has no prior decoder state"
+        );
+
+        assert!(
+            state
+                .install(sensitive(77, 45, PRESENTATION_ID, STREAM_ID, 3, 0x38))
+                .is_err()
+        );
+        assert!(
+            !state.take_decoder_resync(),
+            "rejected key must not flush playback"
+        );
+
+        state
+            .install(sensitive(77, 46, PRESENTATION_ID, STREAM_ID, 4, 0x39))
+            .expect("rotate live presentation");
+        assert!(
+            state.take_decoder_resync(),
+            "new epoch must flush old H264 references"
+        );
+        assert!(
+            !state.take_decoder_resync(),
+            "resync is consumed exactly once"
+        );
+
+        state
+            .install(sensitive(77, 47, PRESENTATION_ID, STREAM_ID, 5, 0x40))
+            .expect("rotate again");
+        assert!(state.clear_if_matches(ServicePresentationKeyClear {
+            control_session_id: 77,
+            request_id: 47,
+            presentation_id: PRESENTATION_ID,
+            stream_id: STREAM_ID,
+            epoch: 5,
+        }));
+        assert!(
+            !state.take_decoder_resync(),
+            "key clear cancels pending resync"
+        );
+    }
+
+    #[test]
+    fn epoch_rotation_rejects_old_ciphertext_and_keeps_new_epoch_silence_bounded() {
+        use crate::presentation_keyframe_retry::PresentationKeyframeSilence;
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let mut state = WorkerGroupMediaKeyState::default();
+        let old_binding = state
+            .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x61))
+            .expect("old key installed");
+        let old_sealed = sealed(3, 0x61, 100, 1_000, true, b"old epoch frame");
+        let old_unit = state
+            .open_access_unit(received(&old_sealed))
+            .expect("old epoch frame authenticates before rotation");
+        let mut silence = PresentationKeyframeSilence::default();
+        silence.note_authenticated_frame(old_binding, old_unit.frame_id, start);
+        assert_eq!(
+            silence.due(old_binding, start + Duration::from_secs(2), true),
+            Some(100)
+        );
+
+        let new_binding = state
+            .install(sensitive(77, 45, PRESENTATION_ID, STREAM_ID, 4, 0x62))
+            .expect("monotonic epoch rotation");
+        assert!(state.take_decoder_resync());
+        // Exactly as the live Worker key-install handler does after a rotation.
+        silence.reset();
+        assert_eq!(
+            silence.due(new_binding, start + Duration::from_secs(3), true),
+            None
+        );
+        assert!(
+            state.open_access_unit(received(&old_sealed)).is_err(),
+            "a previously valid old-epoch frame must not reach the new decoder or silence clock"
+        );
+        assert_eq!(
+            silence.due(new_binding, start + Duration::from_secs(5), true),
+            Some(0)
+        );
+
+        let mut key_bytes = vec![0x62; GROUP_MEDIA_KEY_BYTES];
+        let material = GroupMediaKeyMaterial::import_received_wire(&mut key_bytes)
+            .expect("new epoch sender key");
+        let epoch = GroupMediaEpoch::new(4).expect("new epoch");
+        let mut sender = GroupMediaSender::new(epoch, &material).expect("new epoch sender");
+        let first = GroupMediaFrameBinding::new(PRESENTATION_ID, STREAM_ID, epoch, 10, 2_000, true)
+            .expect("first new binding");
+        let new_sealed = sender
+            .seal_bound_frame(b"new epoch frame", first)
+            .expect("seal new");
+        let new_unit = state
+            .open_access_unit(received(&new_sealed))
+            .expect("new epoch authenticates");
+        silence.note_authenticated_frame(
+            new_binding,
+            new_unit.frame_id,
+            start + Duration::from_secs(6),
+        );
+        assert_eq!(
+            silence.due(new_binding, start + Duration::from_secs(8), true),
+            Some(10)
+        );
+
+        // The cryptographic counter advances, but an authenticated *frame ID*
+        // regresses; #656 must not count this as fresh recovery progress.
+        let regressed =
+            GroupMediaFrameBinding::new(PRESENTATION_ID, STREAM_ID, epoch, 9, 2_001, false)
+                .expect("regressed frame ID binding");
+        let regressed_sealed = sender
+            .seal_bound_frame(b"reordered frame", regressed)
+            .expect("seal regressed frame ID");
+        let regressed_unit = state
+            .open_access_unit(received(&regressed_sealed))
+            .expect("distinct authenticated SFrame counter with older frame ID");
+        silence.note_authenticated_frame(
+            new_binding,
+            regressed_unit.frame_id,
+            start + Duration::from_millis(8_500),
+        );
+        assert_eq!(
+            silence.due(new_binding, start + Duration::from_millis(8_500), true),
+            Some(10)
+        );
+        for _ in 0..3 {
+            silence.note_request_sent(new_binding);
+        }
+        assert_eq!(
+            silence.due(new_binding, start + Duration::from_secs(30), true),
+            None,
+            "old/reordered frames must not replenish exhausted new-epoch recovery budget"
         );
     }
 
