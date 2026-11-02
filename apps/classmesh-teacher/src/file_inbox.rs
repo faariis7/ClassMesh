@@ -828,7 +828,10 @@ mod tests {
         sink.begin(&ID, "untrusted-name.pdf", 4).unwrap();
         let partial = root.join(format!("{}.part", "71".repeat(16)));
         let mode = fs::metadata(&partial).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "received classroom bytes must never be readable by another local principal");
+        assert_eq!(
+            mode, 0o600,
+            "received classroom bytes must never be readable by another local principal"
+        );
         sink.abort(&ID);
         fs::remove_dir_all(root).unwrap();
     }
