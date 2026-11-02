@@ -199,6 +199,9 @@ impl PresentationWindow {
         let mut message = MSG::default();
         while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() } {
             if message.message == WM_QUIT {
+                // WM_QUIT belongs to the thread, not this HWND. It does not
+                // destroy the window; close it before suppressing Drop cleanup.
+                let _ = unsafe { DestroyWindow(self.hwnd) };
                 self.closed = true;
                 break;
             }
@@ -391,6 +394,58 @@ mod tests {
                 "closing HWND must stop the presentation"
             );
             assert!(receiver.closed);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn thread_quit_must_not_leave_presentation_hwnd_after_drop() {
+        // A thread-wide quit can originate outside this HWND. Marking the
+        // presentation closed must not suppress its final HWND cleanup.
+        std::thread::spawn(|| {
+            let module = unsafe { GetModuleHandleW(None).unwrap() };
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: module.into(),
+                lpszClassName: WINDOW_CLASS,
+                ..Default::default()
+            };
+            let _ = unsafe { RegisterClassW(&class) };
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    WINDOW_CLASS,
+                    WINDOW_TITLE,
+                    WS_OVERLAPPEDWINDOW,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    320,
+                    180,
+                    None,
+                    None,
+                    Some(module.into()),
+                    None,
+                )
+                .unwrap()
+            };
+            let mut receiver = PresentationWindow {
+                hwnd,
+                presenter: None,
+                closed: false,
+                client_size: (320, 180),
+                device_lost: false,
+            };
+            unsafe { windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0) };
+            assert!(!receiver.pump_messages());
+            assert!(receiver.closed);
+            drop(receiver);
+            let leaked = unsafe { IsWindow(Some(hwnd)).as_bool() };
+            if leaked {
+                // Clean up even on RED so the regression cannot leak test HWNDs.
+                let _ = unsafe { DestroyWindow(hwnd) };
+            }
+            assert!(!leaked, "WM_QUIT must not leak the presentation HWND");
         })
         .join()
         .unwrap();
