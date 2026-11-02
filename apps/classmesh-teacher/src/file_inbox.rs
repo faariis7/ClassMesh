@@ -356,6 +356,22 @@ struct ActiveFile {
     declared_size: u64,
 }
 
+// A shared writable inbox lets other users replace transfer paths between
+// pathname-based publication and cleanup. The caller owns provisioning;
+// rejecting an unsafe root must never silently chmod someone else's directory.
+#[cfg(unix)]
+fn root_permissions_safe(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o022 == 0
+}
+
+// Windows ACL/owner checks remain authoritative on Windows; Unix mode bits
+// are not a substitute for those checks.
+#[cfg(not(unix))]
+fn root_permissions_safe(_metadata: &fs::Metadata) -> bool {
+    true
+}
+
 /// Persist a single authenticated Teacher file into opaque, transfer-ID named
 /// AppInbox files. Never turn the sender's display name into a path.
 ///
@@ -394,6 +410,7 @@ impl TeacherFileInbox {
                     metadata.is_dir()
                         && !metadata.file_type().is_symlink()
                         && !is_reparse_point(&metadata)
+                        && root_permissions_safe(&metadata)
                 })
             })
     }
@@ -724,6 +741,37 @@ mod tests {
             Err(TeacherFileInboxError::InvalidRoot)
         ));
         fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_rejects_group_or_world_writable_root_without_chmod() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("untrusted-unix-mode");
+        fs::create_dir(&root).unwrap();
+        for mode in [0o777, 0o770] {
+            fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(
+                matches!(
+                    TeacherFileInbox::new(&root),
+                    Err(TeacherFileInboxError::InvalidRoot)
+                ),
+                "mode {mode:o} must not be admitted as an AppInbox"
+            );
+            assert_eq!(
+                fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+                mode,
+                "rejecting a shared root must not silently chmod it"
+            );
+        }
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            TeacherFileInbox::new(&root).is_ok(),
+            "private preprovisioned root remains admissible"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
