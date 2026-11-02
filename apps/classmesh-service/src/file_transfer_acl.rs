@@ -13,6 +13,14 @@ const OWNER_SECURITY_INFORMATION: u32 = 1;
 const DACL_SECURITY_INFORMATION: u32 = 4;
 const TOKEN_QUERY: u32 = 8;
 const TOKEN_USER: u32 = 1;
+// ProgramData permits ordinary Users to create subdirectories. Only deny
+// rights that could replace/remove the already protected ClassMesh directory
+// or rewrite its parent's ACL. Do not apply the stricter child-directory mask
+// to this OS-managed anchor, or standard Service installs would be disabled.
+const DESTRUCTIVE_PARENT_RIGHTS: u32 = 0x1000_0000 // GENERIC_ALL
+    | 0x0200_0000 // MAXIMUM_ALLOWED (ambiguous)
+    | 0x0100_0000 // ACCESS_SYSTEM_SECURITY
+    | 0x000d_0040; // DELETE, WRITE_DAC, WRITE_OWNER, DELETE_CHILD
 const WRITABLE_RIGHTS: u32 = 0x4000_0000 // GENERIC_WRITE
     | 0x1000_0000 // GENERIC_ALL
     | 0x0200_0000 // MAXIMUM_ALLOWED (ambiguous: fail closed)
@@ -151,7 +159,19 @@ fn sid_matches(sid: &[u8], expected: &[u8]) -> bool {
 /// Parse the API-owned ACL only after the entire ACL is bounded by its
 /// descriptor. This avoids GetAce-returned raw pointers and validates the
 /// complete ACE header, length, SID and ACE count before any comparison.
+#[cfg(test)]
 fn verify_acl_bytes(acl: &[u8], system: &[u8], admins: &[u8], service: &[u8]) -> io::Result<()> {
+    verify_acl_bytes_with_policy(acl, system, admins, service, WRITABLE_RIGHTS, false)
+}
+
+fn verify_acl_bytes_with_policy(
+    acl: &[u8],
+    system: &[u8],
+    admins: &[u8],
+    service: &[u8],
+    forbidden_rights: u32,
+    skip_inherit_only: bool,
+) -> io::Result<()> {
     if acl.len() < 8 {
         return Err(denied("Outbox DACL header is truncated"));
     }
@@ -179,7 +199,14 @@ fn verify_acl_bytes(acl: &[u8], system: &[u8], admins: &[u8], service: &[u8]) ->
             0 => {
                 let sid = allow_ace_sid(ace)?;
                 let mask = u32::from_le_bytes(ace[4..8].try_into().expect("ACE mask"));
-                if mask & WRITABLE_RIGHTS != 0
+                // CREATOR OWNER on ProgramData is inherit-only: it does not
+                // grant access to the parent itself. Child ACLs are checked
+                // separately with the strict write/delete policy.
+                if skip_inherit_only && ace[1] & 0x08 != 0 {
+                    offset = end;
+                    continue;
+                }
+                if mask & forbidden_rights != 0
                     && !sid_matches(sid, system)
                     && !sid_matches(sid, admins)
                     && !sid_matches(sid, service)
@@ -202,6 +229,8 @@ fn verify_one_directory(
     system: &[u8],
     admins: &[u8],
     service: &[u8],
+    forbidden_rights: u32,
+    skip_inherit_only: bool,
 ) -> io::Result<()> {
     let mut name: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
     let mut owner = ptr::null_mut();
@@ -286,7 +315,14 @@ fn verify_one_directory(
         // SAFETY: every byte in the ACL slice lies inside the API-owned
         // descriptor. All ACE offsets and SIDs are checked in safe Rust.
         let acl = unsafe { std::slice::from_raw_parts(dacl.cast::<u8>(), acl_size) };
-        verify_acl_bytes(acl, system, admins, service)?;
+        verify_acl_bytes_with_policy(
+            acl,
+            system,
+            admins,
+            service,
+            forbidden_rights,
+            skip_inherit_only,
+        )?;
         Ok(())
     })();
     // SAFETY: descriptor is allocated by GetNamedSecurityInfoW.
@@ -306,10 +342,18 @@ pub(crate) fn verify_private_outbox(root: &Path) -> io::Result<()> {
     let classmesh = state
         .parent()
         .ok_or_else(|| denied("missing ClassMesh parent"))?;
+    let anchor = classmesh
+        .parent()
+        .ok_or_else(|| denied("missing ProgramData trust anchor"))?;
     let system = well_known_sid(22)?; // WinLocalSystemSid
     let admins = well_known_sid(26)?; // WinBuiltinAdministratorsSid
     let service = process_user_sid()?;
-    for path in [classmesh, state, root] {
+    for (path, forbidden_rights, skip_inherit_only) in [
+        (anchor, DESTRUCTIVE_PARENT_RIGHTS, true),
+        (classmesh, WRITABLE_RIGHTS, false),
+        (state, WRITABLE_RIGHTS, false),
+        (root, WRITABLE_RIGHTS, false),
+    ] {
         let metadata = std::fs::symlink_metadata(path)?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             return Err(denied("FileTransfer directory is not a real directory"));
@@ -318,7 +362,14 @@ pub(crate) fn verify_private_outbox(root: &Path) -> io::Result<()> {
         if metadata.file_attributes() & 0x400 != 0 {
             return Err(denied("FileTransfer directory is a reparse point"));
         }
-        verify_one_directory(path, &system, &admins, &service)?;
+        verify_one_directory(
+            path,
+            &system,
+            &admins,
+            &service,
+            forbidden_rights,
+            skip_inherit_only,
+        )?;
     }
     Ok(())
 }
@@ -417,7 +468,7 @@ mod tests {
         assert!(identity.status.success(), "test SID unavailable");
         let sid = String::from_utf8(identity.stdout).expect("SID text");
         let grant = format!("*{}:(OI)(CI)F", sid.trim());
-        for path in [&outbox, &state, &classmesh] {
+        for path in [&outbox, &state, &classmesh, &root] {
             for args in [
                 vec!["/inheritance:r".to_owned()],
                 vec!["/grant".to_owned(), grant.clone()],
@@ -518,8 +569,51 @@ mod tests {
             !prepare_optional_file_transfer_storage(&state.join("file-inbox"), &outbox),
             "unsafe legacy ACL must disable transfer without stopping the control Service"
         );
+        let restore_classmesh = Command::new("icacls")
+            .arg(&classmesh)
+            .args(["/remove:g", "*S-1-5-32-545"])
+            .output()
+            .expect("icacls available");
+        assert!(
+            restore_classmesh.status.success(),
+            "restore failed: {restore_classmesh:?}"
+        );
+        assert!(
+            verify_private_outbox(&outbox).is_ok(),
+            "private children are safe"
+        );
+        let normal_parent_grant = Command::new("icacls")
+            .arg(&root)
+            .args(["/grant", "*S-1-5-32-545:(CI)W"])
+            .output()
+            .expect("icacls available");
+        assert!(
+            normal_parent_grant.status.success(),
+            "normal parent grant failed: {normal_parent_grant:?}"
+        );
+        assert!(
+            verify_private_outbox(&outbox).is_ok(),
+            "ordinary ProgramData-style Users Write must not disable the Service"
+        );
+        // A parent with DELETE_CHILD can swap ClassMesh even if all three
+        // inner directories have private ACLs. The ProgramData anchor must
+        // reject this destructive permission without rejecting ordinary
+        // inherited create-subdirectory grants.
+        let parent_grant = Command::new("icacls")
+            .arg(&root)
+            .args(["/grant", "*S-1-5-32-545:(DC)"])
+            .output()
+            .expect("icacls available");
+        assert!(
+            parent_grant.status.success(),
+            "parent grant failed: {parent_grant:?}"
+        );
+        assert!(
+            verify_private_outbox(&outbox).is_err(),
+            "untrusted DELETE_CHILD on the parent must block FileTransfer"
+        );
         // Restore inheritance before deleting the disposable fixture.
-        for path in [&classmesh, &state, &outbox, &inbox] {
+        for path in [&root, &classmesh, &state, &outbox, &inbox] {
             let _ = Command::new("icacls")
                 .arg(path)
                 .args(["/inheritance:e"])
