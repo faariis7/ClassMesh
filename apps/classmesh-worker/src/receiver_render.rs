@@ -9,8 +9,8 @@ use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, IDC_ARROW, LoadCursorW, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage,
-    RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WM_DESTROY, WM_QUIT, WM_SIZE, WNDCLASSW,
+    DispatchMessageW, IDC_ARROW, IsWindow, LoadCursorW, MSG, PM_REMOVE, PeekMessageW,
+    RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WM_QUIT, WM_SIZE, WNDCLASSW,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::{Interface, w};
@@ -225,6 +225,13 @@ impl PresentationWindow {
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
+            // DefWindowProcW destroys this HWND on WM_CLOSE synchronously.
+            // No process/thread-wide WM_QUIT should be posted: the Worker may
+            // later open another presentation on the same interactive thread.
+            if !unsafe { IsWindow(Some(self.hwnd)).as_bool() } {
+                self.closed = true;
+                break;
+            }
         }
         !self.closed
     }
@@ -264,10 +271,8 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if message == WM_DESTROY {
-        unsafe { PostQuitMessage(0) };
-        return LRESULT(0);
-    }
+    // WM_DESTROY is scoped to this presentation HWND. Do not call
+    // PostQuitMessage: it would poison the Worker thread for later sessions.
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
@@ -282,6 +287,105 @@ mod tests {
             client_size_from_lparam(LPARAM(packed as isize)),
             (1280, 720)
         );
+    }
+
+    #[test]
+    fn destroying_receiver_window_does_not_post_global_thread_quit() {
+        // A Worker can close one presentation and start another on the same
+        // interactive thread. Its HWND must not terminate that thread's queue.
+        std::thread::spawn(|| {
+            let module = unsafe { GetModuleHandleW(None).unwrap() };
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: module.into(),
+                lpszClassName: WINDOW_CLASS,
+                ..Default::default()
+            };
+            let _ = unsafe { RegisterClassW(&class) };
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    WINDOW_CLASS,
+                    WINDOW_TITLE,
+                    WS_OVERLAPPEDWINDOW,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    320,
+                    180,
+                    None,
+                    None,
+                    Some(module.into()),
+                    None,
+                )
+                .unwrap()
+            };
+            unsafe { DestroyWindow(hwnd).unwrap() };
+            let mut message = MSG::default();
+            let mut posted_quit = false;
+            while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() } {
+                posted_quit |= message.message == WM_QUIT;
+            }
+            assert!(
+                !posted_quit,
+                "closing one presentation must not quit the Worker thread"
+            );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn closing_receiver_window_is_observed_without_global_quit() {
+        std::thread::spawn(|| {
+            let module = unsafe { GetModuleHandleW(None).unwrap() };
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: module.into(),
+                lpszClassName: WINDOW_CLASS,
+                ..Default::default()
+            };
+            let _ = unsafe { RegisterClassW(&class) };
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    WINDOW_CLASS,
+                    WINDOW_TITLE,
+                    WS_OVERLAPPEDWINDOW,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    320,
+                    180,
+                    None,
+                    None,
+                    Some(module.into()),
+                    None,
+                )
+                .unwrap()
+            };
+            let mut receiver = PresentationWindow {
+                hwnd,
+                presenter: None,
+                closed: false,
+                client_size: (320, 180),
+                device_lost: false,
+            };
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    Some(hwnd),
+                    windows::Win32::UI::WindowsAndMessaging::WM_CLOSE,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+                .unwrap()
+            };
+            assert!(
+                !receiver.pump_messages(),
+                "closing HWND must stop the presentation"
+            );
+            assert!(receiver.closed);
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
