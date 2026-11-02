@@ -24,7 +24,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 sha2 = "0.10.9"
 quinn = "0.11.12"
 rcgen = { version = "0.14", features = ["x509-parser"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [lints]
