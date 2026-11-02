@@ -1520,6 +1520,66 @@ mod tests {
     }
 
     #[test]
+    fn queued_diagnostics_override_does_not_outlive_its_visible_snapshot() {
+        use crate::device_diagnostics::TroubleshootingOverrideRequest;
+        use crate::ui_shell::TeacherDiagnosticsUiAction;
+
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let row = app
+            .classroom
+            .rows()
+            .into_iter()
+            .find(|row| row.source_id == MonitoringSourceId(7))
+            .expect("selected classroom row");
+        let update = |app: &mut TeacherEguiShell, device: &ClassroomDeviceRow| {
+            app.update_diagnostics(DeviceDiagnosticsSnapshot {
+                device,
+                quality_sample: None,
+                active_path: None,
+                topology_evidence: TransportTopologyEvidence::default(),
+                diagnostic_codes: &[],
+            })
+            .expect("valid diagnostics");
+        };
+        let quality = TeacherUiAction::Diagnostics(TeacherDiagnosticsUiAction {
+            source_id: MonitoringSourceId(7),
+            request: TroubleshootingOverrideRequest::Quality {
+                stream_kind: classmesh_core::StreamKind::Monitoring,
+                tier: classmesh_core::adaptation::QualityTier::Low,
+            },
+        });
+
+        update(&mut app, &row);
+        app.queue_action(quality.clone());
+        app.clear_diagnostics();
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "a revoked diagnostics snapshot must retire its queued override"
+        );
+
+        update(&mut app, &row);
+        app.queue_action(quality.clone());
+        let mut replacement = row.clone();
+        replacement.source_id = MonitoringSourceId(8);
+        update(&mut app, &replacement);
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "diagnostics for a different source must retire the old override"
+        );
+
+        update(&mut app, &row);
+        app.queue_action(quality.clone());
+        assert_eq!(
+            app.take_pending_action(),
+            Some(quality),
+            "unchanged selected diagnostics must retain an allowed override"
+        );
+    }
+
+    #[test]
     fn queued_diagnostics_override_is_rechecked_at_ui_handoff() {
         use crate::device_diagnostics::TroubleshootingOverrideRequest;
         use crate::ui_shell::TeacherDiagnosticsUiAction;
