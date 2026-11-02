@@ -2425,6 +2425,9 @@ mod tests {
             .unwrap();
         assert_eq!(sink.complete(&ID), Err(TeacherFileInboxError::Io));
         drop(blocker);
+        // The inbox intentionally retains Windows directory HANDLEs until
+        // the sink is dropped. Release them before removing the test root.
+        drop(sink);
         if final_path.exists() {
             fs::remove_file(&final_path).unwrap();
         }
