@@ -377,7 +377,18 @@ impl TeacherEguiShell {
         // The engine remains responsible for authoritative authorization and
         // physical-path evidence at apply time.
         if let TeacherUiAction::Diagnostics(diagnostics) = &action {
-            if self.classroom.selected() != Some(diagnostics.source_id)
+            // The click was offered by a selected, visible diagnostics snapshot.
+            // Revoking/replacing that snapshot must retire queued non-cleanup
+            // overrides even when the classroom row still reports Online.
+            // Automatic remains a local cleanup request during disconnects.
+            let cleanup = matches!(
+                diagnostics.request,
+                crate::device_diagnostics::TroubleshootingOverrideRequest::Automatic
+            );
+            if (!cleanup
+                && self.diagnostics.as_ref().map(|view| view.source_id)
+                    != Some(diagnostics.source_id))
+                || self.classroom.selected() != Some(diagnostics.source_id)
                 || !self.classroom.rows().into_iter().any(|row| {
                     row.source_id == diagnostics.source_id
                         && crate::ui_diagnostics::override_action_available(
@@ -1576,6 +1587,18 @@ mod tests {
             app.take_pending_action(),
             Some(quality),
             "unchanged selected diagnostics must retain an allowed override"
+        );
+
+        let cleanup = TeacherUiAction::Diagnostics(TeacherDiagnosticsUiAction {
+            source_id: MonitoringSourceId(7),
+            request: TroubleshootingOverrideRequest::Automatic,
+        });
+        app.queue_action(cleanup.clone());
+        app.clear_diagnostics();
+        assert_eq!(
+            app.take_pending_action(),
+            Some(cleanup),
+            "automatic cleanup must remain available after diagnostics revocation"
         );
     }
 
