@@ -97,10 +97,10 @@ fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
 }
 
 // Check the caller's ORIGINAL spelling before canonicalization can hide an
-// ancestor junction/symlink. Repeat on the resolved path at every boundary.
+// ancestor junction/symlink on Windows and Unix. Repeat on the resolved path at every boundary.
 // This detects static reparse ancestors but does not replace retained
 // directory HANDLEs, trusted owner/DACL checks or native Windows evidence.
-#[cfg(windows)]
+#[cfg(any(unix, windows))]
 fn root_ancestors_safe(root: &Path) -> bool {
     root.ancestors()
         .filter(|ancestor| ancestor.has_root())
@@ -113,7 +113,7 @@ fn root_ancestors_safe(root: &Path) -> bool {
         })
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(unix, windows)))]
 fn root_ancestors_safe(_root: &Path) -> bool {
     true
 }
@@ -691,7 +691,9 @@ mod tests {
     const ID: [u8; 16] = [0x71; 16];
 
     fn temp_root(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
+        // macOS may spell its temporary directory via the /var symlink.
+        // Tests use the real directory so production ancestor checks remain strict.
+        std::env::temp_dir().canonicalize().unwrap().join(format!(
             "classmesh-teacher-inbox-{label}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed),
@@ -1496,9 +1498,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn inbox_pins_resolved_root_when_an_ancestor_symlink_changes() {
-        // An absolute path is not enough: an attacker who can retarget an
-        // ancestor symlink between construction and begin can redirect bytes.
+    fn inbox_rejects_alias_before_an_ancestor_symlink_can_be_retargeted() {
+        // Do not accept an alias merely because canonicalization pins its
+        // current destination: the original spelling crosses an untrusted
+        // namespace link and must fail closed at admission.
         let original_parent = temp_root("original-parent");
         let decoy_parent = temp_root("decoy-parent");
         let alias = temp_root("parent-alias");
@@ -1508,17 +1511,18 @@ mod tests {
         fs::create_dir_all(&decoy).unwrap();
         std::os::unix::fs::symlink(&original_parent, &alias).unwrap();
 
-        let mut sink = TeacherFileInbox::new(alias.join("inbox")).unwrap();
+        assert!(matches!(
+            TeacherFileInbox::new(alias.join("inbox")),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
         fs::remove_file(&alias).unwrap();
         std::os::unix::fs::symlink(&decoy_parent, &alias).unwrap();
-
-        sink.begin(&ID, "lesson.pdf", 4).unwrap();
-        sink.append(&ID, 0, b"data").unwrap();
-        sink.complete(&ID).unwrap();
-
-        let filename = format!("{}.bin", "71".repeat(16));
-        assert_eq!(fs::read(original.join(&filename)).unwrap(), b"data");
-        assert!(!decoy.join(filename).exists());
+        assert!(matches!(
+            TeacherFileInbox::new(alias.join("inbox")),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
+        assert_eq!(fs::read_dir(&original).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&decoy).unwrap().count(), 0);
         fs::remove_file(alias).unwrap();
         fs::remove_dir_all(original_parent).unwrap();
         fs::remove_dir_all(decoy_parent).unwrap();
@@ -1662,6 +1666,24 @@ mod tests {
         ));
         fs::remove_dir(&alias).unwrap();
         fs::remove_dir_all(real_parent).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_rejects_symlinked_parent_of_apparently_real_root() {
+        // The leaf itself is a directory; its untrusted parent alias must
+        // not be canonicalized away before checking the original spelling.
+        let parent = temp_root("real-parent");
+        let alias = temp_root("symlinked-parent");
+        let real_root = parent.join("inbox");
+        fs::create_dir_all(&real_root).unwrap();
+        std::os::unix::fs::symlink(&parent, &alias).unwrap();
+        assert!(matches!(
+            TeacherFileInbox::new(alias.join("inbox")),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
+        fs::remove_file(alias).unwrap();
+        fs::remove_dir_all(parent).unwrap();
     }
 
     #[cfg(unix)]
