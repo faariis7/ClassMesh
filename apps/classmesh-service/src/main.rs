@@ -3760,8 +3760,13 @@ mod windows_service_app {
             let source_id = FileSourceId::new([0x5a; 16]).expect("source id");
             let staged = root.join(format!("{}.bin", "5a".repeat(16)));
             std::fs::write(&staged, b"trusted").expect("stage source");
-            let mut source =
-                FileTransferSourceSession::new(WindowsFileTransferOutboxSource::new(&root));
+            // Only the trusted Service staging producer may register a source.
+            // The source session must not discover arbitrary staged pathnames.
+            let mut outbox = WindowsFileTransferOutboxSource::new(&root);
+            outbox
+                .register_staged_file(source_id, "lesson.pdf")
+                .expect("explicit trusted source registration");
+            let mut source = FileTransferSourceSession::new(outbox);
             let pending = PendingFilePull {
                 principal_id: PrincipalId([7; 32]),
                 control_session_id: 77,
