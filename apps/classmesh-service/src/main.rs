@@ -3765,6 +3765,7 @@ mod windows_service_app {
                 request_id: 44,
                 transfer_id: [9; 16],
                 idle: FilePullIdleLease::new(Instant::now()),
+                acks: FilePullAckLedger::new(7),
             };
             let peer = FileTransferPeer {
                 principal: pending.principal_id,
