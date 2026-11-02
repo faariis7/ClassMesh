@@ -332,10 +332,11 @@ fn verify_one_directory(
     result
 }
 
-/// Refuse to use a transfer directory if ClassMesh, state or that directory
-/// has an untrusted owner or writable ACE. ProgramData is the OS-managed trust anchor.
-/// This is deliberately verification-only: an administrator must provision ACLs.
-pub(crate) fn verify_private_outbox(root: &Path) -> io::Result<()> {
+// Check the same owner/DACL policy before creation (on existing ancestors)
+// and after creation (on every component). The preflight prevents writes
+// through a *known* writable legacy ancestor; it is not atomic against
+// concurrent directory substitution.
+fn verify_storage_directory_chain(root: &Path, allow_missing_children: bool) -> io::Result<()> {
     let state = root
         .parent()
         .ok_or_else(|| denied("missing Outbox state parent"))?;
@@ -354,7 +355,17 @@ pub(crate) fn verify_private_outbox(root: &Path) -> io::Result<()> {
         (state, WRITABLE_RIGHTS, false),
         (root, WRITABLE_RIGHTS, false),
     ] {
-        let metadata = std::fs::symlink_metadata(path)?;
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if allow_missing_children
+                    && path != anchor
+                    && error.kind() == io::ErrorKind::NotFound =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             return Err(denied("FileTransfer directory is not a real directory"));
         }
@@ -372,6 +383,13 @@ pub(crate) fn verify_private_outbox(root: &Path) -> io::Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// Refuse to use a transfer directory if ClassMesh, state or that directory
+/// has an untrusted owner or writable ACE. ProgramData is the OS-managed trust anchor.
+/// This is deliberately verification-only: an administrator must provision ACLs.
+pub(crate) fn verify_private_outbox(root: &Path) -> io::Result<()> {
+    verify_storage_directory_chain(root, false)
 }
 
 /// Both staging roots are pathname-based trust boundaries: the receiver
@@ -416,7 +434,10 @@ fn preflight_existing_storage_chain(path: &Path) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    Ok(())
+    // Reject a pre-existing untrusted owner/ACL before create_dir_all can
+    // write through that directory. Missing children are checked again after
+    // creation by verify_private_file_transfer_storage.
+    verify_storage_directory_chain(path, true)
 }
 
 /// File transfer is optional. An unsafe legacy ProgramData tree must not
@@ -643,6 +664,24 @@ mod tests {
         assert!(
             verify_private_outbox(&outbox).is_err(),
             "Users Modify must fail closed"
+        );
+        // A legacy writable ClassMesh ancestor must be rejected *before*
+        // creating a previously missing state/inbox/outbox directory.
+        let untrusted_new_state = classmesh.join("state-untrusted-precreate");
+        let untrusted_inbox = untrusted_new_state.join("file-inbox");
+        let untrusted_outbox = untrusted_new_state.join("file-outbox");
+        assert!(!prepare_optional_file_transfer_storage(
+            &untrusted_inbox,
+            &untrusted_outbox
+        ));
+        let untrusted_created = untrusted_new_state.exists();
+        if untrusted_created {
+            std::fs::remove_dir_all(&untrusted_new_state)
+                .expect("cleanup test-created untrusted state");
+        }
+        assert!(
+            !untrusted_created,
+            "unsafe writable ClassMesh ancestor must not be mutated before ACL verification"
         );
         assert!(
             !prepare_optional_file_transfer_storage(&state.join("file-inbox"), &outbox),
