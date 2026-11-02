@@ -137,7 +137,7 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
         if !revoke_teacher_after_accept {
             assert!(remote_partial.exists());
         }
-        channel
+        let chunk_send = channel
             .send(&frame(
                 3,
                 control_envelope::Payload::FileTransferChunk(FileTransferChunk {
@@ -146,13 +146,16 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
                     content: remote_bytes.clone(),
                 }),
             ))
-            .await
-            .map_err(|e| e.to_string())?;
+            .await;
         if revoke_teacher_after_accept {
-            // A revoked Teacher must not acknowledge the next chunk or
-            // publish its final file even after the remote sent real bytes.
+            // The Teacher revokes ReceiveFile immediately after Accepted and
+            // closes the connection. Depending on QUIC scheduling, this send
+            // can either win that race or fail with connection lost. Both
+            // outcomes must still produce no Progress/Completed acknowledgement
+            // and no published file (asserted by the Teacher side below).
             return Ok::<_, String>(());
         }
+        chunk_send.map_err(|e| e.to_string())?;
         let status = channel.receive().await.map_err(|e| e.to_string())?;
         assert!(
             matches!(status.payload,Some(control_envelope::Payload::FileTransferStatus(s))
