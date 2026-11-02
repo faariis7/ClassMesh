@@ -309,6 +309,13 @@ fn open_registered_source(path: &Path) -> std::io::Result<File> {
 
 #[cfg(windows)]
 fn cleanup_registered_source(registered: RegisteredOutboxFile) {
+    delete_pinned_file(&registered.file);
+}
+
+/// Delete the exact open file object, never a pathname which can be reused
+/// by a different staging producer before abort or Drop runs.
+#[cfg(windows)]
+fn delete_pinned_file(file: &File) {
     use std::ffi::c_void;
     use std::os::windows::io::AsRawHandle;
 
@@ -335,7 +342,7 @@ fn cleanup_registered_source(registered: RegisteredOutboxFile) {
     // the disposition pointer references a correctly laid-out BOOLEAN value.
     let _ = unsafe {
         set_file_information_by_handle(
-            registered.file.as_raw_handle(),
+            file.as_raw_handle(),
             4,
             (&raw const disposition).cast(),
             std::mem::size_of::<FileDispositionInfo>() as u32,
@@ -348,6 +355,121 @@ fn cleanup_registered_source(_registered: RegisteredOutboxFile) {
     // There is no portable atomic unlink-by-open-handle API. On test hosts,
     // deliberately leave the staged file for its trusted owner to reclaim;
     // a metadata-check-then-unlink would still have a pathname swap race.
+}
+
+#[cfg(not(windows))]
+fn delete_pinned_file(_file: &File) {
+    // No portable handle-relative unlink; leave an orphan rather than
+    // unlink a replacement pathname.
+}
+
+#[cfg(windows)]
+fn open_inbox_temp_file(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // WRITE + DELETE access is needed for handle-bound cleanup. Sharing
+    // READ/DELETE but not WRITE prevents a second writer opening this object.
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const DELETE: u32 = 0x0001_0000;
+    const FILE_SHARE_READ_DELETE: u32 = 0x0000_0005;
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .access_mode(GENERIC_WRITE | DELETE)
+        .share_mode(FILE_SHARE_READ_DELETE)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_inbox_temp_file(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
+}
+
+// Finalize the *open* partial object, not the pathname: an authorized staging
+// producer can rotate/reuse a name while a transfer is in progress.
+#[cfg(windows)]
+fn finalize_pinned_inbox_file(file: &File, _temp: &Path, final_path: &Path) -> std::io::Result<()> {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    struct FileRenameInfo {
+        replace_if_exists: u32,
+        root_directory: *mut c_void,
+        file_name_length: u32,
+        file_name: [u16; 1],
+    }
+    #[link(name = "Kernel32")]
+    unsafe extern "system" {
+        #[link_name = "SetFileInformationByHandle"]
+        fn set_file_information_by_handle(
+            file: *mut c_void,
+            information_class: u32,
+            information: *const c_void,
+            information_size: u32,
+        ) -> i32;
+    }
+    let mut wide: Vec<u16> = final_path.as_os_str().encode_wide().collect();
+    let byte_len = wide
+        .len()
+        .checked_mul(2)
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    // Some Windows filesystem paths consume the trailing WCHAR despite the
+    // documented explicit byte length; reserve and initialize the terminator.
+    wide.push(0);
+    let header_len = std::mem::offset_of!(FileRenameInfo, file_name);
+    let required = header_len
+        .checked_add(wide.len() * 2)
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?
+        .max(std::mem::size_of::<FileRenameInfo>());
+    // Vec<u64> gives FILE_RENAME_INFO the pointer alignment it requires.
+    let mut aligned = vec![0_u64; required.div_ceil(8)];
+    let info = aligned.as_mut_ptr().cast::<FileRenameInfo>();
+    // SAFETY: the allocated aligned buffer covers header + all UTF-16 bytes.
+    unsafe {
+        (*info).replace_if_exists = 0; // never overwrite another transfer
+        (*info).root_directory = std::ptr::null_mut();
+        (*info).file_name_length = byte_len;
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), (*info).file_name.as_mut_ptr(), wide.len());
+    }
+    // FILE_INFO_BY_HANDLE_CLASS::FileRenameInfo = 3.
+    // SAFETY: the pinned file HANDLE has DELETE access and stays live here.
+    let ok = unsafe {
+        set_file_information_by_handle(
+            file.as_raw_handle(),
+            3,
+            info.cast(),
+            u32::try_from(required)
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn finalize_pinned_inbox_file(file: &File, temp: &Path, final_path: &Path) -> std::io::Result<()> {
+    // Portable test hosts cannot rename by HANDLE. Check object identity
+    // before a best-effort rename; this is NOT atomic and is not a production
+    // security guarantee. The enrolled FileTransfer Service runs on Windows.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let pinned = file.metadata()?;
+        let named = std::fs::metadata(temp)?;
+        if pinned.dev() != named.dev() || pinned.ino() != named.ino() {
+            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        }
+        std::fs::rename(temp, final_path)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, temp, final_path);
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
 }
 
 fn source_id_stem(source_id: FileSourceId) -> String {
@@ -427,11 +549,7 @@ impl FileTransferInboxSink for WindowsFileTransferInboxSink {
             return Err(WindowsInboxStorageError::ExistingTransfer);
         }
 
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-            .map_err(|_| WindowsInboxStorageError::Io)?;
+        let file = open_inbox_temp_file(&temp_path).map_err(|_| WindowsInboxStorageError::Io)?;
         self.active = Some(ActiveInboxFile {
             id: *id,
             file,
@@ -489,13 +607,12 @@ impl FileTransferInboxSink for WindowsFileTransferInboxSink {
             .take()
             .ok_or(WindowsInboxStorageError::WrongTransfer)?;
         if active.file.sync_all().is_err() {
-            let _ = fs::remove_file(&active.temp_path);
+            delete_pinned_file(&active.file);
             return Err(WindowsInboxStorageError::Io);
         }
-        drop(active.file);
-
-        if fs::rename(&active.temp_path, &active.final_path).is_err() {
-            let _ = fs::remove_file(&active.temp_path);
+        if finalize_pinned_inbox_file(&active.file, &active.temp_path, &active.final_path).is_err()
+        {
+            delete_pinned_file(&active.file);
             return Err(WindowsInboxStorageError::Io);
         }
         Ok(())
@@ -509,16 +626,14 @@ impl FileTransferInboxSink for WindowsFileTransferInboxSink {
             self.active = Some(active);
             return;
         }
-        drop(active.file);
-        let _ = fs::remove_file(active.temp_path);
+        delete_pinned_file(&active.file);
     }
 }
 
 impl Drop for WindowsFileTransferInboxSink {
     fn drop(&mut self) {
         if let Some(active) = self.active.take() {
-            drop(active.file);
-            let _ = fs::remove_file(active.temp_path);
+            delete_pinned_file(&active.file);
         }
     }
 }
@@ -974,7 +1089,69 @@ mod tests {
         );
         assert!(root.join(format!("{stem}.part")).is_file());
         sink.abort(&id);
+        #[cfg(windows)]
         assert!(!root.join(format!("{stem}.part")).exists());
+        #[cfg(not(windows))]
+        assert!(root.join(format!("{stem}.part")).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inbox_abort_and_drop_must_not_unlink_a_substituted_partial_path() {
+        for drop_instead_of_abort in [false, true] {
+            let root = test_root("inbox-substituted-partial");
+            let id = transfer_id();
+            let stem = transfer_id_stem(&id);
+            let staged = root.join(format!("{stem}.part"));
+            let moved = root.join("original-partial.bin");
+            let mut sink = WindowsFileTransferInboxSink::new(&root);
+            sink.begin(&id, "lesson.pdf", 4).expect("begin");
+            sink.append(&id, 0, b"ab").expect("append");
+            fs::rename(&staged, &moved).expect("rotate original partial");
+            fs::write(&staged, b"foreign-partial").expect("replace pathname");
+
+            if drop_instead_of_abort {
+                drop(sink);
+            } else {
+                sink.abort(&id);
+            }
+            assert_eq!(
+                fs::read(&staged).expect("replacement must survive cleanup"),
+                b"foreign-partial",
+                "abort/drop must not delete a different file at the reused path"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn inbox_complete_must_not_publish_a_substituted_partial_path() {
+        let root = test_root("inbox-complete-substitution");
+        let id = transfer_id();
+        let stem = transfer_id_stem(&id);
+        let staged = root.join(format!("{stem}.part"));
+        let final_path = root.join(format!("{stem}.bin"));
+        let moved = root.join("original-partial.bin");
+        let mut sink = WindowsFileTransferInboxSink::new(&root);
+        sink.begin(&id, "lesson.pdf", 4).expect("begin");
+        sink.append(&id, 0, b"safe").expect("append");
+        fs::rename(&staged, &moved).expect("rotate original partial");
+        fs::write(&staged, b"foreign").expect("replace pathname");
+        let outcome = sink.complete(&id);
+        #[cfg(windows)]
+        {
+            assert_eq!(outcome, Ok(()), "finalize must rename the pinned object");
+            assert_eq!(fs::read(&final_path).expect("published original"), b"safe");
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(outcome, Err(WindowsInboxStorageError::Io));
+            assert!(!final_path.exists(), "portable fallback must fail closed");
+        }
+        assert_eq!(
+            fs::read(&staged).expect("foreign path survives"),
+            b"foreign"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1009,7 +1186,10 @@ mod tests {
             sink.append(&id, 0, b"a").expect("append");
             assert!(root.join(format!("{stem}.part")).is_file());
         }
+        #[cfg(windows)]
         assert!(!root.join(format!("{stem}.part")).exists());
+        #[cfg(not(windows))]
+        assert!(root.join(format!("{stem}.part")).exists());
         let _ = fs::remove_dir_all(root);
     }
 }
