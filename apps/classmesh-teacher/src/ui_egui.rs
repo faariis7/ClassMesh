@@ -412,6 +412,22 @@ impl TeacherEguiShell {
                 self.file_pull_context.as_ref(),
             )
             .ok()?;
+            // The selected session may still be valid after its trusted staged
+            // offer was revoked or replaced. A queued click must not outlive
+            // that exact transfer/source offer. Runtime authorization is still
+            // independently enforced at the authenticated QUIC boundary.
+            let candidate = self.staged_file_candidate?;
+            if !staged_file_candidate_ready(
+                candidate,
+                self.classroom.selected(),
+                self.file_pull_context.as_ref(),
+            ) || candidate.source_id != pull.source_id
+                || candidate.control_session_id != pull.control_session_id
+                || pull.request.transfer_id.as_slice() != &candidate.transfer_id[..]
+                || pull.request.source_id.as_slice() != &candidate.opaque_source_id[..]
+            {
+                return None;
+            }
         }
         Some(action)
     }
@@ -1364,6 +1380,12 @@ mod tests {
             capabilities: BTreeSet::from([Capability::FileTransfer]),
         };
         app.set_file_pull_context(context.clone());
+        app.set_staged_file_candidate(TeacherStagedFileCandidate {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            transfer_id: [1; 16],
+            opaque_source_id: [2; 16],
+        });
         app.queue_file_pull_request([1; 16], [2; 16]);
         app.set_file_pull_context(TeacherFilePullContext {
             control_session_id: 78,
@@ -1372,13 +1394,71 @@ mod tests {
         assert_eq!(app.take_pending_action(), None);
 
         app.set_file_pull_context(context.clone());
+        app.set_staged_file_candidate(TeacherStagedFileCandidate {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            transfer_id: [1; 16],
+            opaque_source_id: [2; 16],
+        });
         app.queue_file_pull_request([1; 16], [2; 16]);
         app.classroom.select(None).unwrap();
         assert_eq!(app.take_pending_action(), None);
 
         app.classroom.select(Some(MonitoringSourceId(7))).unwrap();
         app.set_file_pull_context(context);
+        app.set_staged_file_candidate(TeacherStagedFileCandidate {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            transfer_id: [1; 16],
+            opaque_source_id: [2; 16],
+        });
         app.queue_file_pull_request([1; 16], [2; 16]);
+        assert!(matches!(
+            app.take_pending_action(),
+            Some(TeacherUiAction::FilePull(_))
+        ));
+    }
+
+    #[test]
+    fn queued_file_pull_is_retired_if_trusted_staged_candidate_is_revoked_or_replaced() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let context = TeacherFilePullContext {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            version: classmesh_protocol::PROTOCOL_VERSION,
+            capabilities: BTreeSet::from([Capability::FileTransfer]),
+        };
+        let candidate = TeacherStagedFileCandidate {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            transfer_id: [1; 16],
+            opaque_source_id: [2; 16],
+        };
+        app.set_file_pull_context(context);
+        app.set_staged_file_candidate(candidate);
+        app.queue_file_pull_request(candidate.transfer_id, candidate.opaque_source_id);
+        app.clear_staged_file_candidate();
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "revoked offer must not dispatch"
+        );
+
+        app.set_staged_file_candidate(candidate);
+        app.queue_file_pull_request(candidate.transfer_id, candidate.opaque_source_id);
+        app.set_staged_file_candidate(TeacherStagedFileCandidate {
+            transfer_id: [3; 16],
+            ..candidate
+        });
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "replaced offer must not dispatch"
+        );
+
+        app.set_staged_file_candidate(candidate);
+        app.queue_file_pull_request(candidate.transfer_id, candidate.opaque_source_id);
         assert!(matches!(
             app.take_pending_action(),
             Some(TeacherUiAction::FilePull(_))
