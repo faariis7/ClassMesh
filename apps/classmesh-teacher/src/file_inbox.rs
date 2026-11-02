@@ -278,6 +278,37 @@ fn windows_ancestor_dacl_safe(_root: &Path) -> bool {
     true
 }
 
+// Keep all original-path directory HANDLEs alive for the duration of a
+// Windows transfer. Excluding FILE_SHARE_DELETE denies directory renames and
+// unlink/replacement while complete() temporarily closes its .part HANDLE.
+// This is a namespace lifetime guard, not a substitute for protected
+// provisioning, fresh ACL checks or handle-relative create/link operations.
+#[cfg(windows)]
+fn windows_hold_namespace(root: &Path) -> Result<Vec<File>, TeacherFileInboxError> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    let mut guards = Vec::new();
+    for ancestor in root.ancestors() {
+        let guard = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(ancestor)
+            .map_err(|_| TeacherFileInboxError::InvalidRoot)?;
+        if !fs::symlink_metadata(ancestor).is_ok_and(|metadata| {
+            metadata.is_dir() && !metadata.file_type().is_symlink() && !is_reparse_point(&metadata)
+        }) {
+            return Err(TeacherFileInboxError::InvalidRoot);
+        }
+        guards.push(guard);
+    }
+    Ok(guards)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeacherFileInboxError {
     InvalidRoot,
@@ -294,6 +325,8 @@ pub enum TeacherFileInboxError {
 struct ActiveFile {
     id: [u8; 16],
     file: File,
+    #[cfg(windows)]
+    _ancestor_guards: Vec<File>,
     temp_path: PathBuf,
     final_path: PathBuf,
     received: u64,
@@ -367,6 +400,13 @@ impl FileTransferInboxSink for TeacherFileInbox {
         if !Self::root_ready(&self.root) {
             return Err(TeacherFileInboxError::InvalidRoot);
         }
+        // Acquire namespace guards before opening the .part file. A second
+        // root check rejects detected ACL/path changes after guard acquisition.
+        #[cfg(windows)]
+        let ancestor_guards = windows_hold_namespace(&self.root)?;
+        if !Self::root_ready(&self.root) {
+            return Err(TeacherFileInboxError::InvalidRoot);
+        }
         let temp_path = self.part_path(id);
         let final_path = self.completed_path(id);
         // create_new guarantees that a pre-existing .part (including a
@@ -382,6 +422,8 @@ impl FileTransferInboxSink for TeacherFileInbox {
         self.active = Some(ActiveFile {
             id: *id,
             file,
+            #[cfg(windows)]
+            _ancestor_guards: ancestor_guards,
             temp_path,
             final_path,
             received: 0,
@@ -795,6 +837,39 @@ mod tests {
             fs::remove_file(&part).unwrap();
         }
         fs::remove_dir(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inbox_retains_ancestor_handles_while_receiving_to_block_directory_replacement() {
+        let parent = temp_root("retained-parent");
+        let moved_parent = temp_root("retained-parent-moved");
+        let root = parent.join("inbox");
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).expect("private prepared inbox");
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+
+        // Renaming a parent while the transfer is active must be denied on
+        // Windows; otherwise subsequent pathname operations may target an
+        // attacker-controlled replacement, despite admission-time DACLs.
+        // Fault-inject the exact interval after complete() closes its .part
+        // HANDLE and before it publishes the hard link. Without separate
+        // retained directory HANDLEs, a parent rename succeeds in this gap.
+        let placeholder = fs::File::open(std::env::current_exe().unwrap()).unwrap();
+        let old_part_handle =
+            std::mem::replace(&mut sink.active.as_mut().unwrap().file, placeholder);
+        drop(old_part_handle);
+        let rename_during_transfer = fs::rename(&parent, &moved_parent);
+        assert!(
+            rename_during_transfer.is_err(),
+            "Windows allowed ancestor rename after .part HANDLE closed"
+        );
+        sink.abort(&ID);
+        drop(sink);
+        // Guard handles must be released on abort.
+        fs::rename(&parent, &moved_parent).expect("ancestor unlocked after transfer");
+        fs::remove_dir_all(moved_parent).unwrap();
     }
 
     #[cfg(windows)]
