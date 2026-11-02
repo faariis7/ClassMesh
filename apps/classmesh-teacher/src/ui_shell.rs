@@ -115,6 +115,7 @@ pub enum TeacherInteractionUiActionError {
         expected: u64,
         actual: u64,
     },
+    DeviceNotReady,
     InvalidRequest(TeacherInteractionError),
     CapabilityUnavailable(TeacherInteractionKind),
 }
@@ -159,6 +160,20 @@ pub fn prepare_teacher_interaction_ui_action(
     Ok(action)
 }
 
+// The Teacher UI's most recent device snapshot is only a readiness hint,
+// never a substitute for the engine's live session and permission checks.
+fn selected_device_ready(
+    classroom: &TeacherClassroomViewModel,
+    source_id: MonitoringSourceId,
+) -> bool {
+    classroom.rows().iter().any(|row| {
+        row.source_id == source_id
+            && row.health.presence == PresenceState::Online
+            && row.health.service_ready
+            && row.health.worker_ready
+    })
+}
+
 pub fn validate_teacher_interaction_ui_action(
     action: &TeacherInteractionUiAction,
     classroom: &TeacherClassroomViewModel,
@@ -187,6 +202,9 @@ pub fn validate_teacher_interaction_ui_action(
             expected: action.control_session_id,
             actual: context.control_session_id,
         });
+    }
+    if !selected_device_ready(classroom, action.source_id) {
+        return Err(TeacherInteractionUiActionError::DeviceNotReady);
     }
 
     let kind = classmesh_protocol::teacher_interaction::validate_request(&action.request)
@@ -357,6 +375,7 @@ pub enum TeacherDiagnosticsUiActionError {
         expected: MonitoringSourceId,
         selected: Option<MonitoringSourceId>,
     },
+    DeviceNotReady,
     Validation(TroubleshootingOverrideError),
 }
 
@@ -372,6 +391,16 @@ pub fn apply_diagnostics_ui_action(
             expected: action.source_id,
             selected,
         });
+    }
+
+    // A UI affordance may become stale between the click and dispatch. This
+    // boundary rejects new overrides unless the selected device is still
+    // online with its Service and Worker ready. Automatic reset remains
+    // available during recovery. The engine still owns live authorization.
+    if !matches!(action.request, TroubleshootingOverrideRequest::Automatic)
+        && !selected_device_ready(classroom, action.source_id)
+    {
+        return Err(TeacherDiagnosticsUiActionError::DeviceNotReady);
     }
 
     diagnostics
@@ -717,6 +746,84 @@ mod tests {
     }
 
     #[test]
+    fn teacher_interaction_requires_online_control_and_ready_student_runtime() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let context = teacher_interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+
+        for (presence, service_ready, worker_ready) in [
+            (PresenceState::Offline, true, true),
+            (PresenceState::Connecting, true, true),
+            (PresenceState::ControlRecovering, true, true),
+            (PresenceState::Online, false, true),
+            (PresenceState::Online, true, false),
+        ] {
+            classroom
+                .upsert(ClassroomDeviceSnapshot {
+                    source_id: MonitoringSourceId(7),
+                    display_name: "Student 07".to_owned(),
+                    health: DeviceHealth {
+                        presence,
+                        media: MediaState::Recovering,
+                        service_ready,
+                        worker_ready,
+                    },
+                    quality_tier: None,
+                    thumbnail_available: false,
+                    interactive_active: false,
+                })
+                .unwrap();
+
+            assert_eq!(
+                prepare_teacher_interaction_ui_action(
+                    MonitoringSourceId(7),
+                    TeacherInteractionUiRequest::Message("hello".to_owned()),
+                    &classroom,
+                    Some(&context),
+                ),
+                Err(TeacherInteractionUiActionError::DeviceNotReady),
+                "offline or unready device must not queue Teacher actions: {presence:?}, service={service_ready}, worker={worker_ready}"
+            );
+        }
+    }
+
+    #[test]
+    fn queued_teacher_interaction_rejects_device_that_disconnected_before_dispatch() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let context = teacher_interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+        let action = prepare_teacher_interaction_ui_action(
+            MonitoringSourceId(7),
+            TeacherInteractionUiRequest::Message("hello".to_owned()),
+            &classroom,
+            Some(&context),
+        )
+        .expect("online and ready device can queue an action");
+
+        classroom
+            .upsert(ClassroomDeviceSnapshot {
+                source_id: MonitoringSourceId(7),
+                display_name: "Student 07".to_owned(),
+                health: DeviceHealth {
+                    presence: PresenceState::ControlRecovering,
+                    media: MediaState::Recovering,
+                    service_ready: true,
+                    worker_ready: true,
+                },
+                quality_tier: None,
+                thumbnail_available: false,
+                interactive_active: false,
+            })
+            .unwrap();
+
+        assert_eq!(
+            validate_teacher_interaction_ui_action(&action, &classroom, Some(&context)),
+            Err(TeacherInteractionUiActionError::DeviceNotReady),
+            "queued action must be rejected after control recovery starts"
+        );
+    }
+
+    #[test]
     fn teacher_interaction_rejects_invalid_typed_input_before_action_creation() {
         let mut classroom = classroom();
         classroom.select(Some(MonitoringSourceId(7))).unwrap();
@@ -971,6 +1078,123 @@ mod tests {
                 expected: MonitoringSourceId(7),
                 selected: None,
             })
+        );
+    }
+
+    #[test]
+    fn new_diagnostics_override_rejects_device_that_lost_control_or_runtime_readiness() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let diagnostics = TeacherDeviceDiagnosticsViewModel::new(
+            crate::device_diagnostics::DeviceDiagnosticsConfig::default(),
+        )
+        .unwrap();
+        let action = TeacherDiagnosticsUiAction {
+            source_id: MonitoringSourceId(7),
+            request: TroubleshootingOverrideRequest::Quality {
+                stream_kind: classmesh_core::StreamKind::Monitoring,
+                tier: QualityTier::Low,
+            },
+        };
+
+        for (presence, service_ready, worker_ready) in [
+            (PresenceState::Offline, true, true),
+            (PresenceState::Connecting, true, true),
+            (PresenceState::ControlRecovering, true, true),
+            (PresenceState::Online, false, true),
+            (PresenceState::Online, true, false),
+        ] {
+            classroom
+                .upsert(ClassroomDeviceSnapshot {
+                    source_id: MonitoringSourceId(7),
+                    display_name: "Student 07".to_owned(),
+                    health: DeviceHealth {
+                        presence,
+                        media: MediaState::Idle,
+                        service_ready,
+                        worker_ready,
+                    },
+                    quality_tier: Some(QualityTier::Medium),
+                    thumbnail_available: false,
+                    interactive_active: false,
+                })
+                .unwrap();
+
+            assert_eq!(
+                apply_diagnostics_ui_action(
+                    action,
+                    &classroom,
+                    &diagnostics,
+                    TransportTopologyEvidence::default(),
+                ),
+                Err(TeacherDiagnosticsUiActionError::DeviceNotReady),
+                "new override must not pass with {presence:?}, service={service_ready}, worker={worker_ready}"
+            );
+        }
+    }
+
+    #[test]
+    fn healthy_device_still_accepts_validated_quality_override() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        let diagnostics = TeacherDeviceDiagnosticsViewModel::new(
+            crate::device_diagnostics::DeviceDiagnosticsConfig::default(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            apply_diagnostics_ui_action(
+                TeacherDiagnosticsUiAction {
+                    source_id: MonitoringSourceId(7),
+                    request: TroubleshootingOverrideRequest::Quality {
+                        stream_kind: classmesh_core::StreamKind::Monitoring,
+                        tier: QualityTier::Low,
+                    },
+                },
+                &classroom,
+                &diagnostics,
+                TransportTopologyEvidence::default(),
+            ),
+            Ok(ValidatedTroubleshootingOverride::Quality { .. })
+        ));
+    }
+
+    #[test]
+    fn automatic_diagnostics_reset_remains_available_after_device_disconnects() {
+        let mut classroom = classroom();
+        classroom.select(Some(MonitoringSourceId(7))).unwrap();
+        classroom
+            .upsert(ClassroomDeviceSnapshot {
+                source_id: MonitoringSourceId(7),
+                display_name: "Student 07".to_owned(),
+                health: DeviceHealth {
+                    presence: PresenceState::Offline,
+                    media: MediaState::Idle,
+                    service_ready: false,
+                    worker_ready: false,
+                },
+                quality_tier: None,
+                thumbnail_available: false,
+                interactive_active: false,
+            })
+            .unwrap();
+        let diagnostics = TeacherDeviceDiagnosticsViewModel::new(
+            crate::device_diagnostics::DeviceDiagnosticsConfig::default(),
+        )
+        .unwrap();
+        let action = TeacherDiagnosticsUiAction {
+            source_id: MonitoringSourceId(7),
+            request: TroubleshootingOverrideRequest::Automatic,
+        };
+
+        assert_eq!(
+            apply_diagnostics_ui_action(
+                action,
+                &classroom,
+                &diagnostics,
+                TransportTopologyEvidence::default(),
+            ),
+            Ok(crate::device_diagnostics::ValidatedTroubleshootingOverride::Automatic)
         );
     }
 
