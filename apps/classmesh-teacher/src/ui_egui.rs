@@ -306,6 +306,7 @@ impl TeacherEguiShell {
         let view = self.diagnostics_model.project(snapshot)?;
         if self.diagnostics.as_ref().map(|current| current.source_id) != Some(view.source_id) {
             self.diagnostics_draft = DiagnosticsOverrideDraft::default();
+            self.retire_pending_diagnostics_override();
             if self
                 .playback
                 .as_ref()
@@ -318,8 +319,25 @@ impl TeacherEguiShell {
         Ok(())
     }
 
+    fn retire_pending_diagnostics_override(&mut self) {
+        // A newly authenticated snapshot for the same source must not revive
+        // an intent queued before the old snapshot was revoked (ABA).
+        // Preserve local Automatic cleanup, including during disconnects.
+        if matches!(
+            self.pending_action.as_ref(),
+            Some(TeacherUiAction::Diagnostics(action))
+                if !matches!(
+                    action.request,
+                    crate::device_diagnostics::TroubleshootingOverrideRequest::Automatic
+                )
+        ) {
+            self.pending_action = None;
+        }
+    }
+
     pub fn clear_diagnostics(&mut self) {
         self.diagnostics = None;
+        self.retire_pending_diagnostics_override();
         // The trusted source was removed; never resurrect previously
         // authenticated counters after a new device snapshot appears.
         self.playback = None;
@@ -1568,6 +1586,16 @@ mod tests {
             app.take_pending_action(),
             None,
             "a revoked diagnostics snapshot must retire its queued override"
+        );
+
+        update(&mut app, &row);
+        app.queue_action(quality.clone());
+        app.clear_diagnostics();
+        update(&mut app, &row);
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "restoring the same source must not revive a revoked queued override"
         );
 
         update(&mut app, &row);
