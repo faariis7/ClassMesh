@@ -255,6 +255,30 @@ mod windows_service_app {
         }
     }
 
+    /// Reclaim an exact pending source when the listener revokes optional
+    /// FileTransfer. This is called on *every Service loop tick*, including
+    /// ticks where the FileTransfer queue is empty.
+    fn reclaim_revoked_file_pull(
+        readiness: &FileTransferReadiness,
+        pending: &mut Option<PendingFilePull>,
+        owner: &FileTransferPullOwner,
+        source: &mut FileTransferSourceSession<WindowsFileTransferOutboxSource>,
+    ) -> bool {
+        if readiness.is_ready() {
+            return false;
+        }
+        let Some(active) = pending.take() else {
+            return false;
+        };
+        let peer = FileTransferPeer {
+            principal: active.principal_id,
+            control_session_id: active.control_session_id,
+        };
+        let _ = source.cancel(peer, &active.transfer_id);
+        let _ = owner.release(active.control_session_id);
+        true
+    }
+
     #[derive(Debug)]
     struct PendingPresentationKeyInstall {
         expected_process_id: u32,
@@ -2204,6 +2228,14 @@ mod windows_service_app {
         let mut receiver_telemetry_runtime = ReceiverTelemetryServiceRuntime::default();
         let mut native_receiver_telemetry = ServiceTelemetryReader::new();
         loop {
+            // Hello-time ACL revocation can arrive with no queued transfer.
+            // Reclaim the pinned source and owner lease independently of RX.
+            reclaim_revoked_file_pull(
+                &file_transfer_ready,
+                &mut pending_file_pull,
+                &file_pull_owner,
+                &mut file_source,
+            );
             if let Some(pending) = pending_file_pull
                 && (!file_pull_owner.is_owner(pending.control_session_id)
                     || pending.idle.expired(Instant::now(), FILE_PULL_IDLE_TIMEOUT))
@@ -2268,14 +2300,12 @@ mod windows_service_app {
                     // The listener can independently revoke readiness on a
                     // new Hello before another transfer reaches this queue.
                     // Reclaim that existing source owner on *either* path.
-                    if let Some(pending) = pending_file_pull.take() {
-                        let pending_peer = FileTransferPeer {
-                            principal: pending.principal_id,
-                            control_session_id: pending.control_session_id,
-                        };
-                        let _ = file_source.cancel(pending_peer, &pending.transfer_id);
-                        let _ = file_pull_owner.release(pending.control_session_id);
-                    }
+                    reclaim_revoked_file_pull(
+                        &file_transfer_ready,
+                        &mut pending_file_pull,
+                        &file_pull_owner,
+                        &mut file_source,
+                    );
                     let _ = dispatch
                         .reply_tx
                         .send(FileTransferDispatchOutcome::SourceUnavailable);
@@ -3715,6 +3745,61 @@ mod windows_service_app {
             assert!(!pending.matches(PrincipalId([7; 32]), 78, 44, &[9; 16]));
             assert!(!pending.matches(PrincipalId([7; 32]), 77, 45, &[9; 16]));
             assert!(!pending.matches(PrincipalId([7; 32]), 77, 44, &[8; 16]));
+        }
+
+        #[test]
+        fn revoked_hello_reclaims_pending_source_without_any_queued_dispatch() {
+            let root = std::env::temp_dir().join(format!(
+                "classmesh-revoked-file-source-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&root).expect("test outbox");
+            let source_id = FileSourceId::new([0x5a; 16]).expect("source id");
+            let staged = root.join(format!("{}.bin", "5a".repeat(16)));
+            std::fs::write(&staged, b"trusted").expect("stage source");
+            let mut source =
+                FileTransferSourceSession::new(WindowsFileTransferOutboxSource::new(&root));
+            let pending = PendingFilePull {
+                principal_id: PrincipalId([7; 32]),
+                control_session_id: 77,
+                request_id: 44,
+                transfer_id: [9; 16],
+            };
+            let peer = FileTransferPeer {
+                principal: pending.principal_id,
+                control_session_id: pending.control_session_id,
+            };
+            source
+                .offer(peer, &pending.transfer_id, source_id)
+                .expect("active source");
+            let owner = FileTransferPullOwner::default();
+            assert!(owner.try_acquire(pending.control_session_id));
+            let readiness = FileTransferReadiness::new(true);
+            let mut pending = Some(pending);
+            assert!(!reclaim_revoked_file_pull(
+                &readiness,
+                &mut pending,
+                &owner,
+                &mut source,
+            ));
+            assert!(pending.is_some());
+            readiness.disable(); // same shared flag changed by QUIC Hello
+            assert!(reclaim_revoked_file_pull(
+                &readiness,
+                &mut pending,
+                &owner,
+                &mut source,
+            ));
+            assert!(pending.is_none());
+            assert!(!owner.is_owner(77));
+            assert!(source.chunk(peer, &[9; 16], 0).is_err());
+            assert!(!reclaim_revoked_file_pull(
+                &readiness,
+                &mut pending,
+                &owner,
+                &mut source,
+            ));
+            let _ = std::fs::remove_dir_all(root);
         }
 
         #[test]
