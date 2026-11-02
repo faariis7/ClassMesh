@@ -698,6 +698,19 @@ impl TeacherFileInbox {
         }
         let mut options = OpenOptions::new();
         options.read(true).write(true).create_new(true);
+        // The default Windows share mode permits another same-user writer
+        // to mutate our .part inode between SHA-256 readback and publish.
+        // Permit readers and DELETE (needed for hard-link + .part unlink),
+        // but refuse a second WRITE HANDLE while the transfer is active.
+        // This is a bounded in-transfer guarantee, not a durable ACL or
+        // post-Completed protection against same-user writers.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_SHARE_READ: u32 = 0x1;
+            const FILE_SHARE_DELETE: u32 = 0x4;
+            options.share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);
+        }
         // Keep read access for verified SHA-256 disk readback.
         #[cfg(unix)]
         {
@@ -2403,6 +2416,31 @@ mod tests {
         );
         sink.abort(&ID);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inbox_denies_concurrent_windows_part_writers_while_allowing_verified_publish() {
+        let root = temp_root("exclusive-part-writer");
+        create_private_test_root(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).unwrap();
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        let part = root.join(format!("{}.part", "71".repeat(16)));
+
+        // Another process running as the same user must not modify the
+        // retained partial inode after a verified chunk but before FINISH.
+        // A private DACL alone cannot deny writes by that same user.
+        assert!(
+            fs::OpenOptions::new().write(true).open(&part).is_err(),
+            "the active partial file admits an unverified second writer"
+        );
+        sink.append(&ID, 0, b"DATA").unwrap();
+        sink.complete(&ID).unwrap();
+        let completed = sink.completed_path(&ID);
+        assert_eq!(fs::read(&completed).unwrap(), b"DATA");
+        drop(sink);
+        fs::remove_file(completed).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 
     #[cfg(windows)]
