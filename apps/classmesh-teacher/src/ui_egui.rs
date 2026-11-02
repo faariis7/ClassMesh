@@ -1583,28 +1583,40 @@ mod tests {
         refresh(&mut app);
         app.queue_action(quality.clone());
         app.set_teacher_interaction_context(original.clone());
-        assert_eq!(app.take_pending_action(), Some(quality.clone()),
-            "a same-session refresh must not discard a valid override");
+        assert_eq!(
+            app.take_pending_action(),
+            Some(quality.clone()),
+            "a same-session refresh must not discard a valid override"
+        );
 
         app.queue_action(quality.clone());
         let mut replacement = original.clone();
         replacement.control_session_id += 1;
         app.set_teacher_interaction_context(replacement);
-        assert_eq!(app.take_pending_action(), None,
-            "a queued override from an old control session must not reach the new session");
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "a queued override from an old control session must not reach the new session"
+        );
 
         app.queue_action(quality);
         app.clear_teacher_interaction_context();
-        assert_eq!(app.take_pending_action(), None,
-            "disconnect must retire a queued non-cleanup override");
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "disconnect must retire a queued non-cleanup override"
+        );
 
         let cleanup = TeacherUiAction::Diagnostics(TeacherDiagnosticsUiAction {
             source_id: MonitoringSourceId(7),
             request: TroubleshootingOverrideRequest::Automatic,
         });
         app.queue_action(cleanup.clone());
-        assert_eq!(app.take_pending_action(), Some(cleanup),
-            "local Automatic cleanup remains available after disconnect");
+        assert_eq!(
+            app.take_pending_action(),
+            Some(cleanup),
+            "local Automatic cleanup remains available after disconnect"
+        );
     }
 
     #[test]
