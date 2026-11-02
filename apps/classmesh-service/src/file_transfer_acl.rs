@@ -205,7 +205,9 @@ fn verify_one_directory(
             return Err(denied("Outbox owner SID exceeds its descriptor"));
         }
         if !equal_sid(owner, system) && !equal_sid(owner, admins) && !equal_sid(owner, service) {
-            return Err(denied("Outbox ancestor is owned by an untrusted principal"));
+            return Err(denied(
+                "FileTransfer directory is owned by an untrusted principal",
+            ));
         }
         let dacl_begin = dacl as usize;
         if dacl_begin < descriptor_begin
@@ -264,12 +266,12 @@ fn verify_one_directory(
                         && !equal_sid(sid, service)
                     {
                         return Err(denied(
-                            "Outbox ancestor grants write/delete to another principal",
+                            "FileTransfer directory grants write/delete to another principal",
                         ));
                     }
                 }
                 1 | 2 | 3 | 7 | 8 | 17 => {} // deny, audit, and mandatory-label ACEs
-                _ => return Err(denied("Outbox ancestor has an unsupported ACE type")),
+                _ => return Err(denied("FileTransfer directory has an unsupported ACE type")),
             }
         }
         Ok(())
@@ -281,8 +283,8 @@ fn verify_one_directory(
     result
 }
 
-/// Refuse to serve Outbox data if ClassMesh, state or Outbox itself has an
-/// untrusted owner or writable ACE. ProgramData is the OS-managed trust anchor.
+/// Refuse to use a transfer directory if ClassMesh, state or that directory
+/// has an untrusted owner or writable ACE. ProgramData is the OS-managed trust anchor.
 /// This is deliberately verification-only: an administrator must provision ACLs.
 pub(crate) fn verify_private_outbox(root: &Path) -> io::Result<()> {
     let state = root
@@ -297,15 +299,23 @@ pub(crate) fn verify_private_outbox(root: &Path) -> io::Result<()> {
     for path in [classmesh, state, root] {
         let metadata = std::fs::symlink_metadata(path)?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(denied("Outbox ancestor is not a real directory"));
+            return Err(denied("FileTransfer directory is not a real directory"));
         }
         use std::os::windows::fs::MetadataExt;
         if metadata.file_attributes() & 0x400 != 0 {
-            return Err(denied("Outbox ancestor is a reparse point"));
+            return Err(denied("FileTransfer directory is a reparse point"));
         }
         verify_one_directory(path, &system, &admins, &service)?;
     }
     Ok(())
+}
+
+/// Both staging roots are pathname-based trust boundaries: the receiver
+/// writes and renames files in Inbox, and the source opens registered Outbox
+/// files. Check the full directory chain for *each* root, not just Outbox.
+pub(crate) fn verify_private_file_transfer_storage(inbox: &Path, outbox: &Path) -> io::Result<()> {
+    verify_private_outbox(inbox)?;
+    verify_private_outbox(outbox)
 }
 
 /// File transfer is optional. An unsafe legacy ProgramData tree must not
@@ -314,7 +324,7 @@ pub(crate) fn verify_private_outbox(root: &Path) -> io::Result<()> {
 pub(crate) fn prepare_optional_file_transfer_storage(inbox: &Path, outbox: &Path) -> bool {
     let result = std::fs::create_dir_all(inbox)
         .and_then(|()| std::fs::create_dir_all(outbox))
-        .and_then(|()| verify_private_outbox(outbox));
+        .and_then(|()| verify_private_file_transfer_storage(inbox, outbox));
     if let Err(error) = result {
         eprintln!("ClassMesh FileTransfer disabled: unsafe or unavailable storage: {error}");
         return false;
@@ -392,9 +402,66 @@ mod tests {
             "private Outbox must be accepted: {:?}",
             verify_private_outbox(&outbox)
         );
+        let inbox = state.join("file-inbox");
         assert!(
-            prepare_optional_file_transfer_storage(&state.join("file-inbox"), &outbox),
-            "a privately provisioned Outbox permits the optional transfer feature"
+            prepare_optional_file_transfer_storage(&inbox, &outbox),
+            "private Inbox and Outbox permit the optional transfer feature"
+        );
+        // An attacker-writable inbox is just as unsafe as an Outbox:
+        // the receiver writes .part and renames .bin using that pathname.
+        let inbox_grant = Command::new("icacls")
+            .arg(&inbox)
+            .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"])
+            .output()
+            .expect("icacls available");
+        assert!(
+            inbox_grant.status.success(),
+            "inbox grant failed: {inbox_grant:?}"
+        );
+        assert!(
+            verify_private_outbox(&outbox).is_ok(),
+            "the Outbox remains private for this negative regression"
+        );
+        assert!(
+            !prepare_optional_file_transfer_storage(&inbox, &outbox),
+            "writable inbox must disable optional FileTransfer even with a protected Outbox"
+        );
+        let inbox_remove = Command::new("icacls")
+            .arg(&inbox)
+            .args(["/remove:g", "*S-1-5-32-545"])
+            .output()
+            .expect("icacls available");
+        assert!(
+            inbox_remove.status.success(),
+            "inbox grant cleanup failed: {inbox_remove:?}"
+        );
+        assert!(
+            prepare_optional_file_transfer_storage(&inbox, &outbox),
+            "restored private inbox and outbox must allow optional FileTransfer"
+        );
+        // A substituted Inbox junction must not redirect the receiver's
+        // pathname-based .part creation or .bin publication.
+        let saved_inbox = state.join("file-inbox-private-original");
+        std::fs::rename(&inbox, &saved_inbox).expect("rename test-owned inbox");
+        let junction = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&inbox)
+            .arg(&saved_inbox)
+            .output()
+            .expect("create disposable inbox junction");
+        assert!(
+            junction.status.success(),
+            "junction fixture failed: {junction:?}"
+        );
+        assert!(
+            !prepare_optional_file_transfer_storage(&inbox, &outbox),
+            "reparse-substituted Inbox must disable FileTransfer"
+        );
+        std::fs::remove_dir(&inbox).expect("unlink test-owned junction, not target");
+        std::fs::rename(&saved_inbox, &inbox).expect("restore test-owned inbox");
+        assert!(
+            prepare_optional_file_transfer_storage(&inbox, &outbox),
+            "restored real Inbox directory must be accepted"
         );
         let output = Command::new("icacls")
             .arg(&classmesh)
@@ -415,7 +482,7 @@ mod tests {
             "unsafe legacy ACL must disable transfer without stopping the control Service"
         );
         // Restore inheritance before deleting the disposable fixture.
-        for path in [&classmesh, &state, &outbox] {
+        for path in [&classmesh, &state, &outbox, &inbox] {
             let _ = Command::new("icacls")
                 .arg(path)
                 .args(["/inheritance:e"])
