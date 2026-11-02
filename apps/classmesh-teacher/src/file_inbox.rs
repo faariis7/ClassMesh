@@ -356,13 +356,13 @@ struct ActiveFile {
     declared_size: u64,
 }
 
-// A shared writable inbox lets other users replace transfer paths between
-// pathname-based publication and cleanup. The caller owns provisioning;
-// rejecting an unsafe root must never silently chmod someone else's directory.
+// All received classroom bytes must live under a private, owner-only inbox.
+// A readable/traversable leaf permits other local principals to access files.
+// Provisioning belongs to the caller; never silently chmod an existing root.
 #[cfg(unix)]
 fn root_permissions_safe(metadata: &fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o022 == 0
+    metadata.permissions().mode() & 0o077 == 0
 }
 
 // A private inbox is not safe beneath a non-sticky group/world-writable
@@ -484,9 +484,16 @@ impl FileTransferInboxSink for TeacherFileInbox {
         if fs::symlink_metadata(&final_path).is_ok() {
             return Err(TeacherFileInboxError::ExistingTransfer);
         }
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        // A permissive process umask must never make a received .part file
+        // accessible to other principals, even if the leaf root is private.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
             .open(&temp_path)
             .map_err(|_| TeacherFileInboxError::ExistingTransfer)?;
         self.active = Some(ActiveFile {
@@ -642,6 +649,16 @@ mod tests {
             ))
     }
 
+    fn create_private_test_root(root: &std::path::Path) {
+        fs::create_dir(root).expect("create prepared inbox root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root, fs::Permissions::from_mode(0o700))
+                .expect("set private inbox test permissions");
+        }
+    }
+
     fn offer(data: &[u8]) -> FileTransferOffer {
         FileTransferOffer {
             transfer_id: ID.to_vec(),
@@ -662,7 +679,7 @@ mod tests {
     #[test]
     fn verified_file_receiver_writes_bytes_to_opaque_inbox_only_after_hash_and_commit() {
         let root = temp_root("committed");
-        fs::create_dir(&root).expect("explicit test root");
+        create_private_test_root(&root);
         let sink = TeacherFileInbox::new(&root).expect("prepared root");
         let expected = b"authenticated lesson from classroom";
         let mut receiver = FileTransferReceiver::new(sink);
@@ -697,7 +714,7 @@ mod tests {
     #[test]
     fn wrong_digest_does_not_publish_file_and_aborts_partial() {
         let root = temp_root("hash-mismatch");
-        fs::create_dir(&root).unwrap();
+        create_private_test_root(&root);
         let mut receiver = FileTransferReceiver::new(TeacherFileInbox::new(&root).unwrap());
         receiver.offer(peer(), &offer(b"expected bytes")).unwrap();
         receiver
@@ -730,7 +747,7 @@ mod tests {
             TeacherFileInbox::new(&root),
             Err(TeacherFileInboxError::InvalidRoot)
         ));
-        fs::create_dir(&root).unwrap();
+        create_private_test_root(&root);
         let final_file = root.join(format!("{}.bin", "71".repeat(16)));
         fs::write(&final_file, b"important existing file").unwrap();
         let mut sink = TeacherFileInbox::new(&root).unwrap();
