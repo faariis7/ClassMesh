@@ -1,6 +1,12 @@
 # ClassMesh Agent Handoff
 
-## ASTRA WORK HANDOFF — 2026-10-31 signed manifest foundation
+## ASTRA WORK HANDOFF — 2026-10-31 create-only release signing
+
+- PR #649 merged as `9d20c90edd5d8d5d83df80f66a20780f03dcedbb` after exact-head CI `41141769130` passed both jobs, including Windows signed-manifest verifier test. Separate branch/worktree `codex/phase13-release-signing` at `/Users/ahmed/.codex/worktrees/phase13-release-signing/ClassMesh-phase12` is rebased on that merge; it changes the signer script, native test, Windows CI step and living docs, with no Phase 10/12D4 runtime edits.
+- VM1 Windows PowerShell 5.1 RED found missing signer. GREEN used a temporary CurrentUser CodeSigning RSA certificate to sign a copy of exact #644 Service/Worker bundle, then the independent verifier accepted it; zero sequence, changed Worker before signing, pre-existing orphan signature and duplicate signing were rejected. Temporary cert and test directory cleanup was verified with zero leftovers. The signer checks bundle structure, requires a current RSA-2048+ signing key, uses SHA-256 detached CMS and create-only output; interruption can leave an orphan that fails verification.
+- Open: this signing branch exact-head CI/review. No production signing certificate, protected verifier pin, Authenticode-signed EXEs, installer, release rollback anchor, clean-machine first launch, in-process policy revocation or physical qualification. Next: complete signing PR, then implement protected pin enrollment and staged exact-byte install once real release signing authority is available.
+
+## Previous ASTRA WORK HANDOFF — 2026-10-31 signed manifest foundation
 
 - Latest merged main `ce6fe692992b788be6cc2fd10399fe1c48aa26ce` from PR #644; exact-head CI `41138625385` Portable Rust + Windows Build passed. Earlier #641 `15fa6b69`, #642 `4dead76a`, #643 `fb229088` merged. Current isolated worktree `/Users/ahmed/.codex/worktrees/phase13-signed-release-manifest/ClassMesh-phase12`, branch `codex/phase13-signed-release-manifest`. Do not alter Phase 10 or concurrent Phase 12D4 PR #645+ files.
 - Exact #644 Service/Worker artifact id `13018638145`: VM1 index validation and preflight passed; required runtime `14.51.36231.0`, installed `14.51.36247.0`; both exact EXEs are `NotSigned`. Exact Teacher artifact id `13018093504`: VM1 schema-3 validation/preflight and seven-second Session 1 responsive window PASS; visual accessibility remains undetermined. Artifact hashes and limits are in `PHASE13_SERVICE_WORKER_PREREQUISITES.md`.
