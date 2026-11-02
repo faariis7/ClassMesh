@@ -2093,11 +2093,20 @@ mod windows_service_app {
         // Optional FileTransfer is disabled when legacy/unsafe ProgramData ACLs
         // are found. Keep core Service control, Worker and media operational.
         // The dispatch gate below also prevents any local queued source read.
-        let file_transfer_ready = FileTransferReadiness::new(
+        let hello_inbox_root = inbox_root.clone();
+        let hello_outbox_root = outbox_root.clone();
+        let file_transfer_ready = FileTransferReadiness::with_storage_verifier(
             crate::file_transfer_acl::prepare_optional_file_transfer_storage(
                 &inbox_root,
                 &outbox_root,
             ),
+            move || {
+                crate::file_transfer_acl::verify_private_file_transfer_storage(
+                    &hello_inbox_root,
+                    &hello_outbox_root,
+                )
+                .is_ok()
+            },
         );
         let mut file_receiver =
             FileTransferReceiver::new(WindowsFileTransferInboxSink::new(inbox_root.clone()));
@@ -2232,6 +2241,11 @@ mod windows_service_app {
                     eprintln!(
                         "ClassMesh FileTransfer disabled: Inbox/Outbox ACL changed after startup"
                     );
+                }
+                if !file_transfer_ready.is_ready() {
+                    // The listener can independently revoke readiness on a
+                    // new Hello before another transfer reaches this queue.
+                    // Reclaim that existing source owner on *either* path.
                     if let Some(pending) = pending_file_pull.take() {
                         let pending_peer = FileTransferPeer {
                             principal: pending.principal_id,
@@ -2240,8 +2254,6 @@ mod windows_service_app {
                         let _ = file_source.cancel(pending_peer, &pending.transfer_id);
                         let _ = file_pull_owner.release(pending.control_session_id);
                     }
-                }
-                if !file_transfer_ready.is_ready() {
                     let _ = dispatch
                         .reply_tx
                         .send(FileTransferDispatchOutcome::SourceUnavailable);
