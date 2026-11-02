@@ -371,6 +371,25 @@ impl TeacherEguiShell {
             )
             .ok()?;
         }
+        // The Diagnostics page checks readiness when clicked, but a queued
+        // override can outlive selection or device health changes. Retire it
+        // before engine handoff, while still allowing offline Automatic reset.
+        // The engine remains responsible for authoritative authorization and
+        // physical-path evidence at apply time.
+        if let TeacherUiAction::Diagnostics(diagnostics) = &action {
+            if self.classroom.selected() != Some(diagnostics.source_id)
+                || !self.classroom.rows().into_iter().any(|row| {
+                    row.source_id == diagnostics.source_id
+                        && crate::ui_diagnostics::override_action_available(
+                            diagnostics.request,
+                            row.health,
+                            false,
+                        )
+                })
+            {
+                return None;
+            }
+        }
         // UI snapshots are not authorization, but a newer local lifecycle
         // observation must retire obsolete Start/Stop intents before handoff.
         // The actual presentation lifecycle still revalidates at apply time.
@@ -393,6 +412,22 @@ impl TeacherEguiShell {
                 self.file_pull_context.as_ref(),
             )
             .ok()?;
+            // The selected session may still be valid after its trusted staged
+            // offer was revoked or replaced. A queued click must not outlive
+            // that exact transfer/source offer. Runtime authorization is still
+            // independently enforced at the authenticated QUIC boundary.
+            let candidate = self.staged_file_candidate?;
+            if !staged_file_candidate_ready(
+                candidate,
+                self.classroom.selected(),
+                self.file_pull_context.as_ref(),
+            ) || candidate.source_id != pull.source_id
+                || candidate.control_session_id != pull.control_session_id
+                || pull.request.transfer_id.as_slice() != &candidate.transfer_id[..]
+                || pull.request.source_id.as_slice() != &candidate.opaque_source_id[..]
+            {
+                return None;
+            }
         }
         Some(action)
     }
@@ -1345,6 +1380,12 @@ mod tests {
             capabilities: BTreeSet::from([Capability::FileTransfer]),
         };
         app.set_file_pull_context(context.clone());
+        app.set_staged_file_candidate(TeacherStagedFileCandidate {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            transfer_id: [1; 16],
+            opaque_source_id: [2; 16],
+        });
         app.queue_file_pull_request([1; 16], [2; 16]);
         app.set_file_pull_context(TeacherFilePullContext {
             control_session_id: 78,
@@ -1353,13 +1394,71 @@ mod tests {
         assert_eq!(app.take_pending_action(), None);
 
         app.set_file_pull_context(context.clone());
+        app.set_staged_file_candidate(TeacherStagedFileCandidate {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            transfer_id: [1; 16],
+            opaque_source_id: [2; 16],
+        });
         app.queue_file_pull_request([1; 16], [2; 16]);
         app.classroom.select(None).unwrap();
         assert_eq!(app.take_pending_action(), None);
 
         app.classroom.select(Some(MonitoringSourceId(7))).unwrap();
         app.set_file_pull_context(context);
+        app.set_staged_file_candidate(TeacherStagedFileCandidate {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            transfer_id: [1; 16],
+            opaque_source_id: [2; 16],
+        });
         app.queue_file_pull_request([1; 16], [2; 16]);
+        assert!(matches!(
+            app.take_pending_action(),
+            Some(TeacherUiAction::FilePull(_))
+        ));
+    }
+
+    #[test]
+    fn queued_file_pull_is_retired_if_trusted_staged_candidate_is_revoked_or_replaced() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let context = TeacherFilePullContext {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            version: classmesh_protocol::PROTOCOL_VERSION,
+            capabilities: BTreeSet::from([Capability::FileTransfer]),
+        };
+        let candidate = TeacherStagedFileCandidate {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            transfer_id: [1; 16],
+            opaque_source_id: [2; 16],
+        };
+        app.set_file_pull_context(context);
+        app.set_staged_file_candidate(candidate);
+        app.queue_file_pull_request(candidate.transfer_id, candidate.opaque_source_id);
+        app.clear_staged_file_candidate();
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "revoked offer must not dispatch"
+        );
+
+        app.set_staged_file_candidate(candidate);
+        app.queue_file_pull_request(candidate.transfer_id, candidate.opaque_source_id);
+        app.set_staged_file_candidate(TeacherStagedFileCandidate {
+            transfer_id: [3; 16],
+            ..candidate
+        });
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "replaced offer must not dispatch"
+        );
+
+        app.set_staged_file_candidate(candidate);
+        app.queue_file_pull_request(candidate.transfer_id, candidate.opaque_source_id);
         assert!(matches!(
             app.take_pending_action(),
             Some(TeacherUiAction::FilePull(_))
@@ -1418,6 +1517,65 @@ mod tests {
         assert_eq!(app.staged_file_candidate, None);
         app.set_file_pull_context(context);
         assert_eq!(app.staged_file_candidate, None);
+    }
+
+    #[test]
+    fn queued_diagnostics_override_is_rechecked_at_ui_handoff() {
+        use crate::device_diagnostics::TroubleshootingOverrideRequest;
+        use crate::ui_shell::TeacherDiagnosticsUiAction;
+
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let source_id = MonitoringSourceId(7);
+        let quality = TeacherUiAction::Diagnostics(TeacherDiagnosticsUiAction {
+            source_id,
+            request: TroubleshootingOverrideRequest::Quality {
+                stream_kind: classmesh_core::StreamKind::Monitoring,
+                tier: classmesh_core::adaptation::QualityTier::Low,
+            },
+        });
+
+        app.queue_action(quality.clone());
+        app.classroom.select(None).unwrap();
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "a queued override must not reach the engine after selection changes"
+        );
+
+        app.classroom.select(Some(source_id)).unwrap();
+        app.queue_action(quality);
+        app.classroom
+            .upsert(ClassroomDeviceSnapshot {
+                source_id,
+                display_name: "Student 07".to_owned(),
+                health: DeviceHealth {
+                    presence: PresenceState::Offline,
+                    media: MediaState::Recovering,
+                    service_ready: false,
+                    worker_ready: false,
+                },
+                quality_tier: None,
+                thumbnail_available: false,
+                interactive_active: false,
+            })
+            .unwrap();
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "new overrides must not be handed off after the device becomes unavailable"
+        );
+
+        let cleanup = TeacherUiAction::Diagnostics(TeacherDiagnosticsUiAction {
+            source_id,
+            request: TroubleshootingOverrideRequest::Automatic,
+        });
+        app.queue_action(cleanup.clone());
+        assert_eq!(
+            app.take_pending_action(),
+            Some(cleanup),
+            "return-to-automatic remains available while offline"
+        );
     }
 
     #[test]
