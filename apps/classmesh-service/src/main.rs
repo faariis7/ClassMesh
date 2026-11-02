@@ -1,5 +1,7 @@
 #[cfg(windows)]
 mod control_runtime;
+#[cfg(windows)]
+mod file_transfer_acl;
 #[cfg(any(windows, test))]
 pub mod file_transfer_storage;
 #[cfg(windows)]
@@ -2085,6 +2087,13 @@ mod windows_service_app {
             fs::create_dir_all(&inbox_root).and_then(|()| fs::create_dir_all(&outbox_root))
         {
             eprintln!("ClassMesh file transfer storage preparation failed: {error}");
+            set_stopped_with_exit(&status_handle, 4)?;
+            return Ok(());
+        }
+        // Do not register or serve staged files from an inherited writable
+        // ProgramData tree. Refuse startup instead of trusting a mutable path.
+        if let Err(error) = crate::file_transfer_acl::verify_private_outbox(&outbox_root) {
+            eprintln!("ClassMesh Outbox ACL verification failed: {error}");
             set_stopped_with_exit(&status_handle, 4)?;
             return Ok(());
         }
