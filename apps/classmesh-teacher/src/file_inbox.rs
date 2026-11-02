@@ -365,6 +365,23 @@ fn root_permissions_safe(metadata: &fs::Metadata) -> bool {
     metadata.permissions().mode() & 0o022 == 0
 }
 
+// A private inbox is not safe beneath a non-sticky group/world-writable
+// directory: another principal could replace the private leaf by pathname.
+// Sticky directories are acceptable only when owned by root or by the inbox
+// owner, because the sticky-directory owner may otherwise delete the leaf.
+#[cfg(unix)]
+fn unix_ancestor_permissions_safe(root: &fs::Metadata, ancestor: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let mode = ancestor.mode();
+    mode & 0o022 == 0
+        || (mode & 0o1000 != 0 && (ancestor.uid() == 0 || ancestor.uid() == root.uid()))
+}
+
+#[cfg(not(unix))]
+fn unix_ancestor_permissions_safe(_root: &fs::Metadata, _ancestor: &fs::Metadata) -> bool {
+    true
+}
+
 // Windows ACL/owner checks remain authoritative on Windows; Unix mode bits
 // are not a substitute for those checks.
 #[cfg(not(unix))]
@@ -393,6 +410,9 @@ impl TeacherFileInbox {
     }
 
     fn root_ready(root: &Path) -> bool {
+        let Ok(root_metadata) = fs::symlink_metadata(root) else {
+            return false;
+        };
         root.is_absolute()
             // A mutable intermediate directory must never redirect a
             // parent traversal after the original-path security checks.
@@ -405,15 +425,17 @@ impl TeacherFileInbox {
             // that as a trusted namespace for publishing received files.
             && root.parent().is_some_and(windows_parent_dacl_safe)
             && root.ancestors().skip(2).all(windows_ancestor_dacl_safe)
-            // Trust the preprovisioned AppInbox leaf itself. A canonical
-            // temporary ancestor may legitimately be world-writable + sticky
-            // (for example /tmp); its mode is not the leaf's admission mode.
-            && fs::symlink_metadata(root).is_ok_and(|metadata| root_permissions_safe(&metadata))
+            // A canonical temporary ancestor may be writable only if sticky
+            // and owned by root/the inbox owner; a non-sticky writable parent
+            // could replace the private inbox entry before publication.
+            && root_permissions_safe(&root_metadata)
             && root.ancestors().all(|ancestor| {
                 fs::symlink_metadata(ancestor).is_ok_and(|metadata| {
                     metadata.is_dir()
                         && !metadata.file_type().is_symlink()
                         && !is_reparse_point(&metadata)
+                        && (ancestor == root
+                            || unix_ancestor_permissions_safe(&root_metadata, &metadata))
                 })
             })
     }
@@ -792,6 +814,33 @@ mod tests {
             TeacherFileInbox::new(&root).is_ok(),
             "root must be checked independently of its sticky temporary ancestor"
         );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_rejects_nonsticky_writable_ancestor_before_publication() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = temp_root("nonsticky-writable-parent");
+        let root = parent.join("private-inbox");
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).expect("initially private ancestry");
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"DATA").unwrap();
+
+        // Without the sticky bit, another principal can replace the inbox
+        // entry in this world-writable parent even though its leaf is 0700.
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(matches!(
+            TeacherFileInbox::new(&root),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
+        assert_eq!(sink.complete(&ID), Err(TeacherFileInboxError::InvalidRoot));
+        assert!(!sink.completed_path(&ID).exists());
+        sink.abort(&ID);
         fs::remove_dir_all(parent).unwrap();
     }
 
