@@ -320,6 +320,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
 
     use classmesh_core::recovery::RecoveryPolicy;
     use classmesh_protocol::control_wire::{
@@ -358,6 +359,7 @@ mod tests {
         committed: bool,
         aborted: bool,
         close_on_complete: Option<quinn::Connection>,
+        revoke_on_complete: Option<Box<dyn FnOnce() + Send>>,
     }
     impl FileTransferInboxSink for InboxSink {
         type Error = ();
@@ -379,6 +381,9 @@ mod tests {
         }
         fn complete(&mut self, _id: &[u8; 16]) -> Result<(), ()> {
             self.committed = true;
+            if let Some(revoke) = self.revoke_on_complete.take() {
+                revoke();
+            }
             if let Some(connection) = &self.close_on_complete {
                 connection.close(0_u32.into(), b"test: close after sink commit");
             }
@@ -402,6 +407,7 @@ mod tests {
 
     async fn authenticated_quic_transfer_scenario(
         close_after_commit: bool,
+        revoke_during_commit: bool,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let cert = generate_simple_self_signed(vec!["classmesh.local".into()])?;
         let certificate = CertificateDer::from(cert.cert);
@@ -484,7 +490,7 @@ mod tests {
                 ))
                 .await
                 .map_err(|e| e.to_string())?;
-            if close_after_commit {
+            if close_after_commit || revoke_during_commit {
                 assert!(channel.receive().await.is_err());
             } else {
                 let completed = channel.receive().await.map_err(|e| e.to_string())?;
@@ -541,7 +547,34 @@ mod tests {
                 credentials: BTreeMap::new(),
             })
             .map_err(|e| format!("{e:?}"))?;
-        let live = LiveAuthorizationStore::new(store);
+        let mut revoked = store.clone();
+        revoked
+            .upsert(Principal {
+                id: PrincipalId([8; 32]),
+                kind: PrincipalKind::Teacher,
+                enabled: true,
+                permissions: BTreeSet::new(),
+                credentials: BTreeMap::new(),
+            })
+            .expect("trusted test-only policy revocation");
+        let live = Arc::new(LiveAuthorizationStore::new(store));
+        // Deterministically withdraw Teacher ReceiveFile while FINISH is
+        // synchronously committing, after the pre-FINISH permission check.
+        let revoke_on_complete: Option<Box<dyn FnOnce() + Send>> =
+            revoke_during_commit.then(|| {
+                let live = Arc::clone(&live);
+                Box::new(move || {
+                    // The trusted policy publisher is a separate thread.
+                    // Join before returning from sink.commit so FINISH must
+                    // observe the withdrawn permission at its postcheck.
+                    std::thread::spawn(move || {
+                        live.publish_if_version(1, revoked)
+                            .expect("trusted test-only revocation must publish");
+                    })
+                    .join()
+                    .expect("trusted test publisher must finish");
+                }) as Box<dyn FnOnce() + Send>
+            });
         let mut inbox = TeacherFilePullInbox::new(
             &session,
             EXPECTED,
@@ -550,6 +583,7 @@ mod tests {
             1,
             InboxSink {
                 close_on_complete: close_after_commit.then(|| session.connection.clone()),
+                revoke_on_complete,
                 ..InboxSink::default()
             },
         )
@@ -599,15 +633,23 @@ mod tests {
             .await?;
         assert_eq!(progress.state, FileTransferState::Progress as i32);
         assert!(!inbox.sink().committed);
-        if close_after_commit {
+        if close_after_commit || revoke_during_commit {
             let failed_ack = inbox
                 .receive_and_reply(&mut session, &live, &mut outbound_seq, || 150)
                 .await;
-            assert!(matches!(
-                failed_ack,
-                Err(TeacherFilePullReceiveError::Transport(_))
-            ));
-            assert_eq!(outbound_seq, 4);
+            if revoke_during_commit {
+                assert!(matches!(
+                    failed_ack,
+                    Err(TeacherFilePullReceiveError::TeacherPermissionRevoked)
+                ));
+                assert_eq!(outbound_seq, 3);
+            } else {
+                assert!(matches!(
+                    failed_ack,
+                    Err(TeacherFilePullReceiveError::Transport(_))
+                ));
+                assert_eq!(outbound_seq, 4);
+            }
             assert!(inbox.sink().committed);
             assert!(!inbox.sink().aborted);
             assert_eq!(
@@ -652,12 +694,22 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn authenticated_quic_offer_chunk_finish_persists_bytes_before_completed_status()
     -> Result<(), Box<dyn Error + Send + Sync>> {
-        authenticated_quic_transfer_scenario(false).await
+        authenticated_quic_transfer_scenario(false, false).await
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn authenticated_quic_ack_failure_after_sink_commit_exposes_local_receipt()
     -> Result<(), Box<dyn Error + Send + Sync>> {
-        authenticated_quic_transfer_scenario(true).await
+        authenticated_quic_transfer_scenario(true, false).await
+    }
+
+    // This is a real authenticated QUIC FINISH, with a trusted test-only
+    // revocation injected synchronously inside the actual sink commit.
+    // A committed local file may survive concurrent withdrawal, but no
+    // Completed status may be sent and the local receipt must be retained.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_teacher_revocation_during_finish_preserves_local_receipt_without_ack()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        authenticated_quic_transfer_scenario(false, true).await
     }
 }
