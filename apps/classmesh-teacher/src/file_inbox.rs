@@ -25,6 +25,197 @@ fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
 }
 
+// This is a fail-closed DACL admission check for an explicitly provisioned
+// Windows AppInbox root. It is not an ancestor-HANDLE or anti-TOCTOU proof.
+// A NULL DACL, unknown ACE, foreign owner, or an ACE granting any access to
+// an untrusted SID must not be treated as a private receiving directory.
+#[cfg(windows)]
+fn windows_root_dacl_private(root: &Path) -> bool {
+    use std::ffi::c_void;
+    use std::mem::{offset_of, size_of};
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
+        EqualSid, GetAce, GetLengthSid, GetTokenInformation, IsValidAcl, IsValidSid,
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_MAX_SID_SIZE, TOKEN_QUERY,
+        TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid, WinCreatorOwnerSid, WinLocalSystemSid,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    struct Token(HANDLE);
+    impl Drop for Token {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: OpenProcessToken returned this owned handle.
+                unsafe { CloseHandle(self.0) };
+            }
+        }
+    }
+    struct Descriptor(PSECURITY_DESCRIPTOR);
+    impl Drop for Descriptor {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: GetSecurityInfo allocates with LocalAlloc.
+                unsafe { LocalFree(self.0) };
+            }
+        }
+    }
+    fn well_known(kind: windows_sys::Win32::Security::WELL_KNOWN_SID_TYPE) -> Option<Vec<u8>> {
+        let mut sid = vec![0_u8; SECURITY_MAX_SID_SIZE as usize];
+        let mut length = sid.len() as u32;
+        // SAFETY: destination is writable for the maximum documented SID size.
+        if unsafe { CreateWellKnownSid(kind, null_mut(), sid.as_mut_ptr().cast(), &mut length) }
+            == 0
+        {
+            return None;
+        }
+        sid.truncate(length as usize);
+        Some(sid)
+    }
+    fn equal_sid(a: PSID, b: PSID) -> bool {
+        // SAFETY: both pointers come from validated SIDs in live allocations.
+        unsafe { EqualSid(a, b) != 0 }
+    }
+
+    // Keep the inspected directory HANDLE live through descriptor parsing.
+    // OPEN_REPARSE_POINT prevents this descriptor check from following a leaf link.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let Ok(dir) = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(root)
+    else {
+        return false;
+    };
+
+    let mut raw_token = null_mut();
+    // SAFETY: pseudo-process handle is valid and output HANDLE is writable.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut raw_token) } == 0 {
+        return false;
+    }
+    let token = Token(raw_token);
+    let mut required = 0_u32;
+    // SAFETY: zero-size probe asks Windows for the required buffer length.
+    unsafe { GetTokenInformation(token.0, TokenUser, null_mut(), 0, &raw mut required) };
+    if required < size_of::<TOKEN_USER>() as u32 || required > 4096 {
+        return false;
+    }
+    let mut user_words = vec![0_usize; (required as usize).div_ceil(size_of::<usize>())];
+    // SAFETY: word-aligned allocation is large enough for the reported bytes.
+    if unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            user_words.as_mut_ptr().cast(),
+            required,
+            &raw mut required,
+        )
+    } == 0
+    {
+        return false;
+    }
+    // SAFETY: TokenUser query initialized this aligned TOKEN_USER buffer.
+    let user_sid = unsafe { (*(user_words.as_ptr().cast::<TOKEN_USER>())).User.Sid };
+    if user_sid.is_null() || unsafe { IsValidSid(user_sid) } == 0 {
+        return false;
+    }
+    let Some(system) = well_known(WinLocalSystemSid) else {
+        return false;
+    };
+    let Some(admins) = well_known(WinBuiltinAdministratorsSid) else {
+        return false;
+    };
+    let Some(creator) = well_known(WinCreatorOwnerSid) else {
+        return false;
+    };
+    let system_sid = system.as_ptr().cast_mut().cast();
+    let admins_sid = admins.as_ptr().cast_mut().cast();
+    let creator_sid = creator.as_ptr().cast_mut().cast();
+
+    let mut owner: PSID = null_mut();
+    let mut dacl: *mut ACL = null_mut();
+    let mut descriptor = Descriptor(null_mut());
+    // SAFETY: dir remains open, outputs are writable, descriptor is freed by RAII.
+    if unsafe {
+        GetSecurityInfo(
+            dir.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &raw mut owner,
+            null_mut(),
+            &raw mut dacl,
+            null_mut(),
+            &raw mut descriptor.0,
+        )
+    } != 0
+    {
+        return false;
+    }
+    if descriptor.0.is_null()
+        || owner.is_null()
+        || dacl.is_null()
+        || unsafe { IsValidSid(owner) } == 0
+        || unsafe { IsValidAcl(dacl) } == 0
+    {
+        return false;
+    }
+    // A directory owned by a foreign user is not a trusted AppInbox, even
+    // if its current DACL happens to be restrictive.
+    if !equal_sid(owner, user_sid) && !equal_sid(owner, system_sid) && !equal_sid(owner, admins_sid)
+    {
+        return false;
+    }
+
+    // Reject any unrecognized ACE rather than guessing its effect. This
+    // conservative policy also rejects foreign read access to file contents.
+    let count = unsafe { (*dacl).AceCount };
+    if count == 0 || count > 64 {
+        return false;
+    }
+    for index in 0..u32::from(count) {
+        let mut raw_ace: *mut c_void = null_mut();
+        // SAFETY: index is within the validated ACL's ACE count.
+        if unsafe { GetAce(dacl, index, &raw mut raw_ace) } == 0 || raw_ace.is_null() {
+            return false;
+        }
+        // SAFETY: GetAce returns at least a valid ACE_HEADER in the live ACL.
+        let header = unsafe { &*(raw_ace.cast::<ACE_HEADER>()) };
+        let sid_offset = offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+        if header.AceType != 0 || usize::from(header.AceSize) < sid_offset + 8 {
+            return false;
+        }
+        // SAFETY: ACE type and minimum size validated before accessing SidStart.
+        let allowed = unsafe { &*(raw_ace.cast::<ACCESS_ALLOWED_ACE>()) };
+        let sid: PSID = std::ptr::addr_of!(allowed.SidStart).cast_mut().cast();
+        // SAFETY: GetLengthSid reads the SID header already bounded by ACE size.
+        let sid_length = unsafe { GetLengthSid(sid) } as usize;
+        if sid_length < 8
+            || sid_length > usize::from(header.AceSize) - sid_offset
+            || unsafe { IsValidSid(sid) } == 0
+        {
+            return false;
+        }
+        if !equal_sid(sid, user_sid)
+            && !equal_sid(sid, system_sid)
+            && !equal_sid(sid, admins_sid)
+            && !equal_sid(sid, creator_sid)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(not(windows))]
+fn windows_root_dacl_private(_root: &Path) -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeacherFileInboxError {
     InvalidRoot,
@@ -69,6 +260,7 @@ impl TeacherFileInbox {
 
     fn root_ready(root: &Path) -> bool {
         root.is_absolute()
+            && windows_root_dacl_private(root)
             && root.ancestors().all(|ancestor| {
                 fs::symlink_metadata(ancestor).is_ok_and(|metadata| {
                     metadata.is_dir()
@@ -132,6 +324,9 @@ impl FileTransferInboxSink for TeacherFileInbox {
     }
 
     fn append(&mut self, id: &[u8; 16], offset: u64, content: &[u8]) -> Result<(), Self::Error> {
+        if !Self::root_ready(&self.root) {
+            return Err(TeacherFileInboxError::InvalidRoot);
+        }
         let active = self
             .active
             .as_mut()
@@ -152,6 +347,11 @@ impl FileTransferInboxSink for TeacherFileInbox {
             .file
             .write_all(content)
             .map_err(|_| TeacherFileInboxError::Io)?;
+        // The ACL can change while a chunk is written; never report Progress
+        // after a detected change to an untrusted destination.
+        if !Self::root_ready(&self.root) {
+            return Err(TeacherFileInboxError::InvalidRoot);
+        }
         active.received = end;
         Ok(())
     }
@@ -165,6 +365,11 @@ impl FileTransferInboxSink for TeacherFileInbox {
         }
         if active.received != active.declared_size {
             return Err(TeacherFileInboxError::Incomplete);
+        }
+        // Admission-time ACL checks are not a lifetime grant. Refuse to
+        // publish or acknowledge when another principal acquired inbox access.
+        if !Self::root_ready(&self.root) {
+            return Err(TeacherFileInboxError::InvalidRoot);
         }
         let active = self
             .active
@@ -372,6 +577,60 @@ mod tests {
         ));
         fs::remove_file(alias).unwrap();
         fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inbox_rejects_foreign_windows_dacl_at_admission_and_before_begin() {
+        use std::process::Command;
+        let root = temp_root("foreign-dacl");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).expect("private Windows test root");
+        // The test owns this disposable directory. A foreign principal with
+        // Modify rights must not be able to rewrite received lesson bytes.
+        let grant = Command::new("icacls")
+            .arg(&root)
+            .arg("/grant")
+            .arg("*S-1-1-0:(OI)(CI)M")
+            .output()
+            .expect("native Windows icacls");
+        assert!(grant.status.success(), "icacls failed: {grant:?}");
+        assert!(matches!(
+            TeacherFileInbox::new(&root),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
+        assert_eq!(
+            sink.begin(&ID, "lesson.pdf", 4),
+            Err(TeacherFileInboxError::InvalidRoot)
+        );
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inbox_rejects_windows_acl_revoked_after_chunk_before_publish() {
+        use std::process::Command;
+        let root = temp_root("acl-revoked-before-publish");
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).expect("private Windows test root");
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"DATA").unwrap();
+        let grant = Command::new("icacls")
+            .arg(&root)
+            .arg("/grant")
+            .arg("*S-1-1-0:(OI)(CI)M")
+            .output()
+            .expect("native Windows icacls");
+        assert!(grant.status.success(), "icacls failed: {grant:?}");
+        assert_eq!(sink.complete(&ID), Err(TeacherFileInboxError::InvalidRoot));
+        assert!(!sink.completed_path(&ID).exists());
+        assert_eq!(
+            sink.append(&ID, 4, b""),
+            Err(TeacherFileInboxError::InvalidRoot)
+        );
+        sink.abort(&ID);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(windows)]
