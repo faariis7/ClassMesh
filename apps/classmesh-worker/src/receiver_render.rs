@@ -4,13 +4,13 @@ use classmesh_codec_win::mf_decoder::DecodedGpuFrame;
 use classmesh_render_win::{
     DxgiFailureClass, FlipPresenter, PresentMetrics, ResizeOutcome, classify_dxgi_error,
 };
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, IDC_ARROW, IsWindow, LoadCursorW, MSG, PM_REMOVE, PeekMessageW,
-    RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WM_QUIT, WM_SIZE, WNDCLASSW,
+    DispatchMessageW, GetClientRect, IDC_ARROW, IsWindow, LoadCursorW, MSG, PM_REMOVE,
+    PeekMessageW, RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WM_QUIT, WNDCLASSW,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::{Interface, w};
@@ -190,9 +190,9 @@ impl PresentationWindow {
 
     /// Drains pending Win32 messages without blocking media receive/decode.
     ///
-    /// `WM_SIZE` is consumed as a renderer lifecycle signal. Zero client dimensions suspend
-    /// presentation while the window is minimized; restoring/resizing the window performs a
-    /// bounded `ResizeBuffers` and lazily rebuilds the video processor on the next frame.
+    /// Win32 delivers WM_SIZE synchronously, so queued-message inspection alone misses
+    /// real resizes. After dispatch, read the actual client rectangle and resize the presenter.
+    /// Zero client dimensions suspend rendering while minimized.
     ///
     /// Returns `false` after the presentation window has closed.
     pub fn pump_messages(&mut self) -> bool {
@@ -205,33 +205,6 @@ impl PresentationWindow {
                 self.closed = true;
                 break;
             }
-            if message.message == WM_SIZE && message.hwnd == self.hwnd {
-                let (width, height) = client_size_from_lparam(message.lParam);
-                self.client_size = (width, height);
-                if let Some(presenter) = self.presenter.as_mut() {
-                    match presenter.resize_output(width, height) {
-                        Ok(ResizeOutcome::Resized) => {
-                            eprintln!("student presentation resized to {width}x{height}");
-                        }
-                        Ok(ResizeOutcome::Suspended) => {
-                            eprintln!(
-                                "student presentation suspended while the window is minimized"
-                            );
-                        }
-                        Ok(ResizeOutcome::Unchanged) => {}
-                        Err(error) => {
-                            if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
-                                self.device_lost = true;
-                            }
-                            eprintln!(
-                                "student presentation swap-chain resize failed at {width}x{height}: {error}"
-                            );
-                        }
-                    }
-                } else {
-                    self.device_lost = true;
-                }
-            }
             unsafe {
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
@@ -242,6 +215,41 @@ impl PresentationWindow {
             if !unsafe { IsWindow(Some(self.hwnd)).as_bool() } {
                 self.closed = true;
                 break;
+            }
+        }
+        if !self.closed {
+            let mut rect = RECT::default();
+            if unsafe { GetClientRect(self.hwnd, &mut rect) }.is_ok() {
+                let width = u32::try_from(rect.right - rect.left).unwrap_or(0);
+                let height = u32::try_from(rect.bottom - rect.top).unwrap_or(0);
+                if self.client_size != (width, height) {
+                    self.client_size = (width, height);
+                    if let Some(presenter) = self.presenter.as_mut() {
+                        match presenter.resize_output(width, height) {
+                            Ok(ResizeOutcome::Resized) => {
+                                eprintln!("student presentation resized to {width}x{height}");
+                            }
+                            Ok(ResizeOutcome::Suspended) => {
+                                eprintln!(
+                                    "student presentation suspended while the window is minimized"
+                                );
+                            }
+                            Ok(ResizeOutcome::Unchanged) => {}
+                            Err(error) => {
+                                if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
+                                    self.device_lost = true;
+                                }
+                                eprintln!(
+                                    "student presentation swap-chain resize failed at {width}x{height}: {error}"
+                                );
+                            }
+                        }
+                    } else {
+                        self.device_lost = true;
+                    }
+                }
+            } else if !unsafe { IsWindow(Some(self.hwnd)).as_bool() } {
+                self.closed = true;
             }
         }
         !self.closed
@@ -269,13 +277,6 @@ impl Drop for PresentationWindow {
     }
 }
 
-fn client_size_from_lparam(lparam: LPARAM) -> (u32, u32) {
-    let packed = lparam.0 as usize;
-    let width = u32::try_from(packed & 0xffff).unwrap_or(0);
-    let height = u32::try_from((packed >> 16) & 0xffff).unwrap_or(0);
-    (width, height)
-}
-
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     message: u32,
@@ -290,15 +291,6 @@ unsafe extern "system" fn window_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn extracts_client_size_from_wm_size_lparam() {
-        let packed = (720usize << 16) | 1280usize;
-        assert_eq!(
-            client_size_from_lparam(LPARAM(packed as isize)),
-            (1280, 720)
-        );
-    }
 
     #[test]
     fn destroying_receiver_window_does_not_post_global_thread_quit() {
@@ -500,7 +492,59 @@ mod tests {
     }
 
     #[test]
-    fn zero_wm_size_dimensions_are_preserved_for_minimize() {
-        assert_eq!(client_size_from_lparam(LPARAM(0)), (0, 0));
+    fn synchronous_win32_resize_updates_presentation_client_size() {
+        use windows::Win32::UI::WindowsAndMessaging::{SWP_NOMOVE, SWP_NOZORDER, SetWindowPos};
+
+        std::thread::spawn(|| {
+            let module = unsafe { GetModuleHandleW(None).unwrap() };
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: module.into(),
+                lpszClassName: WINDOW_CLASS,
+                ..Default::default()
+            };
+            let _ = unsafe { RegisterClassW(&class) };
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    WINDOW_CLASS,
+                    WINDOW_TITLE,
+                    WS_OVERLAPPEDWINDOW,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    320,
+                    180,
+                    None,
+                    None,
+                    Some(module.into()),
+                    None,
+                )
+                .unwrap()
+            };
+            let mut receiver = PresentationWindow {
+                hwnd,
+                presenter: None,
+                closed: false,
+                client_size: (320, 180),
+                device_lost: false,
+            };
+            // SetWindowPos delivers WM_SIZE synchronously, not necessarily as a
+            // queued message returned by PeekMessageW.
+            unsafe { SetWindowPos(hwnd, None, 0, 0, 640, 480, SWP_NOMOVE | SWP_NOZORDER).unwrap() };
+            let mut rect = RECT::default();
+            unsafe { GetClientRect(hwnd, &mut rect).unwrap() };
+            let actual = (
+                (rect.right - rect.left) as u32,
+                (rect.bottom - rect.top) as u32,
+            );
+            assert_ne!(actual, (320, 180));
+            assert!(receiver.pump_messages());
+            assert_eq!(
+                receiver.client_size, actual,
+                "synchronous WM_SIZE must update presentation dimensions"
+            );
+        })
+        .join()
+        .unwrap();
     }
 }
