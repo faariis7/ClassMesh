@@ -138,6 +138,9 @@ impl TeacherEguiShell {
             if matches!(self.pending_action, Some(TeacherUiAction::Focus(_))) {
                 self.pending_action = None;
             }
+            // Diagnostics intents carry a source but no session epoch.
+            // A reconnect must not replay a pre-reconnect override.
+            self.retire_pending_diagnostics_override();
         }
         // A new control session, source or missing optional v0.8
         // diagnostics capability invalidates all previously visible data.
@@ -164,6 +167,7 @@ impl TeacherEguiShell {
             self.pending_action = None;
         }
         self.teacher_interaction_context = None;
+        self.retire_pending_diagnostics_override();
         self.playback = None;
         reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
     }
