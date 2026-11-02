@@ -35,6 +35,7 @@ const MAX_TRANSFER_FRAMES: u64 = 65_536;
 pub enum TeacherFilePullRuntimeError {
     Ui(TeacherFilePullError),
     StaleControlSession,
+    SelectionIdentityChanged,
     CapabilityChanged,
     InvalidTransferId,
     Send(TeacherFilePullTransportError),
@@ -60,6 +61,17 @@ pub struct TeacherFilePullCompletion {
     pub last_inbound_sequence: u64,
 }
 
+/// Authenticated mapping of the current monitoring selection to its enrolled
+/// StudentDevice principal. The owning dispatcher must obtain this from its
+/// live trusted device/session registry, never from GUI action fields, an IP,
+/// a hostname, or a caller-provided file source ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedSelectedStudent {
+    pub source_id: MonitoringSourceId,
+    pub control_session_id: u64,
+    pub principal_id: PrincipalId,
+}
+
 /// Call this from the single owning authenticated Teacher session dispatcher
 /// after taking `TeacherUiAction::FilePull` from the actual Teacher GUI.
 /// Do not call in parallel with any other reads/writes on this same channel.
@@ -79,6 +91,7 @@ pub async fn run_authenticated_teacher_file_pull(
     current_context: &TeacherFilePullContext,
     session: &mut ClientControlSession,
     authorization: &LiveAuthorizationStore,
+    verified_selection: VerifiedSelectedStudent,
     expected_student: PrincipalId,
     last_inbound_sequence: u64,
     outbound_sequence: &mut u64,
@@ -99,6 +112,15 @@ pub async fn run_authenticated_teacher_file_pull(
         || !negotiated.capabilities.contains(&Capability::FileTransfer)
     {
         return Err(TeacherFilePullRuntimeError::CapabilityChanged);
+    }
+    // A valid enrolled QUIC peer alone does not prove that the currently
+    // selected monitoring tile belongs to that peer. Require an independent
+    // trusted source->principal mapping before sending any remote work.
+    if verified_selection.source_id != action.source_id
+        || verified_selection.control_session_id != action.control_session_id
+        || verified_selection.principal_id != expected_student
+    {
+        return Err(TeacherFilePullRuntimeError::SelectionIdentityChanged);
     }
     if action.request.transfer_id.len() != 16 {
         return Err(TeacherFilePullRuntimeError::InvalidTransferId);

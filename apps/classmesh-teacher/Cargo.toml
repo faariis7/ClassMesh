@@ -13,6 +13,8 @@ classmesh-core = { path = "../../crates/classmesh-core" }
 classmesh-protocol = { path = "../../crates/classmesh-protocol" }
 classmesh-video = { path = "../../crates/classmesh-video" }
 classmesh-windows-runtime = { path = "../../crates/classmesh-windows-runtime" }
+# Verify the actual AppInbox disk bytes before reporting a completed file.
+sha2 = "0.10.9"
 
 [target.'cfg(windows)'.dependencies]
 classmesh-capture-win = { path = "../../crates/classmesh-capture-win" }
@@ -21,7 +23,6 @@ eframe = { version = "=0.32.3", default-features = false, features = ["accesskit
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [dev-dependencies]
-sha2 = "0.10.9"
 quinn = "0.11.12"
 rcgen = { version = "0.14", features = ["x509-parser"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
