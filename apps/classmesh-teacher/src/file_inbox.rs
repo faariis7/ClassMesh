@@ -2,7 +2,7 @@
 //!
 //! The caller must supply a pre-provisioned, appropriately protected root.
 //! Static path checks reject observed symlink/junction ancestors, but do NOT
-//! establish trusted Windows owner/DACL, retained ancestor HANDLEs, or
+//! establish retained ancestor HANDLEs, durable namespace commits, or
 //! anti-TOCTOU guarantees against an adversary replacing directory ancestors.
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -25,8 +25,8 @@ fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
 }
 
-// This is a fail-closed DACL admission check for an explicitly provisioned
-// Windows AppInbox root. It is not an ancestor-HANDLE or anti-TOCTOU proof.
+// Fail-closed DACL admission for the provisioned Windows AppInbox root and
+// its immediate parent. This is not a retained-ancestor-HANDLE or anti-TOCTOU proof.
 // A NULL DACL, unknown ACE, foreign owner, or an ACE granting any access to
 // an untrusted SID must not be treated as a private receiving directory.
 #[cfg(windows)]
@@ -261,6 +261,10 @@ impl TeacherFileInbox {
     fn root_ready(root: &Path) -> bool {
         root.is_absolute()
             && windows_root_dacl_private(root)
+            // The leaf may be private while its parent grants a foreign
+            // principal directory-entry replacement rights. Do not accept
+            // that as a trusted namespace for publishing received files.
+            && root.parent().is_some_and(windows_root_dacl_private)
             && root.ancestors().all(|ancestor| {
                 fs::symlink_metadata(ancestor).is_ok_and(|metadata| {
                     metadata.is_dir()
@@ -605,6 +609,39 @@ mod tests {
         );
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inbox_rejects_untrusted_immediate_parent_even_when_leaf_is_private() {
+        use std::process::Command;
+        let parent = temp_root("foreign-parent-dacl");
+        let root = parent.join("inbox");
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).expect("initial private parent and leaf");
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"DATA").unwrap();
+
+        // Grant only on the parent, without inheritance flags. The leaf
+        // remains private but a foreign principal can replace its parent
+        // directory entry, so neither admission nor Completed is safe.
+        let grant = Command::new("icacls")
+            .arg(&parent)
+            .arg("/grant")
+            .arg("*S-1-1-0:M")
+            .output()
+            .expect("native Windows icacls");
+        assert!(grant.status.success(), "icacls failed: {grant:?}");
+        assert!(super::windows_root_dacl_private(&root));
+        assert!(matches!(
+            TeacherFileInbox::new(&root),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
+        assert_eq!(sink.complete(&ID), Err(TeacherFileInboxError::InvalidRoot));
+        assert!(!sink.completed_path(&ID).exists());
+        sink.abort(&ID);
+        fs::remove_dir_all(parent).unwrap();
     }
 
     #[cfg(windows)]
