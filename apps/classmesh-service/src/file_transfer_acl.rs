@@ -418,6 +418,24 @@ fn preflight_existing_storage_chain(path: &Path) -> io::Result<()> {
             "FileTransfer storage path must be absolute and normalized",
         ));
     }
+    // The core enrolled Service loads its machine identity from an existing
+    // ClassMesh/state tree before reaching this optional FileTransfer gate.
+    // Never let FileTransfer create that trust root beneath ProgramData: Users
+    // may have FILE_ADD_SUBDIRECTORY there and can race a missing root name.
+    // Only the final inbox/outbox child may be created under a provisioned,
+    // independently verified state directory.
+    let state = path
+        .parent()
+        .ok_or_else(|| denied("missing FileTransfer state directory"))?;
+    match std::fs::symlink_metadata(state) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(denied(
+                "FileTransfer requires a provisioned ClassMesh state root",
+            ));
+        }
+        Err(error) => return Err(error),
+    }
     for ancestor in path.ancestors() {
         match std::fs::symlink_metadata(ancestor) {
             Ok(metadata) => {
@@ -712,6 +730,28 @@ mod tests {
         assert!(
             verify_private_outbox(&outbox).is_ok(),
             "ordinary ProgramData-style Users Write must not disable the Service"
+        );
+        // The OS-managed parent may permit Users to create directories.
+        // If ClassMesh itself is absent, mkdir races an untrusted principal
+        // that can precreate or substitute that name before the ACL postcheck.
+        // A valid enrolled Service already requires a provisioned state tree.
+        let missing_classmesh = root.join("unprovisioned-classmesh");
+        let missing_inbox = missing_classmesh.join("state").join("file-inbox");
+        let missing_outbox = missing_classmesh.join("state").join("file-outbox");
+        let unprovisioned_allowed =
+            prepare_optional_file_transfer_storage(&missing_inbox, &missing_outbox);
+        let created_before_rejection = missing_classmesh.exists();
+        if created_before_rejection {
+            std::fs::remove_dir_all(&missing_classmesh)
+                .expect("cleanup untrusted precreate fixture");
+        }
+        assert!(
+            !unprovisioned_allowed,
+            "unprovisioned root must fail closed"
+        );
+        assert!(
+            !created_before_rejection,
+            "must not mkdir an unprovisioned ClassMesh root under a user-creatable parent"
         );
         // A parent with DELETE_CHILD can swap ClassMesh even if all three
         // inner directories have private ACLs. The ProgramData anchor must
