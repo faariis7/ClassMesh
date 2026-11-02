@@ -214,6 +214,8 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
             credentials,
         })
         .map_err(|e| format!("{e:?}"))?;
+    // A verified Student alone is insufficient: the current Teacher must
+    // also hold live ReceiveFile permission for this actual QUIC flow.
     store
         .upsert(Principal {
             id: PrincipalId([8; 32]),
