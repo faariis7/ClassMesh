@@ -1549,6 +1549,65 @@ mod tests {
     }
 
     #[test]
+    fn queued_diagnostics_override_is_retired_on_control_session_rotation() {
+        use crate::device_diagnostics::TroubleshootingOverrideRequest;
+        use crate::ui_shell::TeacherDiagnosticsUiAction;
+
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let row = app
+            .classroom
+            .rows()
+            .into_iter()
+            .find(|row| row.source_id == MonitoringSourceId(7))
+            .expect("selected classroom row");
+        let refresh = |app: &mut TeacherEguiShell| {
+            app.update_diagnostics(DeviceDiagnosticsSnapshot {
+                device: &row,
+                quality_sample: None,
+                active_path: None,
+                topology_evidence: TransportTopologyEvidence::default(),
+                diagnostic_codes: &[],
+            })
+            .expect("valid diagnostics");
+        };
+        let original = interaction_context(BTreeSet::new());
+        let quality = TeacherUiAction::Diagnostics(TeacherDiagnosticsUiAction {
+            source_id: MonitoringSourceId(7),
+            request: TroubleshootingOverrideRequest::Quality {
+                stream_kind: classmesh_core::StreamKind::Monitoring,
+                tier: classmesh_core::adaptation::QualityTier::Low,
+            },
+        });
+        app.set_teacher_interaction_context(original.clone());
+        refresh(&mut app);
+        app.queue_action(quality.clone());
+        app.set_teacher_interaction_context(original.clone());
+        assert_eq!(app.take_pending_action(), Some(quality.clone()),
+            "a same-session refresh must not discard a valid override");
+
+        app.queue_action(quality.clone());
+        let mut replacement = original.clone();
+        replacement.control_session_id += 1;
+        app.set_teacher_interaction_context(replacement);
+        assert_eq!(app.take_pending_action(), None,
+            "a queued override from an old control session must not reach the new session");
+
+        app.queue_action(quality);
+        app.clear_teacher_interaction_context();
+        assert_eq!(app.take_pending_action(), None,
+            "disconnect must retire a queued non-cleanup override");
+
+        let cleanup = TeacherUiAction::Diagnostics(TeacherDiagnosticsUiAction {
+            source_id: MonitoringSourceId(7),
+            request: TroubleshootingOverrideRequest::Automatic,
+        });
+        app.queue_action(cleanup.clone());
+        assert_eq!(app.take_pending_action(), Some(cleanup),
+            "local Automatic cleanup remains available after disconnect");
+    }
+
+    #[test]
     fn queued_diagnostics_override_does_not_outlive_its_visible_snapshot() {
         use crate::device_diagnostics::TroubleshootingOverrideRequest;
         use crate::ui_shell::TeacherDiagnosticsUiAction;
