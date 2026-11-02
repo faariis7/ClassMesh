@@ -201,6 +201,8 @@ async fn authenticated_quic_to_teacher_app_inbox_publishes_only_after_verified_f
             credentials,
         })
         .map_err(|e| format!("{e:?}"))?;
+    // A verified Student alone is insufficient: the current Teacher must
+    // also hold live ReceiveFile permission for this actual QUIC flow.
     store
         .upsert(Principal {
             id: PrincipalId([8; 32]),
