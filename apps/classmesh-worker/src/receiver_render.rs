@@ -83,7 +83,15 @@ impl PresentationWindow {
                 None,
             )?
         };
-        let presenter = FlipPresenter::new(hwnd, device, width, height)?;
+        let presenter = match FlipPresenter::new(hwnd, device, width, height) {
+            Ok(presenter) => presenter,
+            Err(error) => {
+                // The PresentationWindow owner does not exist yet, so its Drop
+                // cannot close this HWND on a failed D3D11/DXGI initialization.
+                let _ = unsafe { DestroyWindow(hwnd) };
+                return Err(error);
+            }
+        };
 
         Ok(Self {
             hwnd,
@@ -191,6 +199,9 @@ impl PresentationWindow {
         let mut message = MSG::default();
         while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() } {
             if message.message == WM_QUIT {
+                // WM_QUIT belongs to the thread, not this HWND. It does not
+                // destroy the window; close it before suppressing Drop cleanup.
+                let _ = unsafe { DestroyWindow(self.hwnd) };
                 self.closed = true;
                 break;
             }
@@ -383,6 +394,106 @@ mod tests {
                 "closing HWND must stop the presentation"
             );
             assert!(receiver.closed);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn thread_quit_must_not_leave_presentation_hwnd_after_drop() {
+        // A thread-wide quit can originate outside this HWND. Marking the
+        // presentation closed must not suppress its final HWND cleanup.
+        std::thread::spawn(|| {
+            let module = unsafe { GetModuleHandleW(None).unwrap() };
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: module.into(),
+                lpszClassName: WINDOW_CLASS,
+                ..Default::default()
+            };
+            let _ = unsafe { RegisterClassW(&class) };
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    WINDOW_CLASS,
+                    WINDOW_TITLE,
+                    WS_OVERLAPPEDWINDOW,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    320,
+                    180,
+                    None,
+                    None,
+                    Some(module.into()),
+                    None,
+                )
+                .unwrap()
+            };
+            let mut receiver = PresentationWindow {
+                hwnd,
+                presenter: None,
+                closed: false,
+                client_size: (320, 180),
+                device_lost: false,
+            };
+            unsafe { windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0) };
+            assert!(!receiver.pump_messages());
+            assert!(receiver.closed);
+            drop(receiver);
+            let leaked = unsafe { IsWindow(Some(hwnd)).as_bool() };
+            if leaked {
+                // Clean up even on RED so the regression cannot leak test HWNDs.
+                let _ = unsafe { DestroyWindow(hwnd) };
+            }
+            assert!(!leaked, "WM_QUIT must not leak the presentation HWND");
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn failed_presenter_initialization_destroys_its_new_window() {
+        use classmesh_codec_win::d3d11::create_default_video_device;
+        use windows::Win32::UI::WindowsAndMessaging::{EnumThreadWindows, GetClassNameW};
+        use windows::core::BOOL;
+        use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+
+        unsafe extern "system" fn count_window(hwnd: HWND, state: LPARAM) -> BOOL {
+            let mut class = [0u16; 64];
+            let len = unsafe { GetClassNameW(hwnd, &mut class) };
+            let expected: Vec<u16> = "ClassMeshMediaReceiverWindow".encode_utf16().collect();
+            if len > 0 && class[..len as usize] == expected {
+                let count = unsafe { &mut *(state.0 as *mut usize) };
+                *count += 1;
+            }
+            BOOL(1)
+        }
+
+        fn thread_window_count() -> usize {
+            let mut count = 0usize;
+            let thread_id = unsafe { GetCurrentThreadId() };
+            let _ = unsafe {
+                EnumThreadWindows(
+                    thread_id,
+                    Some(count_window),
+                    LPARAM((&raw mut count) as isize),
+                )
+            };
+            count
+        }
+
+        // Use a dedicated Win32 thread so unrelated test windows cannot mask
+        // the leaked HWND. Zero output width fails inside FlipPresenter::new,
+        // after PresentationWindow::new has already created its HWND.
+        std::thread::spawn(|| {
+            let device = create_default_video_device().expect("D3D11 test device");
+            let before = thread_window_count();
+            assert!(PresentationWindow::new(&device, 0, 720).is_err());
+            assert_eq!(
+                thread_window_count(),
+                before,
+                "failed presenter initialization must not leave a live HWND"
+            );
         })
         .join()
         .unwrap();
