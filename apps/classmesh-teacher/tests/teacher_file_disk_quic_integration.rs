@@ -40,6 +40,7 @@ use std::{
     error::Error,
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
 };
 
 const VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 8 };
@@ -88,6 +89,10 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
     let remote_path = path.clone();
     let remote_partial = partial.clone();
     let remote_bytes = data.clone();
+    // The test authority is handed to the peer only for a trusted revocation
+    // after its authenticated stream has actually consumed Accepted.
+    let (revoke_source_tx, revoke_source_rx) =
+        tokio::sync::oneshot::channel::<(Arc<LiveAuthorizationStore>, AuthorizationStore)>();
     // Keep the authenticated server connection alive until the Teacher has
     // actually observed the revoked permission and finished its fail-closed
     // receive path. Otherwise dropping this task can race the QUIC frame and
@@ -137,6 +142,17 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
             if s.state==FileTransferState::Accepted as i32)
         );
         assert!(!remote_path.exists());
+        // The peer consumed Accepted; a local on_status callback alone does
+        // not guarantee that its asynchronous QUIC write arrived at the peer.
+        // Revoke before the next authenticated Chunk is sent.
+        if revoke_teacher_after_accept {
+            let (trusted_live, revoked_policy) = revoke_source_rx
+                .await
+                .map_err(|_| "missing trusted revocation test authority".to_string())?;
+            trusted_live
+                .publish_if_version(1, revoked_policy)
+                .map_err(|error| format!("trusted test revocation failed: {error:?}"))?;
+        }
         // After the Accepted reply the Teacher may immediately revoke the
         // transfer and remove the .part before this server checks the path.
         if !revoke_teacher_after_accept {
@@ -242,7 +258,12 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
             credentials: BTreeMap::new(),
         })
         .map_err(|e| format!("{e:?}"))?;
-    let live = LiveAuthorizationStore::new(store);
+    let live = Arc::new(LiveAuthorizationStore::new(store));
+    if revoke_teacher_after_accept {
+        revoke_source_tx
+            .send((Arc::clone(&live), revoked))
+            .expect("revocation peer owns the live Teacher authority");
+    }
     let context = TeacherFilePullContext {
         source_id: MonitoringSourceId(7),
         control_session_id: 77,
@@ -345,10 +366,6 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
         || 150,
         |status| {
             statuses.push(status.state);
-            if revoke_teacher_after_accept && status.state == FileTransferState::Accepted as i32 {
-                live.publish_if_version(1, revoked.clone())
-                    .expect("trusted test authority revokes Teacher during transfer");
-            }
         },
     )
     .await;
