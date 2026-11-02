@@ -4174,6 +4174,29 @@ mod tests {
     }
 
     #[test]
+    fn secure_storage_without_operator_opt_in_keeps_core_hello_but_never_file_transfer() {
+        use crate::file_transfer_readiness::FILE_TRANSFER_OPERATOR_OPT_IN;
+
+        const {
+            assert!(!FILE_TRANSFER_OPERATOR_OPT_IN);
+        }
+        // Even a perfectly private storage tree is not an operator authorization.
+        let readiness = FileTransferReadiness::with_operator_gate(
+            FILE_TRANSFER_OPERATOR_OPT_IN,
+            || true,
+            || true,
+        );
+        let worker = WorkerCapabilityState::default();
+        let capabilities =
+            service_hello_capabilities(&worker, false, readiness.revalidate_for_hello());
+        assert!(!capabilities.contains(&Capability::FileTransfer));
+        assert!(!file_transfer_available(PROTOCOL_VERSION, &capabilities));
+        assert!(capabilities.contains(&Capability::SystemActions));
+        assert!(capabilities.contains(&Capability::TeacherPresentation));
+        assert!(!readiness.is_ready());
+    }
+
+    #[test]
     fn presentation_runtime_capability_is_explicit_and_probe_gated() {
         let worker = WorkerCapabilityState::default();
         let capabilities = service_hello_capabilities(&worker, false, false);

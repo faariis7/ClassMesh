@@ -3,6 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+// No trusted operator provisioning/opt-in source exists yet. Do not infer
+// permission from private ACLs alone; keep FileTransfer production-default OFF.
+pub(crate) const FILE_TRANSFER_OPERATOR_OPT_IN: bool = false;
+
 /// The optional feature may only transition from ready to disabled.
 /// The Service dispatch loop and future QUIC handshakes share one flag.
 /// A fresh storage check at each new handshake also catches unsafe ACL changes
@@ -25,6 +29,17 @@ impl FileTransferReadiness {
     #[cfg(test)]
     pub(crate) fn new(initially_ready: bool) -> Self {
         Self::with_storage_verifier(initially_ready, || true)
+    }
+
+    /// A secure directory alone is not permission to enable FileTransfer.
+    /// Only an explicit, trusted operator gate may even attempt provisioning.
+    /// A disabled gate must not create paths or run the storage preparer.
+    pub(crate) fn with_operator_gate(
+        operator_opt_in: bool,
+        prepare_storage: impl FnOnce() -> bool,
+        verifier: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Self {
+        Self::with_storage_verifier(operator_opt_in && prepare_storage(), verifier)
     }
 
     pub(crate) fn with_storage_verifier(
@@ -58,7 +73,7 @@ impl FileTransferReadiness {
 
 #[cfg(test)]
 mod tests {
-    use super::FileTransferReadiness;
+    use super::{FILE_TRANSFER_OPERATOR_OPT_IN, FileTransferReadiness};
 
     #[test]
     fn handshake_revalidates_storage_without_a_queued_transfer() {
@@ -94,5 +109,34 @@ mod tests {
         assert!(!listener.is_ready());
         let later_listener = service.clone();
         assert!(!later_listener.is_ready());
+    }
+
+    #[test]
+    fn secure_storage_without_explicit_operator_opt_in_never_advertises_transfer() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let provision_called = Arc::new(AtomicBool::new(false));
+        let called = Arc::clone(&provision_called);
+        const {
+            assert!(!FILE_TRANSFER_OPERATOR_OPT_IN);
+        }
+        let readiness = FileTransferReadiness::with_operator_gate(
+            FILE_TRANSFER_OPERATOR_OPT_IN,
+            move || {
+                called.store(true, Ordering::Release);
+                true
+            },
+            || true,
+        );
+        assert!(!readiness.revalidate_for_hello());
+        assert!(!readiness.is_ready());
+        assert!(
+            !provision_called.load(Ordering::Acquire),
+            "default-OFF must not create staging directories or register sources"
+        );
+
+        let unsafe_opt_in = FileTransferReadiness::with_operator_gate(true, || false, || true);
+        assert!(!unsafe_opt_in.revalidate_for_hello());
     }
 }
