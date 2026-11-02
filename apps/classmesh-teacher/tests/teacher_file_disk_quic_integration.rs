@@ -58,7 +58,8 @@ fn frame(sequence: u64, payload: control_envelope::Payload) -> ControlEnvelope {
 }
 
 async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> TestResult {
-    let root = std::env::temp_dir().join(format!(
+    // Canonicalize the temporary ancestor: on macOS /var can be a symlink.
+    let root = std::env::temp_dir().canonicalize()?.join(format!(
         "classmesh-teacher-quic-inbox-{}-{}",
         std::process::id(),
         if revoke_teacher_after_accept {

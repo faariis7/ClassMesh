@@ -39,6 +39,20 @@ const APP_TITLE: &str = "ClassMesh Teacher";
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [800.0, 600.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [600.0, 420.0];
 
+// Keep each non-Classroom section independently scrollable at the minimum
+// viewport. Classroom already owns its responsive Devices/Monitoring scroller.
+// Separate salts prevent switching sections from inheriting another page's
+// previous scroll offset (and appearing empty until scrolled to the top).
+fn section_scroll_salt(section: TeacherUiSection) -> Option<&'static str> {
+    match section {
+        TeacherUiSection::Classroom => None,
+        TeacherUiSection::Focus => Some("classmesh_teacher_focus_scroll"),
+        TeacherUiSection::Presentation => Some("classmesh_teacher_presentation_scroll"),
+        TeacherUiSection::DeviceActions => Some("classmesh_teacher_device_actions_scroll"),
+        TeacherUiSection::Diagnostics => Some("classmesh_teacher_diagnostics_scroll"),
+    }
+}
+
 #[derive(Debug)]
 pub struct TeacherEguiShell {
     shell: TeacherUiShellState,
@@ -119,6 +133,11 @@ impl TeacherEguiShell {
             != Some((context.source_id, context.control_session_id))
         {
             reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
+            // Focus carries a device ID but no session epoch. A new authenticated
+            // session must not inherit a previously queued UI intent.
+            if matches!(self.pending_action, Some(TeacherUiAction::Focus(_))) {
+                self.pending_action = None;
+            }
         }
         // A new control session, source or missing optional v0.8
         // diagnostics capability invalidates all previously visible data.
@@ -137,6 +156,13 @@ impl TeacherEguiShell {
     }
 
     pub fn clear_teacher_interaction_context(&mut self) {
+        // Retire any intent queued under the old authenticated session.
+        // A new offline ResumeThumbnail click can still be queued afterward.
+        if self.teacher_interaction_context.is_some()
+            && matches!(self.pending_action, Some(TeacherUiAction::Focus(_)))
+        {
+            self.pending_action = None;
+        }
         self.teacher_interaction_context = None;
         self.playback = None;
         reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
@@ -300,9 +326,43 @@ impl TeacherEguiShell {
         self.diagnostics_draft = DiagnosticsOverrideDraft::default();
     }
 
+    /// A queued Focus intent is only a UI hint. Recheck the current
+    /// selection and observed session state at handoff; the engine still
+    /// performs its authoritative live permission and session checks.
+    fn focus_action_still_current(&self, focus: crate::ui_shell::TeacherFocusUiAction) -> bool {
+        let source_id = focus.source_id();
+        if self.classroom.selected() != Some(source_id) {
+            return false;
+        }
+        let Some(row) = self
+            .classroom
+            .rows()
+            .into_iter()
+            .find(|row| row.source_id == source_id)
+        else {
+            return false;
+        };
+        match focus {
+            crate::ui_shell::TeacherFocusUiAction::RequestInteractive { .. } => {
+                !row.interactive_active
+                    && row.health.presence == classmesh_core::presence::PresenceState::Online
+                    && row.health.service_ready
+                    && row.health.worker_ready
+            }
+            // Returning to local monitoring is still useful during a
+            // disconnect; never require network readiness for cleanup.
+            crate::ui_shell::TeacherFocusUiAction::ResumeThumbnail { .. } => row.interactive_active,
+        }
+    }
+
     #[must_use]
     pub fn take_pending_action(&mut self) -> Option<TeacherUiAction> {
         let action = self.pending_action.take()?;
+        if let TeacherUiAction::Focus(focus) = &action {
+            if !self.focus_action_still_current(*focus) {
+                return None;
+            }
+        }
         if let TeacherUiAction::TeacherInteraction(interaction) = &action {
             validate_teacher_interaction_ui_action(
                 interaction,
@@ -310,6 +370,21 @@ impl TeacherEguiShell {
                 self.teacher_interaction_context.as_ref(),
             )
             .ok()?;
+        }
+        // UI snapshots are not authorization, but a newer local lifecycle
+        // observation must retire obsolete Start/Stop intents before handoff.
+        // The actual presentation lifecycle still revalidates at apply time.
+        if let TeacherUiAction::Presentation(presentation) = &action {
+            let current = self.presentation.binding;
+            let still_current = match presentation {
+                crate::ui_shell::TeacherPresentationUiAction::Start => current.is_none(),
+                crate::ui_shell::TeacherPresentationUiAction::Stop { binding } => {
+                    current == Some(*binding)
+                }
+            };
+            if !still_current {
+                return None;
+            }
         }
         if let TeacherUiAction::FilePull(pull) = &action {
             validate_file_pull_action(
@@ -363,17 +438,49 @@ impl TeacherEguiShell {
         let _ = self.shell.handle(TeacherUiMessage::Navigate(section));
     }
 
+    fn handle_navigation_shortcuts(&mut self, ctx: &egui::Context) {
+        // AltGr is reported as Ctrl+Alt on some Windows keyboard layouts.
+        // Require bare Alt so text input and platform shortcuts are untouched.
+        let bare_alt = ctx.input(|input| {
+            input.modifiers.alt
+                && !input.modifiers.ctrl
+                && !input.modifiers.shift
+                && !input.modifiers.command
+                && !input.modifiers.mac_cmd
+        });
+        if !bare_alt {
+            return;
+        }
+
+        for (key, section) in [
+            (egui::Key::Num1, TeacherUiSection::Classroom),
+            (egui::Key::Num2, TeacherUiSection::Focus),
+            (egui::Key::Num3, TeacherUiSection::Presentation),
+            (egui::Key::Num4, TeacherUiSection::DeviceActions),
+            (egui::Key::Num5, TeacherUiSection::Diagnostics),
+        ] {
+            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, key)) {
+                self.navigate(section);
+                break;
+            }
+        }
+    }
+
     fn navigation(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            for (section, label) in [
-                (TeacherUiSection::Classroom, "Classroom"),
-                (TeacherUiSection::Focus, "Focus"),
-                (TeacherUiSection::Presentation, "Presentation"),
-                (TeacherUiSection::DeviceActions, "Device Actions"),
-                (TeacherUiSection::Diagnostics, "Diagnostics"),
+            for (section, label, shortcut) in [
+                (TeacherUiSection::Classroom, "Classroom", "Alt+1"),
+                (TeacherUiSection::Focus, "Focus", "Alt+2"),
+                (TeacherUiSection::Presentation, "Presentation", "Alt+3"),
+                (TeacherUiSection::DeviceActions, "Device Actions", "Alt+4"),
+                (TeacherUiSection::Diagnostics, "Diagnostics", "Alt+5"),
             ] {
                 let selected = self.shell.active_section() == section;
-                if ui.selectable_label(selected, label).clicked() {
+                if ui
+                    .selectable_label(selected, label)
+                    .on_hover_text(format!("Keyboard shortcut: {shortcut}"))
+                    .clicked()
+                {
                     self.navigate(section);
                 }
             }
@@ -461,12 +568,20 @@ impl TeacherEguiShell {
 
 impl eframe::App for TeacherEguiShell {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_navigation_shortcuts(ctx);
         egui::TopBottomPanel::top("classmesh_teacher_navigation").show(ctx, |ui| {
             self.navigation(ui);
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            self.section_body(ui);
+            if let Some(salt) = section_scroll_salt(self.shell.active_section()) {
+                egui::ScrollArea::vertical()
+                    .id_salt(salt)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.section_body(ui));
+            } else {
+                self.section_body(ui);
+            }
         });
     }
 }
@@ -502,9 +617,306 @@ mod tests {
 
     use crate::classroom_view::{ClassroomDeviceRow, ClassroomDeviceSnapshot};
     use crate::device_diagnostics::{DEFAULT_MAX_DIAGNOSTIC_CODES, DeviceDiagnosticsError};
-    use crate::ui_shell::TeacherFocusUiAction;
+    use crate::ui_shell::{TeacherFocusUiAction, TeacherPresentationUiAction};
 
     use super::*;
+
+    fn send_navigation_key(
+        app: &mut TeacherEguiShell,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+        pressed: bool,
+    ) {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            modifiers,
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.handle_navigation_shortcuts(ctx));
+    }
+
+    #[test]
+    fn alt_digit_shortcuts_navigate_all_five_teacher_sections() {
+        let mut app = TeacherEguiShell::default();
+        for (key, expected) in [
+            (egui::Key::Num2, TeacherUiSection::Focus),
+            (egui::Key::Num3, TeacherUiSection::Presentation),
+            (egui::Key::Num4, TeacherUiSection::DeviceActions),
+            (egui::Key::Num5, TeacherUiSection::Diagnostics),
+            (egui::Key::Num1, TeacherUiSection::Classroom),
+        ] {
+            send_navigation_key(&mut app, key, egui::Modifiers::ALT, true);
+            assert_eq!(app.shell.active_section(), expected);
+        }
+    }
+
+    #[test]
+    fn navigation_shortcuts_do_not_intercept_typing_or_altgr() {
+        let mut app = TeacherEguiShell::default();
+        app.navigate(TeacherUiSection::Diagnostics);
+        for modifiers in [
+            egui::Modifiers::NONE,
+            egui::Modifiers::CTRL,
+            egui::Modifiers::SHIFT,
+            egui::Modifiers {
+                alt: true,
+                ctrl: true,
+                ..Default::default()
+            },
+            egui::Modifiers {
+                alt: true,
+                shift: true,
+                ..Default::default()
+            },
+        ] {
+            send_navigation_key(&mut app, egui::Key::Num1, modifiers, true);
+            assert_eq!(app.shell.active_section(), TeacherUiSection::Diagnostics);
+        }
+        send_navigation_key(&mut app, egui::Key::Num1, egui::Modifiers::ALT, false);
+        assert_eq!(app.shell.active_section(), TeacherUiSection::Diagnostics);
+    }
+
+    #[test]
+    fn long_teacher_sections_have_a_scroll_owner_at_the_minimum_viewport() {
+        // Classroom owns its own responsive scroll area; other sections
+        // must remain reachable when their content exceeds 420 points.
+        assert_eq!(section_scroll_salt(TeacherUiSection::Classroom), None);
+        let mut unique_scroll_ids = BTreeSet::new();
+        for section in [
+            TeacherUiSection::Focus,
+            TeacherUiSection::Presentation,
+            TeacherUiSection::DeviceActions,
+            TeacherUiSection::Diagnostics,
+        ] {
+            let salt = section_scroll_salt(section).expect("section must scroll");
+            assert!(
+                unique_scroll_ids.insert(salt),
+                "{section:?} reused a scroll ID"
+            );
+        }
+    }
+
+    #[test]
+    fn queued_presentation_start_is_dropped_if_a_stream_appears_before_handoff() {
+        let mut app = TeacherEguiShell::default();
+        app.queue_action(TeacherUiAction::Presentation(
+            TeacherPresentationUiAction::Start,
+        ));
+        app.set_presentation_snapshot(PresentationRuntimeSnapshot {
+            binding: Some(crate::presentation_view::PresentationBindingView {
+                presentation_id: 9,
+                stream_id: 4,
+                epoch: 1,
+            }),
+            ..PresentationRuntimeSnapshot::default()
+        });
+        assert_eq!(app.take_pending_action(), None);
+    }
+
+    #[test]
+    fn queued_presentation_stop_is_dropped_if_binding_changes_or_stops() {
+        let original = crate::presentation_view::PresentationBindingView {
+            presentation_id: 9,
+            stream_id: 4,
+            epoch: 1,
+        };
+        for replacement in [
+            Some(crate::presentation_view::PresentationBindingView {
+                epoch: 2,
+                ..original
+            }),
+            None,
+        ] {
+            let mut app = TeacherEguiShell::default();
+            app.set_presentation_snapshot(PresentationRuntimeSnapshot {
+                binding: Some(original),
+                ..PresentationRuntimeSnapshot::default()
+            });
+            app.queue_action(TeacherUiAction::Presentation(
+                TeacherPresentationUiAction::Stop { binding: original },
+            ));
+            app.set_presentation_snapshot(PresentationRuntimeSnapshot {
+                binding: replacement,
+                ..PresentationRuntimeSnapshot::default()
+            });
+            assert_eq!(app.take_pending_action(), None);
+        }
+    }
+
+    #[test]
+    fn queued_presentation_actions_survive_when_runtime_binding_is_unchanged() {
+        let mut app = TeacherEguiShell::default();
+        let start = TeacherUiAction::Presentation(TeacherPresentationUiAction::Start);
+        app.queue_action(start.clone());
+        assert_eq!(app.take_pending_action(), Some(start));
+
+        let binding = crate::presentation_view::PresentationBindingView {
+            presentation_id: 9,
+            stream_id: 4,
+            epoch: 1,
+        };
+        app.set_presentation_snapshot(PresentationRuntimeSnapshot {
+            binding: Some(binding),
+            ..PresentationRuntimeSnapshot::default()
+        });
+        let stop = TeacherUiAction::Presentation(TeacherPresentationUiAction::Stop { binding });
+        app.queue_action(stop.clone());
+        assert_eq!(app.take_pending_action(), Some(stop));
+    }
+
+    #[test]
+    fn queued_focus_start_is_retired_on_control_session_replacement_but_not_refresh() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let old = interaction_context(BTreeSet::new());
+        app.set_teacher_interaction_context(old.clone());
+        let start = TeacherUiAction::Focus(TeacherFocusUiAction::RequestInteractive {
+            source_id: MonitoringSourceId(7),
+        });
+        app.queue_action(start.clone());
+        app.set_teacher_interaction_context(old);
+        assert_eq!(app.take_pending_action(), Some(start.clone()));
+
+        app.queue_action(start);
+        let mut replacement = interaction_context(BTreeSet::new());
+        replacement.control_session_id = 78;
+        app.set_teacher_interaction_context(replacement);
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "a queued Focus start must not survive a new control session"
+        );
+    }
+
+    #[test]
+    fn queued_focus_intent_is_retired_on_disconnect_but_new_offline_cleanup_is_allowed() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
+        let start = TeacherUiAction::Focus(TeacherFocusUiAction::RequestInteractive {
+            source_id: MonitoringSourceId(7),
+        });
+        app.queue_action(start);
+        app.clear_teacher_interaction_context();
+        assert_eq!(app.take_pending_action(), None);
+
+        app.classroom
+            .upsert(ClassroomDeviceSnapshot {
+                source_id: MonitoringSourceId(7),
+                display_name: "Student 07".to_owned(),
+                health: DeviceHealth {
+                    presence: PresenceState::Offline,
+                    media: MediaState::Recovering,
+                    service_ready: false,
+                    worker_ready: false,
+                },
+                quality_tier: None,
+                thumbnail_available: false,
+                interactive_active: true,
+            })
+            .unwrap();
+        let cleanup = TeacherUiAction::Focus(TeacherFocusUiAction::ResumeThumbnail {
+            source_id: MonitoringSourceId(7),
+        });
+        app.queue_action(cleanup.clone());
+        assert_eq!(app.take_pending_action(), Some(cleanup));
+    }
+
+    #[test]
+    fn queued_focus_start_is_dropped_after_selection_or_device_readiness_changes() {
+        for (presence, service_ready, worker_ready, selected) in [
+            (PresenceState::Offline, true, true, true),
+            (PresenceState::Connecting, true, true, true),
+            (PresenceState::ControlRecovering, true, true, true),
+            (PresenceState::Online, false, true, true),
+            (PresenceState::Online, true, false, true),
+            (PresenceState::Online, true, true, false),
+        ] {
+            let mut app = TeacherEguiShell::default();
+            select_test_device(&mut app);
+            app.queue_action(TeacherUiAction::Focus(
+                TeacherFocusUiAction::RequestInteractive {
+                    source_id: MonitoringSourceId(7),
+                },
+            ));
+            if selected {
+                app.classroom
+                    .upsert(ClassroomDeviceSnapshot {
+                        source_id: MonitoringSourceId(7),
+                        display_name: "Student 07".to_owned(),
+                        health: DeviceHealth {
+                            presence,
+                            media: MediaState::Recovering,
+                            service_ready,
+                            worker_ready,
+                        },
+                        quality_tier: None,
+                        thumbnail_available: false,
+                        interactive_active: false,
+                    })
+                    .unwrap();
+            } else {
+                app.classroom.select(None).unwrap();
+            }
+            assert_eq!(
+                app.take_pending_action(),
+                None,
+                "stale Focus start must be retired: {presence:?}, service={service_ready}, worker={worker_ready}, selected={selected}"
+            );
+        }
+    }
+
+    #[test]
+    fn queued_focus_handoff_requires_matching_interactive_state_but_allows_offline_resume() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let start = TeacherUiAction::Focus(TeacherFocusUiAction::RequestInteractive {
+            source_id: MonitoringSourceId(7),
+        });
+        app.queue_action(start.clone());
+        assert_eq!(app.take_pending_action(), Some(start.clone()));
+
+        let resume = TeacherUiAction::Focus(TeacherFocusUiAction::ResumeThumbnail {
+            source_id: MonitoringSourceId(7),
+        });
+        app.queue_action(resume.clone());
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "no active session to resume"
+        );
+
+        app.classroom
+            .upsert(ClassroomDeviceSnapshot {
+                source_id: MonitoringSourceId(7),
+                display_name: "Student 07".to_owned(),
+                health: DeviceHealth {
+                    presence: PresenceState::Offline,
+                    media: MediaState::Recovering,
+                    service_ready: false,
+                    worker_ready: false,
+                },
+                quality_tier: None,
+                thumbnail_available: false,
+                interactive_active: true,
+            })
+            .unwrap();
+        app.queue_action(resume.clone());
+        assert_eq!(app.take_pending_action(), Some(resume));
+        app.queue_action(start);
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "active session must not start twice"
+        );
+    }
 
     #[test]
     fn teacher_ui_viewport_has_explicit_default_and_minimum_size() {

@@ -15,6 +15,8 @@ use classmesh_core::adaptation::{
 use classmesh_video::distributor::SharedEncodedFrame;
 use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Device, ID3D11Texture2D};
 
+use crate::capture_cadence::CaptureCadence;
+
 const DEFAULT_POOL_SIZE: usize = 4;
 const DEFAULT_TARGET_FPS: u32 = 30;
 const DEFAULT_TARGET_BITRATE_BPS: u32 = 5_000_000;
@@ -169,7 +171,7 @@ pub struct PresentationPipeline {
     encoder_candidate: EncoderCandidate,
     profile: PresentationProfile,
     stats: PresentationStats,
-    next_submit_timestamp_us: Option<u64>,
+    capture_cadence: CaptureCadence,
     frame_interval_us: u64,
     // Media Foundation must remain initialized until every encoder/sample COM object above drops.
     // Struct fields are dropped in declaration order, so keep the platform guard last.
@@ -250,7 +252,7 @@ impl PresentationPipeline {
             encoder_candidate,
             profile,
             stats: PresentationStats::default(),
-            next_submit_timestamp_us: None,
+            capture_cadence: CaptureCadence::default(),
             frame_interval_us,
             _platform: platform,
         })
@@ -394,13 +396,8 @@ impl PresentationPipeline {
     }
 
     fn is_due(&mut self, timestamp_us: u64) -> bool {
-        if let Some(next_due) = self.next_submit_timestamp_us {
-            if timestamp_us < next_due {
-                return false;
-            }
-        }
-        self.next_submit_timestamp_us = Some(timestamp_us.saturating_add(self.frame_interval_us));
-        true
+        self.capture_cadence
+            .should_submit(timestamp_us, self.frame_interval_us)
     }
 
     fn consume_outputs(

@@ -8,9 +8,9 @@ use classmesh_codec_win::{
 };
 use classmesh_video::{Codec, EncoderClass};
 
+use crate::encoder_benchmark_keyframe_retry::KeyframeRequestRetry;
 use crate::presentation::{PresentationPipeline, PresentationProfile, PresentationTarget};
 
-const KEYFRAME_AFTER_SUBMISSIONS: usize = 30;
 const RESET_MAX_SUBMISSIONS: usize = 30;
 
 #[derive(Debug)]
@@ -84,7 +84,7 @@ pub struct RuntimeEncoderBenchmark {
     pipeline: Option<PresentationPipeline>,
     started: Option<Instant>,
     non_keyframe_observed: bool,
-    keyframe_request_attempted: bool,
+    keyframe_request_retry: KeyframeRequestRetry,
     keyframe_request_pending: bool,
     keyframe_request_frame: Option<u64>,
     keyframe_observed: bool,
@@ -104,7 +104,7 @@ impl RuntimeEncoderBenchmark {
             pipeline: None,
             started: None,
             non_keyframe_observed: false,
-            keyframe_request_attempted: false,
+            keyframe_request_retry: KeyframeRequestRetry::default(),
             keyframe_request_pending: false,
             keyframe_request_frame: None,
             keyframe_observed: false,
@@ -174,16 +174,20 @@ impl RuntimeEncoderBenchmark {
             .as_mut()
             .expect("benchmark pipeline initialized");
 
+        let submitted = self
+            .accumulator
+            .as_ref()
+            .map(BoundedEncoderBenchmark::submitted)
+            .unwrap_or(0);
         if self.pending_reset.is_none()
             && self
-                .accumulator
-                .as_ref()
-                .is_some_and(|benchmark| benchmark.submitted() >= KEYFRAME_AFTER_SUBMISSIONS)
-            && self.non_keyframe_observed
-            && !self.keyframe_request_attempted
+                .keyframe_request_retry
+                .should_attempt(submitted, self.non_keyframe_observed)
         {
-            self.keyframe_request_attempted = true;
-            self.keyframe_request_pending = active.request_keyframe().is_ok();
+            let accepted = active.request_keyframe().is_ok();
+            self.keyframe_request_retry
+                .record_attempt(submitted, accepted);
+            self.keyframe_request_pending = accepted;
         }
 
         let submitted_before = active.stats().submitted_frames;
