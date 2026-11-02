@@ -25,19 +25,21 @@ fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
 }
 
-// Fail-closed DACL admission for the provisioned Windows AppInbox root and
-// its immediate parent. This is not a retained-ancestor-HANDLE or anti-TOCTOU proof.
-// A NULL DACL, unknown ACE, foreign owner, or an ACE granting any access to
-// an untrusted SID must not be treated as a private receiving directory.
+// Windows root and immediate parent must be private. Higher ancestors may
+// grant read/traverse and create-new-child rights (e.g. C:\), but must not
+// let a foreign principal replace an existing descendant or rewrite ACLs.
+// These are sampled ACL checks, not retained ancestor HANDLEs/anti-TOCTOU.
 #[cfg(windows)]
-fn windows_root_dacl_private(root: &Path) -> bool {
+fn windows_directory_acl_safe(root: &Path, require_private: bool) -> bool {
     use std::ffi::c_void;
     use std::mem::{offset_of, size_of};
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
-    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSidToSidW, GetSecurityInfo, SE_FILE_OBJECT,
+    };
     use windows_sys::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
         EqualSid, GetAce, GetLengthSid, GetTokenInformation, IsValidAcl, IsValidSid,
@@ -133,9 +135,31 @@ fn windows_root_dacl_private(root: &Path) -> bool {
     let Some(creator) = well_known(WinCreatorOwnerSid) else {
         return false;
     };
+    // NT SERVICE\TrustedInstaller owns the standard Windows volume root.
+    // Resolve its documented service SID, rather than accepting arbitrary
+    // foreign owners of ancestors as trusted.
+    let installer_text: Vec<u16> = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut installer_raw: PSID = null_mut();
+    // SAFETY: NUL-terminated UTF-16 SID and writable output pointer.
+    if unsafe { ConvertStringSidToSidW(installer_text.as_ptr(), &raw mut installer_raw) } == 0 {
+        return false;
+    }
+    let installer_len = unsafe { GetLengthSid(installer_raw) } as usize;
+    if installer_len < 8 || installer_len > SECURITY_MAX_SID_SIZE as usize {
+        unsafe { LocalFree(installer_raw) };
+        return false;
+    }
+    // SAFETY: ConvertStringSidToSidW returned a valid allocated SID.
+    let installer =
+        unsafe { std::slice::from_raw_parts(installer_raw.cast::<u8>(), installer_len) }.to_vec();
+    unsafe { LocalFree(installer_raw) };
     let system_sid = system.as_ptr().cast_mut().cast();
     let admins_sid = admins.as_ptr().cast_mut().cast();
     let creator_sid = creator.as_ptr().cast_mut().cast();
+    let installer_sid = installer.as_ptr().cast_mut().cast();
 
     let mut owner: PSID = null_mut();
     let mut dacl: *mut ACL = null_mut();
@@ -166,7 +190,10 @@ fn windows_root_dacl_private(root: &Path) -> bool {
     }
     // A directory owned by a foreign user is not a trusted AppInbox, even
     // if its current DACL happens to be restrictive.
-    if !equal_sid(owner, user_sid) && !equal_sid(owner, system_sid) && !equal_sid(owner, admins_sid)
+    if !equal_sid(owner, user_sid)
+        && !equal_sid(owner, system_sid)
+        && !equal_sid(owner, admins_sid)
+        && !equal_sid(owner, installer_sid)
     {
         return false;
     }
@@ -205,14 +232,49 @@ fn windows_root_dacl_private(root: &Path) -> bool {
             && !equal_sid(sid, admins_sid)
             && !equal_sid(sid, creator_sid)
         {
-            return false;
+            if require_private {
+                return false;
+            }
+            // On an ancestor, read/traverse and create-new-sibling rights
+            // alone cannot replace an existing protected child. Deny any
+            // foreign delete/rename, ACL/owner rewrite, generic write/all,
+            // or attribute rewrite. Inherit-only ACEs are checked on their
+            // actual descendant instead of on the current directory.
+            const INHERIT_ONLY_ACE: u8 = 0x08;
+            const UNSAFE_ANCESTOR_RIGHTS: u32 = 0x0001_0000
+                | 0x0004_0000
+                | 0x0008_0000
+                | 0x0000_0040
+                | 0x0000_0010
+                | 0x0000_0100
+                | 0x1000_0000
+                | 0x4000_0000;
+            if header.AceFlags & INHERIT_ONLY_ACE == 0 && allowed.Mask & UNSAFE_ANCESTOR_RIGHTS != 0
+            {
+                return false;
+            }
         }
     }
     true
 }
 
+#[cfg(windows)]
+fn windows_root_dacl_private(root: &Path) -> bool {
+    windows_directory_acl_safe(root, true)
+}
+
+#[cfg(windows)]
+fn windows_ancestor_dacl_safe(root: &Path) -> bool {
+    windows_directory_acl_safe(root, false)
+}
+
 #[cfg(not(windows))]
 fn windows_root_dacl_private(_root: &Path) -> bool {
+    true
+}
+
+#[cfg(not(windows))]
+fn windows_ancestor_dacl_safe(_root: &Path) -> bool {
     true
 }
 
@@ -265,6 +327,7 @@ impl TeacherFileInbox {
             // principal directory-entry replacement rights. Do not accept
             // that as a trusted namespace for publishing received files.
             && root.parent().is_some_and(windows_root_dacl_private)
+            && root.ancestors().skip(2).all(windows_ancestor_dacl_safe)
             && root.ancestors().all(|ancestor| {
                 fs::symlink_metadata(ancestor).is_ok_and(|metadata| {
                     metadata.is_dir()
@@ -609,6 +672,41 @@ mod tests {
         );
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inbox_rejects_writable_grandparent_even_when_parent_and_leaf_are_private() {
+        use std::process::Command;
+        let grandparent = temp_root("foreign-grandparent-dacl");
+        let parent = grandparent.join("parent");
+        let root = parent.join("inbox");
+        fs::create_dir(&grandparent).unwrap();
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&root).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).expect("initial private ancestors");
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"DATA").unwrap();
+
+        // The ACL grant has no inheritance flags. Both direct parent and
+        // inbox remain private; an attacker can replace the parent entry.
+        let grant = Command::new("icacls")
+            .arg(&grandparent)
+            .arg("/grant")
+            .arg("*S-1-1-0:M")
+            .output()
+            .expect("native Windows icacls");
+        assert!(grant.status.success(), "icacls failed: {grant:?}");
+        assert!(super::windows_root_dacl_private(&parent));
+        assert!(super::windows_root_dacl_private(&root));
+        assert!(matches!(
+            TeacherFileInbox::new(&root),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
+        assert_eq!(sink.complete(&ID), Err(TeacherFileInboxError::InvalidRoot));
+        assert!(!sink.completed_path(&ID).exists());
+        sink.abort(&ID);
+        fs::remove_dir_all(grandparent).unwrap();
     }
 
     #[cfg(windows)]
