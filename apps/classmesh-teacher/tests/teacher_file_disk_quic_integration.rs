@@ -88,6 +88,11 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
     let remote_path = path.clone();
     let remote_partial = partial.clone();
     let remote_bytes = data.clone();
+    // Keep the authenticated server connection alive until the Teacher has
+    // actually observed the revoked permission and finished its fail-closed
+    // receive path. Otherwise dropping this task can race the QUIC frame and
+    // replace the intended revocation error with a transport-close error.
+    let (teacher_finished_tx, teacher_finished_rx) = tokio::sync::oneshot::channel::<()>();
     let server_task = tokio::spawn(async move {
         let connection = accept(&server).await.map_err(|e| e.to_string())?;
         let mut channel = ControlChannel::accept(&connection, DEFAULT_IO_TIMEOUT)
@@ -148,11 +153,10 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
             ))
             .await;
         if revoke_teacher_after_accept {
-            // The Teacher revokes ReceiveFile immediately after Accepted and
-            // closes the connection. Depending on QUIC scheduling, this send
-            // can either win that race or fail with connection lost. Both
-            // outcomes must still produce no Progress/Completed acknowledgement
-            // and no published file (asserted by the Teacher side below).
+            // The packet has been submitted, but keep the QUIC connection
+            // owned by this task until the Teacher's receive path returns.
+            // No Progress or Completed acknowledgement is expected.
+            let _ = teacher_finished_rx.await;
             return Ok::<_, String>(());
         }
         chunk_send.map_err(|e| e.to_string())?;
@@ -349,6 +353,9 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
     )
     .await;
     if revoke_teacher_after_accept {
+        // Release the server connection even if the assertion below fails,
+        // avoiding a stranded background task while preserving the error.
+        let _ = teacher_finished_tx.send(());
         assert!(matches!(
             result,
             Err(TeacherFilePullRuntimeError::Receive(
