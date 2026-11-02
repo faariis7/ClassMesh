@@ -133,6 +133,12 @@ impl<S: FileTransferOutboxSource> FileTransferSourceSession<S> {
             if active.peer != peer || active.transfer_id != id || active.source_id != source_id {
                 return Err(SourceError::Busy);
             }
+            // An Offer retry is idempotent only before any source progress.
+            // Once a chunk or Finish has been emitted, replaying the Offer
+            // could reset receiver state for the same transfer identifier.
+            if active.read_mode != SourceReadMode::Unset || active.next_finish_emitted {
+                return Err(SourceError::InvalidOffset);
+            }
             return Ok(offer_from_active(active));
         }
 
@@ -618,6 +624,43 @@ mod tests {
             offer
         );
         assert_eq!(session.source().metadata_calls, 1);
+    }
+
+    #[test]
+    fn replayed_offer_after_source_progress_cannot_restart_transfer() {
+        let mut ack = FileTransferSourceSession::new(RecordingSource::new(b"abcdef".to_vec()));
+        ack.offer(peer(), &transfer_id(), source_id()).unwrap();
+        assert!(matches!(
+            ack.next(peer(), &transfer_id(), 0),
+            Ok(FileTransferSourceFrame::Chunk(_))
+        ));
+        assert_eq!(
+            ack.offer(peer(), &transfer_id(), source_id()),
+            Err(SourceError::InvalidOffset),
+            "a repeated Offer after source bytes were emitted must not reset receiver state"
+        );
+        assert_eq!(ack.source().metadata_calls, 1);
+        assert_eq!(ack.source().reads.len(), 1);
+        assert!(matches!(
+            ack.next(peer(), &transfer_id(), 6),
+            Ok(FileTransferSourceFrame::Finish(_))
+        ));
+        assert_eq!(
+            ack.offer(peer(), &transfer_id(), source_id()),
+            Err(SourceError::InvalidOffset)
+        );
+        assert_eq!(ack.complete(peer(), &transfer_id()), Ok(()));
+
+        let mut direct = FileTransferSourceSession::new(RecordingSource::new(b"abcdef".to_vec()));
+        direct.offer(peer(), &transfer_id(), source_id()).unwrap();
+        direct.chunk(peer(), &transfer_id(), 0).unwrap();
+        assert_eq!(
+            direct.offer(peer(), &transfer_id(), source_id()),
+            Err(SourceError::InvalidOffset),
+            "direct reads must not permit an Offer replay either"
+        );
+        assert_eq!(direct.source().reads.len(), 1);
+        assert!(direct.cancel(peer(), &transfer_id()).is_ok());
     }
 
     #[test]
