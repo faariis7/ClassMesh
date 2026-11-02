@@ -70,6 +70,13 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
         }
     ));
     fs::create_dir(&root)?;
+    // The app refuses a pre-existing shared-readable AppInbox; this fixture
+    // must explicitly provision the same owner-only boundary as production.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+    }
     let data = b"actual classroom bytes".to_vec();
     let path = root.join(format!("{}.bin", "09".repeat(16)));
     let partial = root.join(format!("{}.part", "09".repeat(16)));
