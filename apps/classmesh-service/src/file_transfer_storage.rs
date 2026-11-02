@@ -125,17 +125,6 @@ impl WindowsFileTransferOutboxSource {
         Ok(())
     }
 
-    fn ensure_staged_source_registered(
-        &mut self,
-        source_id: FileSourceId,
-    ) -> Result<(), WindowsOutboxSourceError> {
-        if self.registered.contains_key(&source_id) {
-            return Ok(());
-        }
-        let display_filename = format!("{}.bin", source_id_stem(source_id));
-        self.register_staged_file(source_id, &display_filename)
-    }
-
     #[cfg(test)]
     fn staged_path(&self, source_id: FileSourceId) -> PathBuf {
         self.root.join(format!("{}.bin", source_id_stem(source_id)))
@@ -149,7 +138,8 @@ impl FileTransferOutboxSource for WindowsFileTransferOutboxSource {
         &mut self,
         source_id: FileSourceId,
     ) -> Result<FileTransferSourceMetadata, Self::Error> {
-        self.ensure_staged_source_registered(source_id)?;
+        // An opaque filename on disk is not proof of a trusted staging
+        // producer. Only an explicit registration may expose source bytes.
         self.registered
             .get(&source_id)
             .map(|registered| registered.metadata.clone())
@@ -165,7 +155,6 @@ impl FileTransferOutboxSource for WindowsFileTransferOutboxSource {
         if max_bytes == 0 || max_bytes > MAX_FILE_CHUNK_BYTES {
             return Err(WindowsOutboxSourceError::ReadTooLarge);
         }
-        self.ensure_staged_source_registered(source_id)?;
         let registered = self
             .registered
             .get_mut(&source_id)
@@ -834,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn outbox_lazily_registers_only_the_opaque_app_owned_staged_path() {
+    fn outbox_requires_explicit_trusted_registration_before_metadata_or_read() {
         let root = test_root("outbox-lazy-register");
         fs::create_dir_all(&root).expect("root");
         let mut source = WindowsFileTransferOutboxSource::new(&root);
@@ -842,8 +831,27 @@ mod tests {
         let staged = source.staged_path(id);
         fs::write(&staged, b"locally-staged").expect("seed staged source");
 
-        let metadata = source.metadata(id).expect("lazy metadata");
-        assert_eq!(metadata.filename, format!("{}.bin", source_id_stem(id)));
+        assert!(
+            matches!(
+                source.metadata(id),
+                Err(WindowsOutboxSourceError::MissingSource)
+            ),
+            "an opaque path alone is not trusted source registration"
+        );
+        assert_eq!(
+            source.read_at(id, 0, MAX_FILE_CHUNK_BYTES),
+            Err(WindowsOutboxSourceError::MissingSource),
+            "a request must never implicitly register staged bytes"
+        );
+        assert_eq!(
+            fs::read(&staged).expect("staged bytes survive denial"),
+            b"locally-staged"
+        );
+        source
+            .register_staged_file(id, "lesson.pdf")
+            .expect("explicit trusted registration");
+        let metadata = source.metadata(id).expect("registered metadata");
+        assert_eq!(metadata.filename, "lesson.pdf");
         assert_eq!(metadata.total_size, 14);
         assert_eq!(
             source.read_at(id, 0, MAX_FILE_CHUNK_BYTES).expect("read"),
@@ -857,6 +865,21 @@ mod tests {
         assert!(
             staged.exists(),
             "portable close fails closed without unlink"
+        );
+        // A stale/replayed source request after close must not silently
+        // register a newly substituted file at the same opaque pathname.
+        fs::write(&staged, b"foreign-after-close").expect("substitute staged path");
+        assert!(matches!(
+            source.metadata(id),
+            Err(WindowsOutboxSourceError::MissingSource)
+        ));
+        assert_eq!(
+            source.read_at(id, 0, MAX_FILE_CHUNK_BYTES),
+            Err(WindowsOutboxSourceError::MissingSource)
+        );
+        assert_eq!(
+            fs::read(&staged).expect("replacement survives"),
+            b"foreign-after-close"
         );
         let _ = fs::remove_dir_all(root);
     }
