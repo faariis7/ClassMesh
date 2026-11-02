@@ -356,13 +356,43 @@ struct ActiveFile {
     declared_size: u64,
 }
 
-// A shared writable inbox lets other users replace transfer paths between
-// pathname-based publication and cleanup. The caller owns provisioning;
-// rejecting an unsafe root must never silently chmod someone else's directory.
+// All received classroom bytes must live under a private, owner-only inbox.
+// A readable/traversable leaf permits other local principals to access files.
+// Provisioning belongs to the caller; never silently chmod an existing root.
 #[cfg(unix)]
 fn root_permissions_safe(metadata: &fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o022 == 0
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    // A private mode alone is insufficient: a foreign directory owner can
+    // replace its entries even when other users cannot traverse it. Teacher
+    // storage is a per-user resource, never a privileged/root-owned sink.
+    // Use the effective identity that actually controls filesystem access;
+    // do not silently chown a caller-provisioned directory.
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: geteuid is a side-effect-free POSIX process identity query.
+    let effective_uid = unsafe { geteuid() };
+    effective_uid != 0
+        && metadata.uid() == effective_uid
+        && metadata.permissions().mode() & 0o077 == 0
+}
+
+// A private inbox is not safe beneath a non-sticky group/world-writable
+// directory: another principal could replace the private leaf by pathname.
+// Sticky directories are acceptable only when owned by root or by the inbox
+// owner, because the sticky-directory owner may otherwise delete the leaf.
+#[cfg(unix)]
+fn unix_ancestor_permissions_safe(root: &fs::Metadata, ancestor: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let mode = ancestor.mode();
+    mode & 0o022 == 0
+        || (mode & 0o1000 != 0 && (ancestor.uid() == 0 || ancestor.uid() == root.uid()))
+}
+
+#[cfg(not(unix))]
+fn unix_ancestor_permissions_safe(_root: &fs::Metadata, _ancestor: &fs::Metadata) -> bool {
+    true
 }
 
 // Windows ACL/owner checks remain authoritative on Windows; Unix mode bits
@@ -393,6 +423,9 @@ impl TeacherFileInbox {
     }
 
     fn root_ready(root: &Path) -> bool {
+        let Ok(root_metadata) = fs::symlink_metadata(root) else {
+            return false;
+        };
         root.is_absolute()
             // A mutable intermediate directory must never redirect a
             // parent traversal after the original-path security checks.
@@ -405,15 +438,17 @@ impl TeacherFileInbox {
             // that as a trusted namespace for publishing received files.
             && root.parent().is_some_and(windows_parent_dacl_safe)
             && root.ancestors().skip(2).all(windows_ancestor_dacl_safe)
-            // Trust the preprovisioned AppInbox leaf itself. A canonical
-            // temporary ancestor may legitimately be world-writable + sticky
-            // (for example /tmp); its mode is not the leaf's admission mode.
-            && fs::symlink_metadata(root).is_ok_and(|metadata| root_permissions_safe(&metadata))
+            // A canonical temporary ancestor may be writable only if sticky
+            // and owned by root/the inbox owner; a non-sticky writable parent
+            // could replace the private inbox entry before publication.
+            && root_permissions_safe(&root_metadata)
             && root.ancestors().all(|ancestor| {
                 fs::symlink_metadata(ancestor).is_ok_and(|metadata| {
                     metadata.is_dir()
                         && !metadata.file_type().is_symlink()
                         && !is_reparse_point(&metadata)
+                        && (ancestor == root
+                            || unix_ancestor_permissions_safe(&root_metadata, &metadata))
                 })
             })
     }
@@ -462,9 +497,16 @@ impl FileTransferInboxSink for TeacherFileInbox {
         if fs::symlink_metadata(&final_path).is_ok() {
             return Err(TeacherFileInboxError::ExistingTransfer);
         }
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        // A permissive process umask must never make a received .part file
+        // accessible to other principals, even if the leaf root is private.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
             .open(&temp_path)
             .map_err(|_| TeacherFileInboxError::ExistingTransfer)?;
         self.active = Some(ActiveFile {
@@ -620,6 +662,16 @@ mod tests {
             ))
     }
 
+    fn create_private_test_root(root: &std::path::Path) {
+        fs::create_dir(root).expect("create prepared inbox root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root, fs::Permissions::from_mode(0o700))
+                .expect("set private inbox test permissions");
+        }
+    }
+
     fn offer(data: &[u8]) -> FileTransferOffer {
         FileTransferOffer {
             transfer_id: ID.to_vec(),
@@ -640,7 +692,7 @@ mod tests {
     #[test]
     fn verified_file_receiver_writes_bytes_to_opaque_inbox_only_after_hash_and_commit() {
         let root = temp_root("committed");
-        fs::create_dir(&root).expect("explicit test root");
+        create_private_test_root(&root);
         let sink = TeacherFileInbox::new(&root).expect("prepared root");
         let expected = b"authenticated lesson from classroom";
         let mut receiver = FileTransferReceiver::new(sink);
@@ -675,7 +727,7 @@ mod tests {
     #[test]
     fn wrong_digest_does_not_publish_file_and_aborts_partial() {
         let root = temp_root("hash-mismatch");
-        fs::create_dir(&root).unwrap();
+        create_private_test_root(&root);
         let mut receiver = FileTransferReceiver::new(TeacherFileInbox::new(&root).unwrap());
         receiver.offer(peer(), &offer(b"expected bytes")).unwrap();
         receiver
@@ -708,7 +760,7 @@ mod tests {
             TeacherFileInbox::new(&root),
             Err(TeacherFileInboxError::InvalidRoot)
         ));
-        fs::create_dir(&root).unwrap();
+        create_private_test_root(&root);
         let final_file = root.join(format!("{}.bin", "71".repeat(16)));
         fs::write(&final_file, b"important existing file").unwrap();
         let mut sink = TeacherFileInbox::new(&root).unwrap();
@@ -753,7 +805,7 @@ mod tests {
 
         let root = temp_root("untrusted-unix-mode");
         fs::create_dir(&root).unwrap();
-        for mode in [0o777, 0o770] {
+        for mode in [0o777, 0o770, 0o755, 0o750] {
             fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
             assert!(
                 matches!(
@@ -779,6 +831,70 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn inbox_rejects_foreign_owned_private_root_without_modifying_it() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::process::Command;
+
+        // Existing OS-owned fixtures are inspected read-only. Never chown or
+        // write to a foreign directory to simulate an attacker's AppInbox.
+        let candidates: &[&str] = if cfg!(target_os = "macos") {
+            &["/private/var/db/Spotlight", "/private/var/db/modelmanagerd"]
+        } else if cfg!(target_os = "linux") {
+            &["/root"]
+        } else {
+            &[]
+        };
+        let output = Command::new("id").arg("-u").output().expect("Unix id -u");
+        assert!(output.status.success());
+        let current_uid: u32 = String::from_utf8(output.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let foreign = candidates
+            .iter()
+            .map(std::path::Path::new)
+            .find(|candidate| {
+                fs::symlink_metadata(candidate).is_ok_and(|metadata| {
+                    metadata.is_dir()
+                        && metadata.permissions().mode() & 0o777 == 0o700
+                        && metadata.uid() != current_uid
+                })
+            });
+        let Some(foreign) = foreign else {
+            eprintln!(
+                "No foreign-owned 0700 system directory fixture; skipping fixture-only assertion"
+            );
+            return;
+        };
+        assert!(matches!(
+            TeacherFileInbox::new(foreign),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_partial_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("private-part-mode");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).expect("private AppInbox");
+        sink.begin(&ID, "untrusted-name.pdf", 4).unwrap();
+        let partial = root.join(format!("{}.part", "71".repeat(16)));
+        let mode = fs::metadata(&partial).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "received classroom bytes must never be readable by another local principal"
+        );
+        sink.abort(&ID);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn inbox_accepts_private_root_inside_sticky_temporary_parent() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -792,6 +908,33 @@ mod tests {
             TeacherFileInbox::new(&root).is_ok(),
             "root must be checked independently of its sticky temporary ancestor"
         );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_rejects_nonsticky_writable_ancestor_before_publication() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = temp_root("nonsticky-writable-parent");
+        let root = parent.join("private-inbox");
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).expect("initially private ancestry");
+        sink.begin(&ID, "lesson.pdf", 4).unwrap();
+        sink.append(&ID, 0, b"DATA").unwrap();
+
+        // Without the sticky bit, another principal can replace the inbox
+        // entry in this world-writable parent even though its leaf is 0700.
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(matches!(
+            TeacherFileInbox::new(&root),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
+        assert_eq!(sink.complete(&ID), Err(TeacherFileInboxError::InvalidRoot));
+        assert!(!sink.completed_path(&ID).exists());
+        sink.abort(&ID);
         fs::remove_dir_all(parent).unwrap();
     }
 

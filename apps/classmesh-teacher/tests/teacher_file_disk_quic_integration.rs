@@ -65,6 +65,13 @@ async fn authenticated_quic_to_teacher_app_inbox_publishes_only_after_verified_f
         std::process::id()
     ));
     fs::create_dir(&root)?;
+    // The app refuses a pre-existing shared-readable AppInbox; this fixture
+    // must explicitly provision the same owner-only boundary as production.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+    }
     let data = b"actual classroom bytes".to_vec();
     let path = root.join(format!("{}.bin", "09".repeat(16)));
     let partial = root.join(format!("{}.part", "09".repeat(16)));
