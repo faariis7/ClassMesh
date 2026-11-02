@@ -2114,11 +2114,14 @@ mod windows_service_app {
         // The dispatch gate below also prevents any local queued source read.
         let hello_inbox_root = inbox_root.clone();
         let hello_outbox_root = outbox_root.clone();
-        let file_transfer_ready = FileTransferReadiness::with_storage_verifier(
-            crate::file_transfer_acl::prepare_optional_file_transfer_storage(
-                &inbox_root,
-                &outbox_root,
-            ),
+        let file_transfer_ready = FileTransferReadiness::with_operator_gate(
+            crate::file_transfer_readiness::FILE_TRANSFER_OPERATOR_OPT_IN,
+            || {
+                crate::file_transfer_acl::prepare_optional_file_transfer_storage(
+                    &inbox_root,
+                    &outbox_root,
+                )
+            },
             move || {
                 crate::file_transfer_acl::verify_private_file_transfer_storage(
                     &hello_inbox_root,
