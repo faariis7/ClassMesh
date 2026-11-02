@@ -25,12 +25,17 @@ fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
 }
 
-// Windows root and immediate parent must be private. Higher ancestors may
-// grant read/traverse and create-new-child rights (e.g. C:\), but must not
-// let a foreign principal replace an existing descendant or rewrite ACLs.
-// These are sampled ACL checks, not retained ancestor HANDLEs/anti-TOCTOU.
+// The inbox root must be private. Its direct parent may grant foreign
+// read/traverse rights but not create/delete/replace rights. Higher ancestors
+// may also grant create-new-sibling rights (e.g. C:\), but must not allow
+// replacing existing descendants or rewriting their ACLs.
+// These are sampled ACL checks; namespace HANDLEs are retained separately.
 #[cfg(windows)]
-fn windows_directory_acl_safe(root: &Path, require_private: bool) -> bool {
+fn windows_directory_acl_safe(
+    root: &Path,
+    require_private: bool,
+    allow_foreign_create: bool,
+) -> bool {
     use std::ffi::c_void;
     use std::mem::{offset_of, size_of};
     use std::os::windows::fs::OpenOptionsExt;
@@ -249,8 +254,16 @@ fn windows_directory_acl_safe(root: &Path, require_private: bool) -> bool {
                 | 0x0000_0100
                 | 0x1000_0000
                 | 0x4000_0000;
-            if header.AceFlags & INHERIT_ONLY_ACE == 0 && allowed.Mask & UNSAFE_ANCESTOR_RIGHTS != 0
-            {
+            // The direct parent is more sensitive than volume ancestors:
+            // a foreign principal must not create a sibling of the inbox.
+            const CREATE_CHILD_RIGHTS: u32 = 0x0000_0002 | 0x0000_0004;
+            let forbidden = UNSAFE_ANCESTOR_RIGHTS
+                | if allow_foreign_create {
+                    0
+                } else {
+                    CREATE_CHILD_RIGHTS
+                };
+            if header.AceFlags & INHERIT_ONLY_ACE == 0 && allowed.Mask & forbidden != 0 {
                 return false;
             }
         }
@@ -260,16 +273,26 @@ fn windows_directory_acl_safe(root: &Path, require_private: bool) -> bool {
 
 #[cfg(windows)]
 fn windows_root_dacl_private(root: &Path) -> bool {
-    windows_directory_acl_safe(root, true)
+    windows_directory_acl_safe(root, true, false)
+}
+
+#[cfg(windows)]
+fn windows_parent_dacl_safe(root: &Path) -> bool {
+    windows_directory_acl_safe(root, false, false)
 }
 
 #[cfg(windows)]
 fn windows_ancestor_dacl_safe(root: &Path) -> bool {
-    windows_directory_acl_safe(root, false)
+    windows_directory_acl_safe(root, false, true)
 }
 
 #[cfg(not(windows))]
 fn windows_root_dacl_private(_root: &Path) -> bool {
+    true
+}
+
+#[cfg(not(windows))]
+fn windows_parent_dacl_safe(_root: &Path) -> bool {
     true
 }
 
@@ -359,7 +382,7 @@ impl TeacherFileInbox {
             // The leaf may be private while its parent grants a foreign
             // principal directory-entry replacement rights. Do not accept
             // that as a trusted namespace for publishing received files.
-            && root.parent().is_some_and(windows_root_dacl_private)
+            && root.parent().is_some_and(windows_parent_dacl_safe)
             && root.ancestors().skip(2).all(windows_ancestor_dacl_safe)
             && root.ancestors().all(|ancestor| {
                 fs::symlink_metadata(ancestor).is_ok_and(|metadata| {
@@ -749,6 +772,45 @@ mod tests {
         assert!(!sink.completed_path(&ID).exists());
         sink.abort(&ID);
         fs::remove_dir_all(grandparent).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inbox_accepts_read_only_foreign_parent_but_rejects_child_creation() {
+        use std::process::Command;
+        let base = temp_root("read-only-parent");
+        let parent = base.join("parent");
+        let root = parent.join("inbox");
+        fs::create_dir_all(&root).unwrap();
+        // A standard Windows profile may grant traversal to AppContainer
+        // capability SIDs. Reading/traversing the parent cannot replace the
+        // private inbox; denying this would make ordinary provisioning fail.
+        let read_grant = Command::new("icacls")
+            .arg(&parent)
+            .arg("/grant")
+            .arg("*S-1-1-0:RX")
+            .output()
+            .expect("native Windows icacls");
+        assert!(read_grant.status.success(), "icacls failed: {read_grant:?}");
+        assert!(TeacherFileInbox::new(&root).is_ok());
+
+        // Creating children of the immediate parent is still forbidden even
+        // though higher-level ancestors may permit unrelated sibling creation.
+        let write_grant = Command::new("icacls")
+            .arg(&parent)
+            .arg("/grant")
+            .arg("*S-1-1-0:W")
+            .output()
+            .expect("native Windows icacls");
+        assert!(
+            write_grant.status.success(),
+            "icacls failed: {write_grant:?}"
+        );
+        assert!(matches!(
+            TeacherFileInbox::new(&root),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[cfg(windows)]
