@@ -382,11 +382,50 @@ pub(crate) fn verify_private_file_transfer_storage(inbox: &Path, outbox: &Path) 
     verify_private_outbox(outbox)
 }
 
+/// Refuse an existing junction/symlink anywhere in the creation chain
+/// *before* create_dir_all. Otherwise mkdir follows a pre-existing malicious
+/// ClassMesh/state junction and creates files outside the intended tree before
+/// the post-creation ACL gate can reject it. This is only a preflight: an
+/// attacker racing path replacement still requires a handle-relative creation
+/// design and an independently secured ancestor. Never call it an atomic gate.
+fn preflight_existing_storage_chain(path: &Path) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(denied(
+            "FileTransfer storage path must be absolute and normalized",
+        ));
+    }
+    for ancestor in path.ancestors() {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                if !metadata.is_dir()
+                    || metadata.file_type().is_symlink()
+                    || metadata.file_attributes() & 0x400 != 0
+                {
+                    return Err(denied(
+                        "FileTransfer storage creation traverses a reparse point or non-directory",
+                    ));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 /// File transfer is optional. An unsafe legacy ProgramData tree must not
 /// terminate an otherwise healthy Service, but no source or inbox is usable
 /// until this gate passes. Never rewrite an untrusted directory's ACL here.
 pub(crate) fn prepare_optional_file_transfer_storage(inbox: &Path, outbox: &Path) -> bool {
-    let result = std::fs::create_dir_all(inbox)
+    let result = preflight_existing_storage_chain(inbox)
+        .and_then(|()| preflight_existing_storage_chain(outbox))
+        .and_then(|()| std::fs::create_dir_all(inbox))
         .and_then(|()| std::fs::create_dir_all(outbox))
         .and_then(|()| verify_private_file_transfer_storage(inbox, outbox));
     if let Err(error) = result {
@@ -444,6 +483,46 @@ mod tests {
         let truncated = unsafe { buffer.as_ptr().add(buffer.len() - 1) };
         assert!(copy_sid_within_token(&buffer, buffer.len(), truncated).is_err());
         assert!(copy_sid_within_token(&buffer, buffer.len() + 1, buffer.as_ptr()).is_err());
+    }
+
+    #[test]
+    fn preexisting_classmesh_junction_cannot_create_inbox_outside_storage() {
+        // An attacker-controlled ancestor can redirect create_dir_all before
+        // the post-creation ACL check. Do not mutate the junction target.
+        let sandbox = std::env::temp_dir().join(format!(
+            "classmesh-acl-precreate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let anchor = sandbox.join("anchor");
+        let outside = sandbox.join("outside");
+        std::fs::create_dir_all(&anchor).expect("fixture anchor");
+        std::fs::create_dir_all(&outside).expect("fixture target");
+        let classmesh = anchor.join("ClassMesh");
+        let junction = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&classmesh)
+            .arg(&outside)
+            .output()
+            .expect("create fixture junction");
+        assert!(
+            junction.status.success(),
+            "junction fixture failed: {junction:?}"
+        );
+        let inbox = classmesh.join("state").join("file-inbox");
+        let outbox = classmesh.join("state").join("file-outbox");
+        let allowed = prepare_optional_file_transfer_storage(&inbox, &outbox);
+        let target_mutated = outside.join("state").exists();
+        std::fs::remove_dir(&classmesh).expect("remove only fixture junction");
+        std::fs::remove_dir_all(&sandbox).expect("cleanup disposable fixture");
+        assert!(!allowed, "junction must disable FileTransfer");
+        assert!(
+            !target_mutated,
+            "unsafe junction target must not be mutated before ACL verification"
+        );
     }
 
     #[test]
