@@ -1651,7 +1651,7 @@ async fn run_listener(
                         local_capabilities: service_hello_capabilities(
                             &worker_capabilities,
                             udp_multicast_available,
-                            file_transfer_ready.is_ready(),
+                            file_transfer_ready.revalidate_for_hello(),
                         ),
                         control_session_id: session_id,
                     };
@@ -4158,6 +4158,19 @@ mod tests {
         assert!(with_worker.contains(&Capability::FileTransfer));
         assert!(with_worker.contains(&Capability::TeacherMessage));
         assert!(with_worker.contains(&Capability::OpenTarget));
+    }
+
+    #[test]
+    fn new_hello_revokes_unsafe_file_transfer_but_preserves_core_control() {
+        let readiness = FileTransferReadiness::with_storage_verifier(true, || false);
+        let worker = WorkerCapabilityState::default();
+        assert!(readiness.is_ready());
+        let capabilities =
+            service_hello_capabilities(&worker, false, readiness.revalidate_for_hello());
+        assert!(!capabilities.contains(&Capability::FileTransfer));
+        assert!(capabilities.contains(&Capability::SystemActions));
+        assert!(capabilities.contains(&Capability::TeacherPresentation));
+        assert!(!readiness.is_ready(), "storage revocation is permanent");
     }
 
     #[test]
