@@ -1161,8 +1161,9 @@ mod tests {
     fn same_inode_disk_corruption_after_chunk_must_not_publish_completed() {
         use std::io::Write as _;
 
-        // The network receiver hashes authenticated bytes, but another local
-        // writer can alter the same .part inode without changing its file ID.
+        // The network receiver hashes authenticated bytes. Simulate an
+        // in-place storage fault through the sink's already-owned file handle;
+        // Windows deliberately denies a second writer to this .part inode.
         // Do not acknowledge Completed for bytes other than those received.
         let root = temp_root("same-inode-corruption");
         create_private_test_root(&root).unwrap();
@@ -1181,7 +1182,16 @@ mod tests {
             .unwrap();
 
         let partial = root.join(format!("{}.part", "71".repeat(16)));
-        let mut same_inode_writer = fs::OpenOptions::new().write(true).open(&partial).unwrap();
+        use std::io::{Seek as _, SeekFrom};
+        let mut same_inode_writer = receiver
+            .sink()
+            .active
+            .as_ref()
+            .unwrap()
+            .file
+            .try_clone()
+            .unwrap();
+        same_inode_writer.seek(SeekFrom::Start(0)).unwrap();
         same_inode_writer
             .write_all(&vec![b'X'; expected.len()])
             .unwrap();
@@ -1211,12 +1221,9 @@ mod tests {
         sink.append(&ID, 0, b"original").unwrap();
 
         let partial = root.join(format!("{}.part", "71".repeat(16)));
-        fs::OpenOptions::new()
-            .write(true)
-            .open(&partial)
-            .unwrap()
-            .set_len(3)
-            .unwrap();
+        // Mutate through the retained owner handle: Windows share-mode
+        // hardening intentionally blocks opening a second write handle.
+        sink.active.as_ref().unwrap().file.set_len(3).unwrap();
         assert_eq!(sink.complete(&ID), Err(TeacherFileInboxError::CorruptFile));
         assert!(!sink.completed_path(&ID).exists());
         sink.abort(&ID);
