@@ -31,9 +31,7 @@ unsafe extern "system" {
         sacl: *mut *mut c_void,
         descriptor: *mut *mut c_void,
     ) -> u32;
-    fn GetAce(acl: *mut c_void, index: u32, ace: *mut *mut c_void) -> i32;
     fn GetSecurityDescriptorLength(descriptor: *const c_void) -> u32;
-    fn EqualSid(a: *const c_void, b: *const c_void) -> i32;
     fn CreateWellKnownSid(
         kind: u32,
         domain: *const c_void,
@@ -131,21 +129,72 @@ fn copy_sid_within_token(
 }
 
 /// ACCESS_ALLOWED_ACE layout is 8-byte header/mask followed by a SID.
-/// Validate variable-length SID within AceSize before any EqualSid call.
-fn allow_ace_sid(ace: &[u8]) -> io::Result<*const c_void> {
+/// Validate the exact variable-length SID within AceSize before comparing bytes.
+fn allow_ace_sid(ace: &[u8]) -> io::Result<&[u8]> {
     if ace.len() < 16 {
         return Err(denied("Outbox DACL contains a truncated allow ACE"));
     }
     let subauthorities = usize::from(ace[9]);
-    if ace[8] != 1 || subauthorities > 15 || 16 + subauthorities * 4 > ace.len() {
+    if ace[8] != 1 || subauthorities > 15 || 16 + subauthorities * 4 != ace.len() {
         return Err(denied("Outbox allow ACE contains an invalid SID"));
     }
-    Ok(ace[8..].as_ptr().cast())
+    Ok(&ace[8..])
 }
 
-fn equal_sid(a: *const c_void, b: &[u8]) -> bool {
-    // SAFETY: caller supplies a SID from Windows security APIs; b is a valid SID.
-    unsafe { EqualSid(a, b.as_ptr().cast()) != 0 }
+// A Windows SID has a canonical byte representation: revision, subauthority
+// count, identifier authority and exactly that many LE subauthorities.
+// Compare validated slices instead of passing pointers to EqualSid.
+fn sid_matches(sid: &[u8], expected: &[u8]) -> bool {
+    sid == expected
+}
+
+/// Parse the API-owned ACL only after the entire ACL is bounded by its
+/// descriptor. This avoids GetAce-returned raw pointers and validates the
+/// complete ACE header, length, SID and ACE count before any comparison.
+fn verify_acl_bytes(acl: &[u8], system: &[u8], admins: &[u8], service: &[u8]) -> io::Result<()> {
+    if acl.len() < 8 {
+        return Err(denied("Outbox DACL header is truncated"));
+    }
+    let declared = u16::from_le_bytes([acl[2], acl[3]]) as usize;
+    if declared != acl.len() {
+        return Err(denied("Outbox DACL size is inconsistent"));
+    }
+    let count = u16::from_le_bytes([acl[4], acl[5]]) as usize;
+    let mut offset = 8_usize;
+    for _ in 0..count {
+        let header = acl
+            .get(offset..offset.saturating_add(4))
+            .ok_or_else(|| denied("Outbox DACL ACE header is truncated"))?;
+        let length = u16::from_le_bytes([header[2], header[3]]) as usize;
+        if length < 4 {
+            return Err(denied("Outbox DACL ACE length is invalid"));
+        }
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| denied("Outbox DACL ACE length overflow"))?;
+        let ace = acl
+            .get(offset..end)
+            .ok_or_else(|| denied("Outbox DACL ACE exceeds its ACL"))?;
+        match ace[0] {
+            0 => {
+                let sid = allow_ace_sid(ace)?;
+                let mask = u32::from_le_bytes(ace[4..8].try_into().expect("ACE mask"));
+                if mask & WRITABLE_RIGHTS != 0
+                    && !sid_matches(sid, system)
+                    && !sid_matches(sid, admins)
+                    && !sid_matches(sid, service)
+                {
+                    return Err(denied(
+                        "FileTransfer directory grants write/delete to another principal",
+                    ));
+                }
+            }
+            1 | 2 | 3 | 7 | 8 | 17 => {} // deny, audit, and mandatory-label ACEs
+            _ => return Err(denied("FileTransfer directory has an unsupported ACE type")),
+        }
+        offset = end;
+    }
+    Ok(())
 }
 
 fn verify_one_directory(
@@ -204,7 +253,14 @@ fn verify_one_directory(
         {
             return Err(denied("Outbox owner SID exceeds its descriptor"));
         }
-        if !equal_sid(owner, system) && !equal_sid(owner, admins) && !equal_sid(owner, service) {
+        // SAFETY: the complete SID was bounded by the returned descriptor.
+        let owner_sid =
+            unsafe { std::slice::from_raw_parts(owner.cast::<u8>(), 8 + owner_subauthorities * 4) };
+        if owner_sid[0] != 1
+            || (!sid_matches(owner_sid, system)
+                && !sid_matches(owner_sid, admins)
+                && !sid_matches(owner_sid, service))
+        {
             return Err(denied(
                 "FileTransfer directory is owned by an untrusted principal",
             ));
@@ -217,7 +273,7 @@ fn verify_one_directory(
         {
             return Err(denied("Outbox DACL header is outside its descriptor"));
         }
-        // SAFETY: the DACL header is within the descriptor allocation.
+        // SAFETY: the DACL header is inside the API-owned descriptor.
         let acl_size =
             unsafe { ptr::read_unaligned((dacl as *const u8).add(2).cast::<u16>()) } as usize;
         if acl_size < 8
@@ -227,53 +283,10 @@ fn verify_one_directory(
         {
             return Err(denied("Outbox DACL size exceeds its descriptor"));
         }
-        let acl_end = dacl_begin + acl_size;
-        // SAFETY: validated ACL header bounds.
-        let count = unsafe { ptr::read_unaligned((dacl as *const u8).add(4).cast::<u16>()) };
-        for i in 0..u32::from(count) {
-            let mut ace = ptr::null_mut();
-            // SAFETY: i is within the ACL's reported ACE count.
-            if unsafe { GetAce(dacl, i, &mut ace) } == 0 || ace.is_null() {
-                return Err(denied("Outbox DACL contains an invalid ACE"));
-            }
-            let ace_begin = ace as usize;
-            if ace_begin < dacl_begin + 8
-                || ace_begin.checked_add(4).is_none_or(|end| end > acl_end)
-            {
-                return Err(denied("Outbox ACE header is outside its ACL"));
-            }
-            // SAFETY: ACE header bounds were checked against the API-owned ACL.
-            let kind = unsafe { *(ace as *const u8) };
-            let length = unsafe { ptr::read_unaligned((ace as *const u8).add(2).cast::<u16>()) };
-            if length < 4
-                || ace_begin
-                    .checked_add(length as usize)
-                    .is_none_or(|end| end > acl_end)
-            {
-                return Err(denied("Outbox ACE exceeds its ACL"));
-            }
-            match kind {
-                0 => {
-                    // SAFETY: ACE pointer and AceSize were checked against the
-                    // API-owned ACL allocation before forming this byte slice.
-                    let bytes =
-                        unsafe { std::slice::from_raw_parts(ace.cast::<u8>(), length as usize) };
-                    let sid = allow_ace_sid(bytes)?;
-                    let mask = u32::from_le_bytes(bytes[4..8].try_into().expect("ACE mask"));
-                    if mask & WRITABLE_RIGHTS != 0
-                        && !equal_sid(sid, system)
-                        && !equal_sid(sid, admins)
-                        && !equal_sid(sid, service)
-                    {
-                        return Err(denied(
-                            "FileTransfer directory grants write/delete to another principal",
-                        ));
-                    }
-                }
-                1 | 2 | 3 | 7 | 8 | 17 => {} // deny, audit, and mandatory-label ACEs
-                _ => return Err(denied("FileTransfer directory has an unsupported ACE type")),
-            }
-        }
+        // SAFETY: every byte in the ACL slice lies inside the API-owned
+        // descriptor. All ACE offsets and SIDs are checked in safe Rust.
+        let acl = unsafe { std::slice::from_raw_parts(dacl.cast::<u8>(), acl_size) };
+        verify_acl_bytes(acl, system, admins, service)?;
         Ok(())
     })();
     // SAFETY: descriptor is allocated by GetNamedSecurityInfoW.
@@ -348,6 +361,30 @@ mod tests {
         ace[9] = 0;
         assert!(allow_ace_sid(&ace).is_ok());
         assert!(allow_ace_sid(&ace[..15]).is_err());
+        // An ACCESS_ALLOWED_ACE has no trailing payload after its SID.
+        // Accepting excess bytes obscures the exact SID/ACE ownership boundary.
+        let mut trailing = [0_u8; 20];
+        trailing[8] = 1;
+        trailing[9] = 0;
+        assert!(
+            allow_ace_sid(&trailing).is_err(),
+            "trailing ACE bytes must fail closed"
+        );
+    }
+
+    #[test]
+    fn malformed_acl_ace_count_and_length_fail_closed() {
+        let sid = [1_u8, 0, 0, 0, 0, 0, 0, 5];
+        let mut acl = [0_u8; 8];
+        acl[2..4].copy_from_slice(&8_u16.to_le_bytes());
+        acl[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        assert!(verify_acl_bytes(&acl, &sid, &sid, &sid).is_err());
+        let mut truncated = [0_u8; 12];
+        truncated[2..4].copy_from_slice(&12_u16.to_le_bytes());
+        truncated[4..6].copy_from_slice(&1_u16.to_le_bytes());
+        truncated[8..10].copy_from_slice(&[0, 0]);
+        truncated[10..12].copy_from_slice(&16_u16.to_le_bytes());
+        assert!(verify_acl_bytes(&truncated, &sid, &sid, &sid).is_err());
     }
 
     #[test]
