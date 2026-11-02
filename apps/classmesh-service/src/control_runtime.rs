@@ -1,3 +1,4 @@
+use crate::file_transfer_readiness::FileTransferReadiness;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
@@ -1434,7 +1435,7 @@ pub(crate) struct ControlRuntimeDispatch {
     presentation_dispatch: PresentationDispatchChannels,
     presentation_feedback: PresentationFeedbackBus,
     worker_capabilities: Arc<WorkerCapabilityState>,
-    file_transfer_ready: bool,
+    file_transfer_ready: FileTransferReadiness,
 }
 
 impl ControlRuntimeDispatch {
@@ -1445,7 +1446,7 @@ impl ControlRuntimeDispatch {
         presentation_dispatch: PresentationDispatchChannels,
         presentation_feedback: PresentationFeedbackBus,
         worker_capabilities: Arc<WorkerCapabilityState>,
-        file_transfer_ready: bool,
+        file_transfer_ready: FileTransferReadiness,
     ) -> Self {
         Self {
             input,
@@ -1620,6 +1621,7 @@ async fn run_listener(
                 let presentation_feedback = presentation_feedback.clone();
                 let presentation = presentation.clone();
                 let worker_capabilities = Arc::clone(&worker_capabilities);
+                let file_transfer_ready = file_transfer_ready.clone();
                 tokio::spawn(async move {
                     let connection = match incoming.await {
                         Ok(connection) => connection,
@@ -1639,7 +1641,7 @@ async fn run_listener(
                         local_capabilities: service_hello_capabilities(
                             &worker_capabilities,
                             udp_multicast_available,
-                            file_transfer_ready,
+                            file_transfer_ready.is_ready(),
                         ),
                         control_session_id: session_id,
                     };
