@@ -4,6 +4,7 @@ use classmesh_codec_win::mf_decoder::DecodedGpuFrame;
 use classmesh_render_win::{
     DxgiFailureClass, FlipPresenter, PresentMetrics, ResizeOutcome, classify_dxgi_error,
 };
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -14,6 +15,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::{Interface, w};
+
+const RESIZE_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy)]
+struct ResizeFailureReport {
+    dimensions: (u32, u32),
+    code: windows::core::HRESULT,
+    reported_at: Instant,
+}
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("ClassMeshMediaReceiverWindow");
 const WINDOW_TITLE: windows::core::PCWSTR = w!("ClassMesh Student Presentation");
@@ -28,6 +38,7 @@ pub struct PresentationWindow {
     closed: bool,
     client_size: (u32, u32),
     device_lost: bool,
+    last_resize_failure_report: Option<ResizeFailureReport>,
 }
 
 impl std::fmt::Debug for PresentationWindow {
@@ -99,6 +110,7 @@ impl PresentationWindow {
             closed: false,
             client_size: (width, height),
             device_lost: false,
+            last_resize_failure_report: None,
         })
     }
 
@@ -142,6 +154,7 @@ impl PresentationWindow {
         }
         self.presenter = Some(replacement);
         self.device_lost = false;
+        self.last_resize_failure_report = None;
         Ok(())
     }
 
@@ -196,15 +209,22 @@ impl PresentationWindow {
     ///
     /// Returns `false` after the presentation window has closed.
     pub fn pump_messages(&mut self) -> bool {
-        self.pump_messages_with_resize(|window, width, height| {
-            if let Some(presenter) = window.presenter.as_mut() {
-                presenter.resize_output(width, height)
-            } else {
-                // Keep the real HWND dimensions for a subsequent GPU recovery.
-                window.device_lost = true;
-                Ok(ResizeOutcome::Unchanged)
-            }
-        })
+        self.pump_messages_with_resize(
+            |window, width, height| {
+                if let Some(presenter) = window.presenter.as_mut() {
+                    presenter.resize_output(width, height)
+                } else {
+                    // Keep the real HWND dimensions for a subsequent GPU recovery.
+                    window.device_lost = true;
+                    Ok(ResizeOutcome::Unchanged)
+                }
+            },
+            |width, height, error| {
+                eprintln!(
+                    "student presentation swap-chain resize failed at {width}x{height}: {error}"
+                );
+            },
+        )
     }
 
     // The callback is the single production resize seam. Windows-native tests
@@ -212,6 +232,7 @@ impl PresentationWindow {
     fn pump_messages_with_resize(
         &mut self,
         mut resize: impl FnMut(&mut Self, u32, u32) -> windows::core::Result<ResizeOutcome>,
+        mut report_resize_error: impl FnMut(u32, u32, &windows::core::Error),
     ) -> bool {
         let mut message = MSG::default();
         while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() } {
@@ -246,6 +267,7 @@ impl PresentationWindow {
                             // the observed HWND size. A transient DXGI error
                             // must be retried even if WM_SIZE is not reposted.
                             self.client_size = (width, height);
+                            self.last_resize_failure_report = None;
                             match outcome {
                                 ResizeOutcome::Resized => {
                                     eprintln!("student presentation resized to {width}x{height}");
@@ -262,9 +284,26 @@ impl PresentationWindow {
                             if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
                                 self.device_lost = true;
                             }
-                            eprintln!(
-                                "student presentation swap-chain resize failed at {width}x{height}: {error}"
-                            );
+                            // Preserve the retry on every pump, but bound identical
+                            // diagnostic writes during persistent DXGI failures.
+                            // Changed dimensions/error codes are reported immediately.
+                            let now = Instant::now();
+                            let code = error.code();
+                            let should_report =
+                                self.last_resize_failure_report.is_none_or(|last| {
+                                    last.dimensions != (width, height)
+                                        || last.code != code
+                                        || now.saturating_duration_since(last.reported_at)
+                                            >= RESIZE_FAILURE_REPORT_INTERVAL
+                                });
+                            if should_report {
+                                self.last_resize_failure_report = Some(ResizeFailureReport {
+                                    dimensions: (width, height),
+                                    code,
+                                    reported_at: now,
+                                });
+                                report_resize_error(width, height, &error);
+                            }
                         }
                     }
                 }
@@ -391,6 +430,7 @@ mod tests {
                 closed: false,
                 client_size: (320, 180),
                 device_lost: false,
+                last_resize_failure_report: None,
             };
             unsafe {
                 windows::Win32::UI::WindowsAndMessaging::PostMessageW(
@@ -447,6 +487,7 @@ mod tests {
                 closed: false,
                 client_size: (320, 180),
                 device_lost: false,
+                last_resize_failure_report: None,
             };
             unsafe { windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0) };
             assert!(!receiver.pump_messages());
@@ -547,6 +588,7 @@ mod tests {
                 closed: false,
                 client_size: (320, 180),
                 device_lost: false,
+                last_resize_failure_report: None,
             };
             unsafe { SetWindowPos(hwnd, None, 0, 0, 640, 480, SWP_NOMOVE | SWP_NOZORDER).unwrap() };
             let mut rect = RECT::default();
@@ -560,27 +602,151 @@ mod tests {
             // Inject only the DXGI resize outcome; the actual Win32 window
             // geometry, message pump and state transition remain production code.
             let mut attempts = 0;
-            assert!(receiver.pump_messages_with_resize(|_, width, height| {
-                attempts += 1;
-                assert_eq!((width, height), requested);
-                Err(windows::core::Error::new(
-                    windows::core::HRESULT(0x8000_4005_u32 as i32),
-                    "transient ResizeBuffers failure",
-                ))
-            }));
+            assert!(receiver.pump_messages_with_resize(
+                |_, width, height| {
+                    attempts += 1;
+                    assert_eq!((width, height), requested);
+                    Err(windows::core::Error::new(
+                        windows::core::HRESULT(0x8000_4005_u32 as i32),
+                        "transient ResizeBuffers failure",
+                    ))
+                },
+                |_, _, _| {}
+            ));
             assert_eq!(attempts, 1);
             assert_eq!(
                 receiver.client_size,
                 (320, 180),
                 "failed DXGI resize must not be marked applied"
             );
-            assert!(receiver.pump_messages_with_resize(|_, width, height| {
-                attempts += 1;
-                assert_eq!((width, height), requested);
-                Ok(ResizeOutcome::Resized)
-            }));
+            assert!(receiver.pump_messages_with_resize(
+                |_, width, height| {
+                    attempts += 1;
+                    assert_eq!((width, height), requested);
+                    Ok(ResizeOutcome::Resized)
+                },
+                |_, _, _| {}
+            ));
             assert_eq!(attempts, 2, "unchanged HWND size must retry after failure");
             assert_eq!(receiver.client_size, requested);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn repeated_resize_failure_does_not_flood_diagnostics() {
+        use windows::Win32::UI::WindowsAndMessaging::{SWP_NOMOVE, SWP_NOZORDER, SetWindowPos};
+
+        std::thread::spawn(|| {
+            let module = unsafe { GetModuleHandleW(None).unwrap() };
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: module.into(),
+                lpszClassName: WINDOW_CLASS,
+                ..Default::default()
+            };
+            let _ = unsafe { RegisterClassW(&class) };
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    WINDOW_CLASS,
+                    WINDOW_TITLE,
+                    WS_OVERLAPPEDWINDOW,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    320,
+                    180,
+                    None,
+                    None,
+                    Some(module.into()),
+                    None,
+                )
+                .unwrap()
+            };
+            let mut receiver = PresentationWindow {
+                hwnd,
+                presenter: None,
+                closed: false,
+                client_size: (320, 180),
+                device_lost: false,
+                last_resize_failure_report: None,
+            };
+            unsafe { SetWindowPos(hwnd, None, 0, 0, 640, 480, SWP_NOMOVE | SWP_NOZORDER).unwrap() };
+            let mut reports = Vec::new();
+            let mut attempts = 0;
+            for _ in 0..5 {
+                assert!(receiver.pump_messages_with_resize(
+                    |_, _, _| {
+                        attempts += 1;
+                        Err(windows::core::Error::from(windows::core::HRESULT(
+                            0x8000_4005_u32 as i32,
+                        )))
+                    },
+                    |width, height, error| reports.push((width, height, error.code())),
+                ));
+            }
+            assert_eq!(
+                attempts, 5,
+                "diagnostic suppression must not delay DXGI retries"
+            );
+            assert_eq!(
+                reports.len(),
+                1,
+                "unchanged transient DXGI failure must not log on every pump"
+            );
+            assert_eq!(
+                receiver.client_size,
+                (320, 180),
+                "failed resize must remain retryable"
+            );
+
+            // Simulate the bounded diagnostic heartbeat without sleeping 30 seconds.
+            receiver
+                .last_resize_failure_report
+                .as_mut()
+                .expect("first failure must be recorded")
+                .reported_at -= RESIZE_FAILURE_REPORT_INTERVAL + Duration::from_secs(1);
+            assert!(receiver.pump_messages_with_resize(
+                |_, _, _| Err(windows::core::Error::from(windows::core::HRESULT(
+                    0x8000_4005_u32 as i32,
+                ))),
+                |width, height, error| reports.push((width, height, error.code())),
+            ));
+            assert_eq!(
+                reports.len(),
+                2,
+                "persistent failure must retain a periodic diagnostic"
+            );
+
+            assert!(receiver.pump_messages_with_resize(
+                |_, _, _| Err(windows::core::Error::from(windows::core::HRESULT(
+                    0x8007_0057_u32 as i32
+                ))),
+                |width, height, error| reports.push((width, height, error.code())),
+            ));
+            assert_eq!(
+                reports.len(),
+                3,
+                "a changed failure code must be reported immediately"
+            );
+
+            assert!(receiver.pump_messages_with_resize(
+                |_, _, _| Ok(ResizeOutcome::Resized),
+                |_, _, _| panic!("successful resize must not report a failure"),
+            ));
+            unsafe { SetWindowPos(hwnd, None, 0, 0, 700, 500, SWP_NOMOVE | SWP_NOZORDER).unwrap() };
+            assert!(receiver.pump_messages_with_resize(
+                |_, _, _| Err(windows::core::Error::from(windows::core::HRESULT(
+                    0x8000_4005_u32 as i32
+                ))),
+                |width, height, error| reports.push((width, height, error.code())),
+            ));
+            assert_eq!(
+                reports.len(),
+                4,
+                "a new resize after recovery must report its first failure"
+            );
         })
         .join()
         .unwrap();
@@ -622,6 +788,7 @@ mod tests {
                 closed: false,
                 client_size: (320, 180),
                 device_lost: false,
+                last_resize_failure_report: None,
             };
             // SetWindowPos delivers WM_SIZE synchronously, not necessarily as a
             // queued message returned by PeekMessageW.
