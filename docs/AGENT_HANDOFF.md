@@ -1,5 +1,12 @@
 # ClassMesh Agent Handoff
 
+## ASTRA WORK HANDOFF — 2026-10-29 exact CI Teacher UI artifact
+
+- Latest main: #642 squash `4dead76a8ba2f6004e9b5a9d03dee455210a5376`; exact-head CI run `40853923424` Portable Rust and Windows Build PASS. #641 previously merged `15fa6b69`. Current branch `codex/phase13-exact-artifact-qualification` only records post-merge evidence; no Phase 10 or production files touched.
+- Downloaded exact `classmesh-phase11f4-teacher-ui-windows-x64` artifact id `12889571162` to `/Users/ahmed/Developer/ClassMesh-phase13-artifact-40853923424`. Bundle index SHA-256 `cc6f6eb144d43d8a34b27efb3c627a228443c5d0cd036b6f897e3d61f833d6ab`; EXE SHA-256 `42c813446240afb6ab48923f38fa6c0fdb0cfc1fd91c29274b372adaad3db894`. VM1 copy at `C:\Users\ahmed\ClassMesh-phase13-CI-40853923424` retained.
+- VM1 Windows ARM64 non-admin Session 1: unchanged bundle Validate and Preflight PASS (`14.51.36231.0` required, `14.51.36247.0` installed); seven-second Smoke PASS, responsive ClassMesh Teacher window, process cleaned. Evidence JSON observed 2026-10-29T10:18:07Z, SHA-256 `53cb7007052aee6b8eec1d26485d402620e7a5e4ff00e1e68a94925084fa1ec0`. Separate visible desktop launch of same EXE reached Classroom, Focus, Presentation, Device Actions and Diagnostics with Tab/Enter; Alt+F4 closed it. Historical Phase 11 UI closeout remains distinct.
+- Open: fresh-clean Windows first-launch; full current-artifact accessibility; signed installer and Service/Worker prerequisite matrix; Phase 12 live in-process revocation; VM2 obsolete saved password; physical classroom and storage gates. Phase 12 trusted Service remains default-off. Next: Phase 13 installer/update foundation or coordinated Phase 12 reload with cancellation of already queued privileged work. Do not alter Phase 10 agent files.
+
 ## ASTRA WORK HANDOFF — 2026-10-29 Phase 13 Teacher UI runtime prerequisite
 
 - Latest merged main: #641 squash `15fa6b6927ff4b4bfbc532cdb1146c92fe2816e2`, exact-head CI `40848542126` Portable Rust and Windows Build PASS. #640 previously merged as `952d45b2`, CI `40795113425` PASS. Current branch `codex/phase13-vc-runtime-preflight` in `/Users/ahmed/.codex/worktrees/phase13-vc-runtime-preflight/ClassMesh-phase12` changes only the Teacher UI smoke/packaging script, its focused PowerShell test, CI invocation and living docs; Phase 10 files/worktrees remain untouched.
