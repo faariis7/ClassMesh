@@ -701,6 +701,37 @@ mod tests {
                 "failed resize must remain retryable"
             );
 
+            // A new HWND size with the same HRESULT must report immediately,
+            // even while the previous resize is still failing. No success/reset
+            // or 30-second heartbeat may be required for this transition.
+            unsafe { SetWindowPos(hwnd, None, 0, 0, 700, 500, SWP_NOMOVE | SWP_NOZORDER).unwrap() };
+            let mut changed_rect = RECT::default();
+            unsafe { GetClientRect(hwnd, &mut changed_rect).unwrap() };
+            let changed_dimensions = (changed_rect.right as u32, changed_rect.bottom as u32);
+            assert_ne!(changed_dimensions, (reports[0].0, reports[0].1));
+            assert!(receiver.pump_messages_with_resize(
+                |_, width, height| {
+                    attempts += 1;
+                    assert_eq!((width, height), changed_dimensions);
+                    Err(windows::core::Error::from(windows::core::HRESULT(
+                        0x8000_4005_u32 as i32,
+                    )))
+                },
+                |width, height, error| reports.push((width, height, error.code())),
+            ));
+            assert_eq!(attempts, 6, "dimension change must not delay resize retry");
+            assert_eq!(
+                reports.len(),
+                2,
+                "new HWND dimensions must report immediately"
+            );
+            assert_eq!((reports[1].0, reports[1].1), changed_dimensions);
+            assert_eq!(
+                receiver.client_size,
+                (320, 180),
+                "failed resize remains pending"
+            );
+
             // Simulate the bounded diagnostic heartbeat without sleeping 30 seconds.
             receiver
                 .last_resize_failure_report
@@ -715,7 +746,7 @@ mod tests {
             ));
             assert_eq!(
                 reports.len(),
-                2,
+                3,
                 "persistent failure must retain a periodic diagnostic"
             );
 
@@ -727,7 +758,7 @@ mod tests {
             ));
             assert_eq!(
                 reports.len(),
-                3,
+                4,
                 "a changed failure code must be reported immediately"
             );
 
@@ -735,7 +766,7 @@ mod tests {
                 |_, _, _| Ok(ResizeOutcome::Resized),
                 |_, _, _| panic!("successful resize must not report a failure"),
             ));
-            unsafe { SetWindowPos(hwnd, None, 0, 0, 700, 500, SWP_NOMOVE | SWP_NOZORDER).unwrap() };
+            unsafe { SetWindowPos(hwnd, None, 0, 0, 760, 560, SWP_NOMOVE | SWP_NOZORDER).unwrap() };
             assert!(receiver.pump_messages_with_resize(
                 |_, _, _| Err(windows::core::Error::from(windows::core::HRESULT(
                     0x8000_4005_u32 as i32
@@ -744,7 +775,7 @@ mod tests {
             ));
             assert_eq!(
                 reports.len(),
-                4,
+                5,
                 "a new resize after recovery must report its first failure"
             );
         })
