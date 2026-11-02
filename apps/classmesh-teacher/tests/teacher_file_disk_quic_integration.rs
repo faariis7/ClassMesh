@@ -55,7 +55,8 @@ fn frame(sequence: u64, payload: control_envelope::Payload) -> ControlEnvelope {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authenticated_quic_to_teacher_app_inbox_publishes_only_after_verified_finish() -> TestResult
 {
-    let root = std::env::temp_dir().join(format!(
+    // Use the resolved temporary parent: macOS /var is a symlink.
+    let root = std::env::temp_dir().canonicalize()?.join(format!(
         "classmesh-teacher-quic-inbox-{}",
         std::process::id()
     ));

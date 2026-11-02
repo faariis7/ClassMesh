@@ -1,14 +1,29 @@
 //! Teacher AppInbox storage backed by an explicitly prepared local directory.
 //!
 //! The caller must supply a pre-provisioned, appropriately protected root.
-//! This does not establish trusted Windows root ancestry or anti-reparse
-//! guarantees against an adversary able to replace directory ancestors.
+//! Static path checks reject observed symlink/junction ancestors, but do NOT
+//! establish trusted Windows owner/DACL, retained ancestor HANDLEs, or
+//! anti-TOCTOU guarantees against an adversary replacing directory ancestors.
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use classmesh_control::file_transfer_receiver::FileTransferInboxSink;
 use classmesh_protocol::file_transfer::MAX_FILE_TRANSFER_BYTES;
+
+// Windows junctions are reparse points but are not always reported as
+// symlinks. Check the ORIGINAL ancestor spelling before it is followed.
+#[cfg(windows)]
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeacherFileInboxError {
@@ -53,8 +68,14 @@ impl TeacherFileInbox {
     }
 
     fn root_ready(root: &Path) -> bool {
-        fs::symlink_metadata(root)
-            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        root.is_absolute()
+            && root.ancestors().all(|ancestor| {
+                fs::symlink_metadata(ancestor).is_ok_and(|metadata| {
+                    metadata.is_dir()
+                        && !metadata.file_type().is_symlink()
+                        && !is_reparse_point(&metadata)
+                })
+            })
     }
 
     #[must_use]
@@ -219,11 +240,16 @@ mod tests {
     const ID: [u8; 16] = [0x71; 16];
 
     fn temp_root(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "classmesh-teacher-inbox-{label}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed),
-        ))
+        // macOS /var is a system symlink to /private/var; tests must use
+        // a canonical parent to exercise the intentionally strict admission.
+        std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical test temporary parent")
+            .join(format!(
+                "classmesh-teacher-inbox-{label}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed),
+            ))
     }
 
     fn offer(data: &[u8]) -> FileTransferOffer {
@@ -324,6 +350,46 @@ mod tests {
         );
         assert_eq!(fs::read(final_file).unwrap(), b"important existing file");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_rejects_symlinked_parent_of_apparently_real_root() {
+        let parent = temp_root("trusted-parent");
+        let alias = temp_root("parent-alias");
+        let inbox = parent.join("inbox");
+        fs::create_dir_all(&inbox).unwrap();
+        std::os::unix::fs::symlink(&parent, &alias).unwrap();
+        assert!(matches!(
+            TeacherFileInbox::new(alias.join("inbox")),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
+        fs::remove_file(alias).unwrap();
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inbox_rejects_junction_in_parent_before_accepting_root() {
+        let parent = temp_root("trusted-parent-junction");
+        let alias = temp_root("parent-junction");
+        let inbox = parent.join("inbox");
+        fs::create_dir_all(&inbox).unwrap();
+        let output = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&alias)
+            .arg(&parent)
+            .output()
+            .expect("cmd mklink available on Windows");
+        assert!(output.status.success(), "junction setup failed: {output:?}");
+        assert!(matches!(
+            TeacherFileInbox::new(alias.join("inbox")),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
+        fs::remove_dir(&alias).unwrap();
+        fs::remove_dir_all(parent).unwrap();
     }
 
     #[cfg(unix)]
