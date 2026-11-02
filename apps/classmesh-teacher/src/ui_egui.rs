@@ -1421,6 +1421,65 @@ mod tests {
     }
 
     #[test]
+    fn queued_diagnostics_override_is_rechecked_at_ui_handoff() {
+        use crate::device_diagnostics::TroubleshootingOverrideRequest;
+        use crate::ui_shell::TeacherDiagnosticsUiAction;
+
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let source_id = MonitoringSourceId(7);
+        let quality = TeacherUiAction::Diagnostics(TeacherDiagnosticsUiAction {
+            source_id,
+            request: TroubleshootingOverrideRequest::Quality {
+                stream_kind: classmesh_core::StreamKind::Monitoring,
+                tier: classmesh_core::adaptation::QualityTier::Low,
+            },
+        });
+
+        app.queue_action(quality.clone());
+        app.classroom.select(None).unwrap();
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "a queued override must not reach the engine after selection changes"
+        );
+
+        app.classroom.select(Some(source_id)).unwrap();
+        app.queue_action(quality);
+        app.classroom
+            .upsert(ClassroomDeviceSnapshot {
+                source_id,
+                display_name: "Student 07".to_owned(),
+                health: DeviceHealth {
+                    presence: PresenceState::Offline,
+                    media: MediaState::Recovering,
+                    service_ready: false,
+                    worker_ready: false,
+                },
+                quality_tier: None,
+                thumbnail_available: false,
+                interactive_active: false,
+            })
+            .unwrap();
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "new overrides must not be handed off after the device becomes unavailable"
+        );
+
+        let cleanup = TeacherUiAction::Diagnostics(TeacherDiagnosticsUiAction {
+            source_id,
+            request: TroubleshootingOverrideRequest::Automatic,
+        });
+        app.queue_action(cleanup.clone());
+        assert_eq!(
+            app.take_pending_action(),
+            Some(cleanup),
+            "return-to-automatic remains available while offline"
+        );
+    }
+
+    #[test]
     fn pending_action_slot_is_bounded_and_preserves_oldest_action() {
         let mut app = TeacherEguiShell::default();
         let first = TeacherUiAction::SelectDevice(Some(MonitoringSourceId(7)));
