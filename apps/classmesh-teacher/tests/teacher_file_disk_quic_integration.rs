@@ -188,6 +188,17 @@ async fn authenticated_quic_to_teacher_app_inbox_publishes_only_after_verified_f
             credentials,
         })
         .map_err(|e| format!("{e:?}"))?;
+    // The current authenticated Teacher must also hold the local ReceiveFile
+    // permission; an enrolled Student certificate alone is not sufficient.
+    store
+        .upsert(Principal {
+            id: PrincipalId([8; 32]),
+            kind: PrincipalKind::Teacher,
+            enabled: true,
+            permissions: BTreeSet::from([Permission::ReceiveFile]),
+            credentials: BTreeMap::new(),
+        })
+        .map_err(|e| format!("{e:?}"))?;
     let live = LiveAuthorizationStore::new(store);
     let sink = TeacherFileInbox::new(&root).expect("precreated Teacher inbox");
     let mut inbox = TeacherFilePullInbox::new(&client, STUDENT, 11, ID, 1, sink)?;
