@@ -1386,6 +1386,52 @@ mod tests {
     }
 
     #[test]
+    fn queued_file_pull_is_retired_if_trusted_staged_candidate_is_revoked_or_replaced() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let context = TeacherFilePullContext {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            version: classmesh_protocol::PROTOCOL_VERSION,
+            capabilities: BTreeSet::from([Capability::FileTransfer]),
+        };
+        let candidate = TeacherStagedFileCandidate {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 77,
+            transfer_id: [1; 16],
+            opaque_source_id: [2; 16],
+        };
+        app.set_file_pull_context(context);
+        app.set_staged_file_candidate(candidate);
+        app.queue_file_pull_request(candidate.transfer_id, candidate.opaque_source_id);
+        app.clear_staged_file_candidate();
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "revoked offer must not dispatch"
+        );
+
+        app.set_staged_file_candidate(candidate);
+        app.queue_file_pull_request(candidate.transfer_id, candidate.opaque_source_id);
+        app.set_staged_file_candidate(TeacherStagedFileCandidate {
+            transfer_id: [3; 16],
+            ..candidate
+        });
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "replaced offer must not dispatch"
+        );
+
+        app.set_staged_file_candidate(candidate);
+        app.queue_file_pull_request(candidate.transfer_id, candidate.opaque_source_id);
+        assert!(matches!(
+            app.take_pending_action(),
+            Some(TeacherUiAction::FilePull(_))
+        ));
+    }
+
+    #[test]
     fn reconnect_discards_staged_candidate_and_never_reactivates_it() {
         let mut app = TeacherEguiShell::default();
         select_test_device(&mut app);
