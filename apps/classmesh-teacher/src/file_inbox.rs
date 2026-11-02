@@ -378,6 +378,11 @@ impl TeacherFileInbox {
 
     fn root_ready(root: &Path) -> bool {
         root.is_absolute()
+            // A mutable intermediate directory must never redirect a
+            // parent traversal after the original-path security checks.
+            && !root
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
             && windows_root_dacl_private(root)
             // The leaf may be private while its parent grants a foreign
             // principal directory-entry replacement rights. Do not accept
@@ -693,6 +698,21 @@ mod tests {
         );
         assert_eq!(fs::read(final_file).unwrap(), b"important existing file");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inbox_rejects_parent_dir_components_in_trusted_root() {
+        let parent = temp_root("parent-component");
+        let inbox = parent.join("inbox");
+        fs::create_dir_all(&inbox).unwrap();
+        // A mutable intermediate directory must not redirect dot-dot
+        // traversal after the admission checks.
+        let ambiguous = inbox.join("..").join("inbox");
+        assert!(matches!(
+            TeacherFileInbox::new(ambiguous),
+            Err(TeacherFileInboxError::InvalidRoot)
+        ));
+        fs::remove_dir_all(parent).unwrap();
     }
 
     #[cfg(unix)]
