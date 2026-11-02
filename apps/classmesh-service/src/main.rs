@@ -230,6 +230,27 @@ mod windows_service_app {
         }
     }
 
+    // This is the final in-process delivery boundary for Service source frames.
+    // A produced Chunk/Finish is NOT delivered when the QUIC reply receiver
+    // disappeared. Reclaim the exact source instead of keeping ACK progress.
+    fn send_file_transfer_reply(
+        reply_tx: tokio::sync::oneshot::Sender<FileTransferDispatchOutcome>,
+        outcome: FileTransferDispatchOutcome,
+        on_undelivered_source: impl FnOnce(),
+    ) {
+        let source_frame = matches!(
+            &outcome,
+            FileTransferDispatchOutcome::Outbound(
+                FileTransferOutboundPayload::Offer(_)
+                    | FileTransferOutboundPayload::Chunk(_)
+                    | FileTransferOutboundPayload::Finish(_)
+            )
+        );
+        if reply_tx.send(outcome).is_err() && source_frame {
+            on_undelivered_source();
+        }
+    }
+
     #[derive(Debug)]
     struct PendingPresentationKeyInstall {
         expected_process_id: u32,
@@ -2440,7 +2461,25 @@ mod windows_service_app {
                         }
                     }
                 };
-                let _ = dispatch.reply_tx.send(outcome);
+                let request_id = dispatch.request_id;
+                let pending_binding = pending_file_pull;
+                send_file_transfer_reply(dispatch.reply_tx, outcome, || {
+                    if pending_binding.is_some_and(|active| {
+                        active.matches(
+                            peer.principal,
+                            peer.control_session_id,
+                            request_id,
+                            &transfer_id,
+                        )
+                    }) {
+                        // A closed reply channel cannot deliver the Offer,
+                        // Chunk, or Finish. Cancel the exact Service source;
+                        // never retain a ledger claiming those bytes were sent.
+                        let _ = file_source.cancel(peer, &transfer_id);
+                        let _ = file_pull_owner.release(peer.control_session_id);
+                        pending_file_pull = None;
+                    }
+                });
             }
 
             if let Some(pending) = pending_clipboard_read.as_ref() {
@@ -3550,6 +3589,42 @@ mod windows_service_app {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn failed_source_reply_reclaims_only_undelivered_frames() {
+            let mut reclaimed = 0;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            drop(rx);
+            send_file_transfer_reply(
+                tx,
+                FileTransferDispatchOutcome::Outbound(FileTransferOutboundPayload::Finish(
+                    Default::default(),
+                )),
+                || reclaimed += 1,
+            );
+            assert_eq!(reclaimed, 1, "closed receiver must reclaim source");
+
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            drop(rx);
+            send_file_transfer_reply(tx, FileTransferDispatchOutcome::NoResponse, || {
+                reclaimed += 1;
+            });
+            assert_eq!(reclaimed, 1, "unrelated status must not reclaim source");
+
+            let (tx, mut rx) = tokio::sync::oneshot::channel();
+            send_file_transfer_reply(
+                tx,
+                FileTransferDispatchOutcome::Outbound(FileTransferOutboundPayload::Chunk(
+                    Default::default(),
+                )),
+                || reclaimed += 1,
+            );
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(FileTransferDispatchOutcome::Outbound(_))
+            ));
+            assert_eq!(reclaimed, 1, "successful channel delivery retains source");
+        }
 
         #[test]
         fn file_receive_status_maps_failures_to_bounded_states() {
