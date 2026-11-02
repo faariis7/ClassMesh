@@ -26,6 +26,18 @@ pub enum PresentationDecodeStep {
     WaitingForKeyframe,
 }
 
+// A failed device-loss rebuild is a media-local fatal condition. The caller
+// must tear down the receiver/decoder instead of continuing with a lost GPU.
+#[cfg(any(windows, test))]
+#[must_use]
+const fn keep_window_stream_alive(
+    window_open: bool,
+    device_lost: bool,
+    recovery_succeeded: bool,
+) -> bool {
+    window_open && (!device_lost || recovery_succeeded)
+}
+
 #[cfg(windows)]
 pub struct PresentationDecodeRuntime {
     decoder: classmesh_codec_win::mf_decoder::MfH264Decoder,
@@ -274,12 +286,20 @@ impl PresentationDecodeRuntime {
             None => (true, false),
         };
 
-        if open && device_lost {
-            if let Err(error) = self.rebuild_gpu_pipeline("presentation window device loss") {
-                eprintln!("GPU pipeline rebuild failed after window resize device loss: {error}");
+        let recovery_succeeded = if open && device_lost {
+            match self.rebuild_gpu_pipeline("presentation window device loss") {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!(
+                        "GPU pipeline rebuild failed after window resize device loss: {error}; stopping media receiver"
+                    );
+                    false
+                }
             }
-        }
-        open
+        } else {
+            true
+        };
+        keep_window_stream_alive(open, device_lost, recovery_succeeded)
     }
 
     pub fn finish(&mut self) -> Result<PresentationDecodeBatch, Box<dyn std::error::Error>> {
@@ -350,5 +370,19 @@ impl PresentationDecodeRuntime {
             last: Duration::ZERO,
             longest: Duration::ZERO,
         }
+    }
+}
+
+#[cfg(test)]
+mod window_recovery_tests {
+    use super::keep_window_stream_alive;
+
+    #[test]
+    fn failed_window_gpu_rebuild_ends_only_the_media_path() {
+        assert!(!keep_window_stream_alive(true, true, false));
+        assert!(keep_window_stream_alive(true, true, true));
+        assert!(keep_window_stream_alive(true, false, false));
+        assert!(!keep_window_stream_alive(false, false, true));
+        assert!(!keep_window_stream_alive(false, true, true));
     }
 }

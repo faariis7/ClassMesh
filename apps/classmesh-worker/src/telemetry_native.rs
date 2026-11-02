@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use classmesh_control::receiver_telemetry::ReceiverTelemetryBinding;
 use classmesh_control::receiver_telemetry_transport::encode_receiver_telemetry;
@@ -43,20 +43,41 @@ pub(crate) fn grant_matches_current_receiver(
         && grant.start_request_id != key.request_id
 }
 
-/// Remove a pending frame without forwarding it if the owner retired while
-/// the background sender was blocked or descheduled. The Service MUST still
-/// verify current OS-backed receiver authority at arrival.
+// The Service pipe can be slow to connect after a session switch. Never
+// publish an old playback-health snapshot as though it were current once a
+// delayed connection becomes available. This is two normal report intervals.
+const MAX_QUEUED_TELEMETRY_AGE: Duration = Duration::from_secs(10);
+
+#[derive(Debug)]
+struct QueuedTelemetry {
+    frame: [u8; 136],
+    queued_at: Instant,
+}
+
+/// Remove pending frames without forwarding them if the owner retired while
+/// the sender was blocked or descheduled, or if a delayed connection made
+/// their playback-health measurements obsolete. The Service still verifies
+/// current OS-backed receiver authority at arrival.
 fn take_if_native_sender_armed(
-    rx: &mpsc::Receiver<[u8; 136]>,
+    rx: &mpsc::Receiver<QueuedTelemetry>,
     armed: &AtomicBool,
 ) -> Option<[u8; 136]> {
-    let frame = rx.recv().ok()?;
-    armed.load(Ordering::Acquire).then_some(frame)
+    loop {
+        let queued = rx.recv().ok()?;
+        if !armed.load(Ordering::Acquire) {
+            return None;
+        }
+        if Instant::now().saturating_duration_since(queued.queued_at) <= MAX_QUEUED_TELEMETRY_AGE {
+            return Some(queued.frame);
+        }
+        // Drop the stale sample and wait for the next fresh one. This is a
+        // background-only blocking receive, never the Worker media/IPC loop.
+    }
 }
 
 pub(crate) struct BestEffortReceiverSender {
     grant: ServiceReceiverTelemetryGrant,
-    outbox: SyncSender<[u8; 136]>,
+    outbox: SyncSender<QueuedTelemetry>,
     armed: Arc<AtomicBool>,
 }
 
@@ -97,7 +118,7 @@ impl BestEffortReceiverSender {
             worker_generation: grant.worker_generation,
             receiver_generation: grant.receiver_generation,
         };
-        let (outbox, rx) = mpsc::sync_channel::<[u8; 136]>(1);
+        let (outbox, rx) = mpsc::sync_channel::<QueuedTelemetry>(1);
         let armed = Arc::new(AtomicBool::new(true));
         let sender_armed = Arc::clone(&armed);
         thread::Builder::new()
@@ -172,7 +193,10 @@ impl BestEffortReceiverSender {
             .ok_or("WorkerTelemetrySnapshotNoLongerAuthorized")?;
         let frame =
             encode_receiver_telemetry(&snapshot).map_err(|_| "WorkerTelemetryEncodeInvalid")?;
-        match self.outbox.try_send(frame) {
+        match self.outbox.try_send(QueuedTelemetry {
+            frame,
+            queued_at: Instant::now(),
+        }) {
             Ok(()) => Ok(true),
             Err(TrySendError::Full(_)) => Ok(false),
             Err(TrySendError::Disconnected(_)) => Err("WorkerTelemetrySenderDisconnected"),
@@ -183,6 +207,13 @@ impl BestEffortReceiverSender {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn queued(frame: [u8; 136]) -> QueuedTelemetry {
+        QueuedTelemetry {
+            frame,
+            queued_at: Instant::now(),
+        }
+    }
 
     fn key() -> PresentationKeyInstallBinding {
         PresentationKeyInstallBinding {
@@ -209,10 +240,29 @@ mod tests {
     }
 
     #[test]
+    fn stale_queued_report_is_skipped_after_delayed_service_connection() {
+        // A Service connection can take longer than two 5-second reporting
+        // intervals. A late connection must not publish obsolete health.
+        let (tx, rx) = mpsc::sync_channel(2);
+        let armed = AtomicBool::new(true);
+        tx.try_send(QueuedTelemetry {
+            frame: [7; 136],
+            queued_at: Instant::now() - MAX_QUEUED_TELEMETRY_AGE - Duration::from_secs(1),
+        })
+        .expect("queue old report");
+        tx.try_send(QueuedTelemetry {
+            frame: [8; 136],
+            queued_at: Instant::now(),
+        })
+        .expect("queue current report");
+        assert_eq!(take_if_native_sender_armed(&rx, &armed), Some([8; 136]));
+    }
+
+    #[test]
     fn queued_report_is_never_offered_to_native_io_after_revocation() {
         let (tx, rx) = mpsc::sync_channel(1);
         let armed = AtomicBool::new(true);
-        assert!(tx.try_send([7; 136]).is_ok());
+        assert!(tx.try_send(queued([7; 136])).is_ok());
         armed.store(false, Ordering::Release);
         assert_eq!(take_if_native_sender_armed(&rx, &armed), None);
         assert!(rx.try_recv().is_err());
@@ -227,7 +277,7 @@ mod tests {
             outbox: tx,
             armed: Arc::clone(&armed),
         };
-        assert!(sender.outbox.try_send([9; 136]).is_ok());
+        assert!(sender.outbox.try_send(queued([9; 136])).is_ok());
         drop(sender);
         assert!(!armed.load(Ordering::Acquire));
         assert_eq!(take_if_native_sender_armed(&rx, &armed), None);
@@ -237,8 +287,8 @@ mod tests {
     fn authorized_report_still_passes_without_bounded_queue_growth() {
         let (tx, rx) = mpsc::sync_channel(1);
         let armed = AtomicBool::new(true);
-        assert!(tx.try_send([4; 136]).is_ok());
-        assert!(tx.try_send([5; 136]).is_err());
+        assert!(tx.try_send(queued([4; 136])).is_ok());
+        assert!(tx.try_send(queued([5; 136])).is_err());
         assert_eq!(take_if_native_sender_armed(&rx, &armed), Some([4; 136]));
     }
 

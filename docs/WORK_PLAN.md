@@ -1,4 +1,10 @@
-## Active execution checkpoint — Phase 13 exact CI artifact VM1 retest (2026-10-29)
+## Active execution checkpoint — Phase 13 signed release manifest foundation (2026-10-31)
+
+**Next isolated signing batch:** branch `codex/phase13-release-signing` adds a create-only detached-CMS producer using a CurrentUser RSA-2048+ code-signing certificate supplied by the release operator. VM1 RED lacked signer; GREEN generated a signed manifest for the exact copied #644 bundle, independent verifier accepted it, duplicate overwrite and zero sequence were denied; disposable cert and directory cleanup followed. Windows CI must run this native test after the verifier test. This does not supply a production certificate, Authenticode signatures, protected verifier pin or installer/update authority.
+
+#644 merged `ce6fe692` after exact-head CI `41138625385` passed both jobs; unchanged Service/Worker and Teacher artifacts passed VM1 runtime preflight and Teacher reached a responsive Session 1 window. #649 merged `9d20c90e` after exact-head CI `41141769130` passed both jobs, including the native signed-manifest verifier test. Branch `codex/phase13-release-signing` adds create-only signed metadata production and its native test. Real production certificate, protected signer pin, Authenticode signing, staged exact-byte installation and independent release rollback anchor remain open. Phase 12 in-process revocation remains open; avoid Phase 10 and concurrent Phase 12D4 files.
+
+## Historical checkpoint — Phase 13 exact CI artifact VM1 retest (2026-10-29)
 
 #642 merged as `4dead76a8ba2f6004e9b5a9d03dee455210a5376` after exact-head CI `40853923424` passed Portable Rust and Windows Build. The exact hosted Teacher UI artifact (id `12889571162`, EXE SHA-256 `42c81344...`) passed unchanged bundle validation, x64 runtime preflight and seven-second non-admin Session 1 responsive-window smoke on VM1; the same EXE was visibly launched on the desktop and Tab/Enter reached all five sections. See `PHASE11_TEACHER_UI_SMOKE_RESULTS.md` for hashes and limits. Fresh-clean Windows first-launch, full current-artifact accessibility, signed installer, Service/Worker prerequisite matrix and physical classroom gates remain open. Next engineering target: Phase 13 installer/update foundation or Phase 12 Service-owned reload with safe queued-work revocation; coordinate with Phase 10 agent before any shared runtime edits.
 
@@ -11,6 +17,14 @@
 **Phase 13 cleanup regression:** VM1 Session 1 RED used a wrong-window executable with `-LeaveRunning`; the failed smoke rejected it but left one process alive. GREEN final helper still rejected it and left zero survivors, while a reindexed real Teacher UI bundle again passed a 7-second responsive-window smoke. Only successful smoke can honor `-LeaveRunning`.
 
 **Phase 13 stale-evidence regression:** VM1 RED wrong-window retry left an older `launch-smoke-evidence.json` in place. GREEN clears the helper-owned fixed-name file before checks; the same failed retry left zero processes and no success evidence. A separate final-script real UI rerun passed with a responsive window and fresh evidence.
+
+## Phase 13 Service and Worker prerequisite bundle — 2026-10-31
+
+Branch `codex/phase13-service-worker-prereq` stages x64 release Service and Worker binaries with a fixed-file SHA-256/size index, separate named runtime minima for Service and Worker, PE x64 header check, and shared Visual C++ runtime preflight. CI will build, validate and upload a separate Service/Worker artifact; the Teacher bundle moves to schema 3 and hashes the shared runtime helper. VM1 native local release builds of Service and Worker both imported `VCRUNTIME140.dll`. VM1 bundle Index/Validate/Preflight passed; a one-byte Worker alteration was rejected; the reindexed Teacher schema-3 bundle passed a seven-second Session 1 window smoke. macOS and VM1 focused PowerShell tests pass. Hosted CI/review and exact hosted Service/Worker artifact testing remain pending. This bundle does not install binaries, create a Service, change firewall rules or supply signed update authority; those Phase 13 gates remain open.
+
+**Registry value-kind regression:** VM1 HKCU disposable RED failed because the shared record reader was absent; GREEN rejects text `Installed=1`, DWORD `Version`, and accepts only the documented DWORD/REG_SZ kinds. The test deletes its exact HKCU key. Both VM1 bundles reindexed and passed real HKLM preflight after the change. Hosted CI on the final head remains required.
+
+**Per-binary prerequisite regression:** the initial single shared minimum was replaced with schema-2 entries keyed separately to `classmesh-service.exe` and `classmesh-worker.exe`. macOS and VM1 tests reject an absent Worker entry; VM1 native preflight rejected a Service-only `14.99.0.0` minimum while the Worker minimum remained `14.44.35207.0`, then restored the exact index. Final-head hosted CI and exact hosted artifact still pending.
 
 ## Historical checkpoint — offline trusted startup inspection (2026-10-29)
 
