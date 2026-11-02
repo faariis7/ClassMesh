@@ -2091,7 +2091,7 @@ mod windows_service_app {
                 &outbox_root,
             );
         let mut file_receiver =
-            FileTransferReceiver::new(WindowsFileTransferInboxSink::new(inbox_root));
+            FileTransferReceiver::new(WindowsFileTransferInboxSink::new(inbox_root.clone()));
         let mut file_source = FileTransferSourceSession::new(WindowsFileTransferOutboxSource::new(
             outbox_root.clone(),
         ));
@@ -2208,12 +2208,19 @@ mod windows_service_app {
                 // A previously trusted ProgramData tree can become unsafe
                 // after startup. Revalidate before each queued transfer and
                 // permanently disable this runtime's transfer dispatch if the
-                // protected root changes. Never serve a queued source afterward.
+                // protected Inbox or Outbox changes. Never serve or accept a
+                // queued transfer afterward.
                 if file_transfer_ready
-                    && crate::file_transfer_acl::verify_private_outbox(&outbox_root).is_err()
+                    && crate::file_transfer_acl::verify_private_file_transfer_storage(
+                        &inbox_root,
+                        &outbox_root,
+                    )
+                    .is_err()
                 {
                     file_transfer_ready = false;
-                    eprintln!("ClassMesh FileTransfer disabled: Outbox ACL changed after startup");
+                    eprintln!(
+                        "ClassMesh FileTransfer disabled: Inbox/Outbox ACL changed after startup"
+                    );
                     if let Some(pending) = pending_file_pull.take() {
                         let pending_peer = FileTransferPeer {
                             principal: pending.principal_id,
