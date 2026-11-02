@@ -775,7 +775,7 @@ mod tests {
 
         let root = temp_root("untrusted-unix-mode");
         fs::create_dir(&root).unwrap();
-        for mode in [0o777, 0o770] {
+        for mode in [0o777, 0o770, 0o755, 0o750] {
             fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
             assert!(
                 matches!(
@@ -796,6 +796,23 @@ mod tests {
             TeacherFileInbox::new(&root).is_ok(),
             "private preprovisioned root remains admissible"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_partial_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("private-part-mode");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut sink = TeacherFileInbox::new(&root).expect("private AppInbox");
+        sink.begin(&ID, "untrusted-name.pdf", 4).unwrap();
+        let partial = root.join(format!("{}.part", "71".repeat(16)));
+        let mode = fs::metadata(&partial).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "received classroom bytes must never be readable by another local principal");
+        sink.abort(&ID);
         fs::remove_dir_all(root).unwrap();
     }
 
