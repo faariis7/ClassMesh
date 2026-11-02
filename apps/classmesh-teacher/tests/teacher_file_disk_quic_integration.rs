@@ -70,6 +70,8 @@ async fn run_teacher_disk_transfer_case(revoke_teacher_after_accept: bool) -> Te
         }
     ));
     fs::create_dir(&root)?;
+    // The app refuses a pre-existing shared-readable AppInbox; this fixture
+    // must explicitly provision the same owner-only boundary as production.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

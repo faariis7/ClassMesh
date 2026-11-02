@@ -31,7 +31,7 @@ fn new_override_blocker(health: DeviceHealth) -> Option<&'static str> {
     }
 }
 
-fn override_action_available(
+pub(crate) fn override_action_available(
     request: TroubleshootingOverrideRequest,
     health: DeviceHealth,
     action_pending: bool,
