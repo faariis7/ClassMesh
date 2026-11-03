@@ -150,6 +150,26 @@ class ReadinessTests(unittest.TestCase):
         self.entry["runs"]["data"].append(run)
         self.assertEqual(self.result()["ci"]["Windows Build"]["state"], "PENDING")
 
+    def test_finished_job_keeps_its_result_while_sibling_job_is_running(self):
+        self.entry["runs"]["data"][0].update(status="in_progress", conclusion=None)
+        self.entry["checks"]["data"][0].update(status="in_progress", conclusion=None)
+        result = self.result()
+        self.assertEqual(result["ci"]["Windows Build"]["state"], "PENDING")
+        self.assertEqual(result["ci"]["Portable Rust"]["state"], "SUCCESS")
+        self.entry["checks"]["data"][1]["conclusion"] = "failure"
+        self.assertEqual(self.result()["ci"]["Portable Rust"]["state"], "FAILED")
+
+    def test_in_progress_rerun_does_not_use_previous_attempts_success(self):
+        self.entry["runs"]["data"][0].update(status="in_progress", conclusion=None,
+            run_attempt=2, run_started_at="2026-11-04T02:00:00Z")
+        self.assertEqual(self.result()["ci"]["Portable Rust"]["state"], "PENDING")
+
+    def test_recreated_workflow_at_same_path_invalidates_old_workflow_id(self):
+        run = copy.deepcopy(self.entry["runs"]["data"][0])
+        run.update(id=300, workflow_id=300, check_suite_id=300, status="queued", conclusion=None)
+        self.entry["runs"]["data"].append(run)
+        self.assertEqual(self.result()["ci"]["Windows Build"]["state"], "PENDING")
+
     def test_check_from_untrusted_app_is_not_accepted(self):
         self.entry["checks"]["data"][0]["app"] = {"id": 9, "slug": "fake"}
         self.assertNotEqual(self.result()["ci"]["Windows Build"]["state"], "SUCCESS")

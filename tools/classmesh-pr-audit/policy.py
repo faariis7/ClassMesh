@@ -145,8 +145,8 @@ def evaluate_gate(names, workflow, pr, checks, runs, app_id=None):
             relevant_runs.append(run)
     latest = {}
     for run in relevant_runs:
-        key = run.get("workflow_id")
-        if type(key) is not int or type(run.get("id")) is not int:
+        key = run.get("path")
+        if not isinstance(key, str) or type(run.get("id")) is not int:
             continue
         if key not in latest or (run["id"], run.get("run_attempt", 0)) > (latest[key]["id"], latest[key].get("run_attempt", 0)):
             latest[key] = run
@@ -164,10 +164,7 @@ def evaluate_gate(names, workflow, pr, checks, runs, app_id=None):
         candidates.append(check) if reason is None else result["rejected_evidence"].append({
             "name": check.get("name"), "head_sha": check.get("head_sha", UNKNOWN), "reason": reason,
             "url": url(check.get("details_url"))})
-    # A new run with no jobs yet must invalidate the previous green run.
-    if any(run.get("status") in ("queued", "in_progress", "waiting", "pending", "requested") for run in latest.values()):
-        result.update(state="PENDING", reason="تشغيل أحدث على HEAD الحالي لم يكتمل")
-        return result
+    active = any(run.get("status") in ("queued", "in_progress", "waiting", "pending", "requested") for run in latest.values())
     selected = {}
     for check in candidates:
         suite = obj(check.get("check_suite")).get("id")
@@ -175,7 +172,7 @@ def evaluate_gate(names, workflow, pr, checks, runs, app_id=None):
         reason = None
         if run is None:
             reason = "NO_CURRENT_PR_WORKFLOW_BINDING"
-        elif run.get("status") != "completed":
+        elif run.get("status") not in ("completed", "in_progress", "waiting", "pending"):
             reason = "WORKFLOW_STATUS_UNKNOWN"
         elif type(run.get("run_attempt")) is not int:
             reason = "ATTEMPT_UNKNOWN"
@@ -195,6 +192,12 @@ def evaluate_gate(names, workflow, pr, checks, runs, app_id=None):
         result["evidence"].append({"name": check["name"], "head_sha": sha,
             "state": check_state(check), "conclusion": check.get("conclusion") or UNKNOWN,
             "check_id": check["id"], "url": url(check.get("details_url"))})
+    # A newer run with no current-attempt job yet invalidates old success.
+    # A finished job in the current attempt keeps its own outcome even when
+    # another job in that same workflow (e.g. Windows) is still running.
+    if not result["evidence"] and active:
+        result.update(state="PENDING", reason="تشغيل أحدث على HEAD الحالي لم يكمل هذه الوظيفة")
+        return result
     result["state"] = aggregate([item["state"] for item in result["evidence"]])
     if result["state"] != UNKNOWN:
         result["reason"] = "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
