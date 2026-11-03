@@ -17,12 +17,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{Interface, w};
 
 const RESIZE_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_RESIZE_FAILURE_REPORTS_PER_INTERVAL: u8 = 4;
 
 #[derive(Debug, Clone, Copy)]
 struct ResizeFailureReport {
     dimensions: (u32, u32),
     code: windows::core::HRESULT,
     reported_at: Instant,
+    window_started_at: Instant,
+    reports_in_window: u8,
 }
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("ClassMeshMediaReceiverWindow");
@@ -284,23 +287,39 @@ impl PresentationWindow {
                             if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
                                 self.device_lost = true;
                             }
-                            // Preserve the retry on every pump, but bound identical
-                            // diagnostic writes during persistent DXGI failures.
-                            // Changed dimensions/error codes are reported immediately.
+                            // Retry DXGI on every pump, but cap *all* failure reports
+                            // (including alternating HRESULTs or window dimensions).
+                            // Within the budget, report new signatures immediately;
+                            // after exhaustion, emit a heartbeat when the window resets.
                             let now = Instant::now();
                             let code = error.code();
-                            let should_report =
-                                self.last_resize_failure_report.is_none_or(|last| {
-                                    last.dimensions != (width, height)
-                                        || last.code != code
-                                        || now.saturating_duration_since(last.reported_at)
-                                            >= RESIZE_FAILURE_REPORT_INTERVAL
-                                });
+                            let previous = self.last_resize_failure_report;
+                            let window_expired = previous.is_some_and(|last| {
+                                now.saturating_duration_since(last.window_started_at)
+                                    >= RESIZE_FAILURE_REPORT_INTERVAL
+                            });
+                            let should_report = previous.is_none_or(|last| {
+                                window_expired
+                                    || (last.reports_in_window
+                                        < MAX_RESIZE_FAILURE_REPORTS_PER_INTERVAL
+                                        && (last.dimensions != (width, height)
+                                            || last.code != code
+                                            || now.saturating_duration_since(last.reported_at)
+                                                >= RESIZE_FAILURE_REPORT_INTERVAL))
+                            });
                             if should_report {
+                                let (window_started_at, reports_in_window) = match previous {
+                                    Some(last) if !window_expired => {
+                                        (last.window_started_at, last.reports_in_window + 1)
+                                    }
+                                    _ => (now, 1),
+                                };
                                 self.last_resize_failure_report = Some(ResizeFailureReport {
                                     dimensions: (width, height),
                                     code,
                                     reported_at: now,
+                                    window_started_at,
+                                    reports_in_window,
                                 });
                                 report_resize_error(width, height, &error);
                             }
@@ -778,6 +797,129 @@ mod tests {
                 5,
                 "a new resize after recovery must report its first failure"
             );
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn alternating_resize_failures_keep_retries_and_bound_logs() {
+        use windows::Win32::UI::WindowsAndMessaging::{SWP_NOMOVE, SWP_NOZORDER, SetWindowPos};
+
+        std::thread::spawn(|| {
+            let module = unsafe { GetModuleHandleW(None).unwrap() };
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: module.into(),
+                lpszClassName: WINDOW_CLASS,
+                ..Default::default()
+            };
+            let _ = unsafe { RegisterClassW(&class) };
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    WINDOW_CLASS,
+                    WINDOW_TITLE,
+                    WS_OVERLAPPEDWINDOW,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    320,
+                    180,
+                    None,
+                    None,
+                    Some(module.into()),
+                    None,
+                )
+                .unwrap()
+            };
+            let mut receiver = PresentationWindow {
+                hwnd,
+                presenter: None,
+                closed: false,
+                client_size: (320, 180),
+                device_lost: false,
+                last_resize_failure_report: None,
+            };
+            unsafe { SetWindowPos(hwnd, None, 0, 0, 640, 480, SWP_NOMOVE | SWP_NOZORDER).unwrap() };
+            let mut reports = 0;
+            let mut attempts = 0;
+            for index in 0..100 {
+                let code = if index % 2 == 0 {
+                    0x8000_4005_u32
+                } else {
+                    0x8007_0057_u32
+                };
+                assert!(receiver.pump_messages_with_resize(
+                    |_, _, _| {
+                        attempts += 1;
+                        Err(windows::core::Error::from(windows::core::HRESULT(
+                            code as i32,
+                        )))
+                    },
+                    |_, _, _| reports += 1,
+                ));
+            }
+            assert_eq!(
+                attempts, 100,
+                "diagnostics must never throttle DXGI retries"
+            );
+            assert_eq!(
+                reports, 4,
+                "alternating HRESULTs must consume a bounded burst"
+            );
+            assert_eq!(
+                receiver.client_size,
+                (320, 180),
+                "failed resize must stay retryable"
+            );
+
+            // A suppressed device-lost diagnostic must still raise the real recovery signal.
+            assert!(receiver.pump_messages_with_resize(
+                |_, _, _| {
+                    attempts += 1;
+                    Err(windows::core::Error::from(windows::core::HRESULT(
+                        0x887A_0005_u32 as i32,
+                    )))
+                },
+                |_, _, _| reports += 1,
+            ));
+            assert!(
+                receiver.take_device_lost(),
+                "log budget must not suppress device loss"
+            );
+            assert_eq!(reports, 4);
+
+            // Even a new HWND size cannot bypass the exhausted global budget.
+            unsafe { SetWindowPos(hwnd, None, 0, 0, 700, 500, SWP_NOMOVE | SWP_NOZORDER).unwrap() };
+            assert!(receiver.pump_messages_with_resize(
+                |_, _, _| {
+                    attempts += 1;
+                    Err(windows::core::Error::from(windows::core::HRESULT(
+                        0x8000_4005_u32 as i32,
+                    )))
+                },
+                |_, _, _| reports += 1,
+            ));
+            assert_eq!(attempts, 102);
+            assert_eq!(reports, 4, "dimension churn must not bypass the cap");
+
+            // A new 30-second window restores a diagnostic heartbeat, not a retry delay.
+            receiver
+                .last_resize_failure_report
+                .as_mut()
+                .expect("failure budget must be active")
+                .window_started_at -= RESIZE_FAILURE_REPORT_INTERVAL + Duration::from_secs(1);
+            assert!(receiver.pump_messages_with_resize(
+                |_, _, _| {
+                    attempts += 1;
+                    Err(windows::core::Error::from(windows::core::HRESULT(
+                        0x8000_4005_u32 as i32,
+                    )))
+                },
+                |_, _, _| reports += 1,
+            ));
+            assert_eq!(attempts, 103);
+            assert_eq!(reports, 5, "expired budget must allow a fresh heartbeat");
         })
         .join()
         .unwrap();
