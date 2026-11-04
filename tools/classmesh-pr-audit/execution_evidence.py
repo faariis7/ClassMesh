@@ -41,7 +41,7 @@ def checkout_commit(log):
     return known(lines[marker + 1])
 
 
-def collect_execution_proofs(gh, repo, pr, checks, runs, commits, policy=None):
+def collect_execution_proofs(gh, repo, pr, checks, runs, commits, policy=None, jobs_cache=None):
     from policy import GATES, validate_runs, valid_list
     if not is_known(checks) or not is_known(runs):
         return {}
@@ -72,7 +72,21 @@ def collect_execution_proofs(gh, repo, pr, checks, runs, commits, policy=None):
                 continue
             key = str(check_id)
             job_path = f"repos/{repo}/actions/jobs/{check_id}"
-            job = gh.get(job_path)
+            if jobs_cache is None:
+                job = gh.get(job_path)  # Compatibility with minimal API adapters.
+            else:
+                cache_key = (repo, run["id"], run["run_attempt"])
+                if cache_key not in jobs_cache:
+                    jobs_cache[cache_key] = gh.pages(
+                        f"repos/{repo}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", "jobs")
+                jobs = jobs_cache[cache_key]
+                if is_known(jobs):
+                    ids = [j.get("id") for j in jobs["data"]]
+                    matches = [j for j in jobs["data"] if j.get("id") == check_id]
+                    job = (known(matches[0]) if len(matches) == 1 and all(type(i) is int for i in ids)
+                           and len(ids) == len(set(ids)) else unknown("JOB_MISSING_OR_DUPLICATE", job_path))
+                else:
+                    job = jobs
             if not is_known(job):
                 proofs[key] = job
                 continue
@@ -114,7 +128,7 @@ def validate_base(entry, pr):
     result = {"state": "UNKNOWN", "head_sha": pr["head_sha"], "current_base_sha": pr["base_branch_sha"],
               "reported_merge_sha": obj(obj(entry.get("detail")).get("data")).get("merge_commit_sha") or "UNKNOWN",
               "gates": {}, "reason": "لا يوجد دليل تنفيذ كافٍ لربط الفحوص بالأساس"}
-    stable = entry.get("stable")
+    stable = entry.get("refs_stable", entry.get("stable"))
     if not is_known(stable) or stable["data"] is not True:
         result.update(state="CHANGED_DURING_COLLECTION", reason="تغير PR أو أساسه أثناء الجمع، أو تعذر التحقق من ثباتهما")
         return result

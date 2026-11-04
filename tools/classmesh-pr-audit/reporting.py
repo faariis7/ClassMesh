@@ -25,6 +25,23 @@ def render(report):
         lines.append("لا توجد إجراءات قابلة للاستخراج؛ تحقق من اكتمال جرد الطلبات.")
     if report["collection_gaps"]:
         lines += ["", "**جرد غير مكتمل أو متغير:** " + "؛ ".join(md(g["field"] + ": " + g["code"]) for g in report["collection_gaps"])]
+    if "collection_diagnostics" in report:
+        inventory = report["collection_diagnostics"].get("inventory", {})
+        before, after = inventory.get("before", {}), inventory.get("after", {})
+        lines += ["", "## ثبات الجرد وأداء الجمع", "",
+            "الجرد الأول: **" + md(before.get("state", "UNKNOWN")) + "** · الجرد الأخير: **" + md(after.get("state", "UNKNOWN")) + "**.",
+            "طلبات أضيفت: " + md(inventory.get("added", [])) + " · طلبات خرجت من الجرد: " + md(inventory.get("removed", [])) + "."]
+        for label, observation in (("الأول", before), ("الأخير", after)):
+            if observation.get("error"):
+                lines.append("سبب تعذر الجرد " + label + ": " + md(observation["error"]))
+        lines.append("ثبات القائمة لا يعني اكتمال أدلة كل طلب؛ التغيّرات المحلية موضحة تحته. الملاحظات متتابعة وليست معاملة ذرية.")
+    if "collection_metrics" in report:
+        metrics = report["collection_metrics"]
+        lines += ["", "استدعاءات API: **" + md(metrics.get("requests", "UNKNOWN")) + "** · الزمن: **"
+                  + md(metrics.get("wall_seconds", "UNKNOWN")) + " ثانية**.", "",
+                  "| نوع البيانات | الاستدعاءات | ثوانٍ | محاولات لم تُرسل |", "| --- | ---: | ---: | ---: |"]
+        for category, metric in metrics.get("by_category", {}).items():
+            lines.append("| " + " | ".join(md(v) for v in (category, metric["requests"], metric["seconds"], metric["skipped"])) + " |")
     lines += ["", "## ترتيب التبعيات", "",
         "الأصل يسبق التابع في خطة المعالجة: `" + " → ".join("#" + str(n) for n in report["suggested_review_order"]) + "`", ""]
     lines += ["- `" + " → ".join("#" + str(n) for n in chain) + "`" for chain in report["dependency_chains"]]
@@ -47,6 +64,10 @@ def render(report):
             lines.append(f"| {md(name)} | {gate['state']} | {scope} | {md(links)} |")
         lines += ["", "**العوائق:**", ""]
         lines += ["- " + md(b["reason"]) + " (`" + md(b["code"]) + "`)" for b in pr["blockers"]] or ["لا توجد عوائق مسجلة ضمن نطاق الأدلة."]
+        if "stability" in pr:
+            lines += ["", "**ثبات الأدلة أثناء الجمع:** " + "؛ ".join(
+                md(key) + ": " + md(value.get("error", {}).get("code", value.get("state", "UNKNOWN")))
+                for key, value in pr["stability"].items())]
         reviews = pr["reviews"]
         lines += ["", f"موافقات مستقلة: {len(reviews['independent_approvals'])}/{reviews['auditor_required_independent_approvals']} · قرار GitHub: {reviews['github_review_decision']} · خيوط مفتوحة: {len(reviews['unresolved_threads'])}.", "",
             "القبول اليدوي/الأجهزة: **" + pr["manual_acceptance"]["state"] + "** — " + md(pr["manual_acceptance"]["reason"])]

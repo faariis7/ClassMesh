@@ -1,4 +1,4 @@
-# ClassMesh PR Readiness Auditor V2
+# ClassMesh PR Readiness Auditor V2.1
 
 أداة مستقلة للقراءة فقط تساعد قائد التنسيق على معرفة: ما الجاهز، وما العائق، وما الإجراء التالي، ومن الدور المسؤول، وأي أصل يفتح أكبر عدد من الطلبات. تطوّر تنفيذ V1 نفسه ولا تغيّر تطبيقات ClassMesh أو المجدولات أو الأجهزة.
 
@@ -54,7 +54,7 @@ python3 tools/classmesh-pr-audit/audit.py \
 3. تُقرأ بيانات commit الثابتة وآباؤه من GitHub. `[base, HEAD]` يثبت نسخة التكامل المحددة: INTEGRATION_CURRENT أو INTEGRATION_STALE بحسب رأس الأساس الحالي. نتيجة HEAD الأصلية تبقى ظاهرة حتى حين يتطلب التكامل إعادة تحقق.
 4. checkout لـHEAD نفسه يظهر HEAD_ONLY، ولا يُلغى لمجرد تحرك main عندما تكون قاعدة strict غير مطلوبة. هذا **لا يثبت** تكاملًا مع main. strict=true أو سياسة مجهولة تحتاج دليل تكامل.
 5. إعادة تشغيل Workflow تحتفظ بالـSHA/ref الأصليين؛ run_attempt أو وقت أحدث وحده لا ينعش دليل الأساس. يجب رصد نسخة فعلية وآباء صحيحين. غياب السجل/صلاحياته أو تعدد checkouts أو تغيير شجرة ظاهر بعدها يترك UNKNOWN وBASE_REVALIDATION_REQUIRED.
-6. تُعاد قراءة PR والأساس والجرد؛ اختلاف HEAD/base/merge SHA أو بقية fingerprint يظهر CHANGED_DURING_COLLECTION أو جرد غير ثابت. الجمع ليس معاملة GitHub ذرية؛ تغيّر التعليقات والمراجعات والقواعد قد لا يُكتشف، لذا أعد الفحص قبل القرار النهائي.
+6. تُعاد قراءة PR والأساس والجرد والمراجعات والخيوط والتعليقات. تُفصل عضوية الجرد عن تغيّر أدلة كل PR؛ تغيّر HEAD/base/merge SHA يمنع اعتماد دليل الأساس، وتغيّر مراجعة أو تعليق يمنع جاهزية الطلب دون إلغاء دليل checkout صحيح. الجمع ليس معاملة GitHub ذرية؛ أعد الفحص قبل القرار النهائي.
 
 هذه **أدلة تنفيذ Workflow** وليست تصديقًا تشفيريًا لكفاية الاختبارات: المؤلف يستطيع التأثير في السجل أو السكربت، والاختبار قد يغيّر ملفات بطرق لا يرصدها parser. لا يستبدل ذلك مراجعة Workflow والشيفرة. check أو status خارجي بلا ربط موثوق يبقى UNKNOWN. قاعدة حماية جديدة أو سياق إضافي يُقيّم بالاسم وapp ID الدقيقين؛ legacy status وحده لا يثبت مصدره.
 
@@ -101,3 +101,24 @@ python3 tools/classmesh-pr-audit/audit.py \
 الملفات: github_source.py للنقل، policy.py لسياسة V1 والتحقق الحالي من CI/الموافقات، execution_evidence.py لأدلة الأساس، security_notes.py لتصنيف الأمن، dependencies.py للرسم والأولوية، decisions.py للمراحل والإجراءات، reporting.py للتقرير، audit.py للواجهة والكتابة، verify.py للتحقق المحلي/CI.
 
 مراجع العقود: [Workflow reruns](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs)، [pull_request checkout](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)، [Workflow runs](https://docs.github.com/en/rest/actions/workflow-runs)، [Workflow jobs](https://docs.github.com/en/rest/actions/workflow-jobs)، [Branch rules](https://docs.github.com/en/rest/repos/rules).
+
+## V2.1: الثبات والأداء وتشخيص PARTIAL
+
+`PARTIAL` لا يعني بالضرورة فشل الجرد. افحص `collection_diagnostics.inventory` لمعرفة حالة القراءتين، والأرقام المضافة/المزالة، وسبب API الأصلي. افحص `pull_requests[].stability` للتغيّرات المحلية. التفاصيل والقياسات ونتائج TDD في [V2_1_VALIDATION.md](V2_1_VALIDATION.md).
+
+| التشخيص | الأثر |
+| --- | --- |
+| INVENTORY_MEMBERSHIP_CHANGED | تغيرت قائمة الطلبات؛ الجرد والتبعيات يحتاجان إعادة جمع. |
+| INVENTORY_UNAVAILABLE | إحدى القراءتين ناقصة؛ يُحفظ TIMEOUT/FORBIDDEN/RATE_LIMITED أو سبب الميزانية. |
+| REFS_CHANGED / BASE_BRANCH_CHANGED | تغيّر HEAD أو أساس أو نسخة دمج؛ يمنع جاهزية الطلب المعني ودليل الأساس. |
+| REFS_UNAVAILABLE / BASE_BRANCH_UNAVAILABLE | تعذر إثبات ثبات المراجع؛ UNKNOWN. |
+| REVIEWS_CHANGED / REVIEW_DATA_UNAVAILABLE | تغيّر اعتماد/قرار/خيط أو نقص مصدره؛ لا تعاد الاستفادة من موافقة سابقة. |
+| DISCUSSION_CHANGED / METADATA_CHANGED | تغيّر تعليق أو بيانات مؤثرة مثل body أو Draft؛ مراجعة جديدة مطلوبة. |
+| LATE_PR_CHANGE | تغير ظهر في الجرد الأخير بعد إغلاق قراءة الطلب؛ يبقى غير محسوم محليًا. |
+| EXECUTION_BUDGET_RESERVED | حُفظت ميزانية للإغلاق؛ دليل الوظيفة الذي لم يُجمع UNKNOWN. |
+
+تعديل عنوان أو وقت تحديث فقط لا يبطل الجرد إذا بقيت البيانات المؤثرة وقراءتا المراجعات متطابقتين. ترتيب IDs وحده ليس تغيرًا. لا يختفي تغيّر العدد أو HEAD أو سحب موافقة تحت هذا الاستثناء.
+
+يجمع المدقق الأدلة المنظمة أولًا، ثم يقرأ الوظائف وسجلاتها، ثم يعيد التحقق. تُجمع بيانات jobs لكل run/attempt مرة واحدة داخل التشغيل، وتبقى قراءة كل log وربطه بالـHEAD والمحاولة إلزامية. لا تستخدم بيانات تشغيل سابق. يُحجز أثناء قراءة السجلات جزء محدود من الطلبات والوقت للإغلاق؛ الحجز تقدير ولا يضمن اكتمال مصادر ضخمة متعددة الصفحات.
+
+`collection_metrics` يعرض الاستدعاءات الفعلية، الزمن، الأخطاء والمحاولات التي لم تُرسل بحسب الفئة. هذه حقول اختيارية مضافة إلى schema 2؛ المخرجات القديمة والمثال الحالي محفوظة. تظل `merge_authorized=false`، وتغيرات القواعد/الصلاحيات أو CI بعد قراءتها قد لا تُلتقط في هذه الملاحظات المتتابعة.
