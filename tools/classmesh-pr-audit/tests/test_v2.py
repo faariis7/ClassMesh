@@ -160,6 +160,20 @@ class DecisionTests(unittest.TestCase):
         self.entry["threads"]["data"]["review_decision"] = None
         self.assertEqual(self.result()["readiness_stage"], "UNKNOWN")
 
+    def test_github_changes_requested_is_blocked_even_if_review_list_disagrees(self):
+        self.entry["threads"]["data"]["review_decision"] = "CHANGES_REQUESTED"
+        result = self.result()
+        self.assertEqual(result["readiness_stage"], "BLOCKED")
+        self.assertEqual(result["next_action"], "RESOLVE_REVIEW_THREADS")
+
+    def test_missing_draft_and_malformed_security_source_keep_conditions_unknown(self):
+        self.entry["detail"]["data"]["draft"] = None
+        self.entry["comments"]["data"] = [None]
+        result = self.result()
+        conditions = {c["name"]: c["state"] for c in result["conditions"]}
+        self.assertEqual(conditions["merge_and_threads"], "UNKNOWN")
+        self.assertEqual(conditions["security"], "UNKNOWN")
+
     def test_untrusted_proof_url_cannot_bind_two_unknown_urls(self):
         self.entry["checks"]["data"][0]["details_url"] = "https://evil.invalid/job"
         self.entry["execution_proofs"]["1"]["data"]["url"] = "https://evil.invalid/job"
