@@ -1,5 +1,7 @@
 #[cfg(windows)]
 mod control_runtime;
+#[cfg(any(windows, test))]
+mod file_pull_idle;
 #[cfg(windows)]
 mod file_transfer_acl;
 #[cfg(any(windows, test))]
@@ -108,6 +110,7 @@ mod windows_service_app {
     const MAX_TEACHER_INTERACTIONS_PER_TICK: usize = 1;
     const FILE_TRANSFER_DISPATCH_QUEUE_CAPACITY: usize = 1;
     const MAX_FILE_TRANSFERS_PER_TICK: usize = 1;
+    const FILE_PULL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
     const FOCUSED_MEDIA_QUEUE_CAPACITY: usize = 4;
     const FOCUSED_MEDIA_FEEDBACK_QUEUE_CAPACITY: usize = 32;
     const PRESENTATION_KEY_INSTALL_QUEUE_CAPACITY: usize = 1;
@@ -134,6 +137,7 @@ mod windows_service_app {
         TeacherInteractionDispatchChannels, TeacherInteractionDispatchOutcome,
         WorkerCapabilityState,
     };
+    use crate::file_pull_idle::FilePullIdleLease;
     use crate::file_transfer_readiness::FileTransferReadiness;
     use crate::file_transfer_storage::{
         WindowsFileTransferInboxSink, WindowsFileTransferOutboxSource,
@@ -211,6 +215,7 @@ mod windows_service_app {
         control_session_id: u64,
         request_id: u64,
         transfer_id: [u8; 16],
+        idle: FilePullIdleLease,
     }
 
     impl PendingFilePull {
@@ -2213,13 +2218,15 @@ mod windows_service_app {
                 &mut file_source,
             );
             if let Some(pending) = pending_file_pull
-                && !file_pull_owner.is_owner(pending.control_session_id)
+                && (!file_pull_owner.is_owner(pending.control_session_id)
+                    || pending.idle.expired(Instant::now(), FILE_PULL_IDLE_TIMEOUT))
             {
                 let peer = FileTransferPeer {
                     principal: pending.principal_id,
                     control_session_id: pending.control_session_id,
                 };
                 let _ = file_source.cancel(peer, &pending.transfer_id);
+                let _ = file_pull_owner.release(pending.control_session_id);
                 pending_file_pull = None;
             }
 
@@ -2359,6 +2366,7 @@ mod windows_service_app {
                                         control_session_id: dispatch.control_session_id,
                                         request_id: dispatch.request_id,
                                         transfer_id: exact_transfer_id,
+                                        idle: FilePullIdleLease::new(Instant::now()),
                                     });
                                     FileTransferDispatchOutcome::Outbound(
                                         FileTransferOutboundPayload::Offer(offer),
@@ -2392,6 +2400,9 @@ mod windows_service_app {
 
                         match FileTransferState::try_from(status.state) {
                             Ok(FileTransferState::Accepted | FileTransferState::Progress) => {
+                                if let Some(active) = pending_file_pull.as_mut() {
+                                    active.idle.refresh(Instant::now());
+                                }
                                 match file_source.next(
                                     peer,
                                     &status.transfer_id,
@@ -3585,6 +3596,7 @@ mod windows_service_app {
                 control_session_id: 77,
                 request_id: 44,
                 transfer_id: [9; 16],
+                idle: FilePullIdleLease::new(Instant::now()),
             };
 
             assert!(pending.matches(PrincipalId([7; 32]), 77, 44, &[9; 16]));
@@ -3616,6 +3628,7 @@ mod windows_service_app {
                 control_session_id: 77,
                 request_id: 44,
                 transfer_id: [9; 16],
+                idle: FilePullIdleLease::new(Instant::now()),
             };
             let peer = FileTransferPeer {
                 principal: pending.principal_id,
