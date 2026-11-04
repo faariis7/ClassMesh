@@ -1,0 +1,2425 @@
+{
+  "schema_version": 2,
+  "repo": "owner/project",
+  "target_branch": "main",
+  "mode": "FIXTURE_ONLY",
+  "captured_at": "2026-11-04T02:00:00Z",
+  "finished_at": "2026-11-04T02:00:00Z",
+  "request_count": "UNKNOWN",
+  "collection_state": "PARTIAL",
+  "collection_gaps": [],
+  "summary": {
+    "total": 6,
+    "by_stage": {
+      "READY_FOR_INDEPENDENT_REVIEW": 1,
+      "READY_FOR_FINAL_REVIEW": 1,
+      "READY_FOR_MERGE": 1,
+      "BLOCKED": 3,
+      "UNKNOWN": 0
+    },
+    "by_classification": {
+      "READY_FOR_MERGE": 1,
+      "BASE_REVALIDATION_REQUIRED": 3,
+      "CI_PENDING": 1,
+      "DRAFT": 1,
+      "MANUAL_ACCEPTANCE_REQUIRED": 5,
+      "SECURITY_REVIEW_REQUIRED": 2,
+      "DEPENDENCY_BLOCKED": 1,
+      "CI_FAILED": 1,
+      "MERGE_CONFLICT": 1
+    },
+    "ready_for_independent_review": 1,
+    "ready_for_final_review": 1,
+    "merge_candidates": 1,
+    "blocked": 3,
+    "ci_failed": 1,
+    "confirmed_security_blockers": 0,
+    "missing_evidence": 3,
+    "all_ready": false,
+    "top_actions": [
+      {
+        "number": 101,
+        "next_action": "COORDINATOR_MERGE_DECISION",
+        "action_reason": "الشروط المسجلة القابلة للتحقق مستوفاة؛ أعد التحقق ثم اترك القرار لقائد التنسيق",
+        "suggested_owner": "COORDINATION_LEAD",
+        "priority": {
+          "score": 30,
+          "rank": 1,
+          "level": "NORMAL",
+          "dependent_count": 0,
+          "remaining_condition_count": 0,
+          "factors": {
+            "dependents": 0,
+            "confirmed_security": 0,
+            "ci_failure": 0,
+            "tests_complete": 20,
+            "remaining_conditions": 10,
+            "multiple_dependencies": 0,
+            "missing_evidence": 0
+          },
+          "reasons": [
+            "يفتح معالجة 0 طلبات تابعة (مباشرة وغير مباشرة)",
+            "شروط متبقية: 0؛ منها غير معروف: 0",
+            "الدرجات: dependents=+0، confirmed_security=+0، ci_failure=+0، tests_complete=+20، remaining_conditions=+10، multiple_dependencies=+0، missing_evidence=+0",
+            "الأساس يسبق التابع؛ عدد الشروط تقدير حجم عمل نسبي وليس تقدير زمن"
+          ]
+        }
+      },
+      {
+        "number": 105,
+        "next_action": "REQUEST_INDEPENDENT_REVIEW",
+        "action_reason": "اكتملت المتطلبات الآلية؛ يلزم مراجع مستقل مخول على HEAD الحالي",
+        "suggested_owner": "INDEPENDENT_REVIEWER",
+        "priority": {
+          "score": 28,
+          "rank": 2,
+          "level": "NORMAL",
+          "dependent_count": 0,
+          "remaining_condition_count": 1,
+          "factors": {
+            "dependents": 0,
+            "confirmed_security": 0,
+            "ci_failure": 0,
+            "tests_complete": 20,
+            "remaining_conditions": 8,
+            "multiple_dependencies": 0,
+            "missing_evidence": 0
+          },
+          "reasons": [
+            "يفتح معالجة 0 طلبات تابعة (مباشرة وغير مباشرة)",
+            "شروط متبقية: 1؛ منها غير معروف: 0",
+            "الدرجات: dependents=+0، confirmed_security=+0، ci_failure=+0، tests_complete=+20، remaining_conditions=+8، multiple_dependencies=+0، missing_evidence=+0",
+            "الأساس يسبق التابع؛ عدد الشروط تقدير حجم عمل نسبي وليس تقدير زمن"
+          ]
+        }
+      },
+      {
+        "number": 106,
+        "next_action": "COMPLETE_FINAL_REVIEW",
+        "action_reason": "استكمل العدد والشروط المسجلة للموافقات النهائية",
+        "suggested_owner": "INDEPENDENT_REVIEWER",
+        "priority": {
+          "score": 28,
+          "rank": 3,
+          "level": "NORMAL",
+          "dependent_count": 0,
+          "remaining_condition_count": 1,
+          "factors": {
+            "dependents": 0,
+            "confirmed_security": 0,
+            "ci_failure": 0,
+            "tests_complete": 20,
+            "remaining_conditions": 8,
+            "multiple_dependencies": 0,
+            "missing_evidence": 0
+          },
+          "reasons": [
+            "يفتح معالجة 0 طلبات تابعة (مباشرة وغير مباشرة)",
+            "شروط متبقية: 1؛ منها غير معروف: 0",
+            "الدرجات: dependents=+0، confirmed_security=+0، ci_failure=+0، tests_complete=+20، remaining_conditions=+8، multiple_dependencies=+0، missing_evidence=+0",
+            "الأساس يسبق التابع؛ عدد الشروط تقدير حجم عمل نسبي وليس تقدير زمن"
+          ]
+        }
+      },
+      {
+        "number": 104,
+        "next_action": "FIX_FAILED_CI",
+        "action_reason": "حلل سجل الوظيفة الفاشلة وأصلح السبب ثم اختبر HEAD الجديد",
+        "suggested_owner": "BRANCH_DEVELOPER",
+        "priority": {
+          "score": 3,
+          "rank": 4,
+          "level": "NORMAL",
+          "dependent_count": 0,
+          "remaining_condition_count": 6,
+          "factors": {
+            "dependents": 0,
+            "confirmed_security": 0,
+            "ci_failure": 15,
+            "tests_complete": 0,
+            "remaining_conditions": 0,
+            "multiple_dependencies": 0,
+            "missing_evidence": -12
+          },
+          "reasons": [
+            "يفتح معالجة 0 طلبات تابعة (مباشرة وغير مباشرة)",
+            "شروط متبقية: 6؛ منها غير معروف: 3",
+            "الدرجات: dependents=+0، confirmed_security=+0، ci_failure=+15، tests_complete=+0، remaining_conditions=+0، multiple_dependencies=+0، missing_evidence=-12",
+            "الأساس يسبق التابع؛ عدد الشروط تقدير حجم عمل نسبي وليس تقدير زمن"
+          ]
+        }
+      },
+      {
+        "number": 102,
+        "next_action": "FINISH_DRAFT",
+        "action_reason": "أكمل نطاق الطلب ثم اعرضه للمراجعة",
+        "suggested_owner": "BRANCH_DEVELOPER",
+        "priority": {
+          "score": 0,
+          "rank": 5,
+          "level": "NORMAL",
+          "dependent_count": 1,
+          "remaining_condition_count": 6,
+          "factors": {
+            "dependents": 12,
+            "confirmed_security": 0,
+            "ci_failure": 0,
+            "tests_complete": 0,
+            "remaining_conditions": 0,
+            "multiple_dependencies": 0,
+            "missing_evidence": -12
+          },
+          "reasons": [
+            "يفتح معالجة 1 طلبات تابعة (مباشرة وغير مباشرة)",
+            "شروط متبقية: 6؛ منها غير معروف: 3",
+            "الدرجات: dependents=+12، confirmed_security=+0، ci_failure=+0، tests_complete=+0، remaining_conditions=+0، multiple_dependencies=+0، missing_evidence=-12",
+            "الأساس يسبق التابع؛ عدد الشروط تقدير حجم عمل نسبي وليس تقدير زمن"
+          ]
+        }
+      }
+    ]
+  },
+  "dependency_chains": [
+    [
+      102,
+      103
+    ]
+  ],
+  "suggested_review_order": [
+    101,
+    105,
+    106,
+    104,
+    102,
+    103
+  ],
+  "pull_requests": [
+    {
+      "number": 101,
+      "title": "Independent reporting tool",
+      "url": "https://github.com/owner/project/pull/101",
+      "draft": false,
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_branch": "feature",
+      "head_repo": "owner/project",
+      "base_branch": "main",
+      "base_repo": "owner/project",
+      "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "base_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mergeable": true,
+      "mergeable_state": "clean",
+      "ci": {
+        "Windows Build": {
+          "state": "SUCCESS",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "evidence": [
+            {
+              "name": "Windows Build",
+              "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 1,
+              "url": "https://github.com/owner/project/actions/runs/100/job/1"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        },
+        "Portable Rust": {
+          "state": "SUCCESS",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "evidence": [
+            {
+              "name": "Portable Rust",
+              "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 2,
+              "url": "https://github.com/owner/project/actions/runs/100/job/2"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        },
+        "CodeQL": {
+          "state": "SUCCESS",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "evidence": [
+            {
+              "name": "CodeQL Rust security analysis",
+              "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 3,
+              "url": "https://github.com/owner/project/actions/runs/200/job/3"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        },
+        "Gitleaks": {
+          "state": "SUCCESS",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "evidence": [
+            {
+              "name": "Gitleaks history scan",
+              "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 4,
+              "url": "https://github.com/owner/project/actions/runs/200/job/4"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        }
+      },
+      "reviews": {
+        "state": "KNOWN",
+        "repository_required_approvals": 1,
+        "auditor_required_independent_approvals": 1,
+        "github_review_decision": "APPROVED",
+        "requested_reviewers": [],
+        "requested_teams": [],
+        "independent_approvals": [
+          "independent"
+        ],
+        "recorded": [
+          {
+            "reviewer": "independent",
+            "state": "APPROVED",
+            "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "url": "https://github.com/owner/project/pull/101#pullrequestreview-1"
+          }
+        ],
+        "unresolved_threads": []
+      },
+      "branch_policy": {
+        "required_approvals": 1,
+        "code_owner_review": false,
+        "last_push_approval": false,
+        "conversation_resolution": true,
+        "required_checks": [
+          {
+            "context": "Windows Build",
+            "app_id": null
+          },
+          {
+            "context": "Portable Rust",
+            "app_id": null
+          }
+        ],
+        "unsupported_rules": [],
+        "strict_checks": false
+      },
+      "security": {
+        "state": "NO_REPORTED_FINDINGS",
+        "notes": [],
+        "sensitive_paths": [],
+        "code_scanning": {
+          "state": "KNOWN",
+          "alerts": []
+        },
+        "assessment": "CLEAR",
+        "confirmed_blockers": 0
+      },
+      "manual_acceptance": {
+        "state": "NOT_APPLICABLE",
+        "reason": "التغيير محصور في الأداة أو التوثيق؛ لا يدعي التقرير تأهيل الأجهزة"
+      },
+      "blockers": [],
+      "missing_evidence": [],
+      "observed_at": "2026-11-04T02:00:00Z",
+      "dependencies": {
+        "state": "CLEAR",
+        "parents": [],
+        "declared": [],
+        "unknown_parents": [],
+        "closed_unmerged_parents": [],
+        "merged_parents": [],
+        "ancestors": [],
+        "ancestor_blockers": [],
+        "reasons": []
+      },
+      "classifications": [
+        "READY_FOR_MERGE"
+      ],
+      "suggested_review_priority": 1,
+      "blocking_prs": [],
+      "merge_authorized": false,
+      "base_validation": {
+        "state": "INTEGRATION_CURRENT",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "current_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "reported_merge_sha": "dddddddddddddddddddddddddddddddddddddddd",
+        "gates": {
+          "Windows Build": {
+            "state": "INTEGRATION_CURRENT",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "INTEGRATION_CURRENT",
+                "check_id": 1,
+                "url": "https://github.com/owner/project/actions/runs/100/job/1",
+                "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+                "reason": "آباء commit المرصود يربطونه بـHEAD وإصدار محدد من الأساس",
+                "run_id": 100,
+                "run_attempt": 1
+              }
+            ],
+            "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "Portable Rust": {
+            "state": "INTEGRATION_CURRENT",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "INTEGRATION_CURRENT",
+                "check_id": 2,
+                "url": "https://github.com/owner/project/actions/runs/100/job/2",
+                "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+                "reason": "آباء commit المرصود يربطونه بـHEAD وإصدار محدد من الأساس",
+                "run_id": 100,
+                "run_attempt": 1
+              }
+            ],
+            "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "CodeQL": {
+            "state": "INTEGRATION_CURRENT",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "INTEGRATION_CURRENT",
+                "check_id": 3,
+                "url": "https://github.com/owner/project/actions/runs/200/job/3",
+                "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+                "reason": "آباء commit المرصود يربطونه بـHEAD وإصدار محدد من الأساس",
+                "run_id": 200,
+                "run_attempt": 1
+              }
+            ],
+            "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "Gitleaks": {
+            "state": "INTEGRATION_CURRENT",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "INTEGRATION_CURRENT",
+                "check_id": 4,
+                "url": "https://github.com/owner/project/actions/runs/200/job/4",
+                "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+                "reason": "آباء commit المرصود يربطونه بـHEAD وإصدار محدد من الأساس",
+                "run_id": 200,
+                "run_attempt": 1
+              }
+            ],
+            "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        },
+        "reason": "ثبت checkout وآباء نسخة التكامل الحالية"
+      },
+      "technical_blockers": [],
+      "readiness_stage": "READY_FOR_MERGE",
+      "conditions": [
+        {
+          "name": "ci",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "كل فحص إلزامي مرتبط بـHEAD وتشغيله الحالي"
+        },
+        {
+          "name": "base",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "ثبت checkout وآباء نسخة التكامل الحالية"
+        },
+        {
+          "name": "independent_reviews",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "APPROVED مستقلة وحديثة؛ COMMENTED وصاحب الحساب لا يُحتسبان"
+        },
+        {
+          "name": "security",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "الأمن: CLEAR"
+        },
+        {
+          "name": "dependencies",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "الأصل قبل التابع"
+        },
+        {
+          "name": "manual_acceptance",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "التغيير محصور في الأداة أو التوثيق؛ لا يدعي التقرير تأهيل الأجهزة"
+        },
+        {
+          "name": "merge_and_threads",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "Draft والتعارض والخيوط المفتوحة تمنع التقدم"
+        },
+        {
+          "name": "evidence_completeness",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "يشمل قواعد الحماية وثبات جمع البيانات والصلاحيات"
+        }
+      ],
+      "required_evidence": [],
+      "next_action": "COORDINATOR_MERGE_DECISION",
+      "action_reason": "الشروط المسجلة القابلة للتحقق مستوفاة؛ أعد التحقق ثم اترك القرار لقائد التنسيق",
+      "suggested_owner": "COORDINATION_LEAD",
+      "can_proceed_without_dependencies": true,
+      "priority": {
+        "score": 30,
+        "rank": 1,
+        "level": "NORMAL",
+        "dependent_count": 0,
+        "remaining_condition_count": 0,
+        "factors": {
+          "dependents": 0,
+          "confirmed_security": 0,
+          "ci_failure": 0,
+          "tests_complete": 20,
+          "remaining_conditions": 10,
+          "multiple_dependencies": 0,
+          "missing_evidence": 0
+        },
+        "reasons": [
+          "يفتح معالجة 0 طلبات تابعة (مباشرة وغير مباشرة)",
+          "شروط متبقية: 0؛ منها غير معروف: 0",
+          "الدرجات: dependents=+0، confirmed_security=+0، ci_failure=+0، tests_complete=+20، remaining_conditions=+10، multiple_dependencies=+0، missing_evidence=+0",
+          "الأساس يسبق التابع؛ عدد الشروط تقدير حجم عمل نسبي وليس تقدير زمن"
+        ]
+      }
+    },
+    {
+      "number": 102,
+      "title": "مسودة مع نجاح CI على commit قديم فقط",
+      "url": "https://github.com/owner/project/pull/102",
+      "draft": true,
+      "head_sha": "0000000000000000000000000000000000000066",
+      "head_branch": "feature-102",
+      "head_repo": "owner/project",
+      "base_branch": "main",
+      "base_repo": "owner/project",
+      "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "base_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mergeable": true,
+      "mergeable_state": "clean",
+      "ci": {
+        "Windows Build": {
+          "state": "UNKNOWN",
+          "head_sha": "0000000000000000000000000000000000000066",
+          "evidence": [],
+          "rejected_evidence": [
+            {
+              "name": "Windows Build",
+              "head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "reason": "STALE_OR_OTHER_HEAD",
+              "url": "https://github.com/owner/project/actions/runs/100/job/1"
+            }
+          ],
+          "reason": "لا يوجد دليل مكتمل على HEAD الحالي"
+        },
+        "Portable Rust": {
+          "state": "UNKNOWN",
+          "head_sha": "0000000000000000000000000000000000000066",
+          "evidence": [],
+          "rejected_evidence": [
+            {
+              "name": "Portable Rust",
+              "head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "reason": "STALE_OR_OTHER_HEAD",
+              "url": "https://github.com/owner/project/actions/runs/100/job/2"
+            }
+          ],
+          "reason": "لا يوجد دليل مكتمل على HEAD الحالي"
+        },
+        "CodeQL": {
+          "state": "UNKNOWN",
+          "head_sha": "0000000000000000000000000000000000000066",
+          "evidence": [],
+          "rejected_evidence": [
+            {
+              "name": "CodeQL Rust security analysis",
+              "head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "reason": "STALE_OR_OTHER_HEAD",
+              "url": "https://github.com/owner/project/actions/runs/200/job/3"
+            }
+          ],
+          "reason": "لا يوجد دليل مكتمل على HEAD الحالي"
+        },
+        "Gitleaks": {
+          "state": "UNKNOWN",
+          "head_sha": "0000000000000000000000000000000000000066",
+          "evidence": [],
+          "rejected_evidence": [
+            {
+              "name": "Gitleaks history scan",
+              "head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+              "reason": "STALE_OR_OTHER_HEAD",
+              "url": "https://github.com/owner/project/actions/runs/200/job/4"
+            }
+          ],
+          "reason": "لا يوجد دليل مكتمل على HEAD الحالي"
+        }
+      },
+      "reviews": {
+        "state": "KNOWN",
+        "repository_required_approvals": 1,
+        "auditor_required_independent_approvals": 1,
+        "github_review_decision": "REVIEW_REQUIRED",
+        "requested_reviewers": [],
+        "requested_teams": [],
+        "independent_approvals": [],
+        "recorded": [
+          {
+            "reviewer": "independent",
+            "state": "COMMENTED",
+            "commit_sha": "0000000000000000000000000000000000000066",
+            "url": "https://github.com/owner/project/pull/102#pullrequestreview-1"
+          }
+        ],
+        "unresolved_threads": []
+      },
+      "branch_policy": {
+        "required_approvals": 1,
+        "code_owner_review": false,
+        "last_push_approval": false,
+        "conversation_resolution": true,
+        "required_checks": [
+          {
+            "context": "Windows Build",
+            "app_id": null
+          },
+          {
+            "context": "Portable Rust",
+            "app_id": null
+          }
+        ],
+        "unsupported_rules": [],
+        "strict_checks": false
+      },
+      "security": {
+        "state": "REVIEW_REQUIRED",
+        "notes": [],
+        "sensitive_paths": [],
+        "code_scanning": {
+          "state": "KNOWN",
+          "alerts": []
+        },
+        "assessment": "REVIEW_REQUIRED",
+        "confirmed_blockers": 0
+      },
+      "manual_acceptance": {
+        "state": "NOT_APPLICABLE",
+        "reason": "التغيير محصور في الأداة أو التوثيق؛ لا يدعي التقرير تأهيل الأجهزة"
+      },
+      "blockers": [
+        {
+          "classification": "DRAFT",
+          "code": "DRAFT",
+          "reason": "الطلب مسودة ولم يُعرض للمراجعة النهائية"
+        },
+        {
+          "classification": "CI_PENDING",
+          "code": "CI_INCOMPLETE:Windows Build",
+          "reason": "Windows Build: UNKNOWN"
+        },
+        {
+          "classification": "CI_PENDING",
+          "code": "CI_INCOMPLETE:Portable Rust",
+          "reason": "Portable Rust: UNKNOWN"
+        },
+        {
+          "classification": "CI_PENDING",
+          "code": "CI_INCOMPLETE:CodeQL",
+          "reason": "CodeQL: UNKNOWN"
+        },
+        {
+          "classification": "SECURITY_REVIEW_REQUIRED",
+          "code": "SECURITY_CHECK:CodeQL",
+          "reason": "الفحص الأمني غير ناجح أو غير متاح: CodeQL"
+        },
+        {
+          "classification": "CI_PENDING",
+          "code": "CI_INCOMPLETE:Gitleaks",
+          "reason": "Gitleaks: UNKNOWN"
+        },
+        {
+          "classification": "SECURITY_REVIEW_REQUIRED",
+          "code": "SECURITY_CHECK:Gitleaks",
+          "reason": "الفحص الأمني غير ناجح أو غير متاح: Gitleaks"
+        },
+        {
+          "classification": "MANUAL_ACCEPTANCE_REQUIRED",
+          "code": "INDEPENDENT_APPROVAL_MISSING",
+          "reason": "تنقص موافقة مستقلة على HEAD الحالي؛ COMMENTED ومراجعة صاحب الحساب لا تُحتسب"
+        },
+        {
+          "classification": "MANUAL_ACCEPTANCE_REQUIRED",
+          "code": "REQUIRED_REVIEW_UNSATISFIED",
+          "reason": "المراجعات المطلوبة أو موافقة آخر دفع لم تُحسم لدى GitHub"
+        },
+        {
+          "classification": "BASE_REVALIDATION_REQUIRED",
+          "code": "BASE_REVALIDATION_REQUIRED",
+          "reason": "لا يوجد دليل تنفيذ كافٍ لربط الفحوص بالأساس"
+        },
+        {
+          "classification": "SECURITY_REVIEW_REQUIRED",
+          "code": "SECURITY_EVIDENCE_REVIEW",
+          "reason": "مراجعة أمنية مستقلة مطلوبة؛ نوع الدليل: REVIEW_REQUIRED"
+        },
+        {
+          "classification": "MANUAL_ACCEPTANCE_REQUIRED",
+          "code": "UNKNOWN_EVIDENCE",
+          "reason": "شروط ضرورية غير معروفة؛ لا يمكن إعلان جاهزية الدمج"
+        }
+      ],
+      "missing_evidence": [
+        {
+          "field": "ci.Windows Build",
+          "code": "NO_CURRENT_SUCCESS_EVIDENCE"
+        },
+        {
+          "field": "ci.Portable Rust",
+          "code": "NO_CURRENT_SUCCESS_EVIDENCE"
+        },
+        {
+          "field": "ci.CodeQL",
+          "code": "NO_CURRENT_SUCCESS_EVIDENCE"
+        },
+        {
+          "field": "ci.Gitleaks",
+          "code": "NO_CURRENT_SUCCESS_EVIDENCE"
+        },
+        {
+          "field": "base_validation",
+          "code": "UNKNOWN"
+        }
+      ],
+      "observed_at": "2026-11-04T02:00:00Z",
+      "dependencies": {
+        "state": "CLEAR",
+        "parents": [],
+        "declared": [],
+        "unknown_parents": [],
+        "closed_unmerged_parents": [],
+        "merged_parents": [],
+        "ancestors": [],
+        "ancestor_blockers": [],
+        "reasons": []
+      },
+      "classifications": [
+        "BASE_REVALIDATION_REQUIRED",
+        "CI_PENDING",
+        "DRAFT",
+        "MANUAL_ACCEPTANCE_REQUIRED",
+        "SECURITY_REVIEW_REQUIRED"
+      ],
+      "suggested_review_priority": 5,
+      "blocking_prs": [],
+      "merge_authorized": false,
+      "base_validation": {
+        "state": "UNKNOWN",
+        "head_sha": "0000000000000000000000000000000000000066",
+        "current_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "reported_merge_sha": "dddddddddddddddddddddddddddddddddddddddd",
+        "gates": {
+          "Windows Build": {
+            "state": "UNKNOWN",
+            "ci_state": "UNKNOWN",
+            "observations": [],
+            "tested_base_sha": "UNKNOWN"
+          },
+          "Portable Rust": {
+            "state": "UNKNOWN",
+            "ci_state": "UNKNOWN",
+            "observations": [],
+            "tested_base_sha": "UNKNOWN"
+          },
+          "CodeQL": {
+            "state": "UNKNOWN",
+            "ci_state": "UNKNOWN",
+            "observations": [],
+            "tested_base_sha": "UNKNOWN"
+          },
+          "Gitleaks": {
+            "state": "UNKNOWN",
+            "ci_state": "UNKNOWN",
+            "observations": [],
+            "tested_base_sha": "UNKNOWN"
+          }
+        },
+        "reason": "لا يوجد دليل تنفيذ كافٍ لربط الفحوص بالأساس"
+      },
+      "technical_blockers": [
+        {
+          "classification": "DRAFT",
+          "code": "DRAFT",
+          "reason": "الطلب مسودة ولم يُعرض للمراجعة النهائية"
+        }
+      ],
+      "readiness_stage": "BLOCKED",
+      "conditions": [
+        {
+          "name": "ci",
+          "state": "UNKNOWN",
+          "required": true,
+          "reason": "كل فحص إلزامي مرتبط بـHEAD وتشغيله الحالي"
+        },
+        {
+          "name": "base",
+          "state": "UNKNOWN",
+          "required": true,
+          "reason": "لا يوجد دليل تنفيذ كافٍ لربط الفحوص بالأساس"
+        },
+        {
+          "name": "independent_reviews",
+          "state": "REVIEW_REQUIRED",
+          "required": true,
+          "reason": "APPROVED مستقلة وحديثة؛ COMMENTED وصاحب الحساب لا يُحتسبان"
+        },
+        {
+          "name": "security",
+          "state": "REVIEW_REQUIRED",
+          "required": true,
+          "reason": "الأمن: REVIEW_REQUIRED"
+        },
+        {
+          "name": "dependencies",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "الأصل قبل التابع"
+        },
+        {
+          "name": "manual_acceptance",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "التغيير محصور في الأداة أو التوثيق؛ لا يدعي التقرير تأهيل الأجهزة"
+        },
+        {
+          "name": "merge_and_threads",
+          "state": "UNSATISFIED",
+          "required": true,
+          "reason": "Draft والتعارض والخيوط المفتوحة تمنع التقدم"
+        },
+        {
+          "name": "evidence_completeness",
+          "state": "UNKNOWN",
+          "required": true,
+          "reason": "يشمل قواعد الحماية وثبات جمع البيانات والصلاحيات"
+        }
+      ],
+      "required_evidence": [
+        {
+          "condition": "ci",
+          "state": "UNKNOWN",
+          "description": "كل فحص إلزامي مرتبط بـHEAD وتشغيله الحالي"
+        },
+        {
+          "condition": "base",
+          "state": "UNKNOWN",
+          "description": "لا يوجد دليل تنفيذ كافٍ لربط الفحوص بالأساس"
+        },
+        {
+          "condition": "independent_reviews",
+          "state": "REVIEW_REQUIRED",
+          "description": "APPROVED مستقلة وحديثة؛ COMMENTED وصاحب الحساب لا يُحتسبان"
+        },
+        {
+          "condition": "security",
+          "state": "REVIEW_REQUIRED",
+          "description": "الأمن: REVIEW_REQUIRED"
+        },
+        {
+          "condition": "merge_and_threads",
+          "state": "UNSATISFIED",
+          "description": "Draft والتعارض والخيوط المفتوحة تمنع التقدم"
+        },
+        {
+          "condition": "evidence_completeness",
+          "state": "UNKNOWN",
+          "description": "يشمل قواعد الحماية وثبات جمع البيانات والصلاحيات"
+        },
+        {
+          "condition": "ci.Windows Build",
+          "state": "UNKNOWN",
+          "description": "NO_CURRENT_SUCCESS_EVIDENCE"
+        },
+        {
+          "condition": "ci.Portable Rust",
+          "state": "UNKNOWN",
+          "description": "NO_CURRENT_SUCCESS_EVIDENCE"
+        },
+        {
+          "condition": "ci.CodeQL",
+          "state": "UNKNOWN",
+          "description": "NO_CURRENT_SUCCESS_EVIDENCE"
+        },
+        {
+          "condition": "ci.Gitleaks",
+          "state": "UNKNOWN",
+          "description": "NO_CURRENT_SUCCESS_EVIDENCE"
+        },
+        {
+          "condition": "base_validation",
+          "state": "UNKNOWN",
+          "description": "UNKNOWN"
+        }
+      ],
+      "next_action": "FINISH_DRAFT",
+      "action_reason": "أكمل نطاق الطلب ثم اعرضه للمراجعة",
+      "suggested_owner": "BRANCH_DEVELOPER",
+      "can_proceed_without_dependencies": true,
+      "priority": {
+        "score": 0,
+        "rank": 5,
+        "level": "NORMAL",
+        "dependent_count": 1,
+        "remaining_condition_count": 6,
+        "factors": {
+          "dependents": 12,
+          "confirmed_security": 0,
+          "ci_failure": 0,
+          "tests_complete": 0,
+          "remaining_conditions": 0,
+          "multiple_dependencies": 0,
+          "missing_evidence": -12
+        },
+        "reasons": [
+          "يفتح معالجة 1 طلبات تابعة (مباشرة وغير مباشرة)",
+          "شروط متبقية: 6؛ منها غير معروف: 3",
+          "الدرجات: dependents=+12، confirmed_security=+0، ci_failure=+0، tests_complete=+0، remaining_conditions=+0، multiple_dependencies=+0، missing_evidence=-12",
+          "الأساس يسبق التابع؛ عدد الشروط تقدير حجم عمل نسبي وليس تقدير زمن"
+        ]
+      }
+    },
+    {
+      "number": 103,
+      "title": "طلب تابع لفرع لم يدمج",
+      "url": "https://github.com/owner/project/pull/103",
+      "draft": false,
+      "head_sha": "0000000000000000000000000000000000000067",
+      "head_branch": "feature-103",
+      "head_repo": "owner/project",
+      "base_branch": "feature-102",
+      "base_repo": "owner/project",
+      "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "base_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mergeable": true,
+      "mergeable_state": "clean",
+      "ci": {
+        "Windows Build": {
+          "state": "SUCCESS",
+          "head_sha": "0000000000000000000000000000000000000067",
+          "evidence": [
+            {
+              "name": "Windows Build",
+              "head_sha": "0000000000000000000000000000000000000067",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 1,
+              "url": "https://github.com/owner/project/actions/runs/100/job/1"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        },
+        "Portable Rust": {
+          "state": "SUCCESS",
+          "head_sha": "0000000000000000000000000000000000000067",
+          "evidence": [
+            {
+              "name": "Portable Rust",
+              "head_sha": "0000000000000000000000000000000000000067",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 2,
+              "url": "https://github.com/owner/project/actions/runs/100/job/2"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        },
+        "CodeQL": {
+          "state": "SUCCESS",
+          "head_sha": "0000000000000000000000000000000000000067",
+          "evidence": [
+            {
+              "name": "CodeQL Rust security analysis",
+              "head_sha": "0000000000000000000000000000000000000067",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 3,
+              "url": "https://github.com/owner/project/actions/runs/200/job/3"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        },
+        "Gitleaks": {
+          "state": "SUCCESS",
+          "head_sha": "0000000000000000000000000000000000000067",
+          "evidence": [
+            {
+              "name": "Gitleaks history scan",
+              "head_sha": "0000000000000000000000000000000000000067",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 4,
+              "url": "https://github.com/owner/project/actions/runs/200/job/4"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        }
+      },
+      "reviews": {
+        "state": "KNOWN",
+        "repository_required_approvals": 1,
+        "auditor_required_independent_approvals": 1,
+        "github_review_decision": "APPROVED",
+        "requested_reviewers": [],
+        "requested_teams": [],
+        "independent_approvals": [
+          "independent"
+        ],
+        "recorded": [
+          {
+            "reviewer": "independent",
+            "state": "APPROVED",
+            "commit_sha": "0000000000000000000000000000000000000067",
+            "url": "https://github.com/owner/project/pull/103#pullrequestreview-1"
+          }
+        ],
+        "unresolved_threads": []
+      },
+      "branch_policy": {
+        "required_approvals": 1,
+        "code_owner_review": false,
+        "last_push_approval": false,
+        "conversation_resolution": true,
+        "required_checks": [
+          {
+            "context": "Windows Build",
+            "app_id": null
+          },
+          {
+            "context": "Portable Rust",
+            "app_id": null
+          }
+        ],
+        "unsupported_rules": [],
+        "strict_checks": false
+      },
+      "security": {
+        "state": "NO_REPORTED_FINDINGS",
+        "notes": [],
+        "sensitive_paths": [],
+        "code_scanning": {
+          "state": "KNOWN",
+          "alerts": []
+        },
+        "assessment": "CLEAR",
+        "confirmed_blockers": 0
+      },
+      "manual_acceptance": {
+        "state": "NOT_APPLICABLE",
+        "reason": "التغيير محصور في الأداة أو التوثيق؛ لا يدعي التقرير تأهيل الأجهزة"
+      },
+      "blockers": [
+        {
+          "classification": "BASE_REVALIDATION_REQUIRED",
+          "code": "BASE_REVALIDATION_REQUIRED",
+          "reason": "لا يوجد دليل تنفيذ كافٍ لربط الفحوص بالأساس"
+        },
+        {
+          "classification": "DEPENDENCY_BLOCKED",
+          "code": "DEPENDENCIES_BLOCKED",
+          "reason": "يلزم معالجة الآباء ثم تحديث التابع وإعادة فحصه؛ BLOCKED"
+        },
+        {
+          "classification": "MANUAL_ACCEPTANCE_REQUIRED",
+          "code": "UNKNOWN_EVIDENCE",
+          "reason": "شروط ضرورية غير معروفة؛ لا يمكن إعلان جاهزية الدمج"
+        }
+      ],
+      "missing_evidence": [
+        {
+          "field": "base_validation",
+          "code": "UNKNOWN"
+        }
+      ],
+      "observed_at": "2026-11-04T02:00:00Z",
+      "dependencies": {
+        "state": "BLOCKED",
+        "parents": [
+          102
+        ],
+        "declared": [],
+        "unknown_parents": [],
+        "closed_unmerged_parents": [],
+        "merged_parents": [],
+        "ancestors": [
+          102
+        ],
+        "ancestor_blockers": [
+          {
+            "number": 102,
+            "classifications": [
+              "BASE_REVALIDATION_REQUIRED",
+              "CI_PENDING",
+              "DRAFT",
+              "MANUAL_ACCEPTANCE_REQUIRED",
+              "SECURITY_REVIEW_REQUIRED"
+            ]
+          }
+        ],
+        "reasons": []
+      },
+      "classifications": [
+        "BASE_REVALIDATION_REQUIRED",
+        "DEPENDENCY_BLOCKED",
+        "MANUAL_ACCEPTANCE_REQUIRED"
+      ],
+      "suggested_review_priority": 6,
+      "blocking_prs": [
+        102
+      ],
+      "merge_authorized": false,
+      "base_validation": {
+        "state": "UNKNOWN",
+        "head_sha": "0000000000000000000000000000000000000067",
+        "current_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "reported_merge_sha": "dddddddddddddddddddddddddddddddddddddddd",
+        "gates": {
+          "Windows Build": {
+            "state": "UNKNOWN",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "UNKNOWN",
+                "check_id": 1,
+                "url": "https://github.com/owner/project/actions/runs/100/job/1",
+                "tested_base_sha": "UNKNOWN",
+                "checkout_sha": "UNKNOWN",
+                "reason": "PROOF_IDENTITY_MISMATCH"
+              }
+            ],
+            "tested_base_sha": "UNKNOWN"
+          },
+          "Portable Rust": {
+            "state": "UNKNOWN",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "UNKNOWN",
+                "check_id": 2,
+                "url": "https://github.com/owner/project/actions/runs/100/job/2",
+                "tested_base_sha": "UNKNOWN",
+                "checkout_sha": "UNKNOWN",
+                "reason": "PROOF_IDENTITY_MISMATCH"
+              }
+            ],
+            "tested_base_sha": "UNKNOWN"
+          },
+          "CodeQL": {
+            "state": "UNKNOWN",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "UNKNOWN",
+                "check_id": 3,
+                "url": "https://github.com/owner/project/actions/runs/200/job/3",
+                "tested_base_sha": "UNKNOWN",
+                "checkout_sha": "UNKNOWN",
+                "reason": "PROOF_IDENTITY_MISMATCH"
+              }
+            ],
+            "tested_base_sha": "UNKNOWN"
+          },
+          "Gitleaks": {
+            "state": "UNKNOWN",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "UNKNOWN",
+                "check_id": 4,
+                "url": "https://github.com/owner/project/actions/runs/200/job/4",
+                "tested_base_sha": "UNKNOWN",
+                "checkout_sha": "UNKNOWN",
+                "reason": "PROOF_IDENTITY_MISMATCH"
+              }
+            ],
+            "tested_base_sha": "UNKNOWN"
+          }
+        },
+        "reason": "لا يوجد دليل تنفيذ كافٍ لربط الفحوص بالأساس"
+      },
+      "technical_blockers": [
+        {
+          "classification": "DEPENDENCY_BLOCKED",
+          "code": "DEPENDENCIES_BLOCKED",
+          "reason": "يلزم معالجة الآباء ثم تحديث التابع وإعادة فحصه؛ BLOCKED"
+        }
+      ],
+      "readiness_stage": "BLOCKED",
+      "conditions": [
+        {
+          "name": "ci",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "كل فحص إلزامي مرتبط بـHEAD وتشغيله الحالي"
+        },
+        {
+          "name": "base",
+          "state": "UNKNOWN",
+          "required": true,
+          "reason": "لا يوجد دليل تنفيذ كافٍ لربط الفحوص بالأساس"
+        },
+        {
+          "name": "independent_reviews",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "APPROVED مستقلة وحديثة؛ COMMENTED وصاحب الحساب لا يُحتسبان"
+        },
+        {
+          "name": "security",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "الأمن: CLEAR"
+        },
+        {
+          "name": "dependencies",
+          "state": "UNSATISFIED",
+          "required": true,
+          "reason": "الأصل قبل التابع"
+        },
+        {
+          "name": "manual_acceptance",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "التغيير محصور في الأداة أو التوثيق؛ لا يدعي التقرير تأهيل الأجهزة"
+        },
+        {
+          "name": "merge_and_threads",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "Draft والتعارض والخيوط المفتوحة تمنع التقدم"
+        },
+        {
+          "name": "evidence_completeness",
+          "state": "UNKNOWN",
+          "required": true,
+          "reason": "يشمل قواعد الحماية وثبات جمع البيانات والصلاحيات"
+        }
+      ],
+      "required_evidence": [
+        {
+          "condition": "base",
+          "state": "UNKNOWN",
+          "description": "لا يوجد دليل تنفيذ كافٍ لربط الفحوص بالأساس"
+        },
+        {
+          "condition": "dependencies",
+          "state": "UNSATISFIED",
+          "description": "الأصل قبل التابع"
+        },
+        {
+          "condition": "evidence_completeness",
+          "state": "UNKNOWN",
+          "description": "يشمل قواعد الحماية وثبات جمع البيانات والصلاحيات"
+        },
+        {
+          "condition": "base_validation",
+          "state": "UNKNOWN",
+          "description": "UNKNOWN"
+        }
+      ],
+      "next_action": "WAIT_FOR_DEPENDENCIES",
+      "action_reason": "عالج الأصل أو الدورة أو الأب المجهول أولًا، ثم حدّث التابع وأعد فحصه",
+      "suggested_owner": "COORDINATION_LEAD",
+      "can_proceed_without_dependencies": false,
+      "priority": {
+        "score": 16,
+        "rank": 6,
+        "level": "NORMAL",
+        "dependent_count": 0,
+        "remaining_condition_count": 3,
+        "factors": {
+          "dependents": 0,
+          "confirmed_security": 0,
+          "ci_failure": 0,
+          "tests_complete": 20,
+          "remaining_conditions": 4,
+          "multiple_dependencies": 0,
+          "missing_evidence": -8
+        },
+        "reasons": [
+          "يفتح معالجة 0 طلبات تابعة (مباشرة وغير مباشرة)",
+          "شروط متبقية: 3؛ منها غير معروف: 2",
+          "الدرجات: dependents=+0، confirmed_security=+0، ci_failure=+0، tests_complete=+20، remaining_conditions=+4، multiple_dependencies=+0، missing_evidence=-8",
+          "الأساس يسبق التابع؛ عدد الشروط تقدير حجم عمل نسبي وليس تقدير زمن"
+        ]
+      }
+    },
+    {
+      "number": 104,
+      "title": "تعارض وفشل Windows وملاحظة أمنية",
+      "url": "https://github.com/owner/project/pull/104",
+      "draft": false,
+      "head_sha": "0000000000000000000000000000000000000068",
+      "head_branch": "feature-104",
+      "head_repo": "owner/project",
+      "base_branch": "main",
+      "base_repo": "owner/project",
+      "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "base_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mergeable": false,
+      "mergeable_state": "dirty",
+      "ci": {
+        "Windows Build": {
+          "state": "FAILED",
+          "head_sha": "0000000000000000000000000000000000000068",
+          "evidence": [
+            {
+              "name": "Windows Build",
+              "head_sha": "0000000000000000000000000000000000000068",
+              "state": "FAILED",
+              "conclusion": "failure",
+              "check_id": 1,
+              "url": "https://github.com/owner/project/actions/runs/100/job/1"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        },
+        "Portable Rust": {
+          "state": "SUCCESS",
+          "head_sha": "0000000000000000000000000000000000000068",
+          "evidence": [
+            {
+              "name": "Portable Rust",
+              "head_sha": "0000000000000000000000000000000000000068",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 2,
+              "url": "https://github.com/owner/project/actions/runs/100/job/2"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        },
+        "CodeQL": {
+          "state": "SUCCESS",
+          "head_sha": "0000000000000000000000000000000000000068",
+          "evidence": [
+            {
+              "name": "CodeQL Rust security analysis",
+              "head_sha": "0000000000000000000000000000000000000068",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 3,
+              "url": "https://github.com/owner/project/actions/runs/200/job/3"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        },
+        "Gitleaks": {
+          "state": "SUCCESS",
+          "head_sha": "0000000000000000000000000000000000000068",
+          "evidence": [
+            {
+              "name": "Gitleaks history scan",
+              "head_sha": "0000000000000000000000000000000000000068",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 4,
+              "url": "https://github.com/owner/project/actions/runs/200/job/4"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        }
+      },
+      "reviews": {
+        "state": "KNOWN",
+        "repository_required_approvals": 1,
+        "auditor_required_independent_approvals": 1,
+        "github_review_decision": "APPROVED",
+        "requested_reviewers": [],
+        "requested_teams": [],
+        "independent_approvals": [
+          "independent"
+        ],
+        "recorded": [
+          {
+            "reviewer": "independent",
+            "state": "APPROVED",
+            "commit_sha": "0000000000000000000000000000000000000068",
+            "url": "https://github.com/owner/project/pull/104#pullrequestreview-1"
+          }
+        ],
+        "unresolved_threads": []
+      },
+      "branch_policy": {
+        "required_approvals": 1,
+        "code_owner_review": false,
+        "last_push_approval": false,
+        "conversation_resolution": true,
+        "required_checks": [
+          {
+            "context": "Windows Build",
+            "app_id": null
+          },
+          {
+            "context": "Portable Rust",
+            "app_id": null
+          }
+        ],
+        "unsupported_rules": [],
+        "strict_checks": false
+      },
+      "security": {
+        "state": "REVIEW_REQUIRED",
+        "notes": [
+          {
+            "source": "COMMENT",
+            "classification": "REVIEW_REQUIRED",
+            "reason": "إشارة نصية فقط؛ يلزم تقييم بشري، ولا تثبت ثغرة",
+            "url": "https://github.com/owner/project/pull/104#issuecomment-1",
+            "excerpt": "Security review required: verify the trust boundary before merging."
+          }
+        ],
+        "sensitive_paths": [
+          "apps/classmesh-service/src/example.rs"
+        ],
+        "code_scanning": {
+          "state": "KNOWN",
+          "alerts": []
+        },
+        "assessment": "REVIEW_REQUIRED",
+        "confirmed_blockers": 0
+      },
+      "manual_acceptance": {
+        "state": "UNKNOWN",
+        "reason": "يلزم تحديد نطاق القبول اليدوي وتقديم أدلته؛ Windows CI وVM لا يثبتان اختبارات الأجهزة الفعلية"
+      },
+      "blockers": [
+        {
+          "classification": "MERGE_CONFLICT",
+          "code": "BASE_CONFLICT",
+          "reason": "يوجد تعارض مع الفرع الأساسي"
+        },
+        {
+          "classification": "CI_FAILED",
+          "code": "CI_FAILED:Windows Build",
+          "reason": "Windows Build: فشل على HEAD الحالي"
+        },
+        {
+          "classification": "MANUAL_ACCEPTANCE_REQUIRED",
+          "code": "MANUAL_SCOPE_OR_EVIDENCE",
+          "reason": "يلزم تحديد نطاق القبول اليدوي وتقديم أدلته؛ Windows CI وVM لا يثبتان اختبارات الأجهزة الفعلية"
+        },
+        {
+          "classification": "BASE_REVALIDATION_REQUIRED",
+          "code": "BASE_REVALIDATION_REQUIRED",
+          "reason": "لا يوجد دليل تنفيذ كافٍ لربط الفحوص بالأساس"
+        },
+        {
+          "classification": "SECURITY_REVIEW_REQUIRED",
+          "code": "SECURITY_EVIDENCE_REVIEW",
+          "reason": "مراجعة أمنية مستقلة مطلوبة؛ نوع الدليل: REVIEW_REQUIRED"
+        },
+        {
+          "classification": "MANUAL_ACCEPTANCE_REQUIRED",
+          "code": "UNKNOWN_EVIDENCE",
+          "reason": "شروط ضرورية غير معروفة؛ لا يمكن إعلان جاهزية الدمج"
+        }
+      ],
+      "missing_evidence": [
+        {
+          "field": "manual_acceptance",
+          "code": "NOT_MEASURED_OR_SCOPE_UNCONFIRMED"
+        },
+        {
+          "field": "base_validation",
+          "code": "UNKNOWN"
+        }
+      ],
+      "observed_at": "2026-11-04T02:00:00Z",
+      "dependencies": {
+        "state": "CLEAR",
+        "parents": [],
+        "declared": [],
+        "unknown_parents": [],
+        "closed_unmerged_parents": [],
+        "merged_parents": [],
+        "ancestors": [],
+        "ancestor_blockers": [],
+        "reasons": []
+      },
+      "classifications": [
+        "BASE_REVALIDATION_REQUIRED",
+        "CI_FAILED",
+        "MANUAL_ACCEPTANCE_REQUIRED",
+        "MERGE_CONFLICT",
+        "SECURITY_REVIEW_REQUIRED"
+      ],
+      "suggested_review_priority": 4,
+      "blocking_prs": [],
+      "merge_authorized": false,
+      "base_validation": {
+        "state": "UNKNOWN",
+        "head_sha": "0000000000000000000000000000000000000068",
+        "current_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "reported_merge_sha": "dddddddddddddddddddddddddddddddddddddddd",
+        "gates": {
+          "Windows Build": {
+            "state": "UNKNOWN",
+            "ci_state": "FAILED",
+            "observations": [
+              {
+                "state": "UNKNOWN",
+                "check_id": 1,
+                "url": "https://github.com/owner/project/actions/runs/100/job/1",
+                "tested_base_sha": "UNKNOWN",
+                "checkout_sha": "UNKNOWN",
+                "reason": "PROOF_IDENTITY_MISMATCH"
+              }
+            ],
+            "tested_base_sha": "UNKNOWN"
+          },
+          "Portable Rust": {
+            "state": "UNKNOWN",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "UNKNOWN",
+                "check_id": 2,
+                "url": "https://github.com/owner/project/actions/runs/100/job/2",
+                "tested_base_sha": "UNKNOWN",
+                "checkout_sha": "UNKNOWN",
+                "reason": "PROOF_IDENTITY_MISMATCH"
+              }
+            ],
+            "tested_base_sha": "UNKNOWN"
+          },
+          "CodeQL": {
+            "state": "UNKNOWN",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "UNKNOWN",
+                "check_id": 3,
+                "url": "https://github.com/owner/project/actions/runs/200/job/3",
+                "tested_base_sha": "UNKNOWN",
+                "checkout_sha": "UNKNOWN",
+                "reason": "PROOF_IDENTITY_MISMATCH"
+              }
+            ],
+            "tested_base_sha": "UNKNOWN"
+          },
+          "Gitleaks": {
+            "state": "UNKNOWN",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "UNKNOWN",
+                "check_id": 4,
+                "url": "https://github.com/owner/project/actions/runs/200/job/4",
+                "tested_base_sha": "UNKNOWN",
+                "checkout_sha": "UNKNOWN",
+                "reason": "PROOF_IDENTITY_MISMATCH"
+              }
+            ],
+            "tested_base_sha": "UNKNOWN"
+          }
+        },
+        "reason": "لا يوجد دليل تنفيذ كافٍ لربط الفحوص بالأساس"
+      },
+      "technical_blockers": [
+        {
+          "classification": "MERGE_CONFLICT",
+          "code": "BASE_CONFLICT",
+          "reason": "يوجد تعارض مع الفرع الأساسي"
+        },
+        {
+          "classification": "CI_FAILED",
+          "code": "CI_FAILED:Windows Build",
+          "reason": "Windows Build: فشل على HEAD الحالي"
+        }
+      ],
+      "readiness_stage": "BLOCKED",
+      "conditions": [
+        {
+          "name": "ci",
+          "state": "UNSATISFIED",
+          "required": true,
+          "reason": "كل فحص إلزامي مرتبط بـHEAD وتشغيله الحالي"
+        },
+        {
+          "name": "base",
+          "state": "UNKNOWN",
+          "required": true,
+          "reason": "لا يوجد دليل تنفيذ كافٍ لربط الفحوص بالأساس"
+        },
+        {
+          "name": "independent_reviews",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "APPROVED مستقلة وحديثة؛ COMMENTED وصاحب الحساب لا يُحتسبان"
+        },
+        {
+          "name": "security",
+          "state": "REVIEW_REQUIRED",
+          "required": true,
+          "reason": "الأمن: REVIEW_REQUIRED"
+        },
+        {
+          "name": "dependencies",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "الأصل قبل التابع"
+        },
+        {
+          "name": "manual_acceptance",
+          "state": "UNKNOWN",
+          "required": true,
+          "reason": "يلزم تحديد نطاق القبول اليدوي وتقديم أدلته؛ Windows CI وVM لا يثبتان اختبارات الأجهزة الفعلية"
+        },
+        {
+          "name": "merge_and_threads",
+          "state": "UNSATISFIED",
+          "required": true,
+          "reason": "Draft والتعارض والخيوط المفتوحة تمنع التقدم"
+        },
+        {
+          "name": "evidence_completeness",
+          "state": "UNKNOWN",
+          "required": true,
+          "reason": "يشمل قواعد الحماية وثبات جمع البيانات والصلاحيات"
+        }
+      ],
+      "required_evidence": [
+        {
+          "condition": "ci",
+          "state": "UNSATISFIED",
+          "description": "كل فحص إلزامي مرتبط بـHEAD وتشغيله الحالي"
+        },
+        {
+          "condition": "base",
+          "state": "UNKNOWN",
+          "description": "لا يوجد دليل تنفيذ كافٍ لربط الفحوص بالأساس"
+        },
+        {
+          "condition": "security",
+          "state": "REVIEW_REQUIRED",
+          "description": "الأمن: REVIEW_REQUIRED"
+        },
+        {
+          "condition": "manual_acceptance",
+          "state": "UNKNOWN",
+          "description": "يلزم تحديد نطاق القبول اليدوي وتقديم أدلته؛ Windows CI وVM لا يثبتان اختبارات الأجهزة الفعلية"
+        },
+        {
+          "condition": "merge_and_threads",
+          "state": "UNSATISFIED",
+          "description": "Draft والتعارض والخيوط المفتوحة تمنع التقدم"
+        },
+        {
+          "condition": "evidence_completeness",
+          "state": "UNKNOWN",
+          "description": "يشمل قواعد الحماية وثبات جمع البيانات والصلاحيات"
+        },
+        {
+          "condition": "manual_acceptance",
+          "state": "UNKNOWN",
+          "description": "NOT_MEASURED_OR_SCOPE_UNCONFIRMED"
+        },
+        {
+          "condition": "base_validation",
+          "state": "UNKNOWN",
+          "description": "UNKNOWN"
+        }
+      ],
+      "next_action": "FIX_FAILED_CI",
+      "action_reason": "حلل سجل الوظيفة الفاشلة وأصلح السبب ثم اختبر HEAD الجديد",
+      "suggested_owner": "BRANCH_DEVELOPER",
+      "can_proceed_without_dependencies": true,
+      "priority": {
+        "score": 3,
+        "rank": 4,
+        "level": "NORMAL",
+        "dependent_count": 0,
+        "remaining_condition_count": 6,
+        "factors": {
+          "dependents": 0,
+          "confirmed_security": 0,
+          "ci_failure": 15,
+          "tests_complete": 0,
+          "remaining_conditions": 0,
+          "multiple_dependencies": 0,
+          "missing_evidence": -12
+        },
+        "reasons": [
+          "يفتح معالجة 0 طلبات تابعة (مباشرة وغير مباشرة)",
+          "شروط متبقية: 6؛ منها غير معروف: 3",
+          "الدرجات: dependents=+0، confirmed_security=+0، ci_failure=+15، tests_complete=+0، remaining_conditions=+0، multiple_dependencies=+0، missing_evidence=-12",
+          "الأساس يسبق التابع؛ عدد الشروط تقدير حجم عمل نسبي وليس تقدير زمن"
+        ]
+      }
+    },
+    {
+      "number": 105,
+      "title": "اجتاز الاختبارات ويحتاج مراجعًا مستقلًا",
+      "url": "https://github.com/owner/project/pull/105",
+      "draft": false,
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_branch": "feature-105",
+      "head_repo": "owner/project",
+      "base_branch": "main",
+      "base_repo": "owner/project",
+      "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "base_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mergeable": true,
+      "mergeable_state": "clean",
+      "ci": {
+        "Windows Build": {
+          "state": "SUCCESS",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "evidence": [
+            {
+              "name": "Windows Build",
+              "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 1,
+              "url": "https://github.com/owner/project/actions/runs/100/job/1"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        },
+        "Portable Rust": {
+          "state": "SUCCESS",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "evidence": [
+            {
+              "name": "Portable Rust",
+              "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 2,
+              "url": "https://github.com/owner/project/actions/runs/100/job/2"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        },
+        "CodeQL": {
+          "state": "SUCCESS",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "evidence": [
+            {
+              "name": "CodeQL Rust security analysis",
+              "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 3,
+              "url": "https://github.com/owner/project/actions/runs/200/job/3"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        },
+        "Gitleaks": {
+          "state": "SUCCESS",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "evidence": [
+            {
+              "name": "Gitleaks history scan",
+              "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 4,
+              "url": "https://github.com/owner/project/actions/runs/200/job/4"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        }
+      },
+      "reviews": {
+        "state": "KNOWN",
+        "repository_required_approvals": 1,
+        "auditor_required_independent_approvals": 1,
+        "github_review_decision": "APPROVED",
+        "requested_reviewers": [],
+        "requested_teams": [],
+        "independent_approvals": [],
+        "recorded": [],
+        "unresolved_threads": []
+      },
+      "branch_policy": {
+        "required_approvals": 1,
+        "code_owner_review": false,
+        "last_push_approval": false,
+        "conversation_resolution": true,
+        "required_checks": [
+          {
+            "context": "Windows Build",
+            "app_id": null
+          },
+          {
+            "context": "Portable Rust",
+            "app_id": null
+          }
+        ],
+        "unsupported_rules": [],
+        "strict_checks": false
+      },
+      "security": {
+        "state": "NO_REPORTED_FINDINGS",
+        "notes": [],
+        "sensitive_paths": [],
+        "code_scanning": {
+          "state": "KNOWN",
+          "alerts": []
+        },
+        "assessment": "CLEAR",
+        "confirmed_blockers": 0
+      },
+      "manual_acceptance": {
+        "state": "NOT_APPLICABLE",
+        "reason": "التغيير محصور في الأداة أو التوثيق؛ لا يدعي التقرير تأهيل الأجهزة"
+      },
+      "blockers": [
+        {
+          "classification": "MANUAL_ACCEPTANCE_REQUIRED",
+          "code": "INDEPENDENT_APPROVAL_MISSING",
+          "reason": "تنقص موافقة مستقلة على HEAD الحالي؛ COMMENTED ومراجعة صاحب الحساب لا تُحتسب"
+        }
+      ],
+      "missing_evidence": [],
+      "observed_at": "2026-11-04T02:00:00Z",
+      "dependencies": {
+        "state": "CLEAR",
+        "parents": [],
+        "declared": [],
+        "unknown_parents": [],
+        "closed_unmerged_parents": [],
+        "merged_parents": [],
+        "ancestors": [],
+        "ancestor_blockers": [],
+        "reasons": []
+      },
+      "classifications": [
+        "MANUAL_ACCEPTANCE_REQUIRED"
+      ],
+      "suggested_review_priority": 2,
+      "blocking_prs": [],
+      "merge_authorized": false,
+      "base_validation": {
+        "state": "INTEGRATION_CURRENT",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "current_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "reported_merge_sha": "dddddddddddddddddddddddddddddddddddddddd",
+        "gates": {
+          "Windows Build": {
+            "state": "INTEGRATION_CURRENT",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "INTEGRATION_CURRENT",
+                "check_id": 1,
+                "url": "https://github.com/owner/project/actions/runs/100/job/1",
+                "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+                "reason": "آباء commit المرصود يربطونه بـHEAD وإصدار محدد من الأساس",
+                "run_id": 100,
+                "run_attempt": 1
+              }
+            ],
+            "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "Portable Rust": {
+            "state": "INTEGRATION_CURRENT",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "INTEGRATION_CURRENT",
+                "check_id": 2,
+                "url": "https://github.com/owner/project/actions/runs/100/job/2",
+                "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+                "reason": "آباء commit المرصود يربطونه بـHEAD وإصدار محدد من الأساس",
+                "run_id": 100,
+                "run_attempt": 1
+              }
+            ],
+            "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "CodeQL": {
+            "state": "INTEGRATION_CURRENT",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "INTEGRATION_CURRENT",
+                "check_id": 3,
+                "url": "https://github.com/owner/project/actions/runs/200/job/3",
+                "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+                "reason": "آباء commit المرصود يربطونه بـHEAD وإصدار محدد من الأساس",
+                "run_id": 200,
+                "run_attempt": 1
+              }
+            ],
+            "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "Gitleaks": {
+            "state": "INTEGRATION_CURRENT",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "INTEGRATION_CURRENT",
+                "check_id": 4,
+                "url": "https://github.com/owner/project/actions/runs/200/job/4",
+                "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+                "reason": "آباء commit المرصود يربطونه بـHEAD وإصدار محدد من الأساس",
+                "run_id": 200,
+                "run_attempt": 1
+              }
+            ],
+            "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        },
+        "reason": "ثبت checkout وآباء نسخة التكامل الحالية"
+      },
+      "technical_blockers": [],
+      "readiness_stage": "READY_FOR_INDEPENDENT_REVIEW",
+      "conditions": [
+        {
+          "name": "ci",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "كل فحص إلزامي مرتبط بـHEAD وتشغيله الحالي"
+        },
+        {
+          "name": "base",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "ثبت checkout وآباء نسخة التكامل الحالية"
+        },
+        {
+          "name": "independent_reviews",
+          "state": "REVIEW_REQUIRED",
+          "required": true,
+          "reason": "APPROVED مستقلة وحديثة؛ COMMENTED وصاحب الحساب لا يُحتسبان"
+        },
+        {
+          "name": "security",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "الأمن: CLEAR"
+        },
+        {
+          "name": "dependencies",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "الأصل قبل التابع"
+        },
+        {
+          "name": "manual_acceptance",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "التغيير محصور في الأداة أو التوثيق؛ لا يدعي التقرير تأهيل الأجهزة"
+        },
+        {
+          "name": "merge_and_threads",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "Draft والتعارض والخيوط المفتوحة تمنع التقدم"
+        },
+        {
+          "name": "evidence_completeness",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "يشمل قواعد الحماية وثبات جمع البيانات والصلاحيات"
+        }
+      ],
+      "required_evidence": [
+        {
+          "condition": "independent_reviews",
+          "state": "REVIEW_REQUIRED",
+          "description": "APPROVED مستقلة وحديثة؛ COMMENTED وصاحب الحساب لا يُحتسبان"
+        }
+      ],
+      "next_action": "REQUEST_INDEPENDENT_REVIEW",
+      "action_reason": "اكتملت المتطلبات الآلية؛ يلزم مراجع مستقل مخول على HEAD الحالي",
+      "suggested_owner": "INDEPENDENT_REVIEWER",
+      "can_proceed_without_dependencies": true,
+      "priority": {
+        "score": 28,
+        "rank": 2,
+        "level": "NORMAL",
+        "dependent_count": 0,
+        "remaining_condition_count": 1,
+        "factors": {
+          "dependents": 0,
+          "confirmed_security": 0,
+          "ci_failure": 0,
+          "tests_complete": 20,
+          "remaining_conditions": 8,
+          "multiple_dependencies": 0,
+          "missing_evidence": 0
+        },
+        "reasons": [
+          "يفتح معالجة 0 طلبات تابعة (مباشرة وغير مباشرة)",
+          "شروط متبقية: 1؛ منها غير معروف: 0",
+          "الدرجات: dependents=+0، confirmed_security=+0، ci_failure=+0، tests_complete=+20، remaining_conditions=+8، multiple_dependencies=+0، missing_evidence=+0",
+          "الأساس يسبق التابع؛ عدد الشروط تقدير حجم عمل نسبي وليس تقدير زمن"
+        ]
+      }
+    },
+    {
+      "number": 106,
+      "title": "موافقة مستقلة قائمة؛ يحتاج موافقة ثانية",
+      "url": "https://github.com/owner/project/pull/106",
+      "draft": false,
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_branch": "feature-106",
+      "head_repo": "owner/project",
+      "base_branch": "main",
+      "base_repo": "owner/project",
+      "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "base_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mergeable": true,
+      "mergeable_state": "clean",
+      "ci": {
+        "Windows Build": {
+          "state": "SUCCESS",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "evidence": [
+            {
+              "name": "Windows Build",
+              "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 1,
+              "url": "https://github.com/owner/project/actions/runs/100/job/1"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        },
+        "Portable Rust": {
+          "state": "SUCCESS",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "evidence": [
+            {
+              "name": "Portable Rust",
+              "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 2,
+              "url": "https://github.com/owner/project/actions/runs/100/job/2"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        },
+        "CodeQL": {
+          "state": "SUCCESS",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "evidence": [
+            {
+              "name": "CodeQL Rust security analysis",
+              "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 3,
+              "url": "https://github.com/owner/project/actions/runs/200/job/3"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        },
+        "Gitleaks": {
+          "state": "SUCCESS",
+          "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "evidence": [
+            {
+              "name": "Gitleaks history scan",
+              "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "state": "SUCCESS",
+              "conclusion": "success",
+              "check_id": 4,
+              "url": "https://github.com/owner/project/actions/runs/200/job/4"
+            }
+          ],
+          "rejected_evidence": [],
+          "reason": "نتائج مرتبطة بـHEAD الحالي وتشغيل PR الحالي"
+        }
+      },
+      "reviews": {
+        "state": "KNOWN",
+        "repository_required_approvals": 2,
+        "auditor_required_independent_approvals": 2,
+        "github_review_decision": "APPROVED",
+        "requested_reviewers": [],
+        "requested_teams": [],
+        "independent_approvals": [
+          "independent"
+        ],
+        "recorded": [
+          {
+            "reviewer": "independent",
+            "state": "APPROVED",
+            "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "url": "https://github.com/owner/project/pull/101#pullrequestreview-1"
+          }
+        ],
+        "unresolved_threads": []
+      },
+      "branch_policy": {
+        "required_approvals": 2,
+        "code_owner_review": false,
+        "last_push_approval": false,
+        "conversation_resolution": true,
+        "required_checks": [
+          {
+            "context": "Windows Build",
+            "app_id": null
+          },
+          {
+            "context": "Portable Rust",
+            "app_id": null
+          }
+        ],
+        "unsupported_rules": [],
+        "strict_checks": false
+      },
+      "security": {
+        "state": "NO_REPORTED_FINDINGS",
+        "notes": [],
+        "sensitive_paths": [],
+        "code_scanning": {
+          "state": "KNOWN",
+          "alerts": []
+        },
+        "assessment": "CLEAR",
+        "confirmed_blockers": 0
+      },
+      "manual_acceptance": {
+        "state": "NOT_APPLICABLE",
+        "reason": "التغيير محصور في الأداة أو التوثيق؛ لا يدعي التقرير تأهيل الأجهزة"
+      },
+      "blockers": [
+        {
+          "classification": "MANUAL_ACCEPTANCE_REQUIRED",
+          "code": "INDEPENDENT_APPROVAL_MISSING",
+          "reason": "تنقص موافقة مستقلة على HEAD الحالي؛ COMMENTED ومراجعة صاحب الحساب لا تُحتسب"
+        }
+      ],
+      "missing_evidence": [],
+      "observed_at": "2026-11-04T02:00:00Z",
+      "dependencies": {
+        "state": "CLEAR",
+        "parents": [],
+        "declared": [],
+        "unknown_parents": [],
+        "closed_unmerged_parents": [],
+        "merged_parents": [],
+        "ancestors": [],
+        "ancestor_blockers": [],
+        "reasons": []
+      },
+      "classifications": [
+        "MANUAL_ACCEPTANCE_REQUIRED"
+      ],
+      "suggested_review_priority": 3,
+      "blocking_prs": [],
+      "merge_authorized": false,
+      "base_validation": {
+        "state": "INTEGRATION_CURRENT",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "current_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "reported_merge_sha": "dddddddddddddddddddddddddddddddddddddddd",
+        "gates": {
+          "Windows Build": {
+            "state": "INTEGRATION_CURRENT",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "INTEGRATION_CURRENT",
+                "check_id": 1,
+                "url": "https://github.com/owner/project/actions/runs/100/job/1",
+                "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+                "reason": "آباء commit المرصود يربطونه بـHEAD وإصدار محدد من الأساس",
+                "run_id": 100,
+                "run_attempt": 1
+              }
+            ],
+            "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "Portable Rust": {
+            "state": "INTEGRATION_CURRENT",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "INTEGRATION_CURRENT",
+                "check_id": 2,
+                "url": "https://github.com/owner/project/actions/runs/100/job/2",
+                "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+                "reason": "آباء commit المرصود يربطونه بـHEAD وإصدار محدد من الأساس",
+                "run_id": 100,
+                "run_attempt": 1
+              }
+            ],
+            "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "CodeQL": {
+            "state": "INTEGRATION_CURRENT",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "INTEGRATION_CURRENT",
+                "check_id": 3,
+                "url": "https://github.com/owner/project/actions/runs/200/job/3",
+                "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+                "reason": "آباء commit المرصود يربطونه بـHEAD وإصدار محدد من الأساس",
+                "run_id": 200,
+                "run_attempt": 1
+              }
+            ],
+            "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "Gitleaks": {
+            "state": "INTEGRATION_CURRENT",
+            "ci_state": "SUCCESS",
+            "observations": [
+              {
+                "state": "INTEGRATION_CURRENT",
+                "check_id": 4,
+                "url": "https://github.com/owner/project/actions/runs/200/job/4",
+                "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+                "reason": "آباء commit المرصود يربطونه بـHEAD وإصدار محدد من الأساس",
+                "run_id": 200,
+                "run_attempt": 1
+              }
+            ],
+            "tested_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        },
+        "reason": "ثبت checkout وآباء نسخة التكامل الحالية"
+      },
+      "technical_blockers": [],
+      "readiness_stage": "READY_FOR_FINAL_REVIEW",
+      "conditions": [
+        {
+          "name": "ci",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "كل فحص إلزامي مرتبط بـHEAD وتشغيله الحالي"
+        },
+        {
+          "name": "base",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "ثبت checkout وآباء نسخة التكامل الحالية"
+        },
+        {
+          "name": "independent_reviews",
+          "state": "REVIEW_REQUIRED",
+          "required": true,
+          "reason": "APPROVED مستقلة وحديثة؛ COMMENTED وصاحب الحساب لا يُحتسبان"
+        },
+        {
+          "name": "security",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "الأمن: CLEAR"
+        },
+        {
+          "name": "dependencies",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "الأصل قبل التابع"
+        },
+        {
+          "name": "manual_acceptance",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "التغيير محصور في الأداة أو التوثيق؛ لا يدعي التقرير تأهيل الأجهزة"
+        },
+        {
+          "name": "merge_and_threads",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "Draft والتعارض والخيوط المفتوحة تمنع التقدم"
+        },
+        {
+          "name": "evidence_completeness",
+          "state": "SATISFIED",
+          "required": true,
+          "reason": "يشمل قواعد الحماية وثبات جمع البيانات والصلاحيات"
+        }
+      ],
+      "required_evidence": [
+        {
+          "condition": "independent_reviews",
+          "state": "REVIEW_REQUIRED",
+          "description": "APPROVED مستقلة وحديثة؛ COMMENTED وصاحب الحساب لا يُحتسبان"
+        }
+      ],
+      "next_action": "COMPLETE_FINAL_REVIEW",
+      "action_reason": "استكمل العدد والشروط المسجلة للموافقات النهائية",
+      "suggested_owner": "INDEPENDENT_REVIEWER",
+      "can_proceed_without_dependencies": true,
+      "priority": {
+        "score": 28,
+        "rank": 3,
+        "level": "NORMAL",
+        "dependent_count": 0,
+        "remaining_condition_count": 1,
+        "factors": {
+          "dependents": 0,
+          "confirmed_security": 0,
+          "ci_failure": 0,
+          "tests_complete": 20,
+          "remaining_conditions": 8,
+          "multiple_dependencies": 0,
+          "missing_evidence": 0
+        },
+        "reasons": [
+          "يفتح معالجة 0 طلبات تابعة (مباشرة وغير مباشرة)",
+          "شروط متبقية: 1؛ منها غير معروف: 0",
+          "الدرجات: dependents=+0، confirmed_security=+0، ci_failure=+0، tests_complete=+20، remaining_conditions=+8، multiple_dependencies=+0، missing_evidence=+0",
+          "الأساس يسبق التابع؛ عدد الشروط تقدير حجم عمل نسبي وليس تقدير زمن"
+        ]
+      }
+    }
+  ],
+  "limitations": [
+    "تقرير نقطة زمنية لدعم القرار؛ READY_FOR_MERGE لا يمنح إذن الدمج، والقرار لقائد التنسيق",
+    "موافقة مستقلة واحدة على الأقل على HEAD الحالي؛ لا تُحتسب موافقة صاحب PR أو الحساب المستخدم أو مالك المستودع",
+    "سجلات checkout وآباء commit أدلة تنفيذ GitHub؛ ليست تصديقًا تشفيريًا أو إثبات كفاية الاختبارات، ويمكن لمؤلف Workflow التأثير في السجلات",
+    "HEAD_ONLY يثبت checkout لرأس الفرع فقط؛ لا يدعي اختبار دمجه مع أحدث أساس",
+    "الاختبارات وWindows CI وVM لا تثبت قبول الأجهزة الفعلية؛ الأدلة المادية وقواعد الحماية غير المدعومة تبقى UNKNOWN",
+    "الملاحظة التاريخية لم تُثبت محلولة؛ RESOLVED يصف حالة GitHub المسجلة فقط",
+    "المالكون المقترحون أدوار لا تكليفات فعلية؛ حجم العمل تقدير بعدد الشروط وليس بساعات",
+    "تغير التعليقات والمراجعات والسياسات أثناء الجمع قد لا يُكتشف؛ أعد الفحص قبل القرار النهائي"
+  ],
+  "dependency_cycles": [],
+  "dependency_order_unresolved": [],
+  "comparison": {
+    "snapshot_sha256": "c91eab5fd986ed5617279c479884aff8de58025e7ba7ff4d638bfc18c9a66298",
+    "v1_schema": 1,
+    "v2_schema": 2,
+    "pull_requests": [
+      {
+        "number": 101,
+        "v1_classifications": [
+          "READY_FOR_FINAL_REVIEW"
+        ],
+        "v2_stage": "READY_FOR_MERGE",
+        "v2_classifications": [
+          "READY_FOR_MERGE"
+        ],
+        "next_action": "COORDINATOR_MERGE_DECISION"
+      },
+      {
+        "number": 102,
+        "v1_classifications": [
+          "DRAFT",
+          "CI_PENDING",
+          "SECURITY_REVIEW_REQUIRED",
+          "MANUAL_ACCEPTANCE_REQUIRED"
+        ],
+        "v2_stage": "BLOCKED",
+        "v2_classifications": [
+          "BASE_REVALIDATION_REQUIRED",
+          "CI_PENDING",
+          "DRAFT",
+          "MANUAL_ACCEPTANCE_REQUIRED",
+          "SECURITY_REVIEW_REQUIRED"
+        ],
+        "next_action": "FINISH_DRAFT"
+      },
+      {
+        "number": 103,
+        "v1_classifications": [
+          "DEPENDENCY_BLOCKED"
+        ],
+        "v2_stage": "BLOCKED",
+        "v2_classifications": [
+          "BASE_REVALIDATION_REQUIRED",
+          "DEPENDENCY_BLOCKED",
+          "MANUAL_ACCEPTANCE_REQUIRED"
+        ],
+        "next_action": "WAIT_FOR_DEPENDENCIES"
+      },
+      {
+        "number": 104,
+        "v1_classifications": [
+          "MERGE_CONFLICT",
+          "CI_FAILED",
+          "SECURITY_REVIEW_REQUIRED",
+          "MANUAL_ACCEPTANCE_REQUIRED"
+        ],
+        "v2_stage": "BLOCKED",
+        "v2_classifications": [
+          "BASE_REVALIDATION_REQUIRED",
+          "CI_FAILED",
+          "MANUAL_ACCEPTANCE_REQUIRED",
+          "MERGE_CONFLICT",
+          "SECURITY_REVIEW_REQUIRED"
+        ],
+        "next_action": "FIX_FAILED_CI"
+      },
+      {
+        "number": 105,
+        "v1_classifications": [
+          "MANUAL_ACCEPTANCE_REQUIRED"
+        ],
+        "v2_stage": "READY_FOR_INDEPENDENT_REVIEW",
+        "v2_classifications": [
+          "MANUAL_ACCEPTANCE_REQUIRED"
+        ],
+        "next_action": "REQUEST_INDEPENDENT_REVIEW"
+      },
+      {
+        "number": 106,
+        "v1_classifications": [
+          "MANUAL_ACCEPTANCE_REQUIRED"
+        ],
+        "v2_stage": "READY_FOR_FINAL_REVIEW",
+        "v2_classifications": [
+          "MANUAL_ACCEPTANCE_REQUIRED"
+        ],
+        "next_action": "COMPLETE_FINAL_REVIEW"
+      }
+    ]
+  }
+}

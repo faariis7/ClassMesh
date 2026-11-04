@@ -1,0 +1,306 @@
+{
+  "user": {
+    "login": "owner"
+  },
+  "repos/owner/project/pulls": [
+    {
+      "number": 101,
+      "title": "Independent reporting tool",
+      "draft": false,
+      "state": "open",
+      "html_url": "https://github.com/owner/project/pull/101",
+      "user": {
+        "login": "author"
+      },
+      "body": "Adds an offline report.",
+      "head": {
+        "ref": "feature",
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "repo": {
+          "full_name": "owner/project"
+        }
+      },
+      "base": {
+        "ref": "main",
+        "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "repo": {
+          "full_name": "owner/project"
+        }
+      },
+      "mergeable": true,
+      "mergeable_state": "clean",
+      "updated_at": "2026-11-04T01:00:00Z",
+      "requested_reviewers": [],
+      "requested_teams": [],
+      "changed_files": 1,
+      "merge_commit_sha": "dddddddddddddddddddddddddddddddddddddddd"
+    }
+  ],
+  "repos/owner/project/pulls/101": {
+    "number": 101,
+    "title": "Independent reporting tool",
+    "draft": false,
+    "state": "open",
+    "html_url": "https://github.com/owner/project/pull/101",
+    "user": {
+      "login": "author"
+    },
+    "body": "Adds an offline report.",
+    "head": {
+      "ref": "feature",
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": {
+        "full_name": "owner/project"
+      }
+    },
+    "base": {
+      "ref": "main",
+      "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "repo": {
+        "full_name": "owner/project"
+      }
+    },
+    "mergeable": true,
+    "mergeable_state": "clean",
+    "updated_at": "2026-11-04T01:00:00Z",
+    "requested_reviewers": [],
+    "requested_teams": [],
+    "changed_files": 1,
+    "merge_commit_sha": "dddddddddddddddddddddddddddddddddddddddd"
+  },
+  "repos/owner/project/branches/main": {
+    "commit": {
+      "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "repos/owner/project/branches/main/protection": {
+    "required_pull_request_reviews": {
+      "required_approving_review_count": 1,
+      "require_code_owner_reviews": false,
+      "require_last_push_approval": false
+    },
+    "required_status_checks": {
+      "checks": [
+        {
+          "context": "Windows Build",
+          "app_id": 15368
+        },
+        {
+          "context": "Portable Rust",
+          "app_id": 15368
+        }
+      ],
+      "strict": false
+    },
+    "required_conversation_resolution": {
+      "enabled": true
+    }
+  },
+  "repos/owner/project/rules/branches/main": [],
+  "repos/owner/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs": {
+    "total_count": 4,
+    "check_runs": [
+      {
+        "id": 1,
+        "name": "Windows Build",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "status": "completed",
+        "conclusion": "success",
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 100
+        },
+        "started_at": "2026-11-04T01:00:00Z",
+        "completed_at": "2026-11-04T01:10:00Z",
+        "details_url": "https://github.com/owner/project/actions/runs/100/job/1"
+      },
+      {
+        "id": 2,
+        "name": "Portable Rust",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "status": "completed",
+        "conclusion": "success",
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 100
+        },
+        "started_at": "2026-11-04T01:00:00Z",
+        "completed_at": "2026-11-04T01:10:00Z",
+        "details_url": "https://github.com/owner/project/actions/runs/100/job/2"
+      },
+      {
+        "id": 3,
+        "name": "CodeQL Rust security analysis",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "status": "completed",
+        "conclusion": "success",
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 200
+        },
+        "started_at": "2026-11-04T01:00:00Z",
+        "completed_at": "2026-11-04T01:10:00Z",
+        "details_url": "https://github.com/owner/project/actions/runs/200/job/3"
+      },
+      {
+        "id": 4,
+        "name": "Gitleaks history scan",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "status": "completed",
+        "conclusion": "success",
+        "app": {
+          "id": 15368,
+          "slug": "github-actions"
+        },
+        "check_suite": {
+          "id": 200
+        },
+        "started_at": "2026-11-04T01:00:00Z",
+        "completed_at": "2026-11-04T01:10:00Z",
+        "details_url": "https://github.com/owner/project/actions/runs/200/job/4"
+      }
+    ]
+  },
+  "repos/owner/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/statuses": [],
+  "repos/owner/project/actions/runs": {
+    "total_count": 2,
+    "workflow_runs": [
+      {
+        "id": 100,
+        "workflow_id": 100,
+        "path": ".github/workflows/ci.yml",
+        "check_suite_id": 100,
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "event": "pull_request",
+        "run_attempt": 1,
+        "status": "completed",
+        "conclusion": "success",
+        "run_started_at": "2026-11-04T01:00:00Z",
+        "pull_requests": [
+          {
+            "number": 101
+          }
+        ]
+      },
+      {
+        "id": 200,
+        "workflow_id": 200,
+        "path": ".github/workflows/security-scanning.yml",
+        "check_suite_id": 200,
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "event": "pull_request",
+        "run_attempt": 1,
+        "status": "completed",
+        "conclusion": "success",
+        "run_started_at": "2026-11-04T01:00:00Z",
+        "pull_requests": [
+          {
+            "number": 101
+          }
+        ]
+      }
+    ]
+  },
+  "repos/owner/project/pulls/101/reviews": [
+    {
+      "id": 1,
+      "state": "APPROVED",
+      "user": {
+        "login": "independent",
+        "type": "User"
+      },
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "submitted_at": "2026-11-04T01:20:00Z",
+      "body": "Reviewed",
+      "html_url": "https://github.com/owner/project/pull/101#pullrequestreview-1"
+    }
+  ],
+  "repos/owner/project/pulls/101/files": [
+    {
+      "filename": "tools/classmesh-pr-audit/audit.py"
+    }
+  ],
+  "repos/owner/project/issues/101/comments": [],
+  "repos/owner/project/code-scanning/alerts": [],
+  "repos/owner/project/collaborators/independent/permission": {
+    "permission": "write"
+  },
+  "graphql": {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "reviewDecision": "APPROVED",
+          "reviewThreads": {
+            "nodes": [],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
+          }
+        }
+      }
+    }
+  },
+  "repos/owner/project/git/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+    "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "committer": {
+      "date": "2026-11-04T00:30:00Z"
+    }
+  },
+  "repos/owner/project/git/commits/dddddddddddddddddddddddddddddddddddddddd": {
+    "sha": "dddddddddddddddddddddddddddddddddddddddd",
+    "parents": [
+      {
+        "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      {
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ]
+  },
+  "repos/owner/project/actions/jobs/1": {
+    "id": 1,
+    "run_id": 100,
+    "run_attempt": 1,
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "completed",
+    "conclusion": "success"
+  },
+  "repos/owner/project/actions/jobs/1/logs": "##[group]Run actions/checkout@v6\n[command]/usr/bin/git log -1 --format=%H\ndddddddddddddddddddddddddddddddddddddddd\n",
+  "repos/owner/project/actions/jobs/2": {
+    "id": 2,
+    "run_id": 100,
+    "run_attempt": 1,
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "completed",
+    "conclusion": "success"
+  },
+  "repos/owner/project/actions/jobs/2/logs": "##[group]Run actions/checkout@v6\n[command]/usr/bin/git log -1 --format=%H\ndddddddddddddddddddddddddddddddddddddddd\n",
+  "repos/owner/project/actions/jobs/3": {
+    "id": 3,
+    "run_id": 200,
+    "run_attempt": 1,
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "completed",
+    "conclusion": "success"
+  },
+  "repos/owner/project/actions/jobs/3/logs": "##[group]Run actions/checkout@v6\n[command]/usr/bin/git log -1 --format=%H\ndddddddddddddddddddddddddddddddddddddddd\n",
+  "repos/owner/project/actions/jobs/4": {
+    "id": 4,
+    "run_id": 200,
+    "run_attempt": 1,
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "completed",
+    "conclusion": "success"
+  },
+  "repos/owner/project/actions/jobs/4/logs": "##[group]Run actions/checkout@v6\n[command]/usr/bin/git log -1 --format=%H\ndddddddddddddddddddddddddddddddddddddddd\n"
+}
