@@ -42,7 +42,7 @@ class GitHub:
         self.requests = 0
         self.circuit = None
 
-    def _call(self, arguments, source):
+    def _call(self, arguments, source, text_mode=False):
         if self.circuit:
             return unknown(self.circuit, source)
         remaining = self.deadline - time.monotonic()
@@ -84,6 +84,8 @@ class GitHub:
                 return known(None)
             code = {"401": "UNAUTHORIZED", "403": "FORBIDDEN", "404": "NOT_FOUND_OR_HIDDEN"}.get(status, "API_FAILED")
             return unknown(code, source)
+        if text_mode:
+            return known(process.stdout)
         if data is None:
             return unknown("INVALID_JSON", source)
         if isinstance(data, dict) and data.get("errors"):
@@ -102,6 +104,13 @@ class GitHub:
         if not isinstance(query, str) or not re.match(r"\s*query\b", query) or re.search(r"\b(mutation|subscription)\b", query):
             return unknown("READ_ONLY_VIOLATION", "graphql")
         return self._call(["--method", "POST", "graphql", "-f", "query=" + query], "graphql")
+
+    def get_text(self, endpoint):
+        # Only bounded job logs; capture, parse hashes, discard. Never terminal
+        # output or a disk download. New gh versions reject ANSI without this.
+        if not re.fullmatch(r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/jobs/[0-9]+/logs", endpoint):
+            return unknown("INVALID_LOG_ENDPOINT")
+        return self._call(["--method", "GET", endpoint, "--allow-escape-sequences"], endpoint, text_mode=True)
 
     def pages(self, endpoint, key=None):
         items = []
@@ -133,8 +142,9 @@ def combine_policy(classic, rules):
     if not is_known(classic) or not is_known(rules):
         return unknown("POLICY_UNAVAILABLE", "branch protection + rulesets")
     result = {"required_approvals": 0, "code_owner_review": False,
-              "last_push_approval": False, "conversation_resolution": False,
+              "last_push_approval": False, "conversation_resolution": False, "strict_checks": False,
               "required_checks": [], "unsupported_rules": []}
+    strict_values = []
     try:
         protection = classic["data"]
         if protection is not None:
@@ -149,6 +159,7 @@ def combine_policy(classic, rules):
             status = protection.get("required_status_checks")
             if status is not None:
                 result["required_checks"].extend(status["checks"])
+                strict_values.append(status.get("strict"))
             result["conversation_resolution"] = protection.get("required_conversation_resolution", {}).get("enabled", False)
         if not isinstance(rules["data"], list):
             raise ValueError
@@ -163,12 +174,14 @@ def combine_policy(classic, rules):
                 if params.get("required_reviewers"):
                     result["unsupported_rules"].append("required_reviewers")
             elif kind == "required_status_checks":
+                strict_values.append(rule["parameters"].get("strict_required_status_checks_policy"))
                 for check in rule["parameters"]["required_status_checks"]:
                     result["required_checks"].append({"context": check["context"], "app_id": check.get("integration_id")})
             elif kind not in ("deletion", "non_fast_forward", "copilot_code_review"):
                 result["unsupported_rules"].append(kind)
         if type(result["required_approvals"]) is not int or result["required_approvals"] < 0:
             raise ValueError
+        result["strict_checks"] = True if any(v is True for v in strict_values) else False if all(v is False for v in strict_values) else "UNKNOWN"
         for field in ("code_owner_review", "last_push_approval", "conversation_resolution"):
             if type(result[field]) is not bool:
                 raise ValueError
@@ -191,7 +204,7 @@ def review_threads(gh, repo, number):
           reviewDecision reviewThreads(first: 100, after: CURSOR) {
             pageInfo { hasNextPage endCursor }
             nodes { id isResolved isOutdated comments(first: 100) {
-              pageInfo { hasNextPage } nodes { body url author { login } }
+              pageInfo { hasNextPage } nodes { body url createdAt author { login } }
             } }
           }
         } } }'''
@@ -226,7 +239,7 @@ def fingerprint(pr):
         return None
     try:
         return (pr["number"], pr["head"]["sha"], pr["base"]["ref"], pr["base"]["sha"],
-                pr["draft"], pr["state"], pr["updated_at"])
+                pr["draft"], pr["state"], pr["updated_at"], pr.get("merge_commit_sha"))
     except (KeyError, TypeError):
         return None
 
@@ -242,7 +255,7 @@ def collect(gh, repo, target_branch):
     discovery = gh.pages(prefix + "/pulls?state=open&sort=created&direction=asc")
     snapshot = {"schema_version": 1, "repo": repo, "target_branch": target_branch,
                 "captured_at": utc_now(), "viewer": viewer, "discovery": discovery, "pulls": []}
-    policies, branches, permissions = {}, {}, {}
+    policies, branches, permissions, commits = {}, {}, {}, {}
     for initial in discovery.get("data", []):
         number = initial.get("number")
         if type(number) is not int or number <= 0:
@@ -275,6 +288,11 @@ def collect(gh, repo, target_branch):
         entry["policy"] = policies[branch]
         entry["checks"] = gh.pages(f"{prefix}/commits/{sha}/check-runs?filter=latest", "check_runs")
         entry["runs"] = gh.pages(f"{prefix}/actions/runs?head_sha={sha}&event=pull_request", "workflow_runs")
+        if sha not in commits:
+            commits[sha] = gh.get(f"{prefix}/git/commits/{sha}")
+        entry["head_commit"] = commits[sha]
+        from execution_evidence import collect_execution_proofs
+        entry["execution_proofs"] = collect_execution_proofs(gh, repo, pr, entry["checks"], entry["runs"], commits, entry["policy"])
         entry["statuses"] = gh.pages(f"{prefix}/commits/{sha}/statuses")
         entry["reviews"] = gh.pages(path + "/reviews")
         entry["threads"] = review_threads(gh, repo, number)
@@ -287,7 +305,7 @@ def collect(gh, repo, target_branch):
         for review in entry["reviews"].get("data", []):
             user = review.get("user") if isinstance(review.get("user"), dict) else {}
             login = user.get("login")
-            if review.get("state") != "APPROVED" or not isinstance(login, str):
+            if review.get("state") not in ("APPROVED", "CHANGES_REQUESTED") or not isinstance(login, str):
                 continue
             if login not in permissions:
                 raw = gh.get(f"{prefix}/collaborators/{quote(login, safe='')}/permission")
@@ -300,6 +318,18 @@ def collect(gh, repo, target_branch):
         stable = (is_known(detail) and is_known(after) and fingerprint(pr) is not None
                   and fingerprint(pr) == fingerprint(after["data"]))
         entry["stable"] = known(True) if stable else unknown("SNAPSHOT_CHANGED_OR_UNAVAILABLE", path)
+    from execution_evidence import declared_dependencies
+    open_ids = {entry["number"] for entry in snapshot["pulls"]}
+    dependency_cache = {}
+    for entry in snapshot["pulls"]:
+        pr = entry["detail"].get("data") or entry.get("initial", {})
+        body = pr.get("body", "") if isinstance(pr, dict) else ""
+        entry["dependency_details"] = {}
+        for number in declared_dependencies(body)[:32]:
+            if number not in open_ids:
+                if number not in dependency_cache:
+                    dependency_cache[number] = gh.get(f"{prefix}/pulls/{number}")
+                entry["dependency_details"][str(number)] = dependency_cache[number]
     for branch, before in branches.items():
         after = gh.get(f"{prefix}/branches/{quote(branch, safe='')}")
         try:

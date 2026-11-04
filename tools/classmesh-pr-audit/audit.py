@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent ClassMesh PR auditor. Only two report files are written."""
+"""Read-only ClassMesh decision support; writes only to the output directory."""
 import sys
 
 # Set before local imports, including when invoked without python -B.
@@ -15,7 +15,7 @@ import secrets
 import stat
 
 from github_source import GitHub, collect
-from policy import analyze, clean
+from policy import analyze_v2, compare_versions, clean
 
 
 def md(value):
@@ -23,6 +23,9 @@ def md(value):
 
 
 def render_markdown(report):
+    if report.get("schema_version") == 2:
+        from reporting import render
+        return render(report)
     lines = ["# تقرير جاهزية طلبات ClassMesh", "",
              "الوضع: **" + md(report["mode"]) + "** · جمع البيانات: **" + report["collection_state"] + "**",
              "", "المستودع: " + md(report["repo"]) + " · الفرع المستهدف: " + md(report["target_branch"]),
@@ -89,12 +92,12 @@ def render_markdown(report):
     return "\n".join(lines) + "\n"
 
 
-def write_reports(output_dir, report, markdown):
+def write_reports(output_dir, report, markdown, snapshot=None):
     """Confine writes to a pinned directory descriptor; reject linked targets.
 
     Existing parent must exist. /tmp's macOS ancestor symlink is fine, but the
-    output directory itself and the two report targets must not be symlinks.
-    Both files are staged before replacement; each replacement is atomic.
+    output directory itself and every target must not be symlinks.
+    All files are staged before replacement; each replacement is atomic.
     """
     root = Path(output_dir).absolute()
     if root.is_symlink():
@@ -104,6 +107,8 @@ def write_reports(output_dir, report, markdown):
     staged = []
     try:
         contents = {"report.json": json.dumps(report, ensure_ascii=False, indent=2) + "\n", "report.md": markdown}
+        if snapshot is not None:
+            contents["snapshot.json"] = json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n"
         for name in contents:
             try:
                 info = os.stat(name, dir_fd=directory, follow_symlinks=False)
@@ -140,6 +145,8 @@ def main(argv=None):
     parser.add_argument("--target-branch", default="main")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--fixture", help="Offline snapshot JSON; makes no GitHub calls")
+    parser.add_argument("--compare-v1", action="store_true", help="Include V1/V2 decisions from the same snapshot")
+    parser.add_argument("--save-snapshot", action="store_true", help="Save sanitized snapshot.json inside output directory")
     parser.add_argument("--timeout", type=float, default=20, help="Per request timeout, seconds (1..60)")
     parser.add_argument("--deadline", type=float, default=600, help="Total request budget, seconds (1..3600)")
     parser.add_argument("--max-requests", type=int, default=1200)
@@ -156,19 +163,21 @@ def main(argv=None):
             snapshot["mode"] = "FIXTURE_ONLY"
         else:
             snapshot = collect(GitHub(args.timeout, args.deadline, args.max_requests), args.repo, args.target_branch)
-        report = analyze(snapshot)
         # Remove known credential values too, even if they are not GitHub-shaped.
-        serialized = json.dumps(clean(report), ensure_ascii=False)
+        serialized = json.dumps(clean(snapshot), ensure_ascii=False)
         for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
             secret = os.environ.get(key)
             if secret:
                 serialized = serialized.replace(json.dumps(secret, ensure_ascii=False)[1:-1], "[REDACTED]")
-        report = json.loads(serialized)
-        write_reports(args.output_dir, report, render_markdown(report))
+        snapshot = json.loads(serialized)
+        report = analyze_v2(snapshot)
+        if args.compare_v1:
+            report["comparison"] = compare_versions(snapshot)
+        write_reports(args.output_dir, report, render_markdown(report), snapshot if args.save_snapshot else None)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         print("ERROR: INPUT_OR_OUTPUT_FAILED; no success report is claimed", file=sys.stderr)
         return 3
-    print(f"{report['collection_state']}: {report['summary']['total']} PRs; {report['summary']['ready_for_final_review']} READY_FOR_FINAL_REVIEW")
+    print(f"{report['collection_state']}: {report['summary']['total']} PRs; {report['summary']['merge_candidates']} READY_FOR_MERGE (not authorization)")
     return 2 if report["collection_state"] == "PARTIAL" else 0
 
 

@@ -80,7 +80,8 @@
           "updated_at": "2026-11-04T01:00:00Z",
           "requested_reviewers": [],
           "requested_teams": [],
-          "changed_files": 1
+          "changed_files": 1,
+          "merge_commit_sha": "dddddddddddddddddddddddddddddddddddddddd"
         }
       },
       "checks": {
@@ -262,7 +263,8 @@
               "app_id": null
             }
           ],
-          "unsupported_rules": []
+          "unsupported_rules": [],
+          "strict_checks": false
         }
       },
       "base_branch": {
@@ -274,6 +276,81 @@
       "stable": {
         "state": "KNOWN",
         "data": true
+      },
+      "head_commit": {
+        "state": "KNOWN",
+        "data": {
+          "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "committer": {
+            "date": "2026-11-04T00:30:00Z"
+          }
+        }
+      },
+      "execution_proofs": {
+        "1": {
+          "state": "KNOWN",
+          "data": {
+            "source": "GITHUB_ACTIONS_CHECKOUT_LOG",
+            "check_id": 1,
+            "run_id": 100,
+            "run_attempt": 1,
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+            "parents": [
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            "url": "https://github.com/owner/project/actions/runs/100/job/1"
+          }
+        },
+        "2": {
+          "state": "KNOWN",
+          "data": {
+            "source": "GITHUB_ACTIONS_CHECKOUT_LOG",
+            "check_id": 2,
+            "run_id": 100,
+            "run_attempt": 1,
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+            "parents": [
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            "url": "https://github.com/owner/project/actions/runs/100/job/2"
+          }
+        },
+        "3": {
+          "state": "KNOWN",
+          "data": {
+            "source": "GITHUB_ACTIONS_CHECKOUT_LOG",
+            "check_id": 3,
+            "run_id": 200,
+            "run_attempt": 1,
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+            "parents": [
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            "url": "https://github.com/owner/project/actions/runs/200/job/3"
+          }
+        },
+        "4": {
+          "state": "KNOWN",
+          "data": {
+            "source": "GITHUB_ACTIONS_CHECKOUT_LOG",
+            "check_id": 4,
+            "run_id": 200,
+            "run_attempt": 1,
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+            "parents": [
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            "url": "https://github.com/owner/project/actions/runs/200/job/4"
+          }
+        }
       }
     }
   ]

@@ -1,5 +1,7 @@
 """Pure conservative readiness policy. UNKNOWN is never an approval."""
 import re
+import hashlib
+import json
 from collections import Counter
 from urllib.parse import urlsplit
 
@@ -16,6 +18,21 @@ GATES = {
 CLASSIFICATIONS = ["DRAFT", "MERGE_CONFLICT", "CI_FAILED", "CI_PENDING",
                    "SECURITY_REVIEW_REQUIRED", "DEPENDENCY_BLOCKED", "MANUAL_ACCEPTANCE_REQUIRED"]
 SECURITY_WORDS = re.compile(r"security|vulnerab|CVE-|\bP[012]\b|privileg|trust.boundary|replay|أمن|امني|صلاحيات", re.I)
+
+
+def analyze_v2(snapshot):
+    from decisions import analyze_v2 as evaluate
+    return evaluate(snapshot)
+
+
+def compare_versions(snapshot):
+    """Both evaluators receive the same in-memory input, with a canonical hash."""
+    old, new = analyze(snapshot), analyze_v2(snapshot)
+    digest = hashlib.sha256(json.dumps(snapshot, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    return {"snapshot_sha256": digest, "v1_schema": 1, "v2_schema": 2,
+        "pull_requests": [{"number": b["number"], "v1_classifications": a["classifications"],
+            "v2_stage": b["readiness_stage"], "v2_classifications": b["classifications"],
+            "next_action": b["next_action"]} for a, b in zip(old["pull_requests"], new["pull_requests"])]}
 
 
 def redact(value):

@@ -392,7 +392,8 @@ class GitHubBoundaryTests(unittest.TestCase):
             self.assertEqual(command[5], "POST" if endpoint == "graphql" else "GET")
             if endpoint == "graphql":
                 self.assertTrue(command[-1].startswith("query=query "))
-            return subprocess.CompletedProcess(command, 0, json.dumps(routes[endpoint]), "")
+            payload = routes[endpoint]
+            return subprocess.CompletedProcess(command, 0, payload if endpoint.endswith("/logs") else json.dumps(payload), "")
 
         with patch("subprocess.run", side_effect=response):
             snapshot = self.source.collect(self.source.GitHub(), "owner/project", "main")
@@ -414,7 +415,7 @@ class GitHubBoundaryTests(unittest.TestCase):
                 reads += 1
                 if reads == 2:
                     value["head"]["sha"] = "d" * 40
-            return subprocess.CompletedProcess(command, 0, json.dumps(value), "")
+            return subprocess.CompletedProcess(command, 0, value if endpoint.endswith("/logs") else json.dumps(value), "")
 
         with patch("subprocess.run", side_effect=response):
             snapshot = self.source.collect(self.source.GitHub(), "owner/project", "main")

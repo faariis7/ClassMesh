@@ -32,7 +32,8 @@
       "updated_at": "2026-11-04T01:00:00Z",
       "requested_reviewers": [],
       "requested_teams": [],
-      "changed_files": 1
+      "changed_files": 1,
+      "merge_commit_sha": "dddddddddddddddddddddddddddddddddddddddd"
     }
   ],
   "repos/owner/project/pulls/101": {
@@ -64,7 +65,8 @@
     "updated_at": "2026-11-04T01:00:00Z",
     "requested_reviewers": [],
     "requested_teams": [],
-    "changed_files": 1
+    "changed_files": 1,
+    "merge_commit_sha": "dddddddddddddddddddddddddddddddddddddddd"
   },
   "repos/owner/project/branches/main": {
     "commit": {
@@ -87,7 +89,8 @@
           "context": "Portable Rust",
           "app_id": 15368
         }
-      ]
+      ],
+      "strict": false
     },
     "required_conversation_resolution": {
       "enabled": true
@@ -246,5 +249,58 @@
         }
       }
     }
-  }
+  },
+  "repos/owner/project/git/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+    "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "committer": {
+      "date": "2026-11-04T00:30:00Z"
+    }
+  },
+  "repos/owner/project/git/commits/dddddddddddddddddddddddddddddddddddddddd": {
+    "sha": "dddddddddddddddddddddddddddddddddddddddd",
+    "parents": [
+      {
+        "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      {
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ]
+  },
+  "repos/owner/project/actions/jobs/1": {
+    "id": 1,
+    "run_id": 100,
+    "run_attempt": 1,
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "completed",
+    "conclusion": "success"
+  },
+  "repos/owner/project/actions/jobs/1/logs": "##[group]Run actions/checkout@v6\n[command]/usr/bin/git log -1 --format=%H\ndddddddddddddddddddddddddddddddddddddddd\n",
+  "repos/owner/project/actions/jobs/2": {
+    "id": 2,
+    "run_id": 100,
+    "run_attempt": 1,
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "completed",
+    "conclusion": "success"
+  },
+  "repos/owner/project/actions/jobs/2/logs": "##[group]Run actions/checkout@v6\n[command]/usr/bin/git log -1 --format=%H\ndddddddddddddddddddddddddddddddddddddddd\n",
+  "repos/owner/project/actions/jobs/3": {
+    "id": 3,
+    "run_id": 200,
+    "run_attempt": 1,
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "completed",
+    "conclusion": "success"
+  },
+  "repos/owner/project/actions/jobs/3/logs": "##[group]Run actions/checkout@v6\n[command]/usr/bin/git log -1 --format=%H\ndddddddddddddddddddddddddddddddddddddddd\n",
+  "repos/owner/project/actions/jobs/4": {
+    "id": 4,
+    "run_id": 200,
+    "run_attempt": 1,
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "completed",
+    "conclusion": "success"
+  },
+  "repos/owner/project/actions/jobs/4/logs": "##[group]Run actions/checkout@v6\n[command]/usr/bin/git log -1 --format=%H\ndddddddddddddddddddddddddddddddddddddddd\n"
 }
