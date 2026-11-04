@@ -138,6 +138,9 @@ impl TeacherEguiShell {
             if matches!(self.pending_action, Some(TeacherUiAction::Focus(_))) {
                 self.pending_action = None;
             }
+            // Diagnostics intents carry a source but no session epoch.
+            // A reconnect must not replay a pre-reconnect override.
+            self.retire_pending_diagnostics_override();
         }
         // A new control session, source or missing optional v0.8
         // diagnostics capability invalidates all previously visible data.
@@ -164,6 +167,7 @@ impl TeacherEguiShell {
             self.pending_action = None;
         }
         self.teacher_interaction_context = None;
+        self.retire_pending_diagnostics_override();
         self.playback = None;
         reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
     }
@@ -306,6 +310,7 @@ impl TeacherEguiShell {
         let view = self.diagnostics_model.project(snapshot)?;
         if self.diagnostics.as_ref().map(|current| current.source_id) != Some(view.source_id) {
             self.diagnostics_draft = DiagnosticsOverrideDraft::default();
+            self.retire_pending_diagnostics_override();
             if self
                 .playback
                 .as_ref()
@@ -318,8 +323,25 @@ impl TeacherEguiShell {
         Ok(())
     }
 
+    fn retire_pending_diagnostics_override(&mut self) {
+        // A newly authenticated snapshot for the same source must not revive
+        // an intent queued before the old snapshot was revoked (ABA).
+        // Preserve local Automatic cleanup, including during disconnects.
+        if matches!(
+            self.pending_action.as_ref(),
+            Some(TeacherUiAction::Diagnostics(action))
+                if !matches!(
+                    action.request,
+                    crate::device_diagnostics::TroubleshootingOverrideRequest::Automatic
+                )
+        ) {
+            self.pending_action = None;
+        }
+    }
+
     pub fn clear_diagnostics(&mut self) {
         self.diagnostics = None;
+        self.retire_pending_diagnostics_override();
         // The trusted source was removed; never resurrect previously
         // authenticated counters after a new device snapshot appears.
         self.playback = None;
@@ -377,7 +399,18 @@ impl TeacherEguiShell {
         // The engine remains responsible for authoritative authorization and
         // physical-path evidence at apply time.
         if let TeacherUiAction::Diagnostics(diagnostics) = &action {
-            if self.classroom.selected() != Some(diagnostics.source_id)
+            // The click was offered by a selected, visible diagnostics snapshot.
+            // Revoking/replacing that snapshot must retire queued non-cleanup
+            // overrides even when the classroom row still reports Online.
+            // Automatic remains a local cleanup request during disconnects.
+            let cleanup = matches!(
+                diagnostics.request,
+                crate::device_diagnostics::TroubleshootingOverrideRequest::Automatic
+            );
+            if (!cleanup
+                && self.diagnostics.as_ref().map(|view| view.source_id)
+                    != Some(diagnostics.source_id))
+                || self.classroom.selected() != Some(diagnostics.source_id)
                 || !self.classroom.rows().into_iter().any(|row| {
                     row.source_id == diagnostics.source_id
                         && crate::ui_diagnostics::override_action_available(
@@ -1517,6 +1550,159 @@ mod tests {
         assert_eq!(app.staged_file_candidate, None);
         app.set_file_pull_context(context);
         assert_eq!(app.staged_file_candidate, None);
+    }
+
+    #[test]
+    fn queued_diagnostics_override_is_retired_on_control_session_rotation() {
+        use crate::device_diagnostics::TroubleshootingOverrideRequest;
+        use crate::ui_shell::TeacherDiagnosticsUiAction;
+
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let row = app
+            .classroom
+            .rows()
+            .into_iter()
+            .find(|row| row.source_id == MonitoringSourceId(7))
+            .expect("selected classroom row");
+        let refresh = |app: &mut TeacherEguiShell| {
+            app.update_diagnostics(DeviceDiagnosticsSnapshot {
+                device: &row,
+                quality_sample: None,
+                active_path: None,
+                topology_evidence: TransportTopologyEvidence::default(),
+                diagnostic_codes: &[],
+            })
+            .expect("valid diagnostics");
+        };
+        let original = interaction_context(BTreeSet::new());
+        let quality = TeacherUiAction::Diagnostics(TeacherDiagnosticsUiAction {
+            source_id: MonitoringSourceId(7),
+            request: TroubleshootingOverrideRequest::Quality {
+                stream_kind: classmesh_core::StreamKind::Monitoring,
+                tier: classmesh_core::adaptation::QualityTier::Low,
+            },
+        });
+        app.set_teacher_interaction_context(original.clone());
+        refresh(&mut app);
+        app.queue_action(quality.clone());
+        app.set_teacher_interaction_context(original.clone());
+        assert_eq!(
+            app.take_pending_action(),
+            Some(quality.clone()),
+            "a same-session refresh must not discard a valid override"
+        );
+
+        app.queue_action(quality.clone());
+        let mut replacement = original.clone();
+        replacement.control_session_id += 1;
+        app.set_teacher_interaction_context(replacement);
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "a queued override from an old control session must not reach the new session"
+        );
+
+        app.queue_action(quality);
+        app.clear_teacher_interaction_context();
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "disconnect must retire a queued non-cleanup override"
+        );
+
+        let cleanup = TeacherUiAction::Diagnostics(TeacherDiagnosticsUiAction {
+            source_id: MonitoringSourceId(7),
+            request: TroubleshootingOverrideRequest::Automatic,
+        });
+        app.queue_action(cleanup.clone());
+        assert_eq!(
+            app.take_pending_action(),
+            Some(cleanup),
+            "local Automatic cleanup remains available after disconnect"
+        );
+    }
+
+    #[test]
+    fn queued_diagnostics_override_does_not_outlive_its_visible_snapshot() {
+        use crate::device_diagnostics::TroubleshootingOverrideRequest;
+        use crate::ui_shell::TeacherDiagnosticsUiAction;
+
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let row = app
+            .classroom
+            .rows()
+            .into_iter()
+            .find(|row| row.source_id == MonitoringSourceId(7))
+            .expect("selected classroom row");
+        let update = |app: &mut TeacherEguiShell, device: &ClassroomDeviceRow| {
+            app.update_diagnostics(DeviceDiagnosticsSnapshot {
+                device,
+                quality_sample: None,
+                active_path: None,
+                topology_evidence: TransportTopologyEvidence::default(),
+                diagnostic_codes: &[],
+            })
+            .expect("valid diagnostics");
+        };
+        let quality = TeacherUiAction::Diagnostics(TeacherDiagnosticsUiAction {
+            source_id: MonitoringSourceId(7),
+            request: TroubleshootingOverrideRequest::Quality {
+                stream_kind: classmesh_core::StreamKind::Monitoring,
+                tier: classmesh_core::adaptation::QualityTier::Low,
+            },
+        });
+
+        update(&mut app, &row);
+        app.queue_action(quality.clone());
+        app.clear_diagnostics();
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "a revoked diagnostics snapshot must retire its queued override"
+        );
+
+        update(&mut app, &row);
+        app.queue_action(quality.clone());
+        app.clear_diagnostics();
+        update(&mut app, &row);
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "restoring the same source must not revive a revoked queued override"
+        );
+
+        update(&mut app, &row);
+        app.queue_action(quality.clone());
+        let mut replacement = row.clone();
+        replacement.source_id = MonitoringSourceId(8);
+        update(&mut app, &replacement);
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "diagnostics for a different source must retire the old override"
+        );
+
+        update(&mut app, &row);
+        app.queue_action(quality.clone());
+        assert_eq!(
+            app.take_pending_action(),
+            Some(quality),
+            "unchanged selected diagnostics must retain an allowed override"
+        );
+
+        let cleanup = TeacherUiAction::Diagnostics(TeacherDiagnosticsUiAction {
+            source_id: MonitoringSourceId(7),
+            request: TroubleshootingOverrideRequest::Automatic,
+        });
+        app.queue_action(cleanup.clone());
+        app.clear_diagnostics();
+        assert_eq!(
+            app.take_pending_action(),
+            Some(cleanup),
+            "automatic cleanup must remain available after diagnostics revocation"
+        );
     }
 
     #[test]

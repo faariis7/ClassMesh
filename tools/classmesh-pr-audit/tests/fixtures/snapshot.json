@@ -1,0 +1,357 @@
+{
+  "schema_version": 1,
+  "repo": "owner/project",
+  "target_branch": "main",
+  "viewer": {
+    "state": "KNOWN",
+    "data": "owner"
+  },
+  "captured_at": "2026-11-04T02:00:00Z",
+  "discovery": {
+    "state": "KNOWN",
+    "data": [
+      {
+        "number": 101,
+        "title": "Independent reporting tool",
+        "draft": false,
+        "state": "open",
+        "html_url": "https://github.com/owner/project/pull/101",
+        "user": {
+          "login": "author"
+        },
+        "body": "Adds an offline report.",
+        "head": {
+          "ref": "feature",
+          "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "repo": {
+            "full_name": "owner/project"
+          }
+        },
+        "base": {
+          "ref": "main",
+          "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "repo": {
+            "full_name": "owner/project"
+          }
+        },
+        "mergeable": true,
+        "mergeable_state": "clean",
+        "updated_at": "2026-11-04T01:00:00Z",
+        "requested_reviewers": [],
+        "requested_teams": [],
+        "changed_files": 1
+      }
+    ]
+  },
+  "inventory_stable": {
+    "state": "KNOWN",
+    "data": true
+  },
+  "pulls": [
+    {
+      "detail": {
+        "state": "KNOWN",
+        "data": {
+          "number": 101,
+          "title": "Independent reporting tool",
+          "draft": false,
+          "state": "open",
+          "html_url": "https://github.com/owner/project/pull/101",
+          "user": {
+            "login": "author"
+          },
+          "body": "Adds an offline report.",
+          "head": {
+            "ref": "feature",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "repo": {
+              "full_name": "owner/project"
+            }
+          },
+          "base": {
+            "ref": "main",
+            "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "repo": {
+              "full_name": "owner/project"
+            }
+          },
+          "mergeable": true,
+          "mergeable_state": "clean",
+          "updated_at": "2026-11-04T01:00:00Z",
+          "requested_reviewers": [],
+          "requested_teams": [],
+          "changed_files": 1,
+          "merge_commit_sha": "dddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "checks": {
+        "state": "KNOWN",
+        "data": [
+          {
+            "id": 1,
+            "name": "Windows Build",
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "status": "completed",
+            "conclusion": "success",
+            "app": {
+              "id": 15368,
+              "slug": "github-actions"
+            },
+            "check_suite": {
+              "id": 100
+            },
+            "started_at": "2026-11-04T01:00:00Z",
+            "completed_at": "2026-11-04T01:10:00Z",
+            "details_url": "https://github.com/owner/project/actions/runs/100/job/1"
+          },
+          {
+            "id": 2,
+            "name": "Portable Rust",
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "status": "completed",
+            "conclusion": "success",
+            "app": {
+              "id": 15368,
+              "slug": "github-actions"
+            },
+            "check_suite": {
+              "id": 100
+            },
+            "started_at": "2026-11-04T01:00:00Z",
+            "completed_at": "2026-11-04T01:10:00Z",
+            "details_url": "https://github.com/owner/project/actions/runs/100/job/2"
+          },
+          {
+            "id": 3,
+            "name": "CodeQL Rust security analysis",
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "status": "completed",
+            "conclusion": "success",
+            "app": {
+              "id": 15368,
+              "slug": "github-actions"
+            },
+            "check_suite": {
+              "id": 200
+            },
+            "started_at": "2026-11-04T01:00:00Z",
+            "completed_at": "2026-11-04T01:10:00Z",
+            "details_url": "https://github.com/owner/project/actions/runs/200/job/3"
+          },
+          {
+            "id": 4,
+            "name": "Gitleaks history scan",
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "status": "completed",
+            "conclusion": "success",
+            "app": {
+              "id": 15368,
+              "slug": "github-actions"
+            },
+            "check_suite": {
+              "id": 200
+            },
+            "started_at": "2026-11-04T01:00:00Z",
+            "completed_at": "2026-11-04T01:10:00Z",
+            "details_url": "https://github.com/owner/project/actions/runs/200/job/4"
+          }
+        ]
+      },
+      "statuses": {
+        "state": "KNOWN",
+        "data": []
+      },
+      "runs": {
+        "state": "KNOWN",
+        "data": [
+          {
+            "id": 100,
+            "workflow_id": 100,
+            "path": ".github/workflows/ci.yml",
+            "check_suite_id": 100,
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "event": "pull_request",
+            "run_attempt": 1,
+            "status": "completed",
+            "conclusion": "success",
+            "run_started_at": "2026-11-04T01:00:00Z",
+            "pull_requests": [
+              {
+                "number": 101
+              }
+            ]
+          },
+          {
+            "id": 200,
+            "workflow_id": 200,
+            "path": ".github/workflows/security-scanning.yml",
+            "check_suite_id": 200,
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "event": "pull_request",
+            "run_attempt": 1,
+            "status": "completed",
+            "conclusion": "success",
+            "run_started_at": "2026-11-04T01:00:00Z",
+            "pull_requests": [
+              {
+                "number": 101
+              }
+            ]
+          }
+        ]
+      },
+      "reviews": {
+        "state": "KNOWN",
+        "data": [
+          {
+            "id": 1,
+            "state": "APPROVED",
+            "user": {
+              "login": "independent",
+              "type": "User"
+            },
+            "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "submitted_at": "2026-11-04T01:20:00Z",
+            "body": "Reviewed",
+            "html_url": "https://github.com/owner/project/pull/101#pullrequestreview-1"
+          }
+        ]
+      },
+      "permissions": {
+        "independent": {
+          "state": "KNOWN",
+          "data": "write"
+        }
+      },
+      "threads": {
+        "state": "KNOWN",
+        "data": {
+          "review_decision": "APPROVED",
+          "threads": []
+        }
+      },
+      "comments": {
+        "state": "KNOWN",
+        "data": []
+      },
+      "files": {
+        "state": "KNOWN",
+        "data": [
+          {
+            "filename": "tools/classmesh-pr-audit/audit.py"
+          }
+        ]
+      },
+      "code_scanning": {
+        "state": "KNOWN",
+        "data": []
+      },
+      "policy": {
+        "state": "KNOWN",
+        "data": {
+          "required_approvals": 1,
+          "code_owner_review": false,
+          "last_push_approval": false,
+          "conversation_resolution": true,
+          "required_checks": [
+            {
+              "context": "Windows Build",
+              "app_id": null
+            },
+            {
+              "context": "Portable Rust",
+              "app_id": null
+            }
+          ],
+          "unsupported_rules": [],
+          "strict_checks": false
+        }
+      },
+      "base_branch": {
+        "state": "KNOWN",
+        "data": {
+          "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "stable": {
+        "state": "KNOWN",
+        "data": true
+      },
+      "head_commit": {
+        "state": "KNOWN",
+        "data": {
+          "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "committer": {
+            "date": "2026-11-04T00:30:00Z"
+          }
+        }
+      },
+      "execution_proofs": {
+        "1": {
+          "state": "KNOWN",
+          "data": {
+            "source": "GITHUB_ACTIONS_CHECKOUT_LOG",
+            "check_id": 1,
+            "run_id": 100,
+            "run_attempt": 1,
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+            "parents": [
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            "url": "https://github.com/owner/project/actions/runs/100/job/1"
+          }
+        },
+        "2": {
+          "state": "KNOWN",
+          "data": {
+            "source": "GITHUB_ACTIONS_CHECKOUT_LOG",
+            "check_id": 2,
+            "run_id": 100,
+            "run_attempt": 1,
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+            "parents": [
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            "url": "https://github.com/owner/project/actions/runs/100/job/2"
+          }
+        },
+        "3": {
+          "state": "KNOWN",
+          "data": {
+            "source": "GITHUB_ACTIONS_CHECKOUT_LOG",
+            "check_id": 3,
+            "run_id": 200,
+            "run_attempt": 1,
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+            "parents": [
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            "url": "https://github.com/owner/project/actions/runs/200/job/3"
+          }
+        },
+        "4": {
+          "state": "KNOWN",
+          "data": {
+            "source": "GITHUB_ACTIONS_CHECKOUT_LOG",
+            "check_id": 4,
+            "run_id": 200,
+            "run_attempt": 1,
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "checkout_sha": "dddddddddddddddddddddddddddddddddddddddd",
+            "parents": [
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            "url": "https://github.com/owner/project/actions/runs/200/job/4"
+          }
+        }
+      }
+    }
+  ]
+}
