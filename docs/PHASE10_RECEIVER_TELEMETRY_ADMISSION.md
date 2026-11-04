@@ -1041,3 +1041,19 @@ dispatcher, or establish the PrincipalId-to-monitoring-source identity mapping.
 A trusted session owner must supply the context and feed the verified result;
 without it, the panel remains inactive. There is no production opt-in change,
 RTT/loss/quality inference, physical two-host test or Phase 10G completion.
+
+## Teacher control-envelope replay hardening
+
+The read-only Teacher playback diagnostic ledger now remembers the strictly
+increasing *outer* authenticated ControlEnvelope.sequence separately from the
+inner Worker receiver generation/sequence. An earlier or equal outer envelope
+is rejected before any visible counters, freshness time, or replay state can
+change, even if its inner receiver sequence is made artificially larger.
+The receiver generation may change and its own inner sequence may reset, but
+the QUIC control session's outer envelope sequence must still advance.
+Only successfully admitted playback diagnostics advance the ledger's outer
+sequence; unrelated control frames belong to the session dispatcher, not
+this playback-only ledger. Exact binding revocation clears both counters
+and the outer-sequence watermark. This extra playback-specific check does
+not replace the central control channel's replay validation for other
+message types and does not activate production telemetry.
