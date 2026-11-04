@@ -75,6 +75,7 @@ def enrich(pr, entry, snapshot, collection_gaps):
                 or category == "CI_PENDING" and any(g["state"] == "PENDING" for g in pr["ci"].values())
                 or category == "DEPENDENCY_BLOCKED" and (deps["parents"] or deps["closed_unmerged_parents"] or deps["state"] == "CYCLE")
                 or code.startswith("CHANGES_REQUESTED:") or code == "UNRESOLVED_THREADS"
+                or code == "REQUIRED_REVIEW_UNSATISFIED" and review_decision == "CHANGES_REQUESTED"
                 or code == "BASE_REVALIDATION_REQUIRED" and base["state"] == "INTEGRATION_STALE"
                 or code == "SECURITY_EVIDENCE_REVIEW" and security == "CONFIRMED_BLOCKER"):
             technical.append(b)
@@ -95,13 +96,26 @@ def enrich(pr, entry, snapshot, collection_gaps):
     if not pr["classifications"]:
         pr["classifications"] = [stage]
     ci_states = [g["state"] for g in pr["ci"].values()]
+    review_state = "SATISFIED"
+    if pr["reviews"]["state"] == "UNKNOWN" or not branch_policy:
+        review_state = "UNKNOWN"
+    elif review_decision == "CHANGES_REQUESTED" or any(b["code"].startswith("CHANGES_REQUESTED:") for b in pr["blockers"]):
+        review_state = "UNSATISFIED"
+    elif any(b["code"] in REVIEW_CODES - {"SECURITY_EVIDENCE_REVIEW"} for b in pr["blockers"]):
+        review_state = "REVIEW_REQUIRED"
+    merge_state = "SATISFIED"
+    if (type(pr["draft"]) is not bool or type(pr["mergeable"]) is not bool or pr["reviews"]["state"] == "UNKNOWN"
+            or pr["mergeable_state"] not in ("clean", "dirty") and not explained):
+        merge_state = "UNKNOWN"
+    elif pr["draft"] or not pr["mergeable"] or pr["reviews"]["unresolved_threads"]:
+        merge_state = "UNSATISFIED"
     conditions = [condition("ci", "SATISFIED" if all(s == "SUCCESS" for s in ci_states) else "UNKNOWN" if "UNKNOWN" in ci_states else "UNSATISFIED", "كل فحص إلزامي مرتبط بـHEAD وتشغيله الحالي"),
         condition("base", "SATISFIED" if base["state"] in ("HEAD_ONLY", "INTEGRATION_CURRENT") else "UNSATISFIED" if base["state"] == "INTEGRATION_STALE" else "UNKNOWN", base["reason"]),
-        condition("independent_reviews", "UNKNOWN" if pr["reviews"]["state"] == "UNKNOWN" or not branch_policy else "REVIEW_REQUIRED" if any(b["code"] in REVIEW_CODES - {"SECURITY_EVIDENCE_REVIEW"} for b in pr["blockers"]) else "UNSATISFIED" if any(b["code"].startswith("CHANGES_REQUESTED:") for b in pr["blockers"]) else "SATISFIED", "APPROVED مستقلة وحديثة؛ COMMENTED وصاحب الحساب لا يُحتسبان"),
+        condition("independent_reviews", review_state, "APPROVED مستقلة وحديثة؛ COMMENTED وصاحب الحساب لا يُحتسبان"),
         condition("security", "SATISFIED" if security == "CLEAR" else "UNSATISFIED" if security == "CONFIRMED_BLOCKER" else security, "الأمن: " + security),
         condition("dependencies", "SATISFIED" if deps["state"] == "CLEAR" else "UNKNOWN" if deps["state"] == "UNKNOWN" else "UNSATISFIED", "الأصل قبل التابع"),
         condition("manual_acceptance", "SATISFIED" if pr["manual_acceptance"]["state"] == "NOT_APPLICABLE" else "UNKNOWN", pr["manual_acceptance"]["reason"]),
-        condition("merge_and_threads", "UNSATISFIED" if pr["draft"] is True or pr["mergeable"] is False or pr["reviews"]["unresolved_threads"] else "SATISFIED", "Draft والتعارض والخيوط المفتوحة تمنع التقدم"),
+        condition("merge_and_threads", merge_state, "Draft والتعارض والخيوط المفتوحة تمنع التقدم"),
         condition("evidence_completeness", "UNKNOWN" if pr["missing_evidence"] else "SATISFIED", "يشمل قواعد الحماية وثبات جمع البيانات والصلاحيات")]
     pr["conditions"] = conditions
     pr["required_evidence"] = [{"condition": c["name"], "state": c["state"], "description": c["reason"]} for c in conditions if c["state"] != "SATISFIED"]
@@ -117,7 +131,7 @@ def choose_action(pr):
         (pr["security"]["confirmed_blockers"] > 0, "REQUEST_SECURITY_REVIEW", "عائق أمني مسجل على النسخة الحالية؛ اطلب تقييمًا مستقلًا قبل التقدم", "COORDINATION_LEAD"),
         ("CI_FAILED" in categories, "FIX_FAILED_CI", "حلل سجل الوظيفة الفاشلة وأصلح السبب ثم اختبر HEAD الجديد", "BRANCH_DEVELOPER"),
         ("MERGE_CONFLICT" in categories, "RESOLVE_CONFLICT", "حل تعارض الأساس في الفرع المسؤول وأعد جميع الفحوص", "BRANCH_DEVELOPER"),
-        (any(c.startswith("CHANGES_REQUESTED:") for c in codes) or "UNRESOLVED_THREADS" in codes, "RESOLVE_REVIEW_THREADS", "عالج طلبات المراجعة واحصل على حسم موثق للخيوط", "BRANCH_DEVELOPER"),
+        (pr["reviews"]["github_review_decision"] == "CHANGES_REQUESTED" or any(c.startswith("CHANGES_REQUESTED:") for c in codes) or "UNRESOLVED_THREADS" in codes, "RESOLVE_REVIEW_THREADS", "عالج طلبات المراجعة واحصل على حسم موثق للخيوط", "BRANCH_DEVELOPER"),
         (pr["dependencies"]["state"] != "CLEAR", "WAIT_FOR_DEPENDENCIES", "عالج الأصل أو الدورة أو الأب المجهول أولًا، ثم حدّث التابع وأعد فحصه", "COORDINATION_LEAD"),
         (pr["base_validation"]["state"] == "INTEGRATION_STALE", "REVALIDATE_BASE", "اختبر نسخة تكامل مع الأساس الحالي؛ مجرد إعادة تشغيل النسخة القديمة لا يكفي", "BRANCH_DEVELOPER"),
         ("DRAFT" in categories, "FINISH_DRAFT", "أكمل نطاق الطلب ثم اعرضه للمراجعة", "BRANCH_DEVELOPER"),

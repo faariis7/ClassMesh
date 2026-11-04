@@ -107,6 +107,10 @@ def assess_security(entry, pr, snapshot):
                 classification = "UNKNOWN"
             note("CODE_SCANNING", classification, "حالة GitHub وربط التنبيه بالنسخة الحالية؛ الربط المفقود لا يُخمن",
                  alert.get("html_url"), number=alert.get("number", "UNKNOWN"), observed_commit_sha=sha or "UNKNOWN")
+    invalid_sources = [g["field"] for g in pr["missing_evidence"] if g["field"] in
+                       ("comments", "reviews", "threads", "files", "code_scanning")]
+    if invalid_sources:
+        note("API_SOURCE", "UNKNOWN", "مصادر التقييم غير مكتملة أو غير صالحة: " + ", ".join(invalid_sources), pr["url"])
     states = {n["classification"] for n in notes}
     incomplete = any(pr["ci"][name]["state"] != "SUCCESS" for name in ("CodeQL", "Gitleaks"))
     assessment = next((s for s in ("CONFIRMED_BLOCKER", "UNKNOWN", "REVIEW_REQUIRED") if s in states), None)
