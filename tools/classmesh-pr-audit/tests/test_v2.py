@@ -196,6 +196,19 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(result["security"]["notes"][0]["classification"], "HISTORICAL_NOTE")
         self.assertEqual(result["priority"]["factors"]["confirmed_security"], 0)
 
+    def test_edited_old_security_comment_needs_current_review(self):
+        self.entry["comments"]["data"] = [{"body": "Security concern added today", "created_at": "2020-01-01T00:00:00Z",
+            "updated_at": "2026-11-04T01:00:00Z", "html_url": "https://github.com/owner/project/pull/101#issuecomment-1"}]
+        self.assertEqual(self.result()["security"]["notes"][0]["classification"], "REVIEW_REQUIRED")
+
+    def test_unknown_or_wrong_head_timestamp_cannot_downgrade_security_note(self):
+        self.entry["comments"]["data"] = [{"body": "Security", "created_at": "2020-01-01T00:00:00Z",
+            "html_url": "https://github.com/owner/project/pull/101#issuecomment-1"}]
+        for evidence in (source.unknown("FORBIDDEN", data={"sha": "a" * 40, "committer": {"date": "2099-01-01T00:00:00Z"}}),
+                source.known({"sha": "c" * 40, "committer": {"date": "2099-01-01T00:00:00Z"}})):
+            self.entry["head_commit"] = evidence
+            self.assertEqual(self.result()["security"]["notes"][0]["classification"], "REVIEW_REQUIRED")
+
     def test_resolved_text_is_not_resolution_evidence(self):
         self.entry["threads"]["data"]["threads"] = [{"id": "T", "isResolved": False, "isOutdated": True,
             "comments": [{"body": "Security issue resolved", "url": "https://github.com/owner/project/pull/101#discussion_r1"}]}]
