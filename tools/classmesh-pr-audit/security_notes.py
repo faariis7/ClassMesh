@@ -17,6 +17,10 @@ def assess_security(entry, pr, snapshot):
     notes = []
     head = obj(obj(entry.get("head_commit")).get("data"))
     committed = timestamp(obj(head.get("committer")).get("date") or obj(obj(head.get("commit")).get("committer")).get("date"))
+    captured = timestamp(snapshot.get("captured_at"))
+    if (not is_known(entry.get("head_commit")) or head.get("sha") != pr["head_sha"]
+            or committed is None or captured is None or committed > captured):
+        committed = None
 
     def note(kind, classification, reason, source_url, body="", **extra):
         notes.append({"source": kind, "classification": classification, "reason": reason,
@@ -28,6 +32,10 @@ def assess_security(entry, pr, snapshot):
             return
         link = url(item.get(link_key))
         date = timestamp(item.get("created_at") or item.get("createdAt") or item.get("submitted_at"))
+        edited = item.get("updated_at") or item.get("updatedAt")
+        if edited is not None:
+            updated = timestamp(edited)
+            date = max(date, updated) if date is not None and updated is not None else None
         classification, reason = forced or ("REVIEW_REQUIRED", "إشارة نصية فقط؛ يلزم تقييم بشري، ولا تثبت ثغرة")
         if forced is None and date is not None and committed is not None and date < committed:
             classification, reason = "HISTORICAL_NOTE", "تاريخ الملاحظة يسبق تاريخ HEAD المسجل؛ لا يعني أنها حُلت"

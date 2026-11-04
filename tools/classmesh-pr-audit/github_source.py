@@ -204,7 +204,7 @@ def review_threads(gh, repo, number):
           reviewDecision reviewThreads(first: 100, after: CURSOR) {
             pageInfo { hasNextPage endCursor }
             nodes { id isResolved isOutdated comments(first: 100) {
-              pageInfo { hasNextPage } nodes { body url createdAt author { login } }
+              pageInfo { hasNextPage } nodes { body url createdAt updatedAt author { login } }
             } }
           }
         } } }'''
