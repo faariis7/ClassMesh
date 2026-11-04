@@ -48,7 +48,7 @@ paired live workload. No missing evidence was promoted to success.
   only during this collection, keyed by repository/run/attempt. Bind every job
   ID, head, attempt and conclusion, and still inspect each individual job log.
   Commit, branch and policy caches remain limited to one collection.
-- Reserve `2 * PRs + distinct bases + 2` requests and up to 20% of remaining
+- Reserve `2 * PRs + distinct bases + distinct reviewers + 2` requests and up to 20% of remaining
   time (maximum 60 seconds) during execution-proof collection for closeout.
   Exhausted proof budget yields UNKNOWN, never success. Large paginated reviews
   may need more than this estimate; closeout can still fail explicitly.
@@ -62,7 +62,8 @@ paired live workload. No missing evidence was promoted to success.
 
 ## TDD and local verification
 
-Baseline: **121 tests**. Final: **150 tests** (all original tests retained).
+Initial V2.1 delivery: **121 → 150 tests** (all original tests retained).
+The subsequent required review fix below increases the suite to **162 tests**.
 
 | Cycle | RED observed before implementation | GREEN |
 | --- | --- | --- |
@@ -95,7 +96,7 @@ Defaults: per-call timeout 20s, overall deadline 600s, maximum 1200 requests.
 One serial live before/after pair on 2026-11-04; not a statistical latency SLA.
 Read-only GET/query calls, no requested data omitted, no API failures or skips.
 
-| Measure | V2 | V2.1 |
+| Measure | V2 | Initial V2.1 |
 | --- | ---: | ---: |
 | Actual API requests | 254 | 224 |
 | Wall seconds | 207.048 | 196.883 |
@@ -135,3 +136,114 @@ retain the evidence needed to distinguish a future occurrence.
 Primary API references: [list PRs](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests),
 [jobs for a specific attempt](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt),
 [GitHub API best practices](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api).
+
+
+## Review fix: reviewer permission closeout (2026-11-05)
+
+The review reproduced a real readiness bug in PR #687 at
+`1a4e42f5d060d5bfd193b84bc36fc84238c16317`: the collector cached an initial
+`write` permission, then revalidated the APPROVED review without revalidating
+its author's authority. A closing `read` permission was never requested;
+READY_FOR_MERGE incorrectly retained the opening approval.
+
+The fix stays on the same PR and only changes auditor files. Each observed
+APPROVED/CHANGES_REQUESTED reviewer's permission is read again during closeout.
+Opening and closing caches are separate, per-collection, case-insensitive maps;
+PRs sharing a reviewer share one fresh closing observation, never an opening
+one. The request reserve now includes the number of distinct permission keys.
+A new reviewer appearing only at closeout already makes reviews UNKNOWN and is
+not accepted through the old permission map.
+
+`stability["reviewer_permission:<login>"]` retains both permission observations:
+
+- Same sufficient permission: KNOWN / ELIGIBLE; all existing independence,
+  current HEAD, review-decision and security requirements still apply.
+- Same insufficient permission: KNOWN / INSUFFICIENT; no independent approval.
+- Any permission change: UNKNOWN / REVIEWER_PERMISSION_CHANGED, including
+  write → read and write → admin. No opening approval can remain counted.
+- Either failed read: UNKNOWN / REVIEWER_PERMISSION_UNAVAILABLE, with the
+  original endpoint/cause (e.g. TIMEOUT or FORBIDDEN) retained in observations.
+- Missing/unrecognized permission: INVALID_REVIEWER_PERMISSION, not an assumed
+  read role and not permission to approve. GitHub base `permission`, rather than
+  custom `role_name`, remains the authority used by the existing policy.
+
+Permission changes affect approval evidence and per-PR stability; they do not
+invalidate an otherwise valid checkout/base proof or the entire PR inventory.
+The collector replaces the permission field consumed by policy/security
+analysis, so retaining the before observation for diagnostics cannot count it.
+The Arabic report distinguishes ELIGIBLE, INSUFFICIENT and failure/change codes.
+No merge authority, protection, review requirement, workflow or runtime changes.
+
+### RED and GREEN
+
+Before modifying production code, the new 12-test module produced **13 assertion
+failures** (the API failure test has TIMEOUT and FORBIDDEN subcases). The exact
+write → read regression failed because the result was still READY_FOR_MERGE.
+No failure depended on a missing import or a test runner error.
+
+After implementation all 12 new tests and all 150 previous tests passed:
+
+| Local command / interpreter | Result |
+| --- | --- |
+| `python3.11 -B -m unittest discover -s tools/classmesh-pr-audit/tests` (3.11.15) | 162 PASS, 0.208s |
+| `python3.14 -B -m unittest discover -s tools/classmesh-pr-audit/tests` (3.14.7) | 162 PASS, 0.277s |
+| Both interpreters: `-B tools/classmesh-pr-audit/verify.py` | Syntax and unchanged exact JSON/Arabic example PASS |
+| `git diff --check` | PASS |
+
+Coverage includes permission downgrade, changed sufficient role, unchanged
+write/read, timeout/403/malformed final evidence, missing opening evidence,
+multiple reviewers, shared reviewers across PRs, case variants, reserved budget,
+and separate runs. `merge_authorized=false` remains enforced. The existing
+Python 3.11/3.14, Portable Rust, Windows and security Actions must also pass on
+the new PR HEAD; final exact-HEAD results are delivered with the PR evidence.
+
+### Request cost and live comparison
+
+One serial read-only pair on 2026-11-05 (Asia/Riyadh), before publishing the
+fix, preserved all **13 PR IDs, HEAD SHAs and base SHAs**. The baseline loaded
+all Python modules from `1a4e42f5` before edits; the second run used the fixed
+implementation. No concurrent audit load, no cross-run cache, no permissions
+were changed. Both runs used the default 20s timeout / 600s deadline / 1200
+request limit.
+
+| Workload | Before fix | After fix |
+| --- | ---: | ---: |
+| Live API requests | 241 | 241 |
+| Live wall seconds | 201.590 | 201.839 |
+| Job logs read | 40 | 40 |
+| Distinct review permission subjects in live data | 0 | 0 |
+| Single-reviewer fixture total requests | 25 | 26 |
+| Single-reviewer permission requests | 1 | 2 |
+
+The live workload had **no APPROVED/CHANGES_REQUESTED permission subjects**, so
+no permission request was needed in either run. It proves live compatibility,
+not live revocation handling. The measured 0.249s wall difference is network/run
+variation, not evidence of a speed change. Both had stable inventory, zero API
+errors or budget skips, and correctly remained PARTIAL: one independent-review
+candidate (#687), 12 BLOCKED, zero READY_FOR_MERGE, all merge_authorized=false.
+
+The bounded incremental cost is **one closing GET per distinct observed
+reviewer**, not per review or PR. Mocked multiple-PR and case-variant tests prove
+this deduplication; every new collection starts with empty caches. Rate/budget
+failure still makes eligibility UNKNOWN. The actual write → read transition,
+403/timeout and malformed permission are exercised offline only.
+
+### Remaining observation boundary
+
+Two matching permission reads are not a continuous authorization lease. A
+revoke-and-regrant between observations or a change after the cached closing
+observation may be missed. A shared closing cache is deliberately bounded to one
+observation per reviewer, not an atomic read per PR. Policy/CI changes after
+other observations also remain possible. Re-audit before the coordination lead's
+human decision; the tool never authorizes merge. The live audit cannot safely
+exercise a real permission revocation: that behavior is proven with mocked API
+responses, without changing repository access or any collaborator's role.
+
+API reference: [Get repository permissions for a user](https://docs.github.com/en/rest/collaborators/collaborators#get-repository-permissions-for-a-user).
+
+Structured trust review: the mutable authority is the collaborator base
+permission; a matching APPROVED review cannot authenticate its freshness.
+Changed/unavailable authority now replaces the exact permission evidence read
+by both approval and security analysis. Negative tests prevent stale privilege
+reuse; phase-local deduplication does not authorize a retry fallback. Only
+read-only GET/query APIs are used during the audit; no account role was changed.

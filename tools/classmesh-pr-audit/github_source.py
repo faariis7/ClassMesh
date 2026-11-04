@@ -267,6 +267,21 @@ def fingerprint(pr):
         return None
 
 
+def reviewer_permission(gh, prefix, login):
+    """Read base approval authority, preserving unavailable/invalid evidence."""
+    endpoint = f"{prefix}/collaborators/{quote(login, safe='')}/permission"
+    response = gh.get(endpoint)
+    if not is_known(response):
+        return response
+    data = response["data"]
+    # GitHub maps maintain/triage to write/read; accept the historical names
+    # too, but never infer authority from an unknown/custom role string.
+    if not isinstance(data, dict) or data.get("permission") not in (
+            "admin", "maintain", "write", "triage", "read", "none"):
+        return unknown("INVALID_REVIEWER_PERMISSION", endpoint)
+    return known(data["permission"])
+
+
 def collect(gh, repo, target_branch):
     """Keep data in memory. A second observation detects moving refs/inventory."""
     prefix = "repos/" + repo
@@ -329,13 +344,10 @@ def collect(gh, repo, target_branch):
             login = user.get("login")
             if review.get("state") not in ("APPROVED", "CHANGES_REQUESTED") or not isinstance(login, str):
                 continue
-            if login not in permissions:
-                raw = gh.get(f"{prefix}/collaborators/{quote(login, safe='')}/permission")
-                if is_known(raw) and isinstance(raw["data"], dict) and isinstance(raw["data"].get("permission"), str):
-                    permissions[login] = known(raw["data"]["permission"])
-                else:
-                    permissions[login] = unknown("REVIEWER_PERMISSION_UNAVAILABLE", "collaborator permission")
-            entry["permissions"][login] = permissions[login]
+            key = login.casefold()
+            if key not in permissions:
+                permissions[key] = reviewer_permission(gh, prefix, login)
+            entry["permissions"][login] = permissions[key]
     from execution_evidence import declared_dependencies
     open_ids = {entry["number"] for entry in snapshot["pulls"]}
     dependency_cache = {}
@@ -351,7 +363,7 @@ def collect(gh, repo, target_branch):
     # Structured core evidence for every PR precedes slow logs. Reserve a
     # bounded share for closing observations; skipped proofs stay UNKNOWN.
     from execution_evidence import collect_execution_proofs
-    gh.reserve_requests = 2 * len(snapshot["pulls"]) + len(branches) + 2
+    gh.reserve_requests = 2 * len(snapshot["pulls"]) + len(branches) + len(permissions) + 2
     gh.reserve_seconds = min(60, max(0, gh.deadline - time.monotonic()) * 0.2)
     jobs_cache = {}
     for entry in snapshot["pulls"]:
@@ -361,14 +373,24 @@ def collect(gh, repo, target_branch):
         entry["execution_proofs"] = collect_execution_proofs(
             gh, repo, pr, entry["checks"], entry["runs"], commits, entry["policy"], jobs_cache)
     gh.reserve_requests = gh.reserve_seconds = 0
-    from stability import close_entry, close_inventory, status, branch_sha
+    from stability import close_entry, close_inventory, close_permissions, status, branch_sha
     from review_evidence import collect_reviews
+    # A distinct closing cache: never reuse the opening permission observation.
+    # One new request per case-insensitive login, shared across affected PRs.
+    closing_permissions = {}
     for entry in snapshot["pulls"]:
         if "reviews" not in entry:
             continue
         bundle = collect_reviews(gh, repo, entry["number"])
+        observed_permissions = {}
+        for login in entry["permissions"]:
+            key = login.casefold()
+            if key not in closing_permissions:
+                closing_permissions[key] = reviewer_permission(gh, prefix, login)
+            observed_permissions[login] = closing_permissions[key]
         after = gh.get(f"{prefix}/pulls/{entry['number']}")
         close_entry(entry, after, bundle)
+        close_permissions(entry, observed_permissions)
     for branch, before in branches.items():
         after = gh.get(f"{prefix}/branches/{quote(branch, safe='')}")
         value = status(before, after, branch_sha, "BASE_BRANCH_CHANGED", "BASE_BRANCH_UNAVAILABLE")

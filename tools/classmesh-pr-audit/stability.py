@@ -65,6 +65,28 @@ def close_entry(entry, after, bundle):
     entry['closing_detail'] = after
 
 
+def close_permissions(entry, observations):
+    """Two matching permission observations are required to count authority.
+
+    Stable read/none is known insufficient. A change or either failed read is
+    UNKNOWN, even if the other reviewers could meet the numeric review count.
+    Ref/checkout stability remains separate from reviewer eligibility.
+    """
+    for login, before in entry["permissions"].items():
+        after = observations.get(login, unknown('REVIEWER_PERMISSION_UNAVAILABLE'))
+        state = status(before, after, lambda value: value,
+                       'REVIEWER_PERMISSION_CHANGED', 'REVIEWER_PERMISSION_UNAVAILABLE')
+        state['observations'] = {'before': before, 'after': after}
+        state['eligibility'] = ('UNKNOWN' if not is_known(state) else
+                                'ELIGIBLE' if after['data'] in ('write', 'maintain', 'admin') else 'INSUFFICIENT')
+        entry['stability']['reviewer_permission:' + login] = state
+        # Analysis consumes this field. Never leave an opening write cached here
+        # after a failed/changed closing observation.
+        entry['permissions'][login] = after if is_known(state) else state
+        if not is_known(state) and is_known(entry['stable']):
+            entry['stable'] = state
+
+
 def inventory_observation(value):
     if not is_known(value):
         return {k: v for k, v in value.items() if k != 'data'}

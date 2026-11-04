@@ -66,7 +66,7 @@ def render(report):
         lines += ["- " + md(b["reason"]) + " (`" + md(b["code"]) + "`)" for b in pr["blockers"]] or ["لا توجد عوائق مسجلة ضمن نطاق الأدلة."]
         if "stability" in pr:
             lines += ["", "**ثبات الأدلة أثناء الجمع:** " + "؛ ".join(
-                md(key) + ": " + md(value.get("error", {}).get("code", value.get("state", "UNKNOWN")))
+                md(key) + ": " + md(value.get("error", {}).get("code", value.get("eligibility", value.get("state", "UNKNOWN"))))
                 for key, value in pr["stability"].items())]
         reviews = pr["reviews"]
         lines += ["", f"موافقات مستقلة: {len(reviews['independent_approvals'])}/{reviews['auditor_required_independent_approvals']} · قرار GitHub: {reviews['github_review_decision']} · خيوط مفتوحة: {len(reviews['unresolved_threads'])}.", "",
