@@ -1,0 +1,52 @@
+name: ClassMesh PR auditor
+
+on:
+  pull_request:
+    paths:
+      - 'tools/classmesh-pr-audit/**'
+      - '.github/workflows/classmesh-pr-audit.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/classmesh-pr-audit/**'
+      - '.github/workflows/classmesh-pr-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  auditor:
+    name: Auditor Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.14']
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUTF8: '1'
+      AUDIT_SCOPE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      AUDIT_SCOPE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Offline unit tests
+        run: python -B -m unittest discover -s tools/classmesh-pr-audit/tests -v
+      - name: Syntax, exact sample outputs and change scope
+        run: >-
+          python -B tools/classmesh-pr-audit/verify.py
+          --scope-base "$AUDIT_SCOPE_BASE"
+          --scope-head "$AUDIT_SCOPE_HEAD"
+      - name: Whitespace and unchanged checkout
+        run: |
+          git diff --check "$AUDIT_SCOPE_BASE...$AUDIT_SCOPE_HEAD"
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
