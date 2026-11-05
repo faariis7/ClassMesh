@@ -41,6 +41,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pipe_name = parse_pipe_name(&args)?;
     let pipe = NamedPipeClient::connect(&pipe_name, Duration::from_secs(5))?;
+    // Bind the handshake to the OS-observed pipe server before sending Worker
+    // identity. A ServiceReady payload alone is not peer authentication.
+    let primary_service_pid = pipe.server_process_id()?;
+    if primary_service_pid == 0 || primary_service_pid == std::process::id() {
+        return Err("invalid Worker IPC server process identity".into());
+    }
     let hello = IpcFrame::worker_hello(std::process::id(), actual_session)
         .encode()
         .map_err(ipc_frame_error)?;
@@ -56,10 +62,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Pin the original privileged control pipe's native Service PID before
-    // considering any optional diagnostic grant. Worker report bytes and
-    // the secondary telemetry address are not Service authentication.
-    let primary_service_pid = pipe.server_process_id()?;
+    // Fail closed if the native pipe server identity changes during handshake.
+    // This is continuity checking, not proof of a LocalSystem Service token.
+    if pipe.server_process_id()? != primary_service_pid {
+        return Err("Worker IPC server process changed during handshake".into());
+    }
     let (event_tx, event_rx) = mpsc::sync_channel(WORKER_IPC_EVENT_QUEUE_CAPACITY);
     let reader_pipe = pipe.try_clone()?;
     let _ipc_thread = spawn_ipc_reader(reader_pipe, event_tx);
