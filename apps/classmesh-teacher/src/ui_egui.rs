@@ -641,7 +641,7 @@ fn control_connection_label(context: Option<&TeacherInteractionUiContext>) -> &'
     match context {
         Some(context) if context.control_session_id != 0 => {
             "Session context bound — live Service connection unverified"
-        },
+        }
         _ => "Offline — no authenticated control session",
     }
 }
