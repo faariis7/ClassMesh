@@ -55,6 +55,7 @@ pub enum TeacherPlaybackDiagnosticError {
 pub struct TeacherPlaybackDiagnosticLedger {
     binding: Option<TeacherPlaybackBinding>,
     current: Option<TeacherPlaybackCounters>,
+    last_control_sequence: Option<u64>,
 }
 impl TeacherPlaybackDiagnosticLedger {
     pub fn new(binding: TeacherPlaybackBinding) -> Result<Self, TeacherPlaybackDiagnosticError> {
@@ -64,6 +65,7 @@ impl TeacherPlaybackDiagnosticLedger {
         Ok(Self {
             binding: Some(binding),
             current: None,
+            last_control_sequence: None,
         })
     }
 
@@ -115,6 +117,15 @@ impl TeacherPlaybackDiagnosticLedger {
         {
             return Err(TeacherPlaybackDiagnosticError::Malformed);
         }
+        // The QUIC control envelope is independently sequenced from the
+        // receiver's own report counter. Reject an old outer envelope even
+        // if a replay attacker changes the inner receiver sequence.
+        if self
+            .last_control_sequence
+            .is_some_and(|previous| envelope.sequence <= previous)
+        {
+            return Err(TeacherPlaybackDiagnosticError::Replay);
+        }
         if self.current.is_some_and(|prev| {
             payload.receiver_generation < prev.receiver_generation
                 || (payload.receiver_generation == prev.receiver_generation
@@ -135,6 +146,7 @@ impl TeacherPlaybackDiagnosticLedger {
             keyframe_waits: payload.keyframe_waits,
             queue_drops: payload.queue_drops,
         };
+        self.last_control_sequence = Some(envelope.sequence);
         self.current = Some(next);
         Ok(next)
     }
@@ -146,6 +158,7 @@ impl TeacherPlaybackDiagnosticLedger {
         }
         self.binding = None;
         self.current = None;
+        self.last_control_sequence = None;
         true
     }
 }
@@ -167,7 +180,7 @@ mod tests {
     fn wire(receiver_generation: u64, sequence: u64) -> ControlEnvelope {
         ControlEnvelope {
             control_session_id: 11,
-            sequence: 123,
+            sequence: receiver_generation * 1_000 + sequence,
             protocol_version: Some(ProtocolVersion { major: 0, minor: 8 }),
             request_id: 0,
             payload: Some(control_envelope::Payload::ReceiverPlaybackDiagnostic(
@@ -226,6 +239,45 @@ mod tests {
         assert_eq!(
             ledger.accept_from_authenticated_control(&wire(1, 100), true),
             Err(TeacherPlaybackDiagnosticError::Replay)
+        );
+    }
+
+    #[test]
+    fn control_envelope_replay_cannot_smuggle_in_a_new_receiver_sequence() {
+        let mut ledger = TeacherPlaybackDiagnosticLedger::new(session()).unwrap();
+        let mut first = wire(1, 1);
+        first.sequence = 50;
+        let accepted = ledger
+            .accept_from_authenticated_control(&first, true)
+            .unwrap();
+
+        let mut replayed_control = wire(1, 2);
+        replayed_control.sequence = 50;
+        assert_eq!(
+            ledger.accept_from_authenticated_control(&replayed_control, true),
+            Err(TeacherPlaybackDiagnosticError::Replay)
+        );
+        replayed_control.sequence = 49;
+        assert_eq!(
+            ledger.accept_from_authenticated_control(&replayed_control, true),
+            Err(TeacherPlaybackDiagnosticError::Replay)
+        );
+        assert_eq!(ledger.current(), Some(accepted));
+
+        replayed_control.sequence = 51;
+        let next = ledger
+            .accept_from_authenticated_control(&replayed_control, true)
+            .unwrap();
+        assert_eq!(next.sequence, 2);
+
+        let mut new_receiver = wire(2, 1);
+        new_receiver.sequence = 52;
+        assert_eq!(
+            ledger
+                .accept_from_authenticated_control(&new_receiver, true)
+                .unwrap()
+                .receiver_generation,
+            2
         );
     }
 
