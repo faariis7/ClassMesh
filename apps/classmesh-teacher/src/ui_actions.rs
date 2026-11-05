@@ -2,8 +2,8 @@ use eframe::egui;
 
 use classmesh_protocol::control_wire::AppIdentity;
 use classmesh_protocol::teacher_interaction::{
-    MAX_OPEN_URL_BYTES, MAX_TEACHER_MESSAGE_BYTES, open_target_available,
-    teacher_message_available, validate_https_url, validate_message,
+    TeacherInteractionError, open_target_available, teacher_message_available, validate_https_url,
+    validate_message,
 };
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
@@ -63,11 +63,17 @@ pub fn show_device_actions(
             .desired_rows(3)
             .hint_text("Message to display on the selected device"),
     );
-    truncate_utf8_bytes(&mut draft.message, MAX_TEACHER_MESSAGE_BYTES);
+    // Never silently truncate a pasted action. A shortened URL can address a
+    // different resource, and a shortened message can change its meaning.
+    let message_validation = validate_message(&draft.message);
     if !message_available {
         ui.small("Teacher messages are unavailable for this device.");
+    } else if !draft.message.is_empty() {
+        if let Err(error) = message_validation {
+            ui.small(message_error_label(error));
+        }
     }
-    let message_valid = validate_message(&draft.message).is_ok();
+    let message_valid = message_validation.is_ok();
     if ui
         .add_enabled(
             message_available && message_valid && !action_pending,
@@ -84,11 +90,15 @@ pub fn show_device_actions(
         open_available && !action_pending,
         egui::TextEdit::singleline(&mut draft.https_url).hint_text("https://example.com/lesson"),
     );
-    truncate_utf8_bytes(&mut draft.https_url, MAX_OPEN_URL_BYTES);
+    let url_validation = validate_https_url(&draft.https_url);
     if !open_available {
         ui.small("Open-target actions are unavailable for this device.");
+    } else if !draft.https_url.is_empty() {
+        if let Err(error) = url_validation {
+            ui.small(url_error_label(error));
+        }
     }
-    let url_valid = validate_https_url(&draft.https_url).is_ok();
+    let url_valid = url_validation.is_ok();
     if ui
         .add_enabled(
             open_available && url_valid && !action_pending,
@@ -135,15 +145,30 @@ pub fn reset_teacher_interaction_draft(draft: &mut TeacherInteractionDraft) {
     draft.clear();
 }
 
-fn truncate_utf8_bytes(value: &mut String, max_bytes: usize) {
-    if value.len() <= max_bytes {
-        return;
+fn message_error_label(error: TeacherInteractionError) -> &'static str {
+    match error {
+        TeacherInteractionError::EmptyMessage => "Enter a non-empty message.",
+        TeacherInteractionError::MessageTooLarge => {
+            "Message exceeds the maximum byte length; shorten it before sending."
+        }
+        TeacherInteractionError::MessageContainsControlCharacter => {
+            "Message contains an unsupported control character."
+        }
+        _ => "Message cannot be sent.",
     }
-    let mut end = max_bytes.min(value.len());
-    while !value.is_char_boundary(end) {
-        end -= 1;
+}
+
+fn url_error_label(error: TeacherInteractionError) -> &'static str {
+    match error {
+        TeacherInteractionError::UrlTooLarge => {
+            "HTTPS URL exceeds the maximum byte length; shorten it before opening."
+        }
+        TeacherInteractionError::UnsupportedUrlScheme => "Enter a URL starting with https://.",
+        TeacherInteractionError::InvalidUrl => {
+            "Enter a valid HTTPS URL without whitespace or credentials."
+        }
+        _ => "URL cannot be opened.",
     }
-    value.truncate(end);
 }
 
 const fn app_label(app: AppIdentity) -> &'static str {
@@ -159,6 +184,7 @@ const fn app_label(app: AppIdentity) -> &'static str {
 mod tests {
     use std::collections::BTreeSet;
 
+    use classmesh_protocol::teacher_interaction::{MAX_OPEN_URL_BYTES, MAX_TEACHER_MESSAGE_BYTES};
     use classmesh_protocol::{Capability, PROTOCOL_VERSION};
 
     use super::*;
@@ -192,15 +218,66 @@ mod tests {
     }
 
     #[test]
-    fn draft_byte_bounds_preserve_utf8_boundaries() {
-        let mut value = "é".repeat(MAX_TEACHER_MESSAGE_BYTES);
-        truncate_utf8_bytes(&mut value, MAX_TEACHER_MESSAGE_BYTES);
-        assert!(value.len() <= MAX_TEACHER_MESSAGE_BYTES);
-        assert!(std::str::from_utf8(value.as_bytes()).is_ok());
+    fn oversized_drafts_are_not_silently_changed_into_different_actions() {
+        use classmesh_protocol::teacher_interaction::TeacherInteractionError;
 
-        let mut url = format!("https://example.com/{}", "x".repeat(MAX_OPEN_URL_BYTES));
-        truncate_utf8_bytes(&mut url, MAX_OPEN_URL_BYTES);
-        assert_eq!(url.len(), MAX_OPEN_URL_BYTES);
+        let message = format!("{}FINAL", "M".repeat(MAX_TEACHER_MESSAGE_BYTES));
+        let url = format!(
+            "https://example.com/{}FINAL",
+            "x".repeat(MAX_OPEN_URL_BYTES)
+        );
+        let mut draft = TeacherInteractionDraft {
+            message: message.clone(),
+            https_url: url.clone(),
+            app: None,
+        };
+        let context = context(BTreeSet::from([
+            Capability::TeacherMessage,
+            Capability::OpenTarget,
+        ]));
+        let egui_context = egui::Context::default();
+        let output = egui_context.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                assert_eq!(
+                    show_device_actions(
+                        ui,
+                        Some(MonitoringSourceId(7)),
+                        Some(&context),
+                        &mut draft,
+                        false,
+                    ),
+                    None
+                );
+            });
+        });
+        drop(output);
+
+        // Never turn a too-long URL or message into a different, valid action.
+        assert_eq!(draft.message, message);
+        assert_eq!(draft.https_url, url);
+        assert_eq!(
+            validate_message(&draft.message),
+            Err(TeacherInteractionError::MessageTooLarge)
+        );
+        assert_eq!(
+            validate_https_url(&draft.https_url),
+            Err(TeacherInteractionError::UrlTooLarge)
+        );
+    }
+
+    #[test]
+    fn oversized_and_invalid_action_feedback_is_explicit() {
+        assert!(
+            message_error_label(TeacherInteractionError::MessageTooLarge)
+                .contains("maximum byte length")
+        );
+        assert!(
+            url_error_label(TeacherInteractionError::UrlTooLarge).contains("maximum byte length")
+        );
+        assert!(
+            url_error_label(TeacherInteractionError::UnsupportedUrlScheme).contains("https://")
+        );
+        assert!(url_error_label(TeacherInteractionError::InvalidUrl).contains("valid HTTPS URL"));
     }
 
     #[test]
