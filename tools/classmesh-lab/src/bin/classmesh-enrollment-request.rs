@@ -12,6 +12,7 @@ mod windows_app {
 
     use classmesh_control::enrollment::{ENROLLMENT_MIN_VERSION, validate_enrollment_request};
     use classmesh_identity_win::{CngMachineKey, CngRcgenSigningKey};
+    use classmesh_lab::enrollment_cli_role::EnrollmentCliRole;
     use classmesh_protocol::control_wire::{EnrollmentRequest, PrincipalRole};
     use prost::Message;
     use rcgen::{CertificateParams, DnType};
@@ -20,6 +21,7 @@ mod windows_app {
 
     #[derive(Debug)]
     struct Config {
+        role: EnrollmentCliRole,
         display_name: String,
         output: PathBuf,
     }
@@ -27,6 +29,7 @@ mod windows_app {
     impl Config {
         fn parse() -> Result<Self, String> {
             let mut args = std::env::args().skip(1);
+            let mut role = EnrollmentCliRole::Teacher;
             let mut display_name = None;
             let mut output = None;
 
@@ -36,6 +39,7 @@ mod windows_app {
                         .ok_or_else(|| format!("missing value after {arg}"))
                 };
                 match arg.as_str() {
+                    "--role" => role = EnrollmentCliRole::parse(&value()?)?,
                     "--display-name" => display_name = Some(value()?),
                     "--output" => output = Some(PathBuf::from(value()?)),
                     "--help" | "-h" => return Err(Self::usage().to_owned()),
@@ -44,6 +48,7 @@ mod windows_app {
             }
 
             Ok(Self {
+                role,
                 display_name: display_name
                     .ok_or_else(|| format!("--display-name is required\n\n{}", Self::usage()))?,
                 output: output
@@ -52,7 +57,7 @@ mod windows_app {
         }
 
         fn usage() -> &'static str {
-            "ClassMesh protected Teacher enrollment request\n\n\
+            "ClassMesh enrollment request (optional --role teacher|student-device; default teacher)\n\n\
 Required:\n\
   --display-name <name>     bounded Teacher display name\n\
   --output <request.pb>     new protobuf EnrollmentRequest file\n\n\
@@ -124,7 +129,7 @@ Only the signed PKCS#10 request and non-secret enrollment metadata leave this PC
             .map_err(|error| format!("failed to generate enrollment nonce randomness: {error}"))?;
 
         let principal_hex = hex(&principal_id);
-        let key_name = format!("ClassMesh-Teacher-{principal_hex}");
+        let key_name = format!("{}-{principal_hex}", config.role.key_prefix());
         let key = CngMachineKey::create(key_name.clone())?;
         let mut cleanup = KeyCleanup::new(key_name.clone());
 
@@ -136,13 +141,20 @@ Only the signed PKCS#10 request and non-secret enrollment metadata leave this PC
         let mut params = CertificateParams::new(Vec::<String>::new())?;
         params.distinguished_name.push(
             DnType::CommonName,
-            format!("ClassMesh Teacher {}", config.display_name.trim()),
+            format!(
+                "ClassMesh {} {}",
+                config.role.common_name_label(),
+                config.display_name.trim()
+            ),
         );
         let csr_der = params.serialize_request(&signing_key)?.der().to_vec();
 
         let request = EnrollmentRequest {
             principal_id: principal_id.to_vec(),
-            role: PrincipalRole::Teacher as i32,
+            role: match config.role {
+                EnrollmentCliRole::Teacher => PrincipalRole::Teacher as i32,
+                EnrollmentCliRole::StudentDevice => PrincipalRole::StudentDevice as i32,
+            },
             pkcs10_csr_der: csr_der,
             client_nonce: client_nonce.to_vec(),
             display_name: config.display_name,
@@ -165,6 +177,7 @@ Only the signed PKCS#10 request and non-secret enrollment metadata leave this PC
 
         cleanup.disarm();
         println!("enrollment_request=created");
+        println!("enrollment_role={}", config.role.common_name_label());
         println!("principal_id={principal_hex}");
         println!("cng_key_name={key_name}");
         println!("cng_export_policy=0");

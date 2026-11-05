@@ -16,7 +16,9 @@ mod windows_app {
     use classmesh_control::enrollment_result::approved_credential_from_result;
     use classmesh_identity_win::{
         CngMachineKey, DurableMachineIdentity, MachineIdentityBundle, cng_client_cert_resolver,
+        cng_server_cert_resolver,
     };
+    use classmesh_lab::enrollment_cli_role::EnrollmentCliRole;
     use classmesh_protocol::control_wire::{EnrollmentRequest, EnrollmentResult, PrincipalRole};
     use prost::Message;
     use rustls::RootCertStore;
@@ -31,6 +33,7 @@ mod windows_app {
 
     #[derive(Debug)]
     struct Config {
+        role: EnrollmentCliRole,
         request: PathBuf,
         result: PathBuf,
         trust_roots: Vec<PathBuf>,
@@ -40,6 +43,7 @@ mod windows_app {
     impl Config {
         fn parse() -> Result<Self, String> {
             let mut args = std::env::args().skip(1);
+            let mut role = EnrollmentCliRole::Teacher;
             let mut request = None;
             let mut result = None;
             let mut trust_roots = Vec::new();
@@ -51,6 +55,7 @@ mod windows_app {
                         .ok_or_else(|| format!("missing value after {arg}"))
                 };
                 match arg.as_str() {
+                    "--role" => role = EnrollmentCliRole::parse(&value()?)?,
                     "--request" => request = Some(PathBuf::from(value()?)),
                     "--result" => result = Some(PathBuf::from(value()?)),
                     "--trust-root" => trust_roots.push(PathBuf::from(value()?)),
@@ -74,6 +79,7 @@ mod windows_app {
             }
 
             Ok(Self {
+                role,
                 request: request
                     .ok_or_else(|| format!("--request is required\n\n{}", Self::usage()))?,
                 result: result
@@ -85,7 +91,7 @@ mod windows_app {
         }
 
         fn usage() -> &'static str {
-            "ClassMesh approved Teacher enrollment installer\n\n\
+            "ClassMesh enrollment installer (optional --role teacher|student-device; default teacher)\n\n\
 Required:\n\
   --request <teacher-request.pb>\n\
   --result <approved-result.pb>\n\
@@ -154,8 +160,14 @@ key matching/export policy, bounded trust roots, and refuses to overwrite identi
         let request = EnrollmentRequest::decode(request_bytes.as_slice())?;
         validate_enrollment_request(ENROLLMENT_MIN_VERSION, &request)
             .map_err(|error| format!("enrollment request rejected: {error:?}"))?;
-        if request.role != PrincipalRole::Teacher as i32 {
-            return Err("enrollment request is not for a Teacher principal".into());
+        let expected = match config.role {
+            EnrollmentCliRole::Teacher => PrincipalRole::Teacher as i32,
+            EnrollmentCliRole::StudentDevice => PrincipalRole::StudentDevice as i32,
+        };
+        if request.role != expected {
+            return Err(
+                "enrollment request role does not match requested installation role".into(),
+            );
         }
         let principal_id: [u8; 32] = request
             .principal_id
@@ -191,10 +203,10 @@ key matching/export policy, bounded trust roots, and refuses to overwrite identi
         }
 
         let principal_hex = hex(&principal_id);
-        let key_name = format!("ClassMesh-Teacher-{principal_hex}");
+        let key_name = format!("{}-{principal_hex}", config.role.key_prefix());
         let key = CngMachineKey::open(key_name.clone())?;
         if key.export_policy()? != 0 {
-            return Err("Teacher CNG key is exportable; refusing identity installation".into());
+            return Err("CNG machine key is exportable; refusing identity installation".into());
         }
         let certificate_chain = approved
             .certificate_chain_der
@@ -202,9 +214,15 @@ key matching/export policy, bounded trust roots, and refuses to overwrite identi
             .cloned()
             .map(CertificateDer::from)
             .collect();
-        cng_client_cert_resolver(certificate_chain, key).map_err(|error| {
-            format!("approved certificate does not match protected key: {error}")
-        })?;
+        match config.role {
+            EnrollmentCliRole::Teacher => {
+                cng_client_cert_resolver(certificate_chain, key).map(|_| ())
+            }
+            EnrollmentCliRole::StudentDevice => {
+                cng_server_cert_resolver(certificate_chain, key).map(|_| ())
+            }
+        }
+        .map_err(|error| format!("approved certificate does not match protected key: {error}"))?;
 
         let mut trust_roots_der = Vec::with_capacity(config.trust_roots.len());
         let mut root_store = RootCertStore::empty();
@@ -229,6 +247,7 @@ key matching/export policy, bounded trust roots, and refuses to overwrite identi
         DurableMachineIdentity::new(&config.identity_output).save(&bundle)?;
 
         println!("enrollment_identity=installed");
+        println!("enrollment_role={}", config.role.common_name_label());
         println!("principal_id={principal_hex}");
         println!("cng_key_name={key_name}");
         println!("cng_export_policy=0");
