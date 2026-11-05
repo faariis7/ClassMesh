@@ -106,6 +106,23 @@ impl TeacherPlaybackUiProjection {
         self.ledger.current()
     }
 
+    /// Schedule exactly one UI repaint just after the visible report
+    /// expires. egui is event-driven: hiding stale counters during normal
+    /// rendering is insufficient if no new input wakes the UI. This hint
+    /// never keeps a revoked, future-dated, expired or other-source report
+    /// alive and never drives network quality decisions.
+    #[must_use]
+    pub fn repaint_after_expiry(
+        &self,
+        selected_source: MonitoringSourceId,
+        now: Instant,
+    ) -> Option<Duration> {
+        self.visible(selected_source, now)?;
+        let received = self.received_at?;
+        let age = now.duration_since(received);
+        Some(MAX_PLAYBACK_UI_AGE - age + Duration::from_millis(1))
+    }
+
     /// A stale disconnect cannot revoke another device or control session.
     pub fn revoke(
         &mut self,
@@ -176,6 +193,51 @@ mod tests {
         )
             -> Result<TeacherPlaybackCounters, TeacherPlaybackDiagnosticError> =
             TeacherPlaybackUiProjection::accept_verified_from_source;
+    }
+
+    #[test]
+    fn schedules_expiry_repaint_only_for_visible_exact_source_and_fresh_counters() {
+        let now = Instant::now();
+        let mut state = TeacherPlaybackUiProjection::new(MonitoringSourceId(7), binding()).unwrap();
+        assert_eq!(state.repaint_after_expiry(MonitoringSourceId(7), now), None);
+        let mut initial = envelope();
+        state.accept_authenticated(&initial, true, now).unwrap();
+        let safety_tick = Duration::from_millis(1);
+        assert_eq!(
+            state.repaint_after_expiry(MonitoringSourceId(7), now),
+            Some(MAX_PLAYBACK_UI_AGE + safety_tick)
+        );
+        assert_eq!(
+            state.repaint_after_expiry(MonitoringSourceId(7), now + Duration::from_secs(4)),
+            Some(Duration::from_secs(6) + safety_tick)
+        );
+        assert_eq!(state.repaint_after_expiry(MonitoringSourceId(8), now), None);
+        assert_eq!(
+            state.repaint_after_expiry(MonitoringSourceId(7), now - Duration::from_millis(1)),
+            None
+        );
+        assert_eq!(
+            state.repaint_after_expiry(
+                MonitoringSourceId(7),
+                now + MAX_PLAYBACK_UI_AGE + safety_tick
+            ),
+            None
+        );
+        initial.sequence += 1;
+        if let Some(control_envelope::Payload::ReceiverPlaybackDiagnostic(ref mut report)) =
+            initial.payload
+        {
+            report.sequence += 1;
+        }
+        state
+            .accept_authenticated(&initial, true, now + Duration::from_secs(6))
+            .unwrap();
+        assert_eq!(
+            state.repaint_after_expiry(MonitoringSourceId(7), now + Duration::from_secs(6)),
+            Some(MAX_PLAYBACK_UI_AGE + safety_tick)
+        );
+        assert!(state.revoke(MonitoringSourceId(7), binding()));
+        assert_eq!(state.repaint_after_expiry(MonitoringSourceId(7), now), None);
     }
 
     #[test]
