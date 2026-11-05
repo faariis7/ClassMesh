@@ -205,7 +205,13 @@ async fn verified_quic_source_binding_replay_and_freshness_reach_teacher_project
 async fn non_playback_control_message_is_not_injected_into_teacher_counters() -> TestResult {
     let mut pair = pair().await?;
     let mut other = report();
-    other.payload = None;
+    other.payload = Some(control_envelope::Payload::Heartbeat(
+        classmesh_protocol::control_wire::Heartbeat {
+            monotonic_time_us: 100,
+            control_session_id: CONTROL_SESSION,
+            media: 1,
+        },
+    ));
     pair.server_channel.send(&other).await?;
     let verified =
         receive_authenticated_teacher_control(&mut pair.client, &pair.live_auth, STUDENT, || 150)
@@ -269,7 +275,13 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
         .map_err(|error| format!("{error:?}"))?;
 
     let mut other = report();
-    other.payload = None;
+    other.payload = Some(control_envelope::Payload::Heartbeat(
+        classmesh_protocol::control_wire::Heartbeat {
+            monotonic_time_us: 100,
+            control_session_id: CONTROL_SESSION,
+            media: 1,
+        },
+    ));
     other.sequence = 1;
     pair.server_channel.send(&other).await?;
     let event = owner
@@ -279,7 +291,7 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
     match event {
         TeacherPlaybackSessionEvent::OtherControl(envelope) => {
             assert_eq!(envelope.control_session_id, CONTROL_SESSION);
-            assert!(envelope.payload.is_none());
+            assert!(matches!(envelope.payload, Some(control_envelope::Payload::Heartbeat(_))));
         }
         TeacherPlaybackSessionEvent::Playback(_) => panic!("nonplayback message was misclassified"),
     }
@@ -441,7 +453,13 @@ async fn replayed_outer_control_sequence_forces_retirement_even_when_message_typ
     assert!(owner.visible(SOURCE, now).is_some());
 
     let mut replayed = report();
-    replayed.payload = None;
+    replayed.payload = Some(control_envelope::Payload::Heartbeat(
+        classmesh_protocol::control_wire::Heartbeat {
+            monotonic_time_us: 100,
+            control_session_id: CONTROL_SESSION,
+            media: 1,
+        },
+    ));
     // The unrelated control message repeats the preceding playback's
     // outer sequence. A single owning dispatcher must reject this globally.
     pair.server_channel.send(&replayed).await?;
