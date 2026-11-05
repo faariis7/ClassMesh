@@ -522,3 +522,158 @@ fn student_cycle_reloads_real_identity_and_rejects_untrusted_results() {
         "negative=reuse_and_cross_role; result=REJECTED; system_trust_and_programdata=UNMODIFIED"
     );
 }
+
+
+#[test]
+fn teacher_authorization_requires_proven_issuer_and_role_before_grant() {
+    // Real Windows CNG keys and CLI executables. This would have failed against
+    // the legacy result-only grant, which never verified the CA signature.
+    const GRANT: &str = env!("CARGO_BIN_EXE_classmesh-student-authorize-teacher");
+    let lab = Lab::new();
+    let scratch = Scratch::new();
+    let root = &scratch.0;
+
+    let (student_request, _student, _student_key) =
+        request(root, "student-device", "student_for_grant");
+    let student_result = root.join("student-for-grant.pb");
+    issue(&lab, &student_request, &student_result, "student-device");
+
+    // Staging creates a zero-privilege StudentDevice without touching
+    // ProgramData; all subsequent grants target ONLY this owned temp file.
+    let stage = std::env::temp_dir().join(format!("ClassMesh-Grant-Stage-{}", nonce()));
+    struct OwnedStage(PathBuf);
+    impl Drop for OwnedStage {
+        fn drop(&mut self) {
+            if self.0.exists() {
+                fs::remove_dir_all(&self.0).expect("clean owned temporary stage");
+            }
+        }
+    }
+    let _stage = OwnedStage(stage.clone());
+    success(
+        STAGE,
+        &[
+            "--request",
+            text(&student_request),
+            "--result",
+            text(&student_result),
+            "--trust-root",
+            text(&lab.cert()),
+            "--output-dir",
+            text(&stage),
+        ],
+    );
+    let authorization = stage.join("state/authorization.json");
+    let original_state = fs::read(&authorization).unwrap();
+
+    let (teacher_request, teacher, _teacher_key) = request(root, "teacher", "teacher_for_grant");
+    let approved_path = root.join("teacher-for-grant.pb");
+    let approved = issue(&lab, &teacher_request, &approved_path, "teacher");
+    let correct_ca = lab.cert();
+
+    let authorized = |req: &Path, result: &Path, ca: &Path| {
+        run(
+            GRANT,
+            &[
+                "--request",
+                text(req),
+                "--result",
+                text(result),
+                "--trust-root",
+                text(ca),
+                "--authorization",
+                text(&authorization),
+            ],
+        )
+    };
+    let assert_rejected_without_write = |label: &str, req: &Path, result: &Path, ca: &Path| {
+        let before = fs::read(&authorization).unwrap();
+        let output = authorized(req, result, ca);
+        assert!(
+            !output.status.success(),
+            "{label} unexpectedly granted Teacher permissions"
+        );
+        assert_eq!(
+            fs::read(&authorization).unwrap(),
+            before,
+            "{label} mutated authorization on rejection"
+        );
+    };
+
+    // Fail closed on omitted proof, wrong issuer, modified signed leaf, wrong
+    // CSR, and wrong role—even if the protobuf fingerprint is recomputed.
+    let no_root = run(
+        GRANT,
+        &[
+            "--request",
+            text(&teacher_request),
+            "--result",
+            text(&approved_path),
+            "--authorization",
+            text(&authorization),
+        ],
+    );
+    assert!(!no_root.status.success());
+    assert_eq!(fs::read(&authorization).unwrap(), original_state);
+
+    let untrusted_lab = Lab::new();
+    assert_rejected_without_write(
+        "untrusted-issuer",
+        &teacher_request,
+        &approved_path,
+        &untrusted_lab.cert(),
+    );
+    let mut forged = approved.clone();
+    *forged.certificate_chain_der[0].last_mut().unwrap() ^= 1;
+    forged.credential_fingerprint_sha256 =
+        Sha256::digest(&forged.certificate_chain_der[0]).to_vec();
+    let forged_path = root.join("forged-teacher.pb");
+    fs::write(&forged_path, forged.encode_to_vec()).unwrap();
+    assert_rejected_without_write(
+        "forged-leaf-signature",
+        &teacher_request,
+        &forged_path,
+        &correct_ca,
+    );
+
+    let (other_request, _other_teacher, _other_teacher_key) =
+        request(root, "teacher", "other_teacher_for_grant");
+    assert_rejected_without_write(
+        "unbound-csr",
+        &other_request,
+        &approved_path,
+        &correct_ca,
+    );
+    assert_rejected_without_write(
+        "student-not-teacher",
+        &student_request,
+        &student_result,
+        &correct_ca,
+    );
+
+    // A valid signed and issuer-verified Teacher may get ONLY these two
+    // existing control permissions; no credential or privilege is invented.
+    let result = authorized(&teacher_request, &approved_path, &correct_ca);
+    assert!(
+        result.status.success(),
+        "valid Teacher was rejected: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let state = DurableAuthorizationState::new(&authorization)
+        .load()
+        .unwrap()
+        .unwrap();
+    let grant = state
+        .principal(PrincipalId(teacher.principal_id.clone().try_into().unwrap()))
+        .expect("approved Teacher exists");
+    assert_eq!(grant.kind, PrincipalKind::Teacher);
+    assert_eq!(grant.permissions.len(), 2);
+    assert!(grant.permissions.contains(&classmesh_security::Permission::ViewInteractive));
+    assert!(grant.permissions.contains(&classmesh_security::Permission::ControlInput));
+    assert_rejected_without_write(
+        "duplicate-teacher",
+        &teacher_request,
+        &approved_path,
+        &correct_ca,
+    );
+}
