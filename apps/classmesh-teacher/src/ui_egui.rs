@@ -1324,9 +1324,8 @@ mod tests {
         let now = Instant::now();
         let mut app = TeacherEguiShell::default();
         select_test_device(&mut app);
-        let context = interaction_context(BTreeSet::from([
-            Capability::ReceiverPlaybackDiagnostics,
-        ]));
+        let context =
+            interaction_context(BTreeSet::from([Capability::ReceiverPlaybackDiagnostics]));
         app.set_teacher_interaction_context(context.clone());
         app.set_receiver_playback_context(MonitoringSourceId(7), bound_playback())
             .unwrap();
