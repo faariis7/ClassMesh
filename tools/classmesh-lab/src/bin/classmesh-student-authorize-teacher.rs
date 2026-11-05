@@ -13,7 +13,9 @@ mod windows_app {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use classmesh_control::enrollment::{ENROLLMENT_MIN_VERSION, validate_enrollment_request, validate_enrollment_result_binding};
+    use classmesh_control::enrollment::{
+        ENROLLMENT_MIN_VERSION, validate_enrollment_request, validate_enrollment_result_binding,
+    };
     use classmesh_control::enrollment_result::approved_credential_from_result;
     use classmesh_lab::enrollment_certificate_validation::validate_signed_result;
     use classmesh_lab::enrollment_cli_role::EnrollmentCliRole;
@@ -139,14 +141,24 @@ ControlInput permissions. Existing principals are never replaced by this qualifi
         let result_bytes = read_bounded(&config.result, "Teacher result")?;
         let result = EnrollmentResult::decode(result_bytes.as_slice())?;
         validate_enrollment_result_binding(
-            ENROLLMENT_MIN_VERSION, &principal_id, &csr_digest, &result,
-        ).map_err(|error| format!("Teacher result binding rejected: {error:?}"))?;
+            ENROLLMENT_MIN_VERSION,
+            &principal_id,
+            &csr_digest,
+            &result,
+        )
+        .map_err(|error| format!("Teacher result binding rejected: {error:?}"))?;
         let now_unix_ms = unix_time_ms()?;
-        let roots = config.trust_roots.iter()
+        let roots = config
+            .trust_roots
+            .iter()
             .map(|path| read_bounded(path, "operator trust root"))
             .collect::<AppResult<Vec<_>>>()?;
         validate_signed_result(
-            &request, &result, &roots, now_unix_ms, EnrollmentCliRole::Teacher,
+            &request,
+            &result,
+            &roots,
+            now_unix_ms,
+            EnrollmentCliRole::Teacher,
         )?;
         let approved = approved_credential_from_result(&result, now_unix_ms)
             .map_err(|error| format!("Teacher enrollment result rejected: {error:?}"))?;
