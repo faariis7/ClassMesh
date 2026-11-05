@@ -366,7 +366,12 @@ impl TeacherEguiShell {
         };
         match focus {
             crate::ui_shell::TeacherFocusUiAction::RequestInteractive { .. } => {
-                !row.interactive_active
+                self.teacher_interaction_context
+                    .as_ref()
+                    .is_some_and(|context| {
+                        context.control_session_id != 0 && context.source_id == source_id
+                    })
+                    && !row.interactive_active
                     && row.health.presence == classmesh_core::presence::PresenceState::Online
                     && row.health.service_ready
                     && row.health.worker_ready
@@ -634,11 +639,29 @@ impl TeacherEguiShell {
     }
 }
 
+// The window can start before any authenticated QUIC session exists. Never
+// present an offline console as connected just because the process is running.
+// A context injected by a client is not proof of a currently live Service link.
+fn control_connection_label(context: Option<&TeacherInteractionUiContext>) -> &'static str {
+    match context {
+        Some(context) if context.control_session_id != 0 => {
+            "Session context bound — live Service connection unverified"
+        }
+        _ => "Offline — no authenticated control session",
+    }
+}
+
 impl eframe::App for TeacherEguiShell {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_navigation_shortcuts(ctx);
         egui::TopBottomPanel::top("classmesh_teacher_navigation").show(ctx, |ui| {
             self.navigation(ui);
+        });
+
+        egui::TopBottomPanel::bottom("classmesh_teacher_connection_status").show(ctx, |ui| {
+            ui.small(control_connection_label(
+                self.teacher_interaction_context.as_ref(),
+            ));
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -688,6 +711,25 @@ mod tests {
     use crate::ui_shell::{TeacherFocusUiAction, TeacherPresentationUiAction};
 
     use super::*;
+
+    #[test]
+    fn native_window_status_never_claims_control_without_authenticated_session() {
+        assert_eq!(
+            control_connection_label(None),
+            "Offline — no authenticated control session"
+        );
+        let mut context = interaction_context(BTreeSet::new());
+        context.control_session_id = 0;
+        assert_eq!(
+            control_connection_label(Some(&context)),
+            "Offline — no authenticated control session"
+        );
+        context.control_session_id = 77;
+        assert_eq!(
+            control_connection_label(Some(&context)),
+            "Session context bound — live Service connection unverified"
+        );
+    }
 
     fn send_navigation_key(
         app: &mut TeacherEguiShell,
@@ -840,6 +882,54 @@ mod tests {
     }
 
     #[test]
+    fn queued_focus_start_requires_nonzero_control_session_at_handoff() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let start = TeacherUiAction::Focus(TeacherFocusUiAction::RequestInteractive {
+            source_id: MonitoringSourceId(7),
+        });
+        app.queue_action(start.clone());
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "offline UI cannot start focus"
+        );
+
+        let mut zero = interaction_context(BTreeSet::new());
+        zero.control_session_id = 0;
+        app.set_teacher_interaction_context(zero);
+        app.queue_action(start.clone());
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "zero session is not authorized"
+        );
+
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
+        app.queue_action(start.clone());
+        assert_eq!(app.take_pending_action(), Some(start));
+    }
+
+    #[test]
+    fn queued_focus_start_rejects_session_bound_to_different_device() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let mut other = interaction_context(BTreeSet::new());
+        other.source_id = MonitoringSourceId(8);
+        app.set_teacher_interaction_context(other);
+        app.queue_action(TeacherUiAction::Focus(
+            TeacherFocusUiAction::RequestInteractive {
+                source_id: MonitoringSourceId(7),
+            },
+        ));
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "a session for another device must never authorize focus"
+        );
+    }
+
+    #[test]
     fn queued_focus_start_is_retired_on_control_session_replacement_but_not_refresh() {
         let mut app = TeacherEguiShell::default();
         select_test_device(&mut app);
@@ -945,6 +1035,9 @@ mod tests {
     fn queued_focus_handoff_requires_matching_interactive_state_but_allows_offline_resume() {
         let mut app = TeacherEguiShell::default();
         select_test_device(&mut app);
+        // Focus requests are legal only with a nonzero bound control session.
+        // The separate offline test verifies that missing/zero sessions deny.
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
         let start = TeacherUiAction::Focus(TeacherFocusUiAction::RequestInteractive {
             source_id: MonitoringSourceId(7),
         });
