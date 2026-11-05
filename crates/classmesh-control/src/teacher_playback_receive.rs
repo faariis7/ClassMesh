@@ -56,6 +56,7 @@ pub enum AuthenticatedTeacherReceiveError {
     NotNegotiated,
     SessionMismatch,
     ProtocolVersionMismatch,
+    MissingPayload,
     PeerIdentity(PeerIdentityError),
     Authorization(LiveAuthorizationError),
     Transport(ControlTransportError),
@@ -129,6 +130,10 @@ pub async fn receive_authenticated_teacher_control(
         wire.major == u32::from(negotiated.major) && wire.minor == u32::from(negotiated.minor)
     }) {
         return Err(AuthenticatedTeacherReceiveError::ProtocolVersionMismatch);
+    }
+    // A payload-less envelope is not a dispatchable control command.
+    if envelope.payload.is_none() {
+        return Err(AuthenticatedTeacherReceiveError::MissingPayload);
     }
     let is_playback = matches!(
         envelope.payload,
@@ -494,15 +499,16 @@ mod tests {
         let mut good = missing;
         good.protocol_version = Some(WireVersion { major: 0, minor: 8 });
         pair.server_channel.send(&good).await?;
-        let authenticated = receive_authenticated_teacher_control(
-            &mut pair.client,
-            &pair.authorization,
-            EXPECTED,
-            || 150,
-        )
-        .await?;
-        assert!(authenticated.receiver_playback().is_none());
-        assert_eq!(authenticated.into_envelope().control_session_id, SESSION);
+        assert!(matches!(
+            receive_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150
+            )
+            .await,
+            Err(AuthenticatedTeacherReceiveError::MissingPayload)
+        ));
         Ok(())
     }
 
