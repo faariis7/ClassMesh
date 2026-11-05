@@ -4,20 +4,20 @@ use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use classmesh_control::ControlHello;
 use classmesh_control::client_session::{
-    ClientControlSession, connect_client_session_with_retries,
+    connect_client_session_with_retries, ClientControlSession,
 };
-use classmesh_control::handshake::{ServerHelloConfig, server_hello};
+use classmesh_control::handshake::{server_hello, ServerHelloConfig};
 use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::quic::{
-    ControlChannel, DEFAULT_IO_TIMEOUT, accept, client_config_with_roots,
-    server_config_with_certificate,
+    accept, client_config_with_roots, server_config_with_certificate, ControlChannel,
+    DEFAULT_IO_TIMEOUT,
 };
 use classmesh_control::teacher_playback_receive::receive_authenticated_teacher_control;
+use classmesh_control::ControlHello;
 use classmesh_core::recovery::RecoveryPolicy;
 use classmesh_protocol::control_wire::{
-    ControlEnvelope, ProtocolVersion as WireVersion, ReceiverPlaybackDiagnostic, control_envelope,
+    control_envelope, ControlEnvelope, ProtocolVersion as WireVersion, ReceiverPlaybackDiagnostic,
 };
 use classmesh_protocol::{Capability, ControlRole, ProtocolVersion};
 use classmesh_security::{
@@ -27,12 +27,12 @@ use classmesh_security::{
 use classmesh_teacher::receiver_playback_diagnostics::{
     TeacherPlaybackBinding, TeacherPlaybackDiagnosticError,
 };
-use classmesh_teacher::receiver_playback_ui::{MAX_PLAYBACK_UI_AGE, TeacherPlaybackUiProjection};
+use classmesh_teacher::receiver_playback_ui::{TeacherPlaybackUiProjection, MAX_PLAYBACK_UI_AGE};
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 use quinn::{Connection, Endpoint};
 use rcgen::generate_simple_self_signed;
-use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+use rustls::RootCertStore;
 use sha2::{Digest, Sha256};
 
 type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
@@ -291,7 +291,10 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
     match event {
         TeacherPlaybackSessionEvent::OtherControl(envelope) => {
             assert_eq!(envelope.control_session_id, CONTROL_SESSION);
-            assert!(matches!(envelope.payload, Some(control_envelope::Payload::Heartbeat(_))));
+            assert!(matches!(
+                envelope.payload,
+                Some(control_envelope::Payload::Heartbeat(_))
+            ));
         }
         TeacherPlaybackSessionEvent::Playback(_) => panic!("nonplayback message was misclassified"),
     }
@@ -383,12 +386,15 @@ async fn mismatched_control_session_retires_owner_before_consuming_control_chann
     ));
     assert_eq!(owner.visible(SOURCE, now), None);
     // Rejected route never drained the correctly bound control channel.
-    assert!(
-        receive_authenticated_teacher_control(&mut pair.client, &pair.live_auth, STUDENT, || 150)
-            .await?
-            .receiver_playback()
-            .is_some()
-    );
+    assert!(receive_authenticated_teacher_control(
+        &mut pair.client,
+        &pair.live_auth,
+        STUDENT,
+        || 150
+    )
+    .await?
+    .receiver_playback()
+    .is_some());
     Ok(())
 }
 
@@ -435,8 +441,8 @@ async fn malformed_epoch_does_not_destroy_last_valid_owner_projection() -> TestR
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replayed_outer_control_sequence_forces_retirement_even_when_message_type_changes()
--> TestResult {
+async fn replayed_outer_control_sequence_forces_retirement_even_when_message_type_changes(
+) -> TestResult {
     use classmesh_teacher::receiver_playback_session::{
         TeacherPlaybackSessionError, TeacherPlaybackSessionOwner,
     };
