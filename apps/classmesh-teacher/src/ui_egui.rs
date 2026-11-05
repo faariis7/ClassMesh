@@ -167,6 +167,9 @@ impl TeacherEguiShell {
             self.pending_action = None;
         }
         self.teacher_interaction_context = None;
+        // An authenticated playback ledger belongs to the disconnected session.
+        // Never retain its counters or replay state across a later rebind.
+        self.playback = None;
         self.retire_pending_diagnostics_override();
         self.playback = None;
         reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
@@ -1315,6 +1318,26 @@ mod tests {
             .unwrap();
         assert!(app.visible_receiver_playback_at(now).is_some());
         app.set_presentation_snapshot(PresentationRuntimeSnapshot::default());
+        assert_eq!(app.visible_receiver_playback_at(now), None);
+    }
+
+    #[test]
+    fn disconnect_discards_receiver_playback_binding_and_counters() {
+        let now = Instant::now();
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let context = interaction_context(BTreeSet::from([
+            Capability::ReceiverPlaybackDiagnostics,
+        ]));
+        app.set_teacher_interaction_context(context.clone());
+        app.set_receiver_playback_context(MonitoringSourceId(7), bound_playback())
+            .unwrap();
+        app.accept_authenticated_receiver_playback(&playback_frame(), now)
+            .unwrap();
+        assert!(app.playback.is_some());
+        app.clear_teacher_interaction_context();
+        assert!(app.playback.is_none(), "disconnect must erase old playback ledger");
+        app.set_teacher_interaction_context(context);
         assert_eq!(app.visible_receiver_playback_at(now), None);
     }
 
