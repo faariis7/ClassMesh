@@ -18,6 +18,7 @@ mod windows_app {
         CngMachineKey, DurableMachineIdentity, MachineIdentityBundle, cng_client_cert_resolver,
         cng_server_cert_resolver,
     };
+    use classmesh_lab::enrollment_certificate_validation::validate_signed_result;
     use classmesh_lab::enrollment_cli_role::EnrollmentCliRole;
     use classmesh_protocol::control_wire::{EnrollmentRequest, EnrollmentResult, PrincipalRole};
     use prost::Message;
@@ -236,6 +237,14 @@ key matching/export policy, bounded trust roots, and refuses to overwrite identi
         if root_store.is_empty() {
             return Err("no valid server trust roots were supplied".into());
         }
+
+        validate_signed_result(
+            &request,
+            &result,
+            &trust_roots_der,
+            now_unix_ms,
+            config.role,
+        )?;
 
         let bundle = MachineIdentityBundle {
             principal_id,

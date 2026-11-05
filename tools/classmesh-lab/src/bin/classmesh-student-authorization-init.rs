@@ -20,6 +20,8 @@ mod windows_app {
     };
     use classmesh_control::enrollment_result::approved_credential_from_result;
     use classmesh_identity_win::{CngMachineKey, cng_server_cert_resolver};
+    use classmesh_lab::enrollment_certificate_validation::validate_signed_result;
+    use classmesh_lab::enrollment_cli_role::EnrollmentCliRole;
     use classmesh_protocol::control_wire::{EnrollmentRequest, EnrollmentResult, PrincipalRole};
     use classmesh_security::persistence::DurableAuthorizationState;
     use classmesh_security::{AuthorizationStore, Principal, PrincipalKind};
@@ -34,6 +36,7 @@ mod windows_app {
         request: PathBuf,
         result: PathBuf,
         output_dir: PathBuf,
+        trust_roots: Vec<PathBuf>,
         bind_address: SocketAddr,
     }
 
@@ -51,6 +54,7 @@ mod windows_app {
         fn parse() -> Result<Self, String> {
             let mut args = std::env::args().skip(1);
             let (mut request, mut result, mut output_dir) = (None, None, None);
+            let mut trust_roots = Vec::new();
             let mut bind_address =
                 require_loopback_bind("127.0.0.1:5151").expect("constant bind address is valid");
             while let Some(arg) = args.next() {
@@ -61,6 +65,7 @@ mod windows_app {
                 match arg.as_str() {
                     "--request" => request = Some(PathBuf::from(value()?)),
                     "--result" => result = Some(PathBuf::from(value()?)),
+                    "--trust-root" => trust_roots.push(PathBuf::from(value()?)),
                     "--output-dir" => output_dir = Some(PathBuf::from(value()?)),
                     "--bind-address" => {
                         bind_address = require_loopback_bind(&value()?).map_err(str::to_owned)?
@@ -69,7 +74,11 @@ mod windows_app {
                     _ => return Err(format!("unknown argument: {arg}\n{}", Self::usage())),
                 }
             }
+            if trust_roots.is_empty() || trust_roots.len() > 16 {
+                return Err("1..=16 explicit --trust-root values required".into());
+            }
             Ok(Self {
+                trust_roots,
                 request: request.ok_or("--request is required")?,
                 result: result.ok_or("--result is required")?,
                 output_dir: output_dir.ok_or("--output-dir is required")?,
@@ -79,7 +88,7 @@ mod windows_app {
 
         fn usage() -> &'static str {
             "Usage: classmesh-student-authorization-init --request <StudentDevice-request.pb> \
-             --result <approved.pb> --output-dir <new direct child of %TEMP%> \
+             --result <approved.pb> --trust-root <operator-ca.der> --output-dir <new direct child of %TEMP%> \
              [--bind-address 127.0.0.1:5151]\n\
              Creates only a new temporary staging tree; NEVER installs it into ProgramData."
         }
@@ -165,6 +174,18 @@ mod windows_app {
         if approved.credential.fingerprint.0 != fingerprint {
             return Err("credential fingerprint does not match leaf certificate".into());
         }
+
+        let mut roots = Vec::new();
+        for path in &config.trust_roots {
+            roots.push(read_bounded(path, "operator trust root")?);
+        }
+        validate_signed_result(
+            &request,
+            &result,
+            &roots,
+            now_unix_ms,
+            EnrollmentCliRole::StudentDevice,
+        )?;
 
         // Independently verify matching non-exportable CNG machine signing key.
         let key_name = format!("ClassMesh-StudentDevice-{}", hex(&principal_id));
