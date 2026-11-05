@@ -523,7 +523,6 @@ fn student_cycle_reloads_real_identity_and_rejects_untrusted_results() {
     );
 }
 
-
 #[test]
 fn teacher_authorization_requires_proven_issuer_and_role_before_grant() {
     // Real Windows CNG keys and CLI executables. This would have failed against
@@ -638,12 +637,7 @@ fn teacher_authorization_requires_proven_issuer_and_role_before_grant() {
 
     let (other_request, _other_teacher, _other_teacher_key) =
         request(root, "teacher", "other_teacher_for_grant");
-    assert_rejected_without_write(
-        "unbound-csr",
-        &other_request,
-        &approved_path,
-        &correct_ca,
-    );
+    assert_rejected_without_write("unbound-csr", &other_request, &approved_path, &correct_ca);
     assert_rejected_without_write(
         "student-not-teacher",
         &student_request,
@@ -664,12 +658,22 @@ fn teacher_authorization_requires_proven_issuer_and_role_before_grant() {
         .unwrap()
         .unwrap();
     let grant = state
-        .principal(PrincipalId(teacher.principal_id.clone().try_into().unwrap()))
+        .principal(PrincipalId(
+            teacher.principal_id.clone().try_into().unwrap(),
+        ))
         .expect("approved Teacher exists");
     assert_eq!(grant.kind, PrincipalKind::Teacher);
     assert_eq!(grant.permissions.len(), 2);
-    assert!(grant.permissions.contains(&classmesh_security::Permission::ViewInteractive));
-    assert!(grant.permissions.contains(&classmesh_security::Permission::ControlInput));
+    assert!(
+        grant
+            .permissions
+            .contains(&classmesh_security::Permission::ViewInteractive)
+    );
+    assert!(
+        grant
+            .permissions
+            .contains(&classmesh_security::Permission::ControlInput)
+    );
     assert_rejected_without_write(
         "duplicate-teacher",
         &teacher_request,
