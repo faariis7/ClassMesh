@@ -135,7 +135,10 @@ impl TeacherEguiShell {
             reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
             // Focus carries a device ID but no session epoch. A new authenticated
             // session must not inherit a previously queued UI intent.
-            if matches!(self.pending_action, Some(TeacherUiAction::Focus(_))) {
+            if matches!(
+                self.pending_action,
+                Some(TeacherUiAction::Focus(_) | TeacherUiAction::TeacherInteraction(_))
+            ) {
                 self.pending_action = None;
             }
             // Diagnostics intents carry a source but no session epoch.
@@ -162,7 +165,10 @@ impl TeacherEguiShell {
         // Retire any intent queued under the old authenticated session.
         // A new offline ResumeThumbnail click can still be queued afterward.
         if self.teacher_interaction_context.is_some()
-            && matches!(self.pending_action, Some(TeacherUiAction::Focus(_)))
+            && matches!(
+                self.pending_action,
+                Some(TeacherUiAction::Focus(_) | TeacherUiAction::TeacherInteraction(_))
+            )
         {
             self.pending_action = None;
         }
@@ -1414,6 +1420,28 @@ mod tests {
         reconnected.control_session_id = 78;
         app.set_teacher_interaction_context(reconnected);
 
+        assert_eq!(app.take_pending_action(), None);
+    }
+
+    #[test]
+    fn queued_teacher_message_cannot_cross_session_rebind_or_disconnect() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let old = interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+        app.set_teacher_interaction_context(old.clone());
+        app.queue_teacher_interaction_request(TeacherInteractionUiRequest::Message(
+            "old session".to_owned(),
+        ));
+        let mut next = old.clone();
+        next.control_session_id = 78;
+        app.set_teacher_interaction_context(next);
+        assert_eq!(app.take_pending_action(), None);
+
+        app.queue_teacher_interaction_request(TeacherInteractionUiRequest::Message(
+            "disconnected".to_owned(),
+        ));
+        app.clear_teacher_interaction_context();
+        app.set_teacher_interaction_context(old);
         assert_eq!(app.take_pending_action(), None);
     }
 
