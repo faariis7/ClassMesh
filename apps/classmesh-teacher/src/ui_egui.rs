@@ -636,9 +636,12 @@ impl TeacherEguiShell {
 
 // The window can start before any authenticated QUIC session exists. Never
 // present an offline console as connected just because the process is running.
+// A context injected by a client is not proof of a currently live Service link.
 fn control_connection_label(context: Option<&TeacherInteractionUiContext>) -> &'static str {
     match context {
-        Some(context) if context.control_session_id != 0 => "Control session active",
+        Some(context) if context.control_session_id != 0 => {
+            "Session context bound — live Service connection unverified"
+        },
         _ => "Offline — no authenticated control session",
     }
 }
@@ -719,7 +722,7 @@ mod tests {
         context.control_session_id = 77;
         assert_eq!(
             control_connection_label(Some(&context)),
-            "Control session active"
+            "Session context bound — live Service connection unverified"
         );
     }
 
