@@ -366,7 +366,10 @@ impl TeacherEguiShell {
         };
         match focus {
             crate::ui_shell::TeacherFocusUiAction::RequestInteractive { .. } => {
-                !row.interactive_active
+                self.teacher_interaction_context
+                    .as_ref()
+                    .is_some_and(|context| context.control_session_id != 0)
+                    && !row.interactive_active
                     && row.health.presence == classmesh_core::presence::PresenceState::Online
                     && row.health.service_ready
                     && row.health.worker_ready
@@ -874,6 +877,27 @@ mod tests {
         let stop = TeacherUiAction::Presentation(TeacherPresentationUiAction::Stop { binding });
         app.queue_action(stop.clone());
         assert_eq!(app.take_pending_action(), Some(stop));
+    }
+
+    #[test]
+    fn queued_focus_start_requires_nonzero_control_session_at_handoff() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let start = TeacherUiAction::Focus(TeacherFocusUiAction::RequestInteractive {
+            source_id: MonitoringSourceId(7),
+        });
+        app.queue_action(start.clone());
+        assert_eq!(app.take_pending_action(), None, "offline UI cannot start focus");
+
+        let mut zero = interaction_context(BTreeSet::new());
+        zero.control_session_id = 0;
+        app.set_teacher_interaction_context(zero);
+        app.queue_action(start.clone());
+        assert_eq!(app.take_pending_action(), None, "zero session is not authorized");
+
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
+        app.queue_action(start.clone());
+        assert_eq!(app.take_pending_action(), Some(start));
     }
 
     #[test]
