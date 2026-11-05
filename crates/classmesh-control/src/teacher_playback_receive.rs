@@ -375,7 +375,13 @@ mod tests {
         ));
         let mut pair = pair(true).await?;
         let mut other = report(SESSION);
-        other.payload = None;
+        other.payload = Some(control_envelope::Payload::Heartbeat(
+            classmesh_protocol::control_wire::Heartbeat {
+                monotonic_time_us: 100,
+                control_session_id: SESSION,
+                media: 1,
+            },
+        ));
         pair.server_channel.send(&other).await?;
         let message = receive_authenticated_teacher_control(
             &mut pair.client,
