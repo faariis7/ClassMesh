@@ -887,13 +887,21 @@ mod tests {
             source_id: MonitoringSourceId(7),
         });
         app.queue_action(start.clone());
-        assert_eq!(app.take_pending_action(), None, "offline UI cannot start focus");
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "offline UI cannot start focus"
+        );
 
         let mut zero = interaction_context(BTreeSet::new());
         zero.control_session_id = 0;
         app.set_teacher_interaction_context(zero);
         app.queue_action(start.clone());
-        assert_eq!(app.take_pending_action(), None, "zero session is not authorized");
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "zero session is not authorized"
+        );
 
         app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
         app.queue_action(start.clone());
@@ -1006,6 +1014,9 @@ mod tests {
     fn queued_focus_handoff_requires_matching_interactive_state_but_allows_offline_resume() {
         let mut app = TeacherEguiShell::default();
         select_test_device(&mut app);
+        // Focus requests are legal only with a nonzero bound control session.
+        // The separate offline test verifies that missing/zero sessions deny.
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
         let start = TeacherUiAction::Focus(TeacherFocusUiAction::RequestInteractive {
             source_id: MonitoringSourceId(7),
         });
