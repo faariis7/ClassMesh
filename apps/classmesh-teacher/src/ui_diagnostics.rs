@@ -1,6 +1,7 @@
 use eframe::egui;
 
 use classmesh_core::adaptation::QualityTier;
+use classmesh_core::presence::{DeviceHealth, PresenceState};
 use classmesh_core::transport_topology::{MediaPath, MediaTopology, PhysicalGateStatus};
 use classmesh_core::{MediaTransport, StreamKind};
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
@@ -15,6 +16,29 @@ pub struct DiagnosticsOverrideDraft {
     quality_tier: Option<QualityTier>,
     transport: Option<MediaTransport>,
     topology: Option<MediaTopology>,
+}
+
+// A UI affordance, not an authorization decision. The live engine must
+// still revalidate the selected device, permission and physical path.
+fn new_override_blocker(health: DeviceHealth) -> Option<&'static str> {
+    match health.presence {
+        PresenceState::Offline => Some("Device is offline."),
+        PresenceState::Connecting => Some("Control is still connecting."),
+        PresenceState::ControlRecovering => Some("Control connection is recovering."),
+        PresenceState::Online if !health.service_ready => Some("Student Service is unavailable."),
+        PresenceState::Online if !health.worker_ready => Some("Student Worker is unavailable."),
+        PresenceState::Online => None,
+    }
+}
+
+pub(crate) fn override_action_available(
+    request: TroubleshootingOverrideRequest,
+    health: DeviceHealth,
+    action_pending: bool,
+) -> bool {
+    !action_pending
+        && (matches!(request, TroubleshootingOverrideRequest::Automatic)
+            || new_override_blocker(health).is_none())
 }
 
 pub fn show_diagnostics(
@@ -156,9 +180,19 @@ pub fn show_diagnostics(
     ui.small(
         "Overrides are requests only; live engine evidence is revalidated before application.",
     );
+    if let Some(reason) = new_override_blocker(view.health) {
+        ui.small(format!("New overrides unavailable: {reason}"));
+    }
 
     if ui
-        .add_enabled(!action_pending, egui::Button::new("Return to automatic"))
+        .add_enabled(
+            override_action_available(
+                TroubleshootingOverrideRequest::Automatic,
+                view.health,
+                action_pending,
+            ),
+            egui::Button::new("Return to automatic"),
+        )
         .clicked()
     {
         return Some(TeacherUiMessage::RequestTroubleshootingOverride {
@@ -167,41 +201,50 @@ pub fn show_diagnostics(
         });
     }
 
-    ui.collapsing("Quality override", |ui| {
-        stream_kind_picker(ui, &mut draft.stream_kind);
-        quality_tier_picker(ui, &mut draft.quality_tier);
-    });
+    ui.add_enabled_ui(
+        new_override_blocker(view.health).is_none() && !action_pending,
+        |ui| {
+            ui.collapsing("Quality override", |ui| {
+                stream_kind_picker(ui, &mut draft.stream_kind);
+                quality_tier_picker(ui, &mut draft.quality_tier);
+            });
+        },
+    );
     if let (Some(stream_kind), Some(tier)) = (draft.stream_kind, draft.quality_tier) {
+        let request = TroubleshootingOverrideRequest::Quality { stream_kind, tier };
         if ui
-            .add_enabled(!action_pending, egui::Button::new("Apply quality override"))
+            .add_enabled(
+                override_action_available(request, view.health, action_pending),
+                egui::Button::new("Apply quality override"),
+            )
             .clicked()
         {
-            return Some(TeacherUiMessage::RequestTroubleshootingOverride {
-                source_id,
-                request: TroubleshootingOverrideRequest::Quality { stream_kind, tier },
-            });
+            return Some(TeacherUiMessage::RequestTroubleshootingOverride { source_id, request });
         }
     }
 
-    ui.collapsing("Media path override", |ui| {
-        transport_picker(ui, &mut draft.transport);
-        topology_picker(ui, &mut draft.topology);
-    });
+    ui.add_enabled_ui(
+        new_override_blocker(view.health).is_none() && !action_pending,
+        |ui| {
+            ui.collapsing("Media path override", |ui| {
+                transport_picker(ui, &mut draft.transport);
+                topology_picker(ui, &mut draft.topology);
+            });
+        },
+    );
     if let (Some(transport), Some(topology)) = (draft.transport, draft.topology) {
+        let request = TroubleshootingOverrideRequest::MediaPath(MediaPath {
+            transport,
+            topology,
+        });
         if ui
             .add_enabled(
-                !action_pending,
+                override_action_available(request, view.health, action_pending),
                 egui::Button::new("Request media path override"),
             )
             .clicked()
         {
-            return Some(TeacherUiMessage::RequestTroubleshootingOverride {
-                source_id,
-                request: TroubleshootingOverrideRequest::MediaPath(MediaPath {
-                    transport,
-                    topology,
-                }),
-            });
+            return Some(TeacherUiMessage::RequestTroubleshootingOverride { source_id, request });
         }
     }
 
@@ -333,5 +376,72 @@ mod tests {
         assert_eq!(draft.quality_tier, None);
         assert_eq!(draft.transport, None);
         assert_eq!(draft.topology, None);
+    }
+
+    #[test]
+    fn new_diagnostics_overrides_require_live_runtime_but_automatic_reset_does_not() {
+        use classmesh_core::MediaState;
+        use classmesh_core::presence::{DeviceHealth, PresenceState};
+
+        let healthy = DeviceHealth {
+            presence: PresenceState::Online,
+            media: MediaState::Idle,
+            service_ready: true,
+            worker_ready: true,
+        };
+        let quality = TroubleshootingOverrideRequest::Quality {
+            stream_kind: StreamKind::Monitoring,
+            tier: QualityTier::Low,
+        };
+        let path = TroubleshootingOverrideRequest::MediaPath(MediaPath {
+            transport: MediaTransport::UdpUnicast,
+            topology: MediaTopology::Direct,
+        });
+        for request in [quality, path] {
+            assert!(override_action_available(request, healthy, false));
+            assert!(!override_action_available(request, healthy, true));
+            for presence in [
+                PresenceState::Offline,
+                PresenceState::Connecting,
+                PresenceState::ControlRecovering,
+            ] {
+                assert!(!override_action_available(
+                    request,
+                    DeviceHealth {
+                        presence,
+                        ..healthy
+                    },
+                    false,
+                ));
+            }
+            assert!(!override_action_available(
+                request,
+                DeviceHealth {
+                    service_ready: false,
+                    ..healthy
+                },
+                false,
+            ));
+            assert!(!override_action_available(
+                request,
+                DeviceHealth {
+                    worker_ready: false,
+                    ..healthy
+                },
+                false,
+            ));
+        }
+        let automatic = TroubleshootingOverrideRequest::Automatic;
+        assert!(override_action_available(
+            automatic,
+            DeviceHealth {
+                presence: PresenceState::Offline,
+                service_ready: false,
+                worker_ready: false,
+                ..healthy
+            },
+            false,
+        ));
+        assert!(!override_action_available(automatic, healthy, true));
     }
 }

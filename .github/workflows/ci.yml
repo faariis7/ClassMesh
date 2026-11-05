@@ -123,6 +123,9 @@ jobs:
       - name: Build Phase 12B4 Service qualification binary
         run: cargo build -p classmesh-service --release
 
+      - name: Build Phase 13 Worker deployment candidate
+        run: cargo build -p classmesh-worker --bin classmesh-worker --release
+
       - name: Build Teacher UI shell
         run: cargo build -p classmesh-teacher --bin classmesh-teacher-ui --release
 
@@ -134,7 +137,11 @@ jobs:
 
       - name: Validate Phase 11F4 Teacher UI smoke helper
         shell: pwsh
-        run: .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode Help
+        run: |
+          .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode Help
+          .\scripts\tests\phase13_vc_runtime_preflight.ps1
+          .\scripts\tests\phase13_service_worker_bundle.ps1
+          .\scripts\tests\phase13_vc_runtime_registry.ps1
 
       - name: Validate Phase 12B4 system-action qualification helper
         shell: pwsh
@@ -222,20 +229,44 @@ jobs:
             throw "Phase 9 synthetic baseline did not pass its bounded invariants"
           }
 
-      - name: Validate Phase 10 synthetic adaptive baseline
+      - name: Validate Phase 10 synthetic adaptive baseline at all classroom scales
         shell: pwsh
         run: |
           .\target\release\classmesh-adaptive-controller-benchmark.exe --help
-          $output = .\target\release\classmesh-adaptive-controller-benchmark.exe --receivers 30 --rounds 30
-          $output | Write-Host
-          if ($output -notcontains "physical_qualification=false") {
-            throw "Phase 10 synthetic baseline must not claim physical qualification"
-          }
-          if ($output -notcontains "production_default_selected=false") {
-            throw "Phase 10 synthetic baseline must not select a production default"
-          }
-          if ($output -notcontains "synthetic_invariants_passed=true") {
-            throw "Phase 10 synthetic baseline did not pass its adaptive invariants"
+          foreach ($receivers in @(5, 10, 20, 30)) {
+            $output = @( .\target\release\classmesh-adaptive-controller-benchmark.exe --receivers $receivers --rounds 30 )
+            if ($LASTEXITCODE -ne 0) {
+              throw "Phase 10 synthetic benchmark failed at receiver scale $receivers"
+            }
+            $output | Write-Host
+            $healthy = $receivers - 1
+            $required = @(
+              "mode=synthetic-adaptive-controller",
+              "physical_qualification=false",
+              "production_default_selected=false",
+              "receivers=$receivers",
+              "rounds=30",
+              "healthy_high_after_weak_degrade=$healthy",
+              "weak_degraded_tier=Emergency",
+              "weak_recovered_tier=High",
+              "healthy_high_after_silence=$healthy",
+              "silent_receiver_expired_tier=Emergency",
+              "silent_receiver_recovered_tier=High",
+              "silence_timeout_route_changes=1",
+              "silence_repeated_timeout_changes=0",
+              "noisy_receiver_tier_changes=0",
+              "max_routed_receivers=$receivers",
+              "unresolved_transport_blocked=true",
+              "unresolved_rendition_blocked=true",
+              "qualified_switch_required_hysteresis=true",
+              "reliable_fallback_eligible_without_default_selection=true",
+              "synthetic_invariants_passed=true"
+            )
+            foreach ($line in $required) {
+              if ($output -notcontains $line) {
+                throw "Phase 10 synthetic receiver scale $($receivers): missing invariant $line"
+              }
+            }
           }
 
       - name: Validate Phase 7H physical runner
@@ -515,16 +546,49 @@ jobs:
           New-Item -ItemType Directory -Path phase11f4-teacher-ui-bundle -Force | Out-Null
           Copy-Item target/release/classmesh-teacher-ui.exe phase11f4-teacher-ui-bundle/
           Copy-Item scripts/phase11f4-teacher-ui-smoke.ps1 phase11f4-teacher-ui-bundle/
+          Copy-Item scripts/phase13-vc-runtime.ps1 phase11f4-teacher-ui-bundle/
           Copy-Item docs/PHASE11_TEACHER_UI_SMOKE.md phase11f4-teacher-ui-bundle/
           Copy-Item docs/PHASE11_TEACHER_UI_SMOKE_RESULTS.md phase11f4-teacher-ui-bundle/
           .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode IndexBundle -BundleDir phase11f4-teacher-ui-bundle
           .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode ValidateBundle -BundleDir phase11f4-teacher-ui-bundle
+          .\scripts\phase11f4-teacher-ui-smoke.ps1 -Mode PreflightRuntime -BundleDir phase11f4-teacher-ui-bundle
 
       - name: Upload Phase 11F4 Teacher UI bundle
         uses: actions/upload-artifact@v4
         with:
           name: classmesh-phase11f4-teacher-ui-windows-x64
           path: phase11f4-teacher-ui-bundle/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
+
+      - name: Stage Phase 13 Service and Worker prerequisite bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path phase13-service-worker-bundle -Force | Out-Null
+          Copy-Item target/release/classmesh-service.exe phase13-service-worker-bundle/
+          Copy-Item target/release/classmesh-worker.exe phase13-service-worker-bundle/
+          Copy-Item scripts/phase13-service-worker-bundle.ps1 phase13-service-worker-bundle/
+          Copy-Item scripts/phase13-vc-runtime.ps1 phase13-service-worker-bundle/
+          Copy-Item docs/PHASE13_SERVICE_WORKER_PREREQUISITES.md phase13-service-worker-bundle/
+          .\scripts\phase13-service-worker-bundle.ps1 -Mode IndexBundle -BundleDir phase13-service-worker-bundle
+          .\scripts\phase13-service-worker-bundle.ps1 -Mode ValidateBundle -BundleDir phase13-service-worker-bundle
+          .\scripts\phase13-service-worker-bundle.ps1 -Mode PreflightRuntime -BundleDir phase13-service-worker-bundle
+
+      - name: Test Phase 13 pinned signed release manifest verifier
+        shell: pwsh
+        run: |
+          .\scripts\phase13-release-manifest.ps1 -Mode Help
+          .\scripts\tests\phase13_signed_release_manifest.ps1 -BundleDir phase13-service-worker-bundle
+
+      - name: Test Phase 13 create-only release manifest signing
+        shell: pwsh
+        run: .\scripts\tests\phase13_release_signing.ps1 -BundleDir phase13-service-worker-bundle
+
+      - name: Upload Phase 13 Service and Worker prerequisite bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-phase13-service-worker-windows-x64
+          path: phase13-service-worker-bundle/
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 

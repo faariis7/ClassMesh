@@ -1,5 +1,11 @@
 #![forbid(unsafe_code)]
 
+pub mod classroom_audit_batch_consistency;
+pub mod classroom_audit_chain_consistency;
+pub mod classroom_audit_intent_encoding;
+pub mod classroom_candidate_invariants;
+pub mod classroom_policy_change_stage;
+pub mod classroom_policy_preview;
 pub mod group_media;
 pub mod group_media_coordinator;
 pub mod persistence;
@@ -283,7 +289,7 @@ pub enum AuthorizationStoreError {
     },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AuthorizationStore {
     principals: BTreeMap<PrincipalId, Principal>,
     credential_owners: BTreeMap<CredentialFingerprint, PrincipalId>,
@@ -669,3 +675,7 @@ mod tests {
         );
     }
 }
+
+pub mod classroom_audit_baseline_consistency;
+
+pub mod classroom_audit_chain_baseline_consistency;
