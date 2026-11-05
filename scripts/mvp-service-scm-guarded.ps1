@@ -49,9 +49,16 @@ function Assert-ProtectedFile([string]$Path, [string]$ExpectedHash) {
         foreach ($rule in $acl.Access) {
             if ($rule.AccessControlType -ne 'Allow') { continue }
             $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-            if ($sid -in @('S-1-1-0','S-1-5-11','S-1-5-32-545','S-1-5-4') -and
-                ($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Write) -ne 0) {
-                throw 'FAIL_CLOSED: low-privilege write permission in executable ancestry'
+            # Delete and ACL takeover are mutation capabilities even without Write.
+            $untrusted = @('S-1-1-0','S-1-5-11','S-1-5-32-545','S-1-5-4','S-1-5-2','S-1-5-32-546')
+            $mutation = [Security.AccessControl.FileSystemRights]::WriteData -bor
+                [Security.AccessControl.FileSystemRights]::AppendData -bor
+                [Security.AccessControl.FileSystemRights]::Delete -bor
+                [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+                [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                [Security.AccessControl.FileSystemRights]::TakeOwnership
+            if ($sid -in $untrusted -and ($rule.FileSystemRights -band $mutation) -ne 0) {
+                throw 'FAIL_CLOSED: low-privilege mutation permission in executable ancestry'
             }
         }
         $cursor = $cursor.Parent

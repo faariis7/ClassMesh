@@ -14,3 +14,11 @@ foreach ($case in $cases) {
     if ($output -notmatch [regex]::Escape($case.Match)) { throw "Expected fail-closed marker missing: $($case.Match)" }
 }
 'PASS: Plan nonmutating; unapproved invocation rejects; non-Windows invocation rejects'
+
+# Regression contract: reject all low-privilege mutation rights, not only the Write alias.
+$source = Get-Content -LiteralPath $script -Raw
+foreach ($right in @('WriteData','AppendData','Delete','DeleteSubdirectoriesAndFiles','ChangePermissions','TakeOwnership')) {
+    if ($source -notmatch [regex]::Escape("::$right")) { throw "SCM ACL gate missing mutation right: $right" }
+}
+if ($source -notmatch 'Assert-ProtectedFile \$ServiceExe \$ExpectedServiceSha256') { throw 'Service executable integrity gate missing' }
+'PASS: SCM ACL mutation-right regression contract'
