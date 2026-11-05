@@ -167,9 +167,7 @@ impl TeacherEguiShell {
             self.pending_action = None;
         }
         self.teacher_interaction_context = None;
-        // An authenticated playback ledger belongs to the disconnected session.
-        // Never retain its counters or replay state across a later rebind.
-        self.playback = None;
+        // Retire the authenticated playback ledger and diagnostics intents together.
         self.retire_pending_diagnostics_override();
         self.playback = None;
         reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
@@ -1336,7 +1334,10 @@ mod tests {
             .unwrap();
         assert!(app.playback.is_some());
         app.clear_teacher_interaction_context();
-        assert!(app.playback.is_none(), "disconnect must erase old playback ledger");
+        assert!(
+            app.playback.is_none(),
+            "disconnect must erase old playback ledger"
+        );
         app.set_teacher_interaction_context(context);
         assert_eq!(app.visible_receiver_playback_at(now), None);
     }
