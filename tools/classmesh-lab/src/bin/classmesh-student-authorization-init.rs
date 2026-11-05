@@ -207,9 +207,9 @@ mod windows_app {
             .create_new(true)
             .write(true)
             .open(&config_path)?;
-        write!(
+        writeln!(
             file,
-            "{{\"version\":1,\"bind_address\":\"{}\",\"multicast_interface\":null}}\n",
+            "{{\"version\":1,\"bind_address\":\"{}\",\"multicast_interface\":null}}",
             config.bind_address
         )?;
         file.sync_all()?;
