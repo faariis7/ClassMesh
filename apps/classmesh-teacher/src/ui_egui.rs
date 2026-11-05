@@ -368,7 +368,9 @@ impl TeacherEguiShell {
             crate::ui_shell::TeacherFocusUiAction::RequestInteractive { .. } => {
                 self.teacher_interaction_context
                     .as_ref()
-                    .is_some_and(|context| context.control_session_id != 0)
+                    .is_some_and(|context| {
+                        context.control_session_id != 0 && context.source_id == source_id
+                    })
                     && !row.interactive_active
                     && row.health.presence == classmesh_core::presence::PresenceState::Online
                     && row.health.service_ready
@@ -906,6 +908,25 @@ mod tests {
         app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
         app.queue_action(start.clone());
         assert_eq!(app.take_pending_action(), Some(start));
+    }
+
+    #[test]
+    fn queued_focus_start_rejects_session_bound_to_different_device() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let mut other = interaction_context(BTreeSet::new());
+        other.source_id = MonitoringSourceId(8);
+        app.set_teacher_interaction_context(other);
+        app.queue_action(TeacherUiAction::Focus(
+            TeacherFocusUiAction::RequestInteractive {
+                source_id: MonitoringSourceId(7),
+            },
+        ));
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "a session for another device must never authorize focus"
+        );
     }
 
     #[test]
