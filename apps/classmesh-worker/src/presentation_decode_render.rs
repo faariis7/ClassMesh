@@ -26,6 +26,17 @@ pub enum PresentationDecodeStep {
     WaitingForKeyframe,
 }
 
+// A minimized DXGI presenter returns success without swapping a frame. Keep
+// receiver telemetry tied to actual Present() calls, not successful skips.
+#[cfg(any(windows, test))]
+const fn count_presented_outcome(presented: usize, was_presented: bool) -> usize {
+    if was_presented {
+        presented.saturating_add(1)
+    } else {
+        presented
+    }
+}
+
 // A failed device-loss rebuild is a media-local fatal condition. The caller
 // must tear down the receiver/decoder instead of continuing with a lost GPU.
 #[cfg(any(windows, test))]
@@ -230,7 +241,12 @@ impl PresentationDecodeRuntime {
         for frame in &frames {
             if let Some(presentation) = self.presentation.as_mut() {
                 match presentation.present(frame) {
-                    Ok(()) => batch.presented = batch.presented.saturating_add(1),
+                    Ok(classmesh_render_win::PresentOutcome::Presented) => {
+                        batch.presented = count_presented_outcome(batch.presented, true);
+                    }
+                    Ok(classmesh_render_win::PresentOutcome::SkippedSuspended) => {
+                        batch.presented = count_presented_outcome(batch.presented, false);
+                    }
                     Err(error) => {
                         batch.present_errors = batch.present_errors.saturating_add(1);
                         if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
@@ -375,7 +391,14 @@ impl PresentationDecodeRuntime {
 
 #[cfg(test)]
 mod window_recovery_tests {
-    use super::keep_window_stream_alive;
+    use super::{count_presented_outcome, keep_window_stream_alive};
+
+    #[test]
+    fn suspended_frames_do_not_inflate_successful_present_count() {
+        assert_eq!(count_presented_outcome(4, false), 4);
+        assert_eq!(count_presented_outcome(4, true), 5);
+        assert_eq!(count_presented_outcome(usize::MAX, true), usize::MAX);
+    }
 
     #[test]
     fn failed_window_gpu_rebuild_ends_only_the_media_path() {
