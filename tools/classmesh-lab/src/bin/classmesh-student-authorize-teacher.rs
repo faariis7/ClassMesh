@@ -7,12 +7,17 @@ fn main() {
 mod windows_app {
     use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
-    use std::fs;
+    use std::fs::File;
+    use std::io::Read;
+    use std::path::Path;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use classmesh_control::enrollment::{ENROLLMENT_MIN_VERSION, validate_enrollment_request, validate_enrollment_result_binding};
     use classmesh_control::enrollment_result::approved_credential_from_result;
-    use classmesh_protocol::control_wire::EnrollmentResult;
+    use classmesh_lab::enrollment_certificate_validation::validate_signed_result;
+    use classmesh_lab::enrollment_cli_role::EnrollmentCliRole;
+    use classmesh_protocol::control_wire::{EnrollmentRequest, EnrollmentResult, PrincipalRole};
     use classmesh_security::persistence::DurableAuthorizationState;
     use classmesh_security::{Permission, Principal, PrincipalKind};
     use prost::Message;
@@ -24,14 +29,18 @@ mod windows_app {
 
     #[derive(Debug)]
     struct Config {
+        request: PathBuf,
         result: PathBuf,
         authorization: PathBuf,
+        trust_roots: Vec<PathBuf>,
     }
 
     impl Config {
         fn parse() -> Result<Self, String> {
             let mut args = std::env::args().skip(1);
+            let mut request = None;
             let mut result = None;
+            let mut trust_roots = Vec::new();
             let mut authorization = None;
 
             while let Some(arg) = args.next() {
@@ -40,6 +49,8 @@ mod windows_app {
                         .ok_or_else(|| format!("missing value after {arg}"))
                 };
                 match arg.as_str() {
+                    "--request" => request = Some(PathBuf::from(value()?)),
+                    "--trust-root" => trust_roots.push(PathBuf::from(value()?)),
                     "--result" => result = Some(PathBuf::from(value()?)),
                     "--authorization" => authorization = Some(PathBuf::from(value()?)),
                     "--help" | "-h" => return Err(Self::usage().to_owned()),
@@ -47,7 +58,12 @@ mod windows_app {
                 }
             }
 
+            if trust_roots.is_empty() || trust_roots.len() > 16 {
+                return Err("1..=16 explicit --trust-root values required".into());
+            }
             Ok(Self {
+                request: request.ok_or("--request is required")?,
+                trust_roots,
                 result: result
                     .ok_or_else(|| format!("--result is required\n\n{}", Self::usage()))?,
                 authorization: authorization
@@ -58,6 +74,8 @@ mod windows_app {
         fn usage() -> &'static str {
             "ClassMesh Phase 6F Student Teacher authorization\n\n\
 Required:\n\
+  --request <teacher-request.pb>\n\
+  --trust-root <trusted-ca.der> (repeat 1..=16)\n\
   --result <teacher-approved.pb>\n\
   --authorization <Student authorization.json>\n\n\
 Adds exactly one previously-absent Teacher principal with only ViewInteractive and\n\
@@ -65,17 +83,19 @@ ControlInput permissions. Existing principals are never replaced by this qualifi
         }
     }
 
-    fn read_result(path: &PathBuf) -> AppResult<Vec<u8>> {
-        let metadata = fs::metadata(path)?;
-        let length = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
-        if length == 0 || length > MAX_RESULT_BYTES {
-            return Err(format!(
-                "enrollment result size {length} is outside 1..={MAX_RESULT_BYTES}: {}",
-                path.display()
-            )
-            .into());
+    fn read_bounded(path: &Path, label: &str) -> AppResult<Vec<u8>> {
+        let file = File::open(path)?;
+        let size = usize::try_from(file.metadata()?.len()).unwrap_or(usize::MAX);
+        if size == 0 || size > MAX_RESULT_BYTES {
+            return Err(format!("{label} size is invalid: {size}").into());
         }
-        Ok(fs::read(path)?)
+        let mut bytes = Vec::with_capacity(size);
+        file.take(u64::try_from(MAX_RESULT_BYTES + 1)?)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() != size || bytes.len() > MAX_RESULT_BYTES {
+            return Err(format!("{label} changed during reading").into());
+        }
+        Ok(bytes)
     }
 
     fn unix_time_ms() -> AppResult<u64> {
@@ -107,9 +127,27 @@ ControlInput permissions. Existing principals are never replaced by this qualifi
             }
         };
 
-        let result_bytes = read_result(&config.result)?;
+        let request_bytes = read_bounded(&config.request, "Teacher request")?;
+        let request = EnrollmentRequest::decode(request_bytes.as_slice())?;
+        validate_enrollment_request(ENROLLMENT_MIN_VERSION, &request)
+            .map_err(|error| format!("Teacher request rejected: {error:?}"))?;
+        if request.role != PrincipalRole::Teacher as i32 {
+            return Err("authorization requires an explicit Teacher CSR role".into());
+        }
+        let principal_id: [u8; 32] = request.principal_id.as_slice().try_into()?;
+        let csr_digest: [u8; 32] = Sha256::digest(&request.pkcs10_csr_der).into();
+        let result_bytes = read_bounded(&config.result, "Teacher result")?;
         let result = EnrollmentResult::decode(result_bytes.as_slice())?;
+        validate_enrollment_result_binding(
+            ENROLLMENT_MIN_VERSION, &principal_id, &csr_digest, &result,
+        ).map_err(|error| format!("Teacher result binding rejected: {error:?}"))?;
         let now_unix_ms = unix_time_ms()?;
+        let roots = config.trust_roots.iter()
+            .map(|path| read_bounded(path, "operator trust root"))
+            .collect::<AppResult<Vec<_>>>()?;
+        validate_signed_result(
+            &request, &result, &roots, now_unix_ms, EnrollmentCliRole::Teacher,
+        )?;
         let approved = approved_credential_from_result(&result, now_unix_ms)
             .map_err(|error| format!("Teacher enrollment result rejected: {error:?}"))?;
 
