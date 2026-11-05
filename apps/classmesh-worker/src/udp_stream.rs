@@ -17,6 +17,22 @@ use crate::presentation::{PresentationError, PresentationPipeline, PresentationT
 const MEDIA_WRITE_TIMEOUT: Duration = Duration::from_millis(20);
 const MIN_KEYFRAME_INTERVAL_US: u64 = 500_000;
 
+/// A failed encoder request must not silently consume the only pending IDR.
+/// Requeue it, retaining the coordinator's rate limit for the next attempt.
+fn request_pending_keyframe<E>(
+    keyframes: &mut KeyframeCoordinator,
+    now_us: u64,
+    mut request: impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    if keyframes.poll(now_us) {
+        if let Err(error) = request() {
+            keyframes.request();
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub enum FocusedUdpStreamError {
     Datagram(DatagramError),
@@ -176,10 +192,9 @@ impl FocusedUdpStream {
         let Some(pipeline) = self.pipeline.as_mut() else {
             return Ok(());
         };
-        if self.keyframes.poll(now_us) {
-            pipeline.request_keyframe()?;
-        }
-        Ok(())
+        request_pending_keyframe(&mut self.keyframes, now_us, || {
+            pipeline.request_keyframe().map_err(Into::into)
+        })
     }
 
     pub fn process_frame(
@@ -264,6 +279,37 @@ mod tests {
             }),
             Err(FocusedUdpStreamError::StreamMismatch)
         ));
+    }
+
+    #[test]
+    fn failed_encoder_keyframe_request_remains_pending_for_rate_limited_retry() {
+        let mut keyframes = KeyframeCoordinator::new(MIN_KEYFRAME_INTERVAL_US);
+        keyframes.request();
+        let mut calls = 0;
+        let first = request_pending_keyframe(&mut keyframes, 1_000, || {
+            calls += 1;
+            Err::<(), _>("encoder temporarily unavailable")
+        });
+        assert_eq!(first, Err("encoder temporarily unavailable"));
+        assert_eq!(keyframes.pending_requests(), 1);
+
+        let too_soon =
+            request_pending_keyframe(&mut keyframes, 1_000 + MIN_KEYFRAME_INTERVAL_US - 1, || {
+                calls += 1;
+                Ok::<(), &str>(())
+            });
+        assert_eq!(too_soon, Ok(()));
+        assert_eq!(calls, 1);
+        assert_eq!(keyframes.pending_requests(), 1);
+
+        let recovered =
+            request_pending_keyframe(&mut keyframes, 1_000 + MIN_KEYFRAME_INTERVAL_US, || {
+                calls += 1;
+                Ok::<(), &str>(())
+            });
+        assert_eq!(recovered, Ok(()));
+        assert_eq!(calls, 2);
+        assert_eq!(keyframes.pending_requests(), 0);
     }
 
     #[test]

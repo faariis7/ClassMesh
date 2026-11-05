@@ -119,6 +119,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut native_telemetry_sender: Option<telemetry_native::BestEffortReceiverSender> = None;
 
     loop {
+        // Reconcile the Service-visible readiness from actual capture ownership
+        // after every event, including SuspendMedia and failed backend paths.
+        // A stale true must not survive a dropped DXGI capture.
+        update_worker_capture_readiness(
+            &mut runtime_capabilities,
+            capture.as_ref().map(|active| active.state()),
+            |next| publish_worker_capabilities(&pipe, std::process::id(), actual_session, next),
+        )?;
         let now = Instant::now();
         let mut wait = if capture.is_some() {
             capture_due
@@ -161,15 +169,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok((capture, adapter)) => {
                             encoder_benchmark = runtime_encoder_benchmark(adapter);
                             eprintln!("ClassMesh Worker DXGI capture resumed by Service");
-                            if !runtime_capabilities.dxgi_capture {
-                                runtime_capabilities.dxgi_capture = true;
-                                publish_worker_capabilities(
-                                    &pipe,
-                                    std::process::id(),
-                                    actual_session,
-                                    runtime_capabilities,
-                                )?;
-                            }
                             Some(capture)
                         }
                         Err(error) => {
@@ -604,6 +603,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match group_media_keys.install(install) {
                         Ok(installed) => {
                             debug_assert_eq!(installed, binding);
+                            if group_media_keys.take_decoder_resync() {
+                                // A new SFrame epoch cannot inherit the old H.264
+                                // decoder reference pictures or recovery timers.
+                                // The next accepted media must be a fresh IDR.
+                                presentation_keyframe_request_retry.reset();
+                                presentation_silence.reset();
+                                presentation_delivery_telemetry.reset();
+                                if let Some(decoder) = presentation_decode.as_mut() {
+                                    decoder.recover_after_loss();
+                                }
+                            }
                             classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Installed
                         }
                         Err(error) => {
@@ -930,15 +940,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     capture = Some(restarted);
                     capture_restart.clear();
                     capture_due = Instant::now();
-                    if !runtime_capabilities.dxgi_capture {
-                        runtime_capabilities.dxgi_capture = true;
-                        publish_worker_capabilities(
-                            &pipe,
-                            std::process::id(),
-                            actual_session,
-                            runtime_capabilities,
-                        )?;
-                    }
                     eprintln!(
                         "ClassMesh Worker DXGI capture recovered; control session remained active"
                     );
@@ -1137,6 +1138,32 @@ impl CaptureRestart {
 struct WorkerCapabilitySnapshot {
     dxgi_capture: bool,
     h264_hardware_encode: bool,
+}
+
+#[cfg(windows)]
+fn update_worker_capture_readiness<E>(
+    snapshot: &mut WorkerCapabilitySnapshot,
+    capture_state: Option<classmesh_core::recovery::RecoveryState>,
+    mut publish: impl FnMut(WorkerCapabilitySnapshot) -> Result<(), E>,
+) -> Result<bool, E> {
+    // A RecoveringCapture wrapper can outlive its disposed DXGI backend.
+    // Only a successfully initialized/recreated backend is Service-ready.
+    let capture_present = matches!(
+        capture_state,
+        Some(classmesh_core::recovery::RecoveryState::Healthy)
+    );
+    if snapshot.dxgi_capture == capture_present {
+        return Ok(false);
+    }
+    let updated = WorkerCapabilitySnapshot {
+        dxgi_capture: capture_present,
+        ..*snapshot
+    };
+    // Do not claim a state change locally until the exact PID/session-bound
+    // capability report has been accepted by the IPC writer.
+    publish(updated)?;
+    *snapshot = updated;
+    Ok(true)
 }
 
 #[cfg(windows)]
@@ -2465,6 +2492,105 @@ mod focused_profile_tests {
         let error = worker_event_from_decoded_frame(DecodedIpcFrame::Regular(frame))
             .expect_err("Worker-to-Service result must be rejected on Service-to-Worker path");
         assert!(error.contains("unexpected IPC message after handshake"));
+    }
+
+    #[test]
+    fn capture_readiness_tracks_suspend_failure_and_recovery_without_stale_reports() {
+        let mut snapshot = WorkerCapabilitySnapshot {
+            dxgi_capture: true,
+            h264_hardware_encode: false,
+        };
+        let mut sent = Vec::new();
+        let mut publish = |next: WorkerCapabilitySnapshot| {
+            sent.push(next.dxgi_capture);
+            Ok::<(), &'static str>(())
+        };
+
+        // A Service suspend or terminal DXGI backend failure drops capture.
+        assert_eq!(
+            update_worker_capture_readiness(&mut snapshot, None, &mut publish),
+            Ok(true)
+        );
+        assert!(!snapshot.dxgi_capture);
+        assert_eq!(
+            update_worker_capture_readiness(&mut snapshot, None, &mut publish),
+            Ok(false)
+        );
+        // ResumeMedia or bounded automatic restart restores capture.
+        assert_eq!(
+            update_worker_capture_readiness(
+                &mut snapshot,
+                Some(classmesh_core::recovery::RecoveryState::Healthy),
+                &mut publish
+            ),
+            Ok(true)
+        );
+        assert!(snapshot.dxgi_capture);
+        assert_eq!(
+            update_worker_capture_readiness(
+                &mut snapshot,
+                Some(classmesh_core::recovery::RecoveryState::Healthy),
+                &mut publish
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            update_worker_capture_readiness(&mut snapshot, None, &mut publish),
+            Ok(true)
+        );
+        assert_eq!(sent, vec![false, true, false]);
+    }
+
+    #[test]
+    fn failed_capture_readiness_publish_never_commits_an_unreported_state() {
+        let mut snapshot = WorkerCapabilitySnapshot {
+            dxgi_capture: true,
+            h264_hardware_encode: false,
+        };
+        let result = update_worker_capture_readiness(&mut snapshot, None, |_| {
+            Err::<(), &'static str>("IPC publish failed")
+        });
+        assert_eq!(result, Err("IPC publish failed"));
+        assert!(snapshot.dxgi_capture);
+    }
+
+    #[test]
+    fn recovering_dxgi_backend_does_not_publish_stale_ready_state() {
+        use classmesh_core::recovery::{RecoveryReason, RecoveryState};
+        let mut snapshot = WorkerCapabilitySnapshot {
+            dxgi_capture: true,
+            h264_hardware_encode: false,
+        };
+        let mut sent = Vec::new();
+        let mut publish = |next: WorkerCapabilitySnapshot| {
+            sent.push(next.dxgi_capture);
+            Ok::<(), &'static str>(())
+        };
+        // RecoveringCapture still exists after DXGI AccessLost, but its
+        // inner backend has been disposed and recreation has not succeeded.
+        let recovering = RecoveryState::Recovering {
+            attempt: 1,
+            reason: RecoveryReason::AccessLost,
+        };
+        assert_eq!(
+            update_worker_capture_readiness(&mut snapshot, Some(recovering), &mut publish),
+            Ok(true)
+        );
+        assert!(!snapshot.dxgi_capture);
+        assert_eq!(
+            update_worker_capture_readiness(&mut snapshot, Some(recovering), &mut publish),
+            Ok(false)
+        );
+        assert_eq!(
+            update_worker_capture_readiness(
+                &mut snapshot,
+                Some(RecoveryState::Healthy),
+                &mut publish
+            ),
+            Ok(true)
+        );
+        assert!(snapshot.dxgi_capture);
+        assert_eq!(sent, vec![false, true]);
     }
 
     #[test]

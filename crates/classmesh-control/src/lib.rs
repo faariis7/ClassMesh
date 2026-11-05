@@ -3,6 +3,7 @@
 pub mod adaptive_media_recovery;
 pub mod authorization;
 pub mod bootstrap;
+pub mod classroom_live_policy_review;
 pub mod client_session;
 pub mod clipboard_execution;
 pub mod clipboard_live_authority;
@@ -41,6 +42,8 @@ pub mod receiver_telemetry_stream_framing;
 pub mod receiver_telemetry_transport;
 pub mod stream;
 pub mod system_action_execution;
+pub mod teacher_file_pull_receive;
+pub mod teacher_file_pull_send;
 pub mod x509_issuance;
 
 use std::collections::BTreeSet;

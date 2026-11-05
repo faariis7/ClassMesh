@@ -227,6 +227,15 @@ pub(crate) struct RegistryAnchor {
     key: Key,
 }
 impl RegistryAnchor {
+    /// A fresh installer must not seed startup inputs that would activate an
+    /// earlier committed policy. Probe without flushing or adopting a key.
+    pub(crate) fn require_absent(scope: &str) -> io::Result<()> {
+        let parent = machine_parent(scope)?;
+        match open(parent.0, scope, KEY_READ | KEY_WOW64_64KEY) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            _ => Err(denied()),
+        }
+    }
     pub(crate) fn create(scope: &str, record: &[u8; RECORD_LEN]) -> io::Result<Self> {
         epoch(record)?;
         let parent = machine_parent(scope)?;
@@ -390,6 +399,22 @@ struct PendingAdvance<'a> {
     transaction: OwnedHandle,
     previous: [u8; RECORD_LEN],
 }
+#[cfg(test)]
+fn pause_for_vm_power_cut(stage: &str) -> io::Result<()> {
+    if std::env::var("CLASSMESH_REGISTRY_POWER_CUT_STAGE").as_deref() != Ok(stage) {
+        return Ok(());
+    }
+    let marker = std::env::var("CLASSMESH_REGISTRY_POWER_CUT_MARKER")
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "missing VM marker"))?;
+    // Test binary only: signal an externally controlled hard power-off at an
+    // exact commit boundary. A deadline avoids an abandoned probe hanging.
+    std::fs::write(marker, stage.as_bytes())?;
+    std::thread::sleep(std::time::Duration::from_secs(120));
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "VM power-cut probe was not interrupted",
+    ))
+}
 impl PendingAdvance<'_> {
     fn stage(&self, next: &[u8; RECORD_LEN]) -> io::Result<()> {
         if epoch(next)? <= epoch(&self.previous)? {
@@ -400,7 +425,12 @@ impl PendingAdvance<'_> {
     fn commit(self, next: &[u8; RECORD_LEN]) -> io::Result<()> {
         self.stage(next)?;
         commit(&self.transaction)?;
-        self.anchor.flush_exact(next)
+        #[cfg(test)]
+        pause_for_vm_power_cut("before-flush")?;
+        self.anchor.flush_exact(next)?;
+        #[cfg(test)]
+        pause_for_vm_power_cut("after-flush")?;
+        Ok(())
     }
 }
 
