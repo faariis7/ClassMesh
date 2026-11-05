@@ -47,6 +47,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if primary_service_pid == 0 || primary_service_pid == std::process::id() {
         return Err("invalid Worker IPC server process identity".into());
     }
+    // A Service-owned pipe must originate in Windows Session 0. Reject a
+    // same-user Session 1 pipe before disclosing WorkerHello. This is only
+    // an additional OS-level boundary, not LocalSystem token authentication.
+    if pipe.server_session_id()? != 0 {
+        return Err("Worker IPC server is not running in Windows Session 0".into());
+    }
     let hello = IpcFrame::worker_hello(std::process::id(), actual_session)
         .encode()
         .map_err(ipc_frame_error)?;
@@ -64,6 +70,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Fail closed if the native pipe server identity changes during handshake.
     // This is continuity checking, not proof of a LocalSystem Service token.
+    if pipe.server_session_id()? != 0 {
+        return Err("Worker IPC server session changed during handshake".into());
+    }
     if pipe.server_process_id()? != primary_service_pid {
         return Err("Worker IPC server process changed during handshake".into());
     }
