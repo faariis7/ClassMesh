@@ -634,11 +634,24 @@ impl TeacherEguiShell {
     }
 }
 
+// The window can start before any authenticated QUIC session exists. Never
+// present an offline console as connected just because the process is running.
+fn control_connection_label(context: Option<&TeacherInteractionUiContext>) -> &'static str {
+    match context {
+        Some(context) if context.control_session_id != 0 => "Control session active",
+        _ => "Offline — no authenticated control session",
+    }
+}
+
 impl eframe::App for TeacherEguiShell {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_navigation_shortcuts(ctx);
         egui::TopBottomPanel::top("classmesh_teacher_navigation").show(ctx, |ui| {
             self.navigation(ui);
+        });
+
+        egui::TopBottomPanel::bottom("classmesh_teacher_connection_status").show(ctx, |ui| {
+            ui.small(control_connection_label(self.teacher_interaction_context.as_ref()));
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -688,6 +701,22 @@ mod tests {
     use crate::ui_shell::{TeacherFocusUiAction, TeacherPresentationUiAction};
 
     use super::*;
+
+    #[test]
+    fn native_window_status_never_claims_control_without_authenticated_session() {
+        assert_eq!(
+            control_connection_label(None),
+            "Offline — no authenticated control session"
+        );
+        let mut context = interaction_context(BTreeSet::new());
+        context.control_session_id = 0;
+        assert_eq!(
+            control_connection_label(Some(&context)),
+            "Offline — no authenticated control session"
+        );
+        context.control_session_id = 77;
+        assert_eq!(control_connection_label(Some(&context)), "Control session active");
+    }
 
     fn send_navigation_key(
         app: &mut TeacherEguiShell,
