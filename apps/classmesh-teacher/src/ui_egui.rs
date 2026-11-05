@@ -651,7 +651,9 @@ impl eframe::App for TeacherEguiShell {
         });
 
         egui::TopBottomPanel::bottom("classmesh_teacher_connection_status").show(ctx, |ui| {
-            ui.small(control_connection_label(self.teacher_interaction_context.as_ref()));
+            ui.small(control_connection_label(
+                self.teacher_interaction_context.as_ref(),
+            ));
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -715,7 +717,10 @@ mod tests {
             "Offline — no authenticated control session"
         );
         context.control_session_id = 77;
-        assert_eq!(control_connection_label(Some(&context)), "Control session active");
+        assert_eq!(
+            control_connection_label(Some(&context)),
+            "Control session active"
+        );
     }
 
     fn send_navigation_key(
