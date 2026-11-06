@@ -163,3 +163,16 @@ foreach ($needle in @('Get-CimInstance Win32_Service -Filter', 'SCM service stil
     }
 }
 'PASS: SCM deletion confirmation is bounded and fail-closed'
+
+# The actual SCM-hosted PID must be isolated in Session 0, not the
+# interactive Teacher/Worker Session 1. Static check, not VM proof.
+$processAt = $source.IndexOf('Get-CimInstance Win32_Process')
+$sessionAt = $source.IndexOf('$process.SessionId -ne 0')
+$successAt = $source.IndexOf('SCM_LOCALSYSTEM_RUNNING_PID=')
+if ($processAt -lt 0 -or $sessionAt -le $processAt -or $successAt -le $sessionAt) {
+    throw 'SCM Session 0 attestation must follow process lookup and precede success'
+}
+if (-not $source.Contains('SCM Service process is not isolated in Session 0')) {
+    throw 'Missing Session 0 fail-closed diagnostic'
+}
+'PASS: SCM process Session 0 isolation contract'
