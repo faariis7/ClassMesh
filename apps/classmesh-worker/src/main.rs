@@ -1,4 +1,6 @@
 #[cfg(windows)]
+mod service_token;
+#[cfg(windows)]
 mod telemetry_native;
 
 #[cfg(windows)]
@@ -53,6 +55,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if pipe.server_session_id()? != 0 {
         return Err("Worker IPC server is not running in Windows Session 0".into());
     }
+    // Never disclose WorkerHello to a Session 0 process without a kernel-verified
+    // LocalSystem token. The pipe PID is OS-reported, not supplied by the peer.
+    service_token::require_local_system(primary_service_pid)?;
     let hello = IpcFrame::worker_hello(std::process::id(), actual_session)
         .encode()
         .map_err(ipc_frame_error)?;
@@ -74,8 +79,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if pipe.server_process_id()? != primary_service_pid {
         return Err("Worker IPC server process changed during handshake".into());
     }
+    service_token::require_local_system(primary_service_pid)?;
     eprintln!(
-        "ClassMesh Worker IPC ServiceReady received; Session 0/PID continuity checked (LocalSystem authorization unverified)"
+        "ClassMesh Worker IPC ServiceReady received; Session 0/PID and LocalSystem token checked (SCM registration and policy authorization unverified)"
     );
     let (event_tx, event_rx) = mpsc::sync_channel(WORKER_IPC_EVENT_QUEUE_CAPACITY);
     let reader_pipe = pipe.try_clone()?;
