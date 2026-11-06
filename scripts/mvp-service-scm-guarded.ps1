@@ -90,7 +90,19 @@ try {
     if ($null -eq $svc -or $svc.State -ne 'Running' -or $svc.StartName -notin @('LocalSystem','NT AUTHORITY\\SYSTEM') -or $svc.ProcessId -le 0) {
         throw 'FAIL_CLOSED: LocalSystem SCM runtime not verified'
     }
-    "SCM_LOCALSYSTEM_RUNNING_PID=$($svc.ProcessId); WORKER_IPC_NOT_YET_PROVEN"
+    # The SCM registration path is not proof of the image that actually started.
+    # Query the running process and fail closed if its image is not the pinned,
+    # protected executable. This is post-start evidence, not a TOCTOU cure.
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($svc.ProcessId)"
+    if ($null -eq $process -or [string]::IsNullOrWhiteSpace($process.ExecutablePath)) {
+        throw 'FAIL_CLOSED: running Service image path unavailable'
+    }
+    $expectedImage = (Get-Item -LiteralPath $ServiceExe).FullName
+    if (-not [string]::Equals($process.ExecutablePath, $expectedImage, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'FAIL_CLOSED: running Service image path differs from pinned executable'
+    }
+    Assert-ProtectedFile $process.ExecutablePath $ExpectedServiceSha256
+    "SCM_LOCALSYSTEM_RUNNING_PID=$($svc.ProcessId); IMAGE_PIN_VERIFIED; WORKER_IPC_NOT_YET_PROVEN"
 } finally {
     if ($created) {
         $live = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
