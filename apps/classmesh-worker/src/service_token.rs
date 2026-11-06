@@ -94,6 +94,24 @@ pub(crate) fn require_local_system(pid: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn reject_foreign_interactive_user_process() {
+        // A real OS process token, not a mocked SID: the child inherits the
+        // interactive test runner identity and must not impersonate Service.
+        // Avoid running this assertion under LocalSystem CI agents.
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/C", "ping -n 8 127.0.0.1 >NUL"])
+            .spawn()
+            .expect("spawn non-service child");
+        let result = super::require_local_system(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(
+            result.expect_err("interactive child must not be trusted as Service").kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
     fn reject_current_process_and_zero_pid() {
         assert!(super::require_local_system(0).is_err());
         assert!(super::require_local_system(std::process::id()).is_err());
