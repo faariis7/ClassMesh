@@ -162,11 +162,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Do not dispatch privileged control/input/media events if the OS-level
         // pipe peer no longer matches the Service process observed at handshake.
         // This remains a continuity check, not LocalSystem authorization.
-        if next_event.is_ok()
-            && (pipe.server_process_id()? != primary_service_pid || pipe.server_session_id()? != 0)
-        {
-            release_tracked_input(&mut input_injector);
-            return Err("Worker IPC server identity changed before event dispatch".into());
+        if next_event.is_ok() {
+            // A failed native identity query is also a lost trust boundary.
+            // Release held keys/buttons before returning its error; `?` here
+            // would exit without releasing remote input.
+            let peer_identity = (|| -> Result<bool, Box<dyn std::error::Error>> {
+                Ok(pipe.server_process_id()? == primary_service_pid
+                    && pipe.server_session_id()? == 0)
+            })();
+            match peer_identity {
+                Ok(true) => {}
+                Ok(false) => {
+                    release_tracked_input(&mut input_injector);
+                    return Err("Worker IPC server identity changed before event dispatch".into());
+                }
+                Err(error) => {
+                    release_tracked_input(&mut input_injector);
+                    return Err(format!("Worker IPC server identity query failed: {error}").into());
+                }
+            }
         }
         match next_event {
             Ok(WorkerEvent::Control(command)) => match command {
