@@ -47,6 +47,30 @@ impl AuthenticatedTeacherControlMessage {
     }
 }
 
+/// Per-session receive guard for an authorized Teacher control stream.
+/// Create a fresh guard only after a new authenticated Hello session; never
+/// reset it to accept an old sequence on the same connection.
+#[derive(Debug, Default)]
+pub struct TeacherControlSequenceGuard {
+    last_sequence: Option<u64>,
+}
+
+impl TeacherControlSequenceGuard {
+    /// Reject duplicate, zero or regressing envelope sequence numbers before
+    /// passing a verified message to the owning dispatcher.
+    pub fn admit(
+        &mut self,
+        message: AuthenticatedTeacherControlMessage,
+    ) -> Result<AuthenticatedTeacherControlMessage, AuthenticatedTeacherReceiveError> {
+        let sequence = message.envelope.sequence;
+        if sequence == 0 || self.last_sequence.is_some_and(|last| sequence <= last) {
+            return Err(AuthenticatedTeacherReceiveError::ReplayedSequence);
+        }
+        self.last_sequence = Some(sequence);
+        Ok(message)
+    }
+}
+
 #[derive(Debug)]
 pub enum AuthenticatedTeacherReceiveError {
     WrongRole,
@@ -58,6 +82,7 @@ pub enum AuthenticatedTeacherReceiveError {
     InnerSessionMismatch,
     ProtocolVersionMismatch,
     MissingPayload,
+    ReplayedSequence,
     PeerIdentity(PeerIdentityError),
     Authorization(LiveAuthorizationError),
     Transport(ControlTransportError),
@@ -565,6 +590,37 @@ mod tests {
             .receiver_playback()
             .is_none()
         );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verified_control_guard_rejects_replay_and_regression() -> TestResult {
+        let mut pair = pair(true).await?;
+        let mut guard = TeacherControlSequenceGuard::default();
+        for sequence in [2, 2, 1, 0, 3] {
+            let mut envelope = report(SESSION);
+            envelope.sequence = sequence;
+            pair.server_channel.send(&envelope).await?;
+            let verified = receive_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150,
+            )
+            .await?;
+            let admitted = guard.admit(verified);
+            if sequence == 2 && guard.last_sequence == Some(2) && admitted.is_ok() {
+                continue;
+            }
+            if sequence == 3 {
+                assert!(admitted?.receiver_playback().is_some());
+            } else {
+                assert!(matches!(
+                    admitted,
+                    Err(AuthenticatedTeacherReceiveError::ReplayedSequence)
+                ));
+            }
+        }
         Ok(())
     }
 
