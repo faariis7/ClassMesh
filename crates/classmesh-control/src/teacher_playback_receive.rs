@@ -190,6 +190,27 @@ pub async fn receive_authenticated_teacher_control(
     })
 }
 
+/// Receive a verified Teacher control message and enforce per-session replay
+/// ordering before it can reach the owning dispatcher. The caller must retain
+/// the same guard for the lifetime of this authenticated control session.
+/// A new guard is only valid after a fresh authenticated Hello handshake.
+pub async fn receive_guarded_authenticated_teacher_control(
+    session: &mut ClientControlSession,
+    authorization: &LiveAuthorizationStore,
+    expected_student: PrincipalId,
+    now_unix_ms: impl Fn() -> u64,
+    guard: &mut TeacherControlSequenceGuard,
+) -> Result<AuthenticatedTeacherControlMessage, AuthenticatedTeacherReceiveError> {
+    let verified = receive_authenticated_teacher_control(
+        session,
+        authorization,
+        expected_student,
+        now_unix_ms,
+    )
+    .await?;
+    guard.admit(verified)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -601,14 +622,14 @@ mod tests {
             let mut envelope = report(SESSION);
             envelope.sequence = sequence;
             pair.server_channel.send(&envelope).await?;
-            let verified = receive_authenticated_teacher_control(
+            let admitted = receive_guarded_authenticated_teacher_control(
                 &mut pair.client,
                 &pair.authorization,
                 EXPECTED,
                 || 150,
+                &mut guard,
             )
-            .await?;
-            let admitted = guard.admit(verified);
+            .await;
             if sequence == 2 && guard.last_sequence == Some(2) && admitted.is_ok() {
                 continue;
             }
