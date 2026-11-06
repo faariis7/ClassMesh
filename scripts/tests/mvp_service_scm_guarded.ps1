@@ -135,3 +135,19 @@ foreach ($needle in @('$finalService.State -ne ''Running''', '$finalService.Proc
     if (-not $finalWindow.Contains($needle)) { throw "Final SCM runtime binding missing: $needle" }
 }
 'PASS: SCM runtime evidence rebinds unchanged live PID before success'
+
+# A successful sc.exe delete only requests removal; SCM may retain the
+# registration until outstanding handles close. Do not claim cleanup early.
+$deleteAt = $source.IndexOf('& sc.exe delete $serviceName')
+$waitAt = $source.IndexOf('$deleteDeadline = [DateTime]::UtcNow.AddSeconds(15)')
+$absentAt = $source.IndexOf('if ($null -ne $remaining)')
+$removedAt = $source.IndexOf('SCM_DISPOSABLE_SERVICE_REMOVED')
+if ($deleteAt -lt 0 -or $waitAt -le $deleteAt -or $absentAt -le $waitAt -or $removedAt -le $absentAt) {
+    throw 'SCM deletion must be observed before reporting disposable cleanup'
+}
+foreach ($needle in @('Get-CimInstance Win32_Service -Filter', 'SCM service still registered after delete', '[DateTime]::UtcNow -lt $deleteDeadline')) {
+    if (-not $source.Substring($waitAt, $removedAt - $waitAt).Contains($needle)) {
+        throw "SCM deletion confirmation guard missing: $needle"
+    }
+}
+'PASS: SCM deletion confirmation is bounded and fail-closed'
