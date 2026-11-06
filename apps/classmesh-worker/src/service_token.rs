@@ -114,6 +114,21 @@ mod tests {
     }
 
     #[test]
+    fn reject_exited_process_pid() {
+        // A PID from a terminated process must not authorize an IPC peer.
+        // Even if Windows temporarily retains the process object, its user
+        // token is not LocalSystem on an interactive CI runner.
+        let child = std::process::Command::new("cmd.exe")
+            .args(["/C", "exit 0"])
+            .spawn()
+            .expect("spawn short-lived process");
+        let pid = child.id();
+        let output = child.wait_with_output().expect("wait for child exit");
+        assert!(output.status.success());
+        assert!(super::require_local_system(pid).is_err());
+    }
+
+    #[test]
     fn reject_current_process_and_zero_pid() {
         assert!(super::require_local_system(0).is_err());
         assert!(super::require_local_system(std::process::id()).is_err());
