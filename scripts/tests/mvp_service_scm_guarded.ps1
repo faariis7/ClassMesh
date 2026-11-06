@@ -44,3 +44,15 @@ if ($source -match [regex]::Escape('$sid -in $untrusted')) {
     throw 'Legacy low-privilege SID denylist must not control mutation decisions'
 }
 'PASS: SCM ACL allowlist rejects unknown mutation principals'
+
+# Post-start evidence must bind the actual SCM process image to the pinned binary.
+foreach ($needle in @('Get-CimInstance Win32_Process', 'ExecutablePath', 'running Service image path differs', 'Assert-ProtectedFile $process.ExecutablePath $ExpectedServiceSha256', 'IMAGE_PIN_VERIFIED')) {
+    if (-not $source.Contains($needle)) { throw "Missing runtime image attestation: $needle" }
+}
+$startAt = $source.IndexOf('Start-Service -Name $serviceName')
+$runtimeAt = $source.IndexOf('Get-CimInstance Win32_Process')
+$successAt = $source.IndexOf('IMAGE_PIN_VERIFIED')
+if ($startAt -lt 0 -or $runtimeAt -le $startAt -or $successAt -le $runtimeAt) {
+    throw 'Running image attestation must follow SCM start and precede success'
+}
+'PASS: SCM runtime image path/hash fail-closed contract'
