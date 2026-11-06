@@ -143,6 +143,11 @@ try {
         throw 'FAIL_CLOSED: running Service image path differs from pinned executable'
     }
     Assert-ProtectedFile $process.ExecutablePath $ExpectedServiceSha256
+    # Windows services run in isolated Session 0; a Session 1 process is not
+    # evidence of a genuine SCM-hosted service, even with a matching image.
+    if ($process.SessionId -ne 0) {
+        throw 'FAIL_CLOSED: SCM Service process is not isolated in Session 0'
+    }
     # SCM StartName describes configuration, not the token of the running PID.
     # Verify the actual process owner SID via CIM before reporting LocalSystem.
     $ownerResult = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
