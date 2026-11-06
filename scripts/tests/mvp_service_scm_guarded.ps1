@@ -92,3 +92,15 @@ foreach ($needle in @('Start-Sleep -Milliseconds 250', "State -in @('Stopped','S
     if (-not $source.Contains($needle)) { throw "SCM readiness fail-closed guard missing: $needle" }
 }
 'PASS: bounded SCM readiness and early-exit contract'
+
+# Runtime identity must be proven from the actual PID token, not SCM StartName.
+$processAt = $source.IndexOf('Get-CimInstance Win32_Process')
+$ownerAt = $source.IndexOf('Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid')
+$successAt = $source.IndexOf('SCM_LOCALSYSTEM_RUNNING_PID=')
+if ($processAt -lt 0 -or $ownerAt -le $processAt -or $successAt -le $ownerAt) {
+    throw 'Actual LocalSystem process SID attestation must precede runtime success'
+}
+foreach ($needle in @('$ownerResult.ReturnValue -ne 0', '$ownerResult.Sid -ne ''S-1-5-18''', 'running Service process token is not LocalSystem')) {
+    if (-not $source.Contains($needle)) { throw "SCM process token attestation missing: $needle" }
+}
+'PASS: SCM actual process owner SID attestation contract'
