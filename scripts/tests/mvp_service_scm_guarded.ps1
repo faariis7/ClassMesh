@@ -80,6 +80,18 @@ if ($source.Contains('if ($acl.Owner -notmatch')) {
 }
 'PASS: SCM ancestry owner validation uses stable SIDs'
 
+# The protected-file check must walk from FileInfo to its containing DirectoryInfo,
+# then through every parent. FileInfo.Parent alone silently skips directory ACLs.
+foreach ($needle in @('$cursor -is [IO.FileInfo]', '$cursor = $cursor.Directory', '$cursor = $cursor.Parent')) {
+    if (-not $source.Contains($needle)) { throw "Executable ancestor traversal missing: $needle" }
+}
+if ($source.IndexOf('$cursor = $cursor.Directory') -gt $source.IndexOf('$cursor = $cursor.Parent')) {
+    throw 'Executable file must transition to its directory before parent traversal'
+}
+'PASS: executable and directory ancestry are both checked'
+
+
+
 # Readiness must be bounded, fail closed on early termination, and precede
 # runtime image attestation. This is a static contract, not native SCM evidence.
 $startAt = $source.IndexOf('Start-Service -Name $serviceName')
