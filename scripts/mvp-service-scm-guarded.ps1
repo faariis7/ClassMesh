@@ -55,6 +55,8 @@ function Assert-ProtectedFile([string]$Path, [string]$ExpectedHash) {
             $trustedMutationSids = @('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
             $mutation = [Security.AccessControl.FileSystemRights]::WriteData -bor
                 [Security.AccessControl.FileSystemRights]::AppendData -bor
+                [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+                [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
                 [Security.AccessControl.FileSystemRights]::Delete -bor
                 [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
                 [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
