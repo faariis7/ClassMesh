@@ -158,7 +158,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             wait = wait.min(Duration::from_millis(10));
         }
 
-        match event_rx.recv_timeout(wait) {
+        let next_event = event_rx.recv_timeout(wait);
+        // Do not dispatch privileged control/input/media events if the OS-level
+        // pipe peer no longer matches the Service process observed at handshake.
+        // This remains a continuity check, not LocalSystem authorization.
+        if next_event.is_ok()
+            && (pipe.server_process_id()? != primary_service_pid || pipe.server_session_id()? != 0)
+        {
+            release_tracked_input(&mut input_injector);
+            return Err("Worker IPC server identity changed before event dispatch".into());
+        }
+        match next_event {
             Ok(WorkerEvent::Control(command)) => match command {
                 classmesh_windows_runtime::ipc::IpcControlCommand::SuspendMedia => {
                     release_tracked_input(&mut input_injector);
@@ -1329,8 +1339,8 @@ where
     L: classmesh_win32::OpenTargetLauncher,
 {
     use classmesh_protocol::control_wire::{
-        AppIdentity, TeacherInteractionKind, TeacherInteractionState, open_target,
-        teacher_interaction_request,
+        open_target, teacher_interaction_request, AppIdentity, TeacherInteractionKind,
+        TeacherInteractionState,
     };
     use classmesh_win32::{TeacherInteractionAcceptance, WindowsAppIdentity};
 
@@ -1464,7 +1474,7 @@ fn start_capture() -> Result<
     Box<dyn std::error::Error>,
 > {
     use classmesh_capture_win::{
-        RecoveringCapture, enumerate_displays, query_adapter_capability_identity,
+        enumerate_displays, query_adapter_capability_identity, RecoveringCapture,
     };
     use classmesh_core::recovery::RecoveryPolicy;
 
@@ -1853,7 +1863,9 @@ fn read_one_frame(
             .push_bytes(&buffer[..read])
             .map_err(ipc_frame_error)?;
         if frames.len() > 1 {
-            return Err("ClassMesh Service sent multiple IPC frames before handshake completed".into());
+            return Err(
+                "ClassMesh Service sent multiple IPC frames before handshake completed".into(),
+            );
         }
         if let Some(frame) = frames.pop() {
             return Ok(frame);
@@ -2064,7 +2076,7 @@ mod focused_profile_tests {
     fn teacher_message_request(
         text: &str,
     ) -> classmesh_protocol::control_wire::TeacherInteractionRequest {
-        use classmesh_protocol::control_wire::{TeacherMessage, teacher_interaction_request};
+        use classmesh_protocol::control_wire::{teacher_interaction_request, TeacherMessage};
 
         classmesh_protocol::control_wire::TeacherInteractionRequest {
             action: Some(teacher_interaction_request::Action::Message(
@@ -2079,7 +2091,7 @@ mod focused_profile_tests {
         url: &str,
     ) -> classmesh_protocol::control_wire::TeacherInteractionRequest {
         use classmesh_protocol::control_wire::{
-            OpenTarget, open_target, teacher_interaction_request,
+            open_target, teacher_interaction_request, OpenTarget,
         };
 
         classmesh_protocol::control_wire::TeacherInteractionRequest {
@@ -2095,7 +2107,7 @@ mod focused_profile_tests {
         app: classmesh_protocol::control_wire::AppIdentity,
     ) -> classmesh_protocol::control_wire::TeacherInteractionRequest {
         use classmesh_protocol::control_wire::{
-            OpenTarget, open_target, teacher_interaction_request,
+            open_target, teacher_interaction_request, OpenTarget,
         };
 
         classmesh_protocol::control_wire::TeacherInteractionRequest {
@@ -2250,7 +2262,7 @@ mod focused_profile_tests {
     #[test]
     fn teacher_interaction_routes_without_executing_an_os_side_effect() {
         use classmesh_protocol::control_wire::{
-            TeacherInteractionRequest, TeacherMessage, teacher_interaction_request,
+            teacher_interaction_request, TeacherInteractionRequest, TeacherMessage,
         };
         use classmesh_windows_runtime::ipc::{IpcFrame, ServiceTeacherInteractionRequest};
         use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
