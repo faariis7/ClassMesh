@@ -69,3 +69,13 @@ foreach ($needle in @('StartName','StartMode','PathName.Trim()','SCM registered 
     if (-not $registrationWindow.Contains($needle)) { throw "SCM pre-start registration gate missing: $needle" }
 }
 'PASS: SCM pre-start registered image/account verification contract'
+
+# Protected ancestry ownership must be checked by stable SID, not localized
+# account display names. Failure to obtain a SID must fail closed.
+foreach ($needle in @('GetOwner([Security.Principal.SecurityIdentifier])', 'owner SID unavailable', "'S-1-5-32-544','S-1-5-18'")) {
+    if (-not $source.Contains($needle)) { throw "Owner SID validation missing: $needle" }
+}
+if ($source.Contains("if ($acl.Owner -notmatch")) {
+    throw 'Localized ACL owner-name comparison must not control trust'
+}
+'PASS: SCM ancestry owner validation uses stable SIDs'
