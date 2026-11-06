@@ -230,6 +230,15 @@ pub async fn receive_guarded_authenticated_teacher_control(
     now_unix_ms: impl Fn() -> u64,
     guard: &mut TeacherControlSequenceGuard,
 ) -> Result<AuthenticatedTeacherControlMessage, AuthenticatedTeacherReceiveError> {
+    // Fail closed before consuming a frame from a different authenticated
+    // connection. The old guard must never drain the reconnect's first frame.
+    let connection_id = session.connection.stable_id();
+    if guard
+        .bound_connection_id
+        .is_some_and(|bound| bound != connection_id)
+    {
+        return Err(AuthenticatedTeacherReceiveError::GuardConnectionMismatch);
+    }
     let verified = receive_authenticated_teacher_control(
         session,
         authorization,
@@ -237,7 +246,7 @@ pub async fn receive_guarded_authenticated_teacher_control(
         now_unix_ms,
     )
     .await?;
-    guard.admit_on_connection(session.connection.stable_id(), verified)
+    guard.admit_on_connection(connection_id, verified)
 }
 
 #[cfg(test)]
