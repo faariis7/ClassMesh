@@ -72,7 +72,14 @@ function Assert-ProtectedFile([string]$Path, [string]$ExpectedHash) {
                 throw 'FAIL_CLOSED: low-privilege mutation permission in executable ancestry'
             }
         }
-        $cursor = $cursor.Parent
+        # FileInfo does not expose DirectoryInfo.Parent as its own Parent; explicitly
+        # ascend from the executable file to its containing directory, then to root.
+        # Otherwise an unsafe writable ancestor can escape the ACL/reparse gate.
+        if ($cursor -is [IO.FileInfo]) {
+            $cursor = $cursor.Directory
+        } else {
+            $cursor = $cursor.Parent
+        }
     }
 }
 if (-not $ServiceExe -or -not $TrustedProvisionExe) { throw 'FAIL_CLOSED: both executable paths required' }
