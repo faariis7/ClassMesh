@@ -79,3 +79,16 @@ if ($source.Contains('if ($acl.Owner -notmatch')) {
     throw 'Localized ACL owner-name comparison must not control trust'
 }
 'PASS: SCM ancestry owner validation uses stable SIDs'
+
+# Readiness must be bounded, fail closed on early termination, and precede
+# runtime image attestation. This is a static contract, not native SCM evidence.
+$startAt = $source.IndexOf('Start-Service -Name $serviceName')
+$deadlineAt = $source.IndexOf('$deadline = [DateTime]::UtcNow.AddSeconds(15)')
+$processAt = $source.IndexOf('Get-CimInstance Win32_Process')
+if ($startAt -lt 0 -or $deadlineAt -le $startAt -or $processAt -le $deadlineAt) {
+    throw 'Bounded SCM readiness check must precede runtime image attestation'
+}
+foreach ($needle in @('Start-Sleep -Milliseconds 250', "State -in @('Stopped','StopPending','Paused')", 'SCM service exited or disappeared before readiness', '[DateTime]::UtcNow -lt $deadline')) {
+    if (-not $source.Contains($needle)) { throw "SCM readiness fail-closed guard missing: $needle" }
+}
+'PASS: bounded SCM readiness and early-exit contract'
