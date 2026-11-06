@@ -109,7 +109,18 @@ try {
     }
     Assert-ProtectedFile $ServiceExe $ExpectedServiceSha256
     Start-Service -Name $serviceName -ErrorAction Stop
-    $svc = Get-CimInstance Win32_Service -Filter "Name='ClassMeshService'"
+    # SCM may report StartPending briefly after Start-Service returns. Bound the
+    # wait and require a real Running process rather than treating a transition
+    # state as either success or an immediate false failure.
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        $svc = Get-CimInstance Win32_Service -Filter "Name='ClassMeshService'"
+        if ($null -ne $svc -and $svc.State -eq 'Running' -and $svc.ProcessId -gt 0) { break }
+        if ($null -eq $svc -or $svc.State -in @('Stopped','StopPending','Paused')) {
+            throw 'FAIL_CLOSED: SCM service exited or disappeared before readiness'
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
     if ($null -eq $svc -or $svc.State -ne 'Running' -or $svc.StartName -notin @('LocalSystem','NT AUTHORITY\\SYSTEM') -or $svc.ProcessId -le 0) {
         throw 'FAIL_CLOSED: LocalSystem SCM runtime not verified'
     }
