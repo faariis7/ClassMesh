@@ -46,19 +46,44 @@ function Get-MvpFileEvidence {
 }
 
 function Read-MvpJson {
-    param([string]$Path)
+    param([string]$Path, [string]$ExpectedSha256)
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
         $item.Length -le 0 -or $item.Length -gt 65536) { throw "Invalid MVP JSON file size/type: $Path" }
-    Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    $reader = [IO.BinaryReader]::new([IO.File]::OpenRead($item.FullName))
+    try { $bytes = $reader.ReadBytes(65537) } finally { $reader.Dispose() }
+    if ($bytes.Length -eq 0 -or $bytes.Length -gt 65536) { throw "Invalid MVP JSON file size: $Path" }
+    if ($PSBoundParameters.ContainsKey('ExpectedSha256')) {
+        if ($ExpectedSha256 -notmatch '^[0-9a-f]{64}$') { throw 'An independently trusted MVP index SHA256 is required' }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $actual = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '') }
+        finally { $sha.Dispose() }
+        if ($actual -ine $ExpectedSha256) { throw 'MVP index SHA256 mismatch' }
+    }
+    [Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xfeff) | ConvertFrom-Json
+}
+
+function Get-MvpBundleDirectory {
+    param([string]$Path)
+    $root = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (-not $root.PSIsContainer -or $root.PSProvider.Name -ne 'FileSystem') {
+        throw 'MVP bundle directory must be a local filesystem directory'
+    }
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
+        [IO.DriveInfo]::new($root.Root.FullName).DriveType -ne [IO.DriveType]::Fixed) {
+        throw 'MVP bundle directory must be on a local fixed Windows drive'
+    }
+    for ($directory = $root; $null -ne $directory; $directory = $directory.Parent) {
+        if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Reparse point in MVP bundle directory ancestry: $($directory.FullName)"
+        }
+    }
+    $root
 }
 
 function Test-MvpBundle {
-    param([string]$BundleDir, $Expected)
-    $root = Get-Item -LiteralPath $BundleDir -Force -ErrorAction Stop
-    if (-not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'MVP bundle directory must be a plain directory'
-    }
+    param([string]$BundleDir, $Expected, [string]$ExpectedIndexSha256)
+    $root = Get-MvpBundleDirectory $BundleDir
     $names = @(Get-MvpRequiredFiles) + @('teacher-ui-bundle-index.json','service-worker-bundle-index.json')
     $entries = @(Get-ChildItem -LiteralPath $root.FullName -Force)
     if ($entries.Count -ne $names.Count + 1) { throw 'MVP bundle file count mismatch' }
@@ -66,7 +91,7 @@ function Test-MvpBundle {
         if ($entry.Name -cnotin ($names + @('mvp-bundle-index.json')) -or $entry.PSIsContainer -or
             ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Unexpected MVP file: $($entry.Name)" }
     }
-    $index = Read-MvpJson (Join-Path $root.FullName 'mvp-bundle-index.json')
+    $index = Read-MvpJson (Join-Path $root.FullName 'mvp-bundle-index.json') -ExpectedSha256 $ExpectedIndexSha256
     if ($index.schema_version -ne 1 -or $index.target -cne 'windows-x64' -or
         $index.production_qualified -isnot [bool] -or $index.production_qualified) {
         throw 'Unsupported MVP file schema, target or production claim'
@@ -96,14 +121,14 @@ function Test-MvpBundle {
     if ($config.schema_version -ne 1 -or $config.service_name -cne 'ClassMeshService' -or
         ($config.teacher_startup_seconds -isnot [int] -and $config.teacher_startup_seconds -isnot [long]) -or $config.teacher_startup_seconds -lt 1 -or
         $config.teacher_startup_seconds -gt 30) { throw 'Invalid MVP launcher configuration file' }
-    # Execute existing helpers only after every bundled script has passed its hash check.
-    & (Join-Path $root.FullName 'phase11f4-teacher-ui-smoke.ps1') -Mode ValidateBundle -BundleDir $root.FullName | Out-Null
-    & (Join-Path $root.FullName 'phase13-service-worker-bundle.ps1') -Mode ValidateBundle -BundleDir $root.FullName | Out-Null
+    # Use helpers from the trusted launcher location. BundleDir supplies data paths.
+    & (Join-Path $PSScriptRoot 'phase11f4-teacher-ui-smoke.ps1') -Mode ValidateBundle -BundleDir $root.FullName | Out-Null
+    & (Join-Path $PSScriptRoot 'phase13-service-worker-bundle.ps1') -Mode ValidateBundle -BundleDir $root.FullName | Out-Null
     & {
-        param($Root)
-        . (Join-Path $Root 'phase13-service-worker-bundle.ps1') -Mode Help | Out-Null
+        param($HelperRoot, $Root)
+        . (Join-Path $HelperRoot 'phase13-service-worker-bundle.ps1') -Mode Help | Out-Null
         Assert-X64Pe (Join-Path $Root 'classmesh-teacher-ui.exe')
-    } $root.FullName
+    } $PSScriptRoot $root.FullName
     $index
 }
 
@@ -141,6 +166,7 @@ function Get-MvpRuntimeDecision {
 
 function Open-MvpBundleLease {
     param([string]$BundleDir)
+    $BundleDir = (Get-MvpBundleDirectory $BundleDir).FullName
     $handles = @()
     try {
         foreach ($name in (@(Get-MvpRequiredFiles) + @('teacher-ui-bundle-index.json','service-worker-bundle-index.json','mvp-bundle-index.json'))) {
@@ -205,9 +231,10 @@ function Get-MvpWorkerMatch {
     if (@($Candidates).Count -eq 0) { return 'NOT_RUNNING' }
     $sameSession = @($Candidates | Where-Object { $_.session_id -eq $SessionId -and $SessionId -gt 0 })
     if ($sameSession.Count -eq 0) { return 'WRONG_SESSION' }
+    if ($ServiceProcessId -eq 0 -or $null -eq $ServiceStartedUtc) { return 'UNKNOWN' }
     $owned = @($sameSession | Where-Object {
-        $ServiceProcessId -gt 0 -and $_.parent_process_id -eq $ServiceProcessId -and
-        $null -ne $ServiceStartedUtc -and $null -ne $_.started_utc -and $_.started_utc -ge $ServiceStartedUtc
+        $_.parent_process_id -eq $ServiceProcessId -and
+        $null -ne $_.started_utc -and $_.started_utc -ge $ServiceStartedUtc
     })
     if ($owned.Count -eq 0) { return 'WRONG_PARENT' }
     if (@($owned | Where-Object { $null -eq $_.binary_matches }).Count -gt 0) { return 'UNKNOWN' }
@@ -220,9 +247,9 @@ function Get-MvpWorkerMatch {
 }
 
 function Assert-MvpTeacherSession {
-    param([bool]$Elevated, [int]$SessionId)
+    param([bool]$Elevated, [int]$SessionId, [bool]$Interactive)
     if ($Elevated) { throw 'Teacher must be launched from a standard-user PowerShell; elevation is refused' }
-    if ($SessionId -le 0) { throw 'Teacher requires a signed-in interactive session, not Session 0' }
+    if ($SessionId -le 0 -or -not $Interactive) { throw 'Teacher requires a signed-in interactive desktop in a nonzero session' }
 }
 
 function Get-MvpBinaryMatch {
@@ -232,12 +259,38 @@ function Get-MvpBinaryMatch {
     catch { return $null }
 }
 
+function Read-MvpIdentityMetadata {
+    param([string]$Path)
+    $json = Read-MvpJson $Path
+    if (($json.version -isnot [int] -and $json.version -isnot [long]) -or $json.version -ne 1 -or
+        @($json.principal_id).Count -ne 32 -or
+        ($json.not_after_unix_ms -isnot [int] -and $json.not_after_unix_ms -isnot [long]) -or
+        $json.not_after_unix_ms -le 0) { throw 'Unrecognized identity metadata schema' }
+    foreach ($byte in $json.principal_id) {
+        if (($byte -isnot [int] -and $byte -isnot [long]) -or $byte -lt 0 -or $byte -gt 255) {
+            throw 'Invalid identity metadata principal byte'
+        }
+    }
+    [pscustomobject]@{
+        principal_id = ([BitConverter]::ToString([byte[]]$json.principal_id)).Replace('-','').ToLowerInvariant()
+        not_after = [DateTimeOffset]::FromUnixTimeMilliseconds($json.not_after_unix_ms).ToString('o')
+    }
+}
+
 function Get-MvpEnrollmentObservation {
     # Presence/metadata are deliberately not cryptographic or protected-state approval.
     $records = @()
     $principal = $null; $expiry = $null
     $paths = @('state\machine-identity.json','state\authorization.json','config\control-runtime.json')
-    $root = Join-Path $env:ProgramData 'ClassMesh'
+    $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if ([string]::IsNullOrWhiteSpace($programData)) {
+        return [pscustomobject]@{
+            status='UNKNOWN'; approval='UNKNOWN'; files=@(); key_binding='UNKNOWN'
+            declared_principal_id=$null; declared_not_after=$null
+            reason='The OS CommonApplicationData folder could not be resolved'
+        }
+    }
+    $root = Join-Path $programData 'ClassMesh'
     foreach ($relative in $paths) {
         $path = Join-Path $root $relative
         $record = [ordered]@{path=$path;status='UNKNOWN';error=$null}
@@ -246,10 +299,9 @@ function Get-MvpEnrollmentObservation {
             if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Protected state path is not a plain file' }
             $record.status = 'PRESENT_UNVERIFIED'
             if ($relative -eq 'state\machine-identity.json') {
-                $json = Read-MvpJson $path
-                if ($json.version -ne 1 -or @($json.principal_id).Count -ne 32) { throw 'Unrecognized identity metadata schema' }
-                $principal = ([BitConverter]::ToString([byte[]]$json.principal_id)).Replace('-','').ToLowerInvariant()
-                $expiry = [DateTimeOffset]::FromUnixTimeMilliseconds([long]$json.not_after_unix_ms).ToString('o')
+                $metadata = Read-MvpIdentityMetadata $path
+                $principal = $metadata.principal_id
+                $expiry = $metadata.not_after
             }
         } catch {
             if ($_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound) { $record.status='MISSING' }

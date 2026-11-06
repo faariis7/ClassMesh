@@ -8,16 +8,17 @@
 ## التنزيل والتحقق
 
 نزّل artifact المسمى `classmesh-windows-mvp-x64` من **Windows Build الناجح**
-لطلب الدمج المطلوب. داخله ZIP واحد وملف SHA256. احتفظ برقم التشغيل ومحاولته
-وبصمة ZIP من سجل خطوة التغليف في ذلك التشغيل، أو من تنزيل موثوق مستقل.
-الملف الجانبي وحده ليس دليلًا مستقلًا إذا عُدلت الحزمة معه.
+لطلب الدمج المطلوب. داخله ZIP واحد وملف SHA256. خذ رقم التشغيل ومحاولته
+وبصمتي `mvp_zip_sha256` و`mvp_index_sha256` من سجل خطوة التغليف الموثوق.
+يستخدم المشغّل بصمة الفهرس المستقلة للتحقق من الملفات داخل المجلد المستخرج.
 
 في حدث PR، يستخدم CI الـmerge commit الاختباري الذي تختاره `actions/checkout`
 افتراضيًا؛ `source_revision` في `mvp-bundle-index.json` هو **ذلك commit الفعلي**،
 وليس افتراضًا بأنه HEAD فرع PR. جميع البرامج الثلاثة تحمل إيصالات البناء نفسها.
 لا تخلط هذه الحزمة مع ملفات من artifact آخر أو محاولة CI أخرى.
 
-نفّذ من PowerShell عادي غير مرتفع، في مجلد TEMP جديد ومعزول:
+استخدم PowerShell عاديًا غير مرتفع، واستخرج الحزمة في مجلد TEMP خاص جديد
+على قرص محلي بمسار خالٍ من الروابط وjunctions. تحقق من ZIP قبل تشغيل سكربتاته.
 
 ```powershell
 $zip = 'C:\path\classmesh-windows-mvp-x64.zip'
@@ -31,8 +32,13 @@ Expand-Archive -LiteralPath $zip -DestinationPath $bundle
 $source = '<40 lowercase hex actual CI checkout SHA>'
 $run = '<CI run ID>'
 $attempt = '1' # استخدم المحاولة الفعلية، لا تفترض 1 في إعادة التشغيل
-& "$bundle\windows-mvp-launch.ps1" -Mode Validate -BundleDir $bundle `
-    -ExpectedSourceRevision $source -ExpectedCiRunId $run -ExpectedCiRunAttempt $attempt
+$ci = @{
+    ExpectedSourceRevision = $source
+    ExpectedCiRunId = $run
+    ExpectedCiRunAttempt = $attempt
+    ExpectedIndexSha256 = '<mvp_index_sha256 from the trusted CI log>'
+}
+& "$bundle\windows-mvp-launch.ps1" -Mode Validate -BundleDir $bundle @ci
 ```
 
 إذا كانت سياسة جهاز المختبر تمنع scripts محلية غير موقّعة، استخدم قناة تنفيذ
@@ -45,13 +51,10 @@ $attempt = '1' # استخدم المحاولة الفعلية، لا تفترض 
 ## التشخيص وتشغيل Teacher
 
 ```powershell
-& "$bundle\windows-mvp-launch.ps1" -Mode Diagnose -BundleDir $bundle `
-    -ExpectedSourceRevision $source -ExpectedCiRunId $run -ExpectedCiRunAttempt $attempt
-& "$bundle\windows-mvp-launch.ps1" -Mode Smoke -BundleDir $bundle `
-    -ExpectedSourceRevision $source -ExpectedCiRunId $run -ExpectedCiRunAttempt $attempt
+& "$bundle\windows-mvp-launch.ps1" -Mode Diagnose -BundleDir $bundle @ci
+& "$bundle\windows-mvp-launch.ps1" -Mode Smoke -BundleDir $bundle @ci
 # Launch يترك نافذة Teacher الناجحة مفتوحة بطلب صريح، وSmoke يغلق عمليته.
-& "$bundle\windows-mvp-launch.ps1" -Mode Launch -BundleDir $bundle `
-    -ExpectedSourceRevision $source -ExpectedCiRunId $run -ExpectedCiRunAttempt $attempt
+& "$bundle\windows-mvp-launch.ps1" -Mode Launch -BundleDir $bundle @ci
 ```
 
 يُطبع مسار `mvp-report.json` داخل TEMP جديد باسم `ClassMesh-MVP-<guid>`.

@@ -3,20 +3,21 @@ param(
     [ValidateSet('Help','RecordBuild','Stage','Validate')][string]$Mode,
     [string]$ExecutableName, [string]$BuildDir = 'target/release', [string]$ReceiptsDir,
     [string]$OutputDir = 'windows-mvp-output', [string]$BundleDir = '.',
-    [string]$ExpectedSourceRevision, [string]$ExpectedCiRunId, [string]$ExpectedCiRunAttempt = '1'
+    [string]$ExpectedSourceRevision, [string]$ExpectedCiRunId, [string]$ExpectedCiRunAttempt = '1',
+    [string]$ExpectedIndexSha256
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-mvp-common.ps1')
 
 if ($Mode -eq 'Help') {
-    Write-Host 'Windows MVP: CI-only RecordBuild/Stage; Validate requires expected source SHA, run ID and attempt. No installation or release signing.'
+    Write-Host 'Windows MVP: CI-only RecordBuild/Stage. Validate requires the expected source SHA, run ID, attempt, and trusted index SHA256.'
     return
 }
 if ($Mode -eq 'Validate') {
     $expected = [pscustomobject]@{source_revision=$ExpectedSourceRevision;ci_run_id=$ExpectedCiRunId;ci_run_attempt=$ExpectedCiRunAttempt;ci_repository='faariis7/ClassMesh';ci_job='windows'}
     $handles = @(Open-MvpBundleLease $BundleDir)
-    try { $null = Test-MvpBundle $BundleDir $expected } finally { foreach ($h in $handles) { $h.Dispose() } }
+    try { $null = Test-MvpBundle $BundleDir $expected $ExpectedIndexSha256 } finally { foreach ($h in $handles) { $h.Dispose() } }
     Write-Host 'mvp_bundle_valid=true'
     return
 }
@@ -60,8 +61,10 @@ $files = @(@(Get-MvpRequiredFiles) + @('teacher-ui-bundle-index.json','service-w
 })
 $index = [ordered]@{schema_version=1;target='windows-x64';production_qualified=$false;components=$components;files=$files}
 foreach ($p in $context.PSObject.Properties) { $index[$p.Name] = $p.Value }
-Write-MvpNewJson $index (Join-Path $bundle 'mvp-bundle-index.json')
-$null = Test-MvpBundle $bundle $context
+$indexPath = Join-Path $bundle 'mvp-bundle-index.json'
+Write-MvpNewJson $index $indexPath
+$indexSha256 = (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$null = Test-MvpBundle $bundle $context $indexSha256
 # The existing runtime validators remain authoritative for all three binaries.
 & (Join-Path $bundle 'phase11f4-teacher-ui-smoke.ps1') -Mode PreflightRuntime -BundleDir $bundle
 & (Join-Path $bundle 'phase13-service-worker-bundle.ps1') -Mode PreflightRuntime -BundleDir $bundle
@@ -71,5 +74,6 @@ $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant
 [IO.File]::WriteAllText(($zip + '.sha256'), "$hash  classmesh-windows-mvp-x64.zip`n", [Text.UTF8Encoding]::new($false))
 Write-Host "mvp_zip=$zip"
 Write-Host "mvp_zip_sha256=$hash"
+Write-Host "mvp_index_sha256=$indexSha256"
 Write-Host "mvp_source_revision=$($context.source_revision)"
 Write-Host "mvp_ci_run_id=$($context.ci_run_id) attempt=$($context.ci_run_attempt) job=$($context.ci_job)"

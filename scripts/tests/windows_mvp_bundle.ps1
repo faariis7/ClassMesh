@@ -26,6 +26,9 @@ function Context {
 function Write-Json($Value, [string]$Path) {
     $Value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $Path -Encoding utf8
 }
+function Get-FixtureIndexPin([string]$Root) {
+    (Get-FileHash -LiteralPath (Join-Path $Root 'mvp-bundle-index.json') -Algorithm SHA256).Hash
+}
 function New-Fixture([string]$Root) {
     $null = New-Item -ItemType Directory -Path $Root
     foreach ($name in @(Get-MvpRequiredFiles)) {
@@ -65,7 +68,12 @@ function New-Fixture([string]$Root) {
     $index
 }
 
-$suiteRoot = Join-Path ([IO.Path]::GetTempPath()) ('ClassMesh-MVP-unit-' + [guid]::NewGuid().ToString('N'))
+$tempRoot = [IO.Path]::GetTempPath()
+if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+    Push-Location -LiteralPath $tempRoot
+    try { $tempRoot = (& /bin/pwd -P).Trim() } finally { Pop-Location }
+}
+$suiteRoot = Join-Path $tempRoot ('ClassMesh-MVP-unit-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $suiteRoot
 try {
     Check 'valid identical CI context is accepted' { Assert-MvpBuildContext (Context) (Context) }
@@ -78,9 +86,90 @@ try {
     }
     Check 'a complete bundle passes existing component validators' {
         $root = Join-Path $suiteRoot 'valid'; $null = New-Fixture $root
-        $result = Test-MvpBundle $root (Context)
+        $result = Test-MvpBundle $root (Context) (Get-FixtureIndexPin $root)
         Assert-True ($result.source_revision -ceq ('a' * 40)) 'valid revision was lost'
         Assert-True (@($result.components).Count -eq 3) 'all three components must be indexed'
+    }
+    Check 'bundle validation requires an independently trusted index SHA256' {
+        $root = Join-Path $suiteRoot 'unpinned'
+        $null = New-Fixture $root
+        Reject { Test-MvpBundle $root (Context) } 'trusted.*index.*SHA256'
+    }
+    Check 'reindexed tampering is rejected before a bundle helper can execute' {
+        $root = Join-Path $suiteRoot 'reindexed-tamper'
+        $index = New-Fixture $root
+        $indexPath = Join-Path $root 'mvp-bundle-index.json'
+        $trustedPin = (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash
+        $teacherIndexName = 'teacher-ui-bundle-index.json'
+        $teacherIndexPath = Join-Path $root $teacherIndexName
+        $teacherIndex = Get-Content -LiteralPath $teacherIndexPath -Raw | ConvertFrom-Json
+        $helperName = 'phase11f4-teacher-ui-smoke.ps1'
+        $exeName = 'classmesh-teacher-ui.exe'
+        $marker = Join-Path $suiteRoot 'tampered-helper-ran.txt'
+        [IO.File]::AppendAllText((Join-Path $root $exeName), 'altered')
+        $escapedMarker = $marker.Replace("'", "''")
+        Add-Content -LiteralPath (Join-Path $root $helperName) -Value "`n[IO.File]::WriteAllText('$escapedMarker', 'executed')"
+        $records = @($teacherIndex.files) + @($index.files) + @($index.components)
+        foreach ($record in ($records | Where-Object { $_.path -in @($exeName, $helperName) })) {
+            $actual = Get-MvpFileEvidence (Join-Path $root $record.path) $record.path
+            $record.sha256 = $actual.sha256
+            $record.bytes = $actual.bytes
+        }
+        Write-Json $teacherIndex $teacherIndexPath
+        $legacyRecord = $index.files | Where-Object path -CEQ $teacherIndexName
+        $actualIndex = Get-MvpFileEvidence $teacherIndexPath $teacherIndexName
+        $legacyRecord.sha256 = $actualIndex.sha256
+        $legacyRecord.bytes = $actualIndex.bytes
+        Write-Json $index $indexPath
+        try { Reject { Test-MvpBundle $root (Context) $trustedPin } 'index SHA256 mismatch' }
+        finally { Assert-True (-not (Test-Path -LiteralPath $marker)) 'modified bundle helper executed before trust validation' }
+    }
+    Check 'bundle rejects a redirected ancestor even with an intact index' {
+        $parent = (New-Item -ItemType Directory -Path (Join-Path $suiteRoot 'plain-parent')).FullName
+        $realBundle = Join-Path $parent 'bundle'
+        $null = New-Fixture $realBundle
+        $pin = (Get-FileHash -LiteralPath (Join-Path $realBundle 'mvp-bundle-index.json') -Algorithm SHA256).Hash
+        $alias = Join-Path $suiteRoot 'redirected-parent'
+        $kind = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'Junction' } else { 'SymbolicLink' }
+        $null = New-Item -ItemType $kind -Path $alias -Target $parent
+        try {
+            Reject { Test-MvpBundle (Join-Path $alias 'bundle') (Context) $pin } 'reparse point.*ancestry'
+        } finally { [IO.Directory]::Delete($alias) }
+    }
+    Check 'Teacher smoke requires confirmation of owned process exit' {
+        . (Join-Path (Join-Path $PSScriptRoot '..') 'phase11f4-teacher-ui-smoke.ps1') -Mode Help
+        $ownedProcess = [pscustomobject]@{ HasExited = $false; KillCalled = $false }
+        $ownedProcess | Add-Member -MemberType ScriptMethod -Name Refresh -Value {}
+        $ownedProcess | Add-Member -MemberType ScriptMethod -Name Kill -Value { $this.KillCalled = $true }
+        $ownedProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($TimeoutMs) $false }
+        Reject { Stop-OwnedTeacherSmokeProcess $ownedProcess } 'cleanup.*confirm.*exit'
+        Assert-True $ownedProcess.KillCalled 'cleanup never stopped the owned process'
+    }
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        Check 'missing VC runtime retains SCM enrollment and Worker diagnostics' {
+            $root = Join-Path $suiteRoot 'missing-runtime'
+            $index = New-Fixture $root
+            $legacyPath = Join-Path $root 'teacher-ui-bundle-index.json'
+            $legacy = Get-Content -LiteralPath $legacyPath -Raw | ConvertFrom-Json
+            $legacy.minimum_vc_runtime_version = '14.999.0.0'
+            Write-Json $legacy $legacyPath
+            $record = $index.files | Where-Object path -CEQ 'teacher-ui-bundle-index.json'
+            $actual = Get-MvpFileEvidence $legacyPath $record.path
+            $record.sha256 = $actual.sha256
+            $record.bytes = $actual.bytes
+            Write-Json $index (Join-Path $root 'mvp-bundle-index.json')
+            $report = Join-Path ([IO.Path]::GetTempPath()) ('ClassMesh-MVP-' + [guid]::NewGuid().ToString('N'))
+            try {
+                $program = (Get-Process -Id $PID).Path
+                & $program -NoProfile -File (Join-Path $root 'windows-mvp-launch.ps1') -Mode Diagnose -BundleDir $root `
+                    -ExpectedSourceRevision ('a' * 40) -ExpectedCiRunId 12345 -ExpectedIndexSha256 (Get-FixtureIndexPin $root) -ReportDir $report
+                $code = $LASTEXITCODE
+                $result = Get-Content -LiteralPath (Join-Path $report 'mvp-report.json') -Raw | ConvertFrom-Json
+                Assert-True ($code -eq 1 -and $result.runtime.status -eq 'FAILED') 'missing runtime was not recorded'
+                Assert-True ($null -ne $result.observation -and $null -ne $result.decision) 'runtime failure suppressed read-only Windows observations'
+                Assert-True ($result.teacher.status -eq 'NOT_REQUESTED') 'Diagnose attempted a Teacher launch'
+            } finally { if (Test-Path $report) { Remove-Item -LiteralPath $report -Recurse -Force } }
+        }
     }
     foreach ($case in @('modified-exe','old-worker','other-run','missing-component','extra-file','missing-file','traversal','duplicate-record','missing-hash','production-claim','bad-pe')) {
         Check "bundle rejects $case" {
@@ -105,7 +194,7 @@ try {
                 }
             }
             Write-Json $index (Join-Path $root 'mvp-bundle-index.json')
-            Reject { Test-MvpBundle $root (Context) } $pattern
+            Reject { Test-MvpBundle $root (Context) (Get-FixtureIndexPin $root) } $pattern
         }
     }
     Check 'leases retain all validated bundle files' {
@@ -142,7 +231,8 @@ try {
             try {
                 $sha = if ($case -eq 'valid') { 'a' * 40 } else { 'b' * 40 }
                 $program = (Get-Process -Id $PID).Path
-                & $program -NoProfile -File (Join-Path $root 'windows-mvp-launch.ps1') -Mode Validate -BundleDir $root -ExpectedSourceRevision $sha -ExpectedCiRunId 12345 -ReportDir $report
+                & $program -NoProfile -File (Join-Path $root 'windows-mvp-launch.ps1') -Mode Validate -BundleDir $root `
+                    -ExpectedSourceRevision $sha -ExpectedCiRunId 12345 -ExpectedIndexSha256 (Get-FixtureIndexPin $root) -ReportDir $report
                 $code = $LASTEXITCODE
                 $result = Get-Content -LiteralPath (Join-Path $report 'mvp-report.json') -Raw | ConvertFrom-Json
                 if ($case -eq 'valid') { Assert-True ($code -eq 0 -and $result.bundle.status -eq 'PASSED') 'valid CLI bundle failed' }

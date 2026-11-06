@@ -38,7 +38,7 @@ foreach ($case in @('missing-service','api-failure','service-binary-unknown','se
         $passed++; Write-Host "PASS $case"
     } catch { $failed++; Write-Host "FAIL $case : $($_.Exception.Message)" }
 }
-foreach ($case in @('matching','wrong-session','wrong-parent','old-process','wrong-binary','unknown-binary','wrong-pipe','duplicate','absent')) {
+foreach ($case in @('matching','wrong-session','wrong-parent','unknown-parent','old-process','wrong-binary','unknown-binary','wrong-pipe','duplicate','absent')) {
     try {
         $started = [datetime]'2026-11-05T10:00:00Z'
         $candidate = [pscustomobject]@{session_id=1;parent_process_id=100;started_utc=$started.AddSeconds(1);binary_matches=$true;pipe_binding_matches=$true}
@@ -46,6 +46,7 @@ foreach ($case in @('matching','wrong-session','wrong-parent','old-process','wro
             'matching' { 'MATCHING_PROCESS_OBSERVED' }
             'wrong-session' { $candidate.session_id=2; 'WRONG_SESSION' }
             'wrong-parent' { $candidate.parent_process_id=200; 'WRONG_PARENT' }
+            'unknown-parent' { 'UNKNOWN' }
             'old-process' { $candidate.started_utc=$started.AddSeconds(-1); 'WRONG_PARENT' }
             'wrong-binary' { $candidate.binary_matches=$false; 'BINARY_MISMATCH' }
             'unknown-binary' { $candidate.binary_matches=$null; 'UNKNOWN' }
@@ -54,19 +55,55 @@ foreach ($case in @('matching','wrong-session','wrong-parent','old-process','wro
             'absent' { 'NOT_RUNNING' }
         }
         $candidates = if ($case -eq 'absent') { @() } elseif ($case -eq 'duplicate') { @($candidate,$candidate) } else { @($candidate) }
-        $r = Get-MvpWorkerMatch $candidates 1 100 $started
+        $servicePid = if ($case -eq 'unknown-parent') { 0 } else { 100 }
+        $r = Get-MvpWorkerMatch $candidates 1 $servicePid $started
         Expect ($r -ceq $want) "Worker matching $case returned $r instead of $want"
         $passed++; Write-Host "PASS worker-$case"
     } catch { $failed++; Write-Host "FAIL worker-$case : $($_.Exception.Message)" }
 }
-foreach ($case in @('standard','elevated','session-zero')) {
+foreach ($case in @('standard','elevated','session-zero','noninteractive-desktop')) {
     try {
         $rejected=$false
-        try { Assert-MvpTeacherSession ($case -eq 'elevated') $(if ($case -eq 'session-zero') {0} else {1}) }
+        try { Assert-MvpTeacherSession ($case -eq 'elevated') $(if ($case -eq 'session-zero') {0} else {1}) ($case -ne 'noninteractive-desktop') }
         catch { $rejected=$true }
         Expect ($rejected -eq ($case -ne 'standard')) "Teacher launch policy failed for $case"
         $passed++; Write-Host "PASS teacher-$case"
     } catch { $failed++; Write-Host "FAIL teacher-$case : $($_.Exception.Message)" }
+}
+$previousProgramData = $env:ProgramData
+$fakeProgramData = Join-Path ([IO.Path]::GetTempPath()) ('ClassMesh-MVP-fake-data-' + [guid]::NewGuid().ToString('N'))
+try {
+    $state = Join-Path $fakeProgramData 'ClassMesh/state'
+    $null = New-Item -ItemType Directory -Path $state
+    @{ version=1; principal_id=@(165) * 32; not_after_unix_ms=1893456000000 } |
+        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $state 'machine-identity.json') -Encoding utf8
+    $env:ProgramData = $fakeProgramData
+    $o = Get-MvpEnrollmentObservation
+    Expect ($o.declared_principal_id -cne ('a5' * 32)) 'caller-controlled ProgramData supplied enrollment metadata'
+    $passed++; Write-Host 'PASS OS-ProgramData'
+} catch { $failed++; Write-Host "FAIL OS-ProgramData : $($_.Exception.Message)" }
+finally {
+    $env:ProgramData = $previousProgramData
+    if (Test-Path -LiteralPath $fakeProgramData) { Remove-Item -LiteralPath $fakeProgramData -Recurse -Force }
+}
+foreach ($case in @('valid','string-version','string-principal-byte','null-expiry')) {
+    $path = Join-Path ([IO.Path]::GetTempPath()) ('ClassMesh-MVP-identity-' + [guid]::NewGuid().ToString('N') + '.json')
+    try {
+        $identity = @{ version=1; principal_id=@(165) * 32; not_after_unix_ms=1893456000000 }
+        switch ($case) {
+            'string-version' { $identity.version = '1' }
+            'string-principal-byte' { $identity.principal_id[0] = '165' }
+            'null-expiry' { $identity.not_after_unix_ms = $null }
+        }
+        $identity | ConvertTo-Json | Set-Content -LiteralPath $path -Encoding utf8
+        $metadata = $null
+        $rejected = $false
+        try { $metadata = Read-MvpIdentityMetadata $path } catch { $rejected = $true }
+        Expect ($rejected -eq ($case -ne 'valid')) "identity metadata validation failed for $case"
+        if (-not $rejected) { Expect ($metadata.principal_id -ceq ('a5' * 32)) 'valid principal bytes were not preserved' }
+        $passed++; Write-Host "PASS identity-$case"
+    } catch { $failed++; Write-Host "FAIL identity-$case : $($_.Exception.Message)" }
+    finally { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path } }
 }
 foreach ($failure in @('Access denied','CIM operation timed out')) {
     $previousProgramData = $env:ProgramData

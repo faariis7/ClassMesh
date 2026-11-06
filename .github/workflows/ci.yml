@@ -618,8 +618,11 @@ jobs:
           .\scripts\windows-mvp-bundle.ps1 -Mode Stage -ReceiptsDir "$env:RUNNER_TEMP/classmesh-mvp-receipts" -OutputDir windows-mvp-output
           $zip = 'windows-mvp-output/classmesh-windows-mvp-x64.zip'
           $expanded = Join-Path $env:RUNNER_TEMP 'classmesh-mvp-ci-extracted'
+          $index = 'windows-mvp-output/classmesh-windows-mvp-x64/mvp-bundle-index.json'
+          $indexSha256 = (Get-FileHash -LiteralPath $index -Algorithm SHA256).Hash
           Expand-Archive -LiteralPath $zip -DestinationPath $expanded
-          .\scripts\windows-mvp-bundle.ps1 -Mode Validate -BundleDir $expanded -ExpectedSourceRevision $env:GITHUB_SHA -ExpectedCiRunId $env:GITHUB_RUN_ID -ExpectedCiRunAttempt $env:GITHUB_RUN_ATTEMPT
+          .\scripts\windows-mvp-bundle.ps1 -Mode Validate -BundleDir $expanded -ExpectedSourceRevision $env:GITHUB_SHA `
+            -ExpectedCiRunId $env:GITHUB_RUN_ID -ExpectedCiRunAttempt $env:GITHUB_RUN_ATTEMPT -ExpectedIndexSha256 $indexSha256
 
       - name: Upload unified Windows MVP ZIP
         uses: actions/upload-artifact@v4
