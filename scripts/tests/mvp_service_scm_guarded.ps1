@@ -121,3 +121,17 @@ $pinAt = $source.IndexOf('$expectedCommand = $bin')
 $createAt = $source.IndexOf('& sc.exe create $serviceName')
 if ($pinAt -lt 0 -or $pinAt -ge $createAt) { throw 'Cleanup identity must be pinned before SCM creation' }
 'PASS: SCM cleanup refuses changed service registration before stop/delete'
+
+# Runtime evidence must still describe the same running SCM PID after token
+# and image checks; restart/PID changes invalidate earlier observations.
+$ownerAt = $source.IndexOf('Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid')
+$finalAt = $source.IndexOf('$finalService = Get-CimInstance Win32_Service')
+$successAt = $source.IndexOf('SCM_LOCALSYSTEM_RUNNING_PID=')
+if ($ownerAt -lt 0 -or $finalAt -le $ownerAt -or $successAt -le $finalAt) {
+    throw 'Final SCM PID attestation must follow token proof and precede success'
+}
+$finalWindow = $source.Substring($finalAt, $successAt - $finalAt)
+foreach ($needle in @('$finalService.State -ne ''Running''', '$finalService.ProcessId -ne $svc.ProcessId', 'SCM process or registration changed during runtime attestation')) {
+    if (-not $finalWindow.Contains($needle)) { throw "Final SCM runtime binding missing: $needle" }
+}
+'PASS: SCM runtime evidence rebinds unchanged live PID before success'
