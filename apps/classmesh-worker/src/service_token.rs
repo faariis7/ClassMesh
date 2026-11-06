@@ -5,13 +5,13 @@ use std::io;
 use std::mem::size_of;
 use std::ptr::null_mut;
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
 use windows_sys::Win32::Security::{
     CreateWellKnownSid, EqualSid, GetTokenInformation, SECURITY_MAX_SID_SIZE, TOKEN_QUERY,
     TOKEN_USER, TokenUser, WinLocalSystemSid,
 };
 use windows_sys::Win32::System::Threading::{
-    GetExitCodeProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
 };
 
 struct Handle(HANDLE);
@@ -36,18 +36,14 @@ pub(crate) fn require_local_system(pid: u32) -> io::Result<()> {
     if process.0.is_null() {
         return Err(io::Error::last_os_error());
     }
-    // A terminated LocalSystem process still has a queryable token while a
-    // handle to its process object exists. Never authorize a dead pipe peer.
-    let mut exit_code = 0u32;
-    // SAFETY: process is a live owned query handle and exit_code is writable.
-    if unsafe { GetExitCodeProcess(process.0, &mut exit_code) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if exit_code != 259 {
-        // STILL_ACTIVE
+    // A terminated process may return STILL_ACTIVE (259) as its actual exit
+    // code. Query the process object's signaled state instead of interpreting
+    // its exit code as proof of liveness; zero timeout never blocks Worker.
+    // SAFETY: process is a valid owned process handle, queried without waiting.
+    if unsafe { WaitForSingleObject(process.0, 0) } != WAIT_TIMEOUT {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "pipe server process exited",
+            "pipe server process exited or liveness is unverified",
         ));
     }
     let mut raw_token = null_mut();
@@ -143,6 +139,24 @@ mod tests {
         assert_eq!(
             super::require_local_system(pid)
                 .expect_err("exited process must not authorize IPC")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn reject_exited_process_with_still_active_exit_code() {
+        // Windows allows exit code 259, which GetExitCodeProcess reports as
+        // STILL_ACTIVE even after termination. The process must be rejected.
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/C", "exit 259"])
+            .spawn()
+            .expect("spawn process with ambiguous exit code");
+        let pid = child.id();
+        let _ = child.wait().expect("wait for child exit");
+        assert_eq!(
+            super::require_local_system(pid)
+                .expect_err("terminated process with exit code 259 must be rejected")
                 .kind(),
             std::io::ErrorKind::PermissionDenied
         );
