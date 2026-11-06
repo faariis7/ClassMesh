@@ -43,7 +43,14 @@ function Assert-ProtectedFile([string]$Path, [string]$ExpectedHash) {
             throw 'FAIL_CLOSED: reparse point in executable ancestry'
         }
         $acl = Get-Acl -LiteralPath $cursor.FullName
-        if ($acl.Owner -notmatch '^(BUILTIN\\Administrators|NT AUTHORITY\\SYSTEM|S-1-5-32-544|S-1-5-18)$') {
+        # Owner display names are localized and may be renamed. Compare the
+        # authoritative SID instead; translation failures must fail closed.
+        try {
+            $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        } catch {
+            throw 'FAIL_CLOSED: executable ancestry owner SID unavailable'
+        }
+        if ($ownerSid -notin @('S-1-5-32-544','S-1-5-18')) {
             throw 'FAIL_CLOSED: executable ancestry owner is not SYSTEM/Administrators'
         }
         foreach ($rule in $acl.Access) {
