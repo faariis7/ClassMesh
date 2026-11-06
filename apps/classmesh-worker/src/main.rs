@@ -136,14 +136,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut native_telemetry_sender: Option<telemetry_native::BestEffortReceiverSender> = None;
 
     loop {
+        // Before publishing readiness or touching capture/media state, reject a
+        // pipe peer that vanished or changed while the previous tick was idle.
+        // The post-wait check below still protects event dispatch after blocking.
+        let pre_tick_peer = (|| -> Result<bool, Box<dyn std::error::Error>> {
+            Ok(pipe.server_process_id()? == primary_service_pid && pipe.server_session_id()? == 0)
+        })();
+        match pre_tick_peer {
+            Ok(true) => {}
+            Ok(false) => {
+                release_tracked_input(&mut input_injector);
+                return Err("Worker IPC server identity changed before media tick".into());
+            }
+            Err(error) => {
+                release_tracked_input(&mut input_injector);
+                return Err(format!(
+                    "Worker IPC server identity query failed before media tick: {error}"
+                )
+                .into());
+            }
+        }
         // Reconcile the Service-visible readiness from actual capture ownership
         // after every event, including SuspendMedia and failed backend paths.
         // A stale true must not survive a dropped DXGI capture.
-        update_worker_capture_readiness(
+        if let Err(error) = update_worker_capture_readiness(
             &mut runtime_capabilities,
             capture.as_ref().map(|active| active.state()),
             |next| publish_worker_capabilities(&pipe, std::process::id(), actual_session, next),
-        )?;
+        ) {
+            // A failed capability publish ends the trusted IPC loop. Do not
+            // leave remote keys or mouse buttons held while unwinding.
+            release_tracked_input(&mut input_injector);
+            return Err(error);
+        }
         let now = Instant::now();
         let mut wait = if capture.is_some() {
             capture_due
