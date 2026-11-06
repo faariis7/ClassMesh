@@ -32,3 +32,15 @@ foreach ($check in @('Assert-ProtectedFile $ServiceExe $ExpectedServiceSha256', 
     if (-not $window.Contains($check)) { throw "Post-verification pinned binary recheck missing: $check" }
 }
 'PASS: SCM post-verification integrity recheck contract (TOCTOU residual remains)'
+
+# Unknown local/domain principals must never inherit executable mutation rights.
+if ($source -notmatch [regex]::Escape('$sid -notin $trustedMutationSids')) {
+    throw 'Unknown ACL principal fail-closed gate missing'
+}
+foreach ($trustedSid in @('S-1-5-18','S-1-5-32-544')) {
+    if (-not $source.Contains($trustedSid)) { throw "Trusted principal missing: $trustedSid" }
+}
+if ($source -match [regex]::Escape('$sid -in $untrusted')) {
+    throw 'Legacy low-privilege SID denylist must not control mutation decisions'
+}
+'PASS: SCM ACL allowlist rejects unknown mutation principals'
