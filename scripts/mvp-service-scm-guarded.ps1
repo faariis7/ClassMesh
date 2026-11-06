@@ -87,6 +87,20 @@ try {
     $output = & sc.exe create $serviceName 'binPath=' $bin 'start=' 'demand' 'type=' 'own' 'obj=' 'LocalSystem' 2>&1
     if ($LASTEXITCODE -ne 0) { throw "SCM create failed: $($output -join ' | ')" }
     $created = $true
+    # Bind the SCM configuration to the reviewed executable before the first start.
+    # A successful sc.exe create alone does not establish the installed image path
+    # or the LocalSystem account. Fail closed and let finally remove our service.
+    $registered = Get-CimInstance Win32_Service -Filter "Name='ClassMeshService'"
+    if ($null -eq $registered -or
+        $registered.StartName -notin @('LocalSystem','NT AUTHORITY\\SYSTEM') -or
+        $registered.StartMode -ne 'Manual') {
+        throw 'FAIL_CLOSED: SCM registration account/start mode mismatch'
+    }
+    $expectedCommand = '"' + (Get-Item -LiteralPath $ServiceExe).FullName + '"'
+    if (-not [string]::Equals($registered.PathName.Trim(), $expectedCommand, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'FAIL_CLOSED: SCM registered binary command mismatch'
+    }
+    Assert-ProtectedFile $ServiceExe $ExpectedServiceSha256
     Start-Service -Name $serviceName -ErrorAction Stop
     $svc = Get-CimInstance Win32_Service -Filter "Name='ClassMeshService'"
     if ($null -eq $svc -or $svc.State -ne 'Running' -or $svc.StartName -notin @('LocalSystem','NT AUTHORITY\\SYSTEM') -or $svc.ProcessId -le 0) {
