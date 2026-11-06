@@ -143,6 +143,17 @@ try {
         $ownerResult.Sid -ne 'S-1-5-18') {
         throw 'FAIL_CLOSED: running Service process token is not LocalSystem'
     }
+    # Rebind the evidence to the same live SCM process after all CIM queries.
+    # A stopped/restarted service or PID change invalidates earlier image/token
+    # observations, even if each individual query appeared successful.
+    $finalService = Get-CimInstance Win32_Service -Filter "Name='ClassMeshService'"
+    if ($null -eq $finalService -or $finalService.State -ne 'Running' -or
+        $finalService.ProcessId -ne $svc.ProcessId -or
+        $finalService.StartName -notin @('LocalSystem','NT AUTHORITY\\SYSTEM') -or
+        $finalService.StartMode -ne 'Manual' -or
+        -not [string]::Equals($finalService.PathName.Trim(), $expectedCommand, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'FAIL_CLOSED: SCM process or registration changed during runtime attestation'
+    }
     "SCM_LOCALSYSTEM_RUNNING_PID=$($svc.ProcessId); IMAGE_PIN_VERIFIED; WORKER_IPC_NOT_YET_PROVEN"
 } finally {
     if ($created) {
