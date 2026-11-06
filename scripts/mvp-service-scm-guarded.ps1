@@ -50,14 +50,16 @@ function Assert-ProtectedFile([string]$Path, [string]$ExpectedHash) {
             if ($rule.AccessControlType -ne 'Allow') { continue }
             $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
             # Delete and ACL takeover are mutation capabilities even without Write.
-            $untrusted = @('S-1-1-0','S-1-5-11','S-1-5-32-545','S-1-5-4','S-1-5-2','S-1-5-32-546')
+            # Allow mutation only for trusted machine principals. A denylist misses
+            # custom local groups, service accounts, and domain principals.
+            $trustedMutationSids = @('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
             $mutation = [Security.AccessControl.FileSystemRights]::WriteData -bor
                 [Security.AccessControl.FileSystemRights]::AppendData -bor
                 [Security.AccessControl.FileSystemRights]::Delete -bor
                 [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
                 [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
                 [Security.AccessControl.FileSystemRights]::TakeOwnership
-            if ($sid -in $untrusted -and ($rule.FileSystemRights -band $mutation) -ne 0) {
+            if ($sid -notin $trustedMutationSids -and ($rule.FileSystemRights -band $mutation) -ne 0) {
                 throw 'FAIL_CLOSED: low-privilege mutation permission in executable ancestry'
             }
         }
