@@ -17,7 +17,7 @@ foreach ($case in $cases) {
 
 # Regression contract: reject all low-privilege mutation rights, not only the Write alias.
 $source = Get-Content -LiteralPath $script -Raw
-foreach ($right in @('WriteData','AppendData','Delete','DeleteSubdirectoriesAndFiles','ChangePermissions','TakeOwnership')) {
+foreach ($right in @('WriteData','AppendData','WriteAttributes','WriteExtendedAttributes','Delete','DeleteSubdirectoriesAndFiles','ChangePermissions','TakeOwnership')) {
     if ($source -notmatch [regex]::Escape("::$right")) { throw "SCM ACL gate missing mutation right: $right" }
 }
 if ($source -notmatch 'Assert-ProtectedFile \$ServiceExe \$ExpectedServiceSha256') { throw 'Service executable integrity gate missing' }
