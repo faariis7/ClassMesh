@@ -53,6 +53,7 @@ impl AuthenticatedTeacherControlMessage {
 #[derive(Debug, Default)]
 pub struct TeacherControlSequenceGuard {
     last_sequence: Option<u64>,
+    bound_session_id: Option<u64>,
 }
 
 impl TeacherControlSequenceGuard {
@@ -62,10 +63,18 @@ impl TeacherControlSequenceGuard {
         &mut self,
         message: AuthenticatedTeacherControlMessage,
     ) -> Result<AuthenticatedTeacherControlMessage, AuthenticatedTeacherReceiveError> {
+        let session_id = message.envelope.control_session_id;
+        if self
+            .bound_session_id
+            .is_some_and(|bound| bound != session_id)
+        {
+            return Err(AuthenticatedTeacherReceiveError::GuardSessionMismatch);
+        }
         let sequence = message.envelope.sequence;
         if sequence == 0 || self.last_sequence.is_some_and(|last| sequence <= last) {
             return Err(AuthenticatedTeacherReceiveError::ReplayedSequence);
         }
+        self.bound_session_id = Some(session_id);
         self.last_sequence = Some(sequence);
         Ok(message)
     }
@@ -83,6 +92,7 @@ pub enum AuthenticatedTeacherReceiveError {
     ProtocolVersionMismatch,
     MissingPayload,
     ReplayedSequence,
+    GuardSessionMismatch,
     PeerIdentity(PeerIdentityError),
     Authorization(LiveAuthorizationError),
     Transport(ControlTransportError),
@@ -643,6 +653,32 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn sequence_guard_cannot_be_reused_across_authenticated_sessions() {
+        let mut guard = TeacherControlSequenceGuard::default();
+        let mut first = report(SESSION);
+        first.sequence = 7;
+        assert!(
+            guard
+                .admit(AuthenticatedTeacherControlMessage {
+                    envelope: first,
+                    is_playback: true,
+                })
+                .is_ok()
+        );
+        let mut second = report(SESSION + 1);
+        second.sequence = 8;
+        assert!(matches!(
+            guard.admit(AuthenticatedTeacherControlMessage {
+                envelope: second,
+                is_playback: true,
+            }),
+            Err(AuthenticatedTeacherReceiveError::GuardSessionMismatch)
+        ));
+        assert_eq!(guard.last_sequence, Some(7));
+        assert_eq!(guard.bound_session_id, Some(SESSION));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
