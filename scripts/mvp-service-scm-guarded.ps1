@@ -146,6 +146,15 @@ try {
     "SCM_LOCALSYSTEM_RUNNING_PID=$($svc.ProcessId); IMAGE_PIN_VERIFIED; WORKER_IPC_NOT_YET_PROVEN"
 } finally {
     if ($created) {
+        # Never stop/delete a service whose SCM identity changed after our create.
+        # A name match alone is insufficient to prove that cleanup owns the service.
+        $cleanupRegistration = Get-CimInstance Win32_Service -Filter "Name='ClassMeshService'"
+        if ($null -eq $cleanupRegistration -or
+            $cleanupRegistration.StartName -notin @('LocalSystem','NT AUTHORITY\\SYSTEM') -or
+            $cleanupRegistration.StartMode -ne 'Manual' -or
+            -not [string]::Equals($cleanupRegistration.PathName.Trim(), $expectedCommand, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'FAIL_CLOSED: SCM cleanup ownership mismatch; do not stop or delete service; manual investigation required'
+        }
         $live = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
         if ($null -ne $live -and $live.Status -ne 'Stopped') {
             Stop-Service -Name $serviceName -ErrorAction Stop
