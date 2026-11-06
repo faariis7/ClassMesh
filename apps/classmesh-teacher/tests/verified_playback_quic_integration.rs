@@ -470,7 +470,9 @@ async fn replayed_outer_control_sequence_forces_retirement_even_when_message_typ
         owner
             .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
             .await,
-        Err(TeacherPlaybackSessionError::ControlSequenceRegression)
+        Err(TeacherPlaybackSessionError::Receive(
+            classmesh_control::teacher_playback_receive::AuthenticatedTeacherReceiveError::ReplayedSequence
+        ))
     ));
     assert_eq!(owner.visible(SOURCE, now), None);
     assert!(matches!(
