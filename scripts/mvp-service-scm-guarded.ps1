@@ -75,6 +75,10 @@ if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
 if ($LASTEXITCODE -ne 0) { throw 'FAIL_CLOSED: trusted startup verification failed' }
 $created = $false
 try {
+    # Revalidate both pinned binaries after the external verifier returns; it may run for
+    # an extended period. This narrows, but cannot eliminate, the SCM path TOCTOU window.
+    Assert-ProtectedFile $ServiceExe $ExpectedServiceSha256
+    Assert-ProtectedFile $TrustedProvisionExe $ExpectedProvisionSha256
     $bin = '"' + (Get-Item -LiteralPath $ServiceExe).FullName + '"'
     $output = & sc.exe create $serviceName 'binPath=' $bin 'start=' 'demand' 'type=' 'own' 'obj=' 'LocalSystem' 2>&1
     if ($LASTEXITCODE -ne 0) { throw "SCM create failed: $($output -join ' | ')" }
