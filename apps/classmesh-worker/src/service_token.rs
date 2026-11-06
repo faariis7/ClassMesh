@@ -11,7 +11,7 @@ use windows_sys::Win32::Security::{
     TOKEN_USER, TokenUser, WinLocalSystemSid,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetExitCodeProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 struct Handle(HANDLE);
@@ -35,6 +35,20 @@ pub(crate) fn require_local_system(pid: u32) -> io::Result<()> {
     let process = Handle(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) });
     if process.0.is_null() {
         return Err(io::Error::last_os_error());
+    }
+    // A terminated LocalSystem process still has a queryable token while a
+    // handle to its process object exists. Never authorize a dead pipe peer.
+    let mut exit_code = 0u32;
+    // SAFETY: process is a live owned query handle and exit_code is writable.
+    if unsafe { GetExitCodeProcess(process.0, &mut exit_code) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if exit_code != 259 {
+        // STILL_ACTIVE
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "pipe server process exited",
+        ));
     }
     let mut raw_token = null_mut();
     // SAFETY: process handle is live and raw_token is writable.
@@ -118,14 +132,20 @@ mod tests {
         // A PID from a terminated process must not authorize an IPC peer.
         // Even if Windows temporarily retains the process object, its user
         // token is not LocalSystem on an interactive CI runner.
-        let child = std::process::Command::new("cmd.exe")
+        let mut child = std::process::Command::new("cmd.exe")
             .args(["/C", "exit 0"])
             .spawn()
             .expect("spawn short-lived process");
         let pid = child.id();
-        let output = child.wait_with_output().expect("wait for child exit");
-        assert!(output.status.success());
-        assert!(super::require_local_system(pid).is_err());
+        assert!(child.wait().expect("wait for child exit").success());
+        // Keep the child handle alive: Windows retains the exited process
+        // object and its token, so an open PID is not proof of liveness.
+        assert_eq!(
+            super::require_local_system(pid)
+                .expect_err("exited process must not authorize IPC")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]
