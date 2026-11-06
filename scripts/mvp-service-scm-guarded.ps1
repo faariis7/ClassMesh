@@ -173,6 +173,17 @@ try {
         }
         & sc.exe delete $serviceName | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'SCM cleanup failed; manual investigation required' }
+        # sc.exe delete may only mark a service for deletion while SCM handles
+        # remain open. Never claim removal until its registration disappears.
+        $deleteDeadline = [DateTime]::UtcNow.AddSeconds(15)
+        do {
+            $remaining = Get-CimInstance Win32_Service -Filter "Name='ClassMeshService'"
+            if ($null -eq $remaining) { break }
+            Start-Sleep -Milliseconds 250
+        } while ([DateTime]::UtcNow -lt $deleteDeadline)
+        if ($null -ne $remaining) {
+            throw 'FAIL_CLOSED: SCM service still registered after delete; manual investigation required'
+        }
         'SCM_DISPOSABLE_SERVICE_REMOVED; protected enrollment state intentionally retained'
     }
 }
