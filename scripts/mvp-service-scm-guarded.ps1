@@ -178,6 +178,17 @@ try {
             Stop-Service -Name $serviceName -ErrorAction Stop
             $live.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(15))
         }
+        # Stop-Service is an external operation: SCM registration can be replaced
+        # between our initial ownership check and deletion. Re-attest immediately
+        # before the destructive delete; never delete a foreign replacement.
+        $beforeDelete = Get-CimInstance Win32_Service -Filter "Name='ClassMeshService'"
+        if ($null -eq $beforeDelete -or
+            $beforeDelete.State -ne 'Stopped' -or
+            $beforeDelete.StartName -notin @('LocalSystem','NT AUTHORITY\\SYSTEM') -or
+            $beforeDelete.StartMode -ne 'Manual' -or
+            -not [string]::Equals($beforeDelete.PathName.Trim(), $expectedCommand, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'FAIL_CLOSED: SCM registration changed before delete; manual investigation required'
+        }
         & sc.exe delete $serviceName | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'SCM cleanup failed; manual investigation required' }
         # sc.exe delete may only mark a service for deletion while SCM handles
