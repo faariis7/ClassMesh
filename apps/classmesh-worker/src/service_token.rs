@@ -106,7 +106,9 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         assert_eq!(
-            result.expect_err("interactive child must not be trusted as Service").kind(),
+            result
+                .expect_err("interactive child must not be trusted as Service")
+                .kind(),
             std::io::ErrorKind::PermissionDenied
         );
     }
