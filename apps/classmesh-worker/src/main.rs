@@ -167,7 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // A failed capability publish ends the trusted IPC loop. Do not
             // leave remote keys or mouse buttons held while unwinding.
             release_tracked_input(&mut input_injector);
-            return Err(error.into());
+            return Err(error);
         }
         let now = Instant::now();
         let mut wait = if capture.is_some() {
