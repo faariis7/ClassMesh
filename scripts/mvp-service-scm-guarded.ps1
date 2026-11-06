@@ -136,6 +136,13 @@ try {
         throw 'FAIL_CLOSED: running Service image path differs from pinned executable'
     }
     Assert-ProtectedFile $process.ExecutablePath $ExpectedServiceSha256
+    # SCM StartName describes configuration, not the token of the running PID.
+    # Verify the actual process owner SID via CIM before reporting LocalSystem.
+    $ownerResult = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
+    if ($null -eq $ownerResult -or $ownerResult.ReturnValue -ne 0 -or
+        $ownerResult.Sid -ne 'S-1-5-18') {
+        throw 'FAIL_CLOSED: running Service process token is not LocalSystem'
+    }
     "SCM_LOCALSYSTEM_RUNNING_PID=$($svc.ProcessId); IMAGE_PIN_VERIFIED; WORKER_IPC_NOT_YET_PROVEN"
 } finally {
     if ($created) {
