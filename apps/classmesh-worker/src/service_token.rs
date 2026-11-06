@@ -11,7 +11,7 @@ use windows_sys::Win32::Security::{
     TOKEN_USER, TokenUser, WinLocalSystemSid,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
 };
 
 struct Handle(HANDLE);
