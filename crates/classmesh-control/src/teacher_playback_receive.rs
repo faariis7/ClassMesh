@@ -54,9 +54,27 @@ impl AuthenticatedTeacherControlMessage {
 pub struct TeacherControlSequenceGuard {
     last_sequence: Option<u64>,
     bound_session_id: Option<u64>,
+    bound_connection_id: Option<usize>,
 }
 
 impl TeacherControlSequenceGuard {
+    /// Bind to one QUIC connection; a reconnect requires a fresh guard.
+    pub fn admit_on_connection(
+        &mut self,
+        connection_id: usize,
+        message: AuthenticatedTeacherControlMessage,
+    ) -> Result<AuthenticatedTeacherControlMessage, AuthenticatedTeacherReceiveError> {
+        if self
+            .bound_connection_id
+            .is_some_and(|bound| bound != connection_id)
+        {
+            return Err(AuthenticatedTeacherReceiveError::GuardConnectionMismatch);
+        }
+        let admitted = self.admit(message)?;
+        self.bound_connection_id = Some(connection_id);
+        Ok(admitted)
+    }
+
     /// Reject duplicate, zero or regressing envelope sequence numbers before
     /// passing a verified message to the owning dispatcher.
     pub fn admit(
@@ -93,6 +111,7 @@ pub enum AuthenticatedTeacherReceiveError {
     MissingPayload,
     ReplayedSequence,
     GuardSessionMismatch,
+    GuardConnectionMismatch,
     PeerIdentity(PeerIdentityError),
     Authorization(LiveAuthorizationError),
     Transport(ControlTransportError),
@@ -218,7 +237,7 @@ pub async fn receive_guarded_authenticated_teacher_control(
         now_unix_ms,
     )
     .await?;
-    guard.admit(verified)
+    guard.admit_on_connection(session.connection.stable_id(), verified)
 }
 
 #[cfg(test)]
@@ -679,6 +698,38 @@ mod tests {
         ));
         assert_eq!(guard.last_sequence, Some(7));
         assert_eq!(guard.bound_session_id, Some(SESSION));
+    }
+
+    #[test]
+    fn sequence_guard_rejects_reconnect_even_with_same_session_id() {
+        let mut guard = TeacherControlSequenceGuard::default();
+        let mut first = report(SESSION);
+        first.sequence = 7;
+        assert!(
+            guard
+                .admit_on_connection(
+                    11,
+                    AuthenticatedTeacherControlMessage {
+                        envelope: first,
+                        is_playback: true,
+                    }
+                )
+                .is_ok()
+        );
+        let mut second = report(SESSION);
+        second.sequence = 8;
+        assert!(matches!(
+            guard.admit_on_connection(
+                12,
+                AuthenticatedTeacherControlMessage {
+                    envelope: second,
+                    is_playback: true,
+                }
+            ),
+            Err(AuthenticatedTeacherReceiveError::GuardConnectionMismatch)
+        ));
+        assert_eq!(guard.last_sequence, Some(7));
+        assert_eq!(guard.bound_connection_id, Some(11));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
