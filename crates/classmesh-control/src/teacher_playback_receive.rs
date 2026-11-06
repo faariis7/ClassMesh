@@ -55,6 +55,7 @@ pub enum AuthenticatedTeacherReceiveError {
     WrongPrincipalKind,
     NotNegotiated,
     SessionMismatch,
+    InnerSessionMismatch,
     ProtocolVersionMismatch,
     MissingPayload,
     PeerIdentity(PeerIdentityError),
@@ -134,6 +135,14 @@ pub async fn receive_authenticated_teacher_control(
     // A payload-less envelope is not a dispatchable control command.
     if envelope.payload.is_none() {
         return Err(AuthenticatedTeacherReceiveError::MissingPayload);
+    }
+    // Heartbeat repeats the session identifier inside its payload. A valid
+    // outer envelope must not launder a heartbeat from another session into
+    // the owning dispatcher, even on an authenticated QUIC connection.
+    if let Some(control_envelope::Payload::Heartbeat(heartbeat)) = &envelope.payload {
+        if heartbeat.control_session_id != envelope.control_session_id {
+            return Err(AuthenticatedTeacherReceiveError::InnerSessionMismatch);
+        }
     }
     let is_playback = matches!(
         envelope.payload,
@@ -515,6 +524,47 @@ mod tests {
             .await,
             Err(AuthenticatedTeacherReceiveError::MissingPayload)
         ));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authenticated_heartbeat_cannot_smuggle_a_different_inner_session() -> TestResult {
+        let mut pair = pair(true).await?;
+        let mut other = report(SESSION);
+        other.payload = Some(control_envelope::Payload::Heartbeat(
+            classmesh_protocol::control_wire::Heartbeat {
+                monotonic_time_us: 100,
+                control_session_id: SESSION + 1,
+                media: 1,
+            },
+        ));
+        pair.server_channel.send(&other).await?;
+        assert!(matches!(
+            receive_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150
+            )
+            .await,
+            Err(AuthenticatedTeacherReceiveError::InnerSessionMismatch)
+        ));
+        // A subsequent valid heartbeat remains dispatchable.
+        if let Some(control_envelope::Payload::Heartbeat(heartbeat)) = &mut other.payload {
+            heartbeat.control_session_id = SESSION;
+        }
+        pair.server_channel.send(&other).await?;
+        assert!(
+            receive_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150
+            )
+            .await?
+            .receiver_playback()
+            .is_none()
+        );
         Ok(())
     }
 
