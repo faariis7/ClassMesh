@@ -104,3 +104,20 @@ foreach ($needle in @('$ownerResult.ReturnValue -ne 0', '$ownerResult.Sid -ne ''
     if (-not $source.Contains($needle)) { throw "SCM process token attestation missing: $needle" }
 }
 'PASS: SCM actual process owner SID attestation contract'
+
+# Cleanup must not stop/delete a service that no longer matches the registration
+# created by this harness. Static ordering check only; native race needs VM proof.
+$cleanupAt = $source.IndexOf('$cleanupRegistration = Get-CimInstance Win32_Service')
+$stopAt = $source.IndexOf('Stop-Service -Name $serviceName')
+$deleteAt = $source.IndexOf('& sc.exe delete $serviceName')
+if ($cleanupAt -lt 0 -or $stopAt -le $cleanupAt -or $deleteAt -le $stopAt) {
+    throw 'SCM cleanup ownership attestation must precede stop and delete'
+}
+$cleanupWindow = $source.Substring($cleanupAt, $stopAt - $cleanupAt)
+foreach ($needle in @('StartName', 'StartMode', 'PathName.Trim()', '$expectedCommand', 'SCM cleanup ownership mismatch')) {
+    if (-not $cleanupWindow.Contains($needle)) { throw "SCM cleanup ownership guard missing: $needle" }
+}
+$pinAt = $source.IndexOf('$expectedCommand = $bin')
+$createAt = $source.IndexOf('& sc.exe create $serviceName')
+if ($pinAt -lt 0 -or $pinAt -ge $createAt) { throw 'Cleanup identity must be pinned before SCM creation' }
+'PASS: SCM cleanup refuses changed service registration before stop/delete'
