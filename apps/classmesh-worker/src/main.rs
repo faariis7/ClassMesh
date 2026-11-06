@@ -74,7 +74,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if pipe.server_process_id()? != primary_service_pid {
         return Err("Worker IPC server process changed during handshake".into());
     }
-    eprintln!("ClassMesh Worker IPC ServiceReady received; Session 0/PID continuity checked (LocalSystem authorization unverified)");
+    eprintln!(
+        "ClassMesh Worker IPC ServiceReady received; Session 0/PID continuity checked (LocalSystem authorization unverified)"
+    );
     let (event_tx, event_rx) = mpsc::sync_channel(WORKER_IPC_EVENT_QUEUE_CAPACITY);
     let reader_pipe = pipe.try_clone()?;
     let _ipc_thread = spawn_ipc_reader(reader_pipe, event_tx);
@@ -1353,8 +1355,8 @@ where
     L: classmesh_win32::OpenTargetLauncher,
 {
     use classmesh_protocol::control_wire::{
-        open_target, teacher_interaction_request, AppIdentity, TeacherInteractionKind,
-        TeacherInteractionState,
+        AppIdentity, TeacherInteractionKind, TeacherInteractionState, open_target,
+        teacher_interaction_request,
     };
     use classmesh_win32::{TeacherInteractionAcceptance, WindowsAppIdentity};
 
@@ -1488,7 +1490,7 @@ fn start_capture() -> Result<
     Box<dyn std::error::Error>,
 > {
     use classmesh_capture_win::{
-        enumerate_displays, query_adapter_capability_identity, RecoveringCapture,
+        RecoveringCapture, enumerate_displays, query_adapter_capability_identity,
     };
     use classmesh_core::recovery::RecoveryPolicy;
 
@@ -2090,7 +2092,7 @@ mod focused_profile_tests {
     fn teacher_message_request(
         text: &str,
     ) -> classmesh_protocol::control_wire::TeacherInteractionRequest {
-        use classmesh_protocol::control_wire::{teacher_interaction_request, TeacherMessage};
+        use classmesh_protocol::control_wire::{TeacherMessage, teacher_interaction_request};
 
         classmesh_protocol::control_wire::TeacherInteractionRequest {
             action: Some(teacher_interaction_request::Action::Message(
@@ -2105,7 +2107,7 @@ mod focused_profile_tests {
         url: &str,
     ) -> classmesh_protocol::control_wire::TeacherInteractionRequest {
         use classmesh_protocol::control_wire::{
-            open_target, teacher_interaction_request, OpenTarget,
+            OpenTarget, open_target, teacher_interaction_request,
         };
 
         classmesh_protocol::control_wire::TeacherInteractionRequest {
@@ -2121,7 +2123,7 @@ mod focused_profile_tests {
         app: classmesh_protocol::control_wire::AppIdentity,
     ) -> classmesh_protocol::control_wire::TeacherInteractionRequest {
         use classmesh_protocol::control_wire::{
-            open_target, teacher_interaction_request, OpenTarget,
+            OpenTarget, open_target, teacher_interaction_request,
         };
 
         classmesh_protocol::control_wire::TeacherInteractionRequest {
@@ -2276,7 +2278,7 @@ mod focused_profile_tests {
     #[test]
     fn teacher_interaction_routes_without_executing_an_os_side_effect() {
         use classmesh_protocol::control_wire::{
-            teacher_interaction_request, TeacherInteractionRequest, TeacherMessage,
+            TeacherInteractionRequest, TeacherMessage, teacher_interaction_request,
         };
         use classmesh_windows_runtime::ipc::{IpcFrame, ServiceTeacherInteractionRequest};
         use classmesh_windows_runtime::ipc_sensitive::DecodedIpcFrame;
