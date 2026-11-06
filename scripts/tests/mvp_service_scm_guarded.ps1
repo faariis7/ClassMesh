@@ -56,3 +56,16 @@ if ($startAt -lt 0 -or $runtimeAt -le $startAt -or $successAt -le $runtimeAt) {
     throw 'Running image attestation must follow SCM start and precede success'
 }
 'PASS: SCM runtime image path/hash fail-closed contract'
+
+# Registered SCM configuration must be checked before the first service start.
+$createAt = $source.IndexOf('& sc.exe create $serviceName')
+$registeredAt = $source.IndexOf('$registered = Get-CimInstance Win32_Service')
+$startAt = $source.IndexOf('Start-Service -Name $serviceName')
+if ($registeredAt -le $createAt -or $startAt -le $registeredAt) {
+    throw 'SCM registration verification must follow create and precede start'
+}
+$registrationWindow = $source.Substring($registeredAt, $startAt - $registeredAt)
+foreach ($needle in @('StartName','StartMode','PathName.Trim()','SCM registered binary command mismatch','Assert-ProtectedFile $ServiceExe $ExpectedServiceSha256')) {
+    if (-not $registrationWindow.Contains($needle)) { throw "SCM pre-start registration gate missing: $needle" }
+}
+'PASS: SCM pre-start registered image/account verification contract'
