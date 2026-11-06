@@ -161,10 +161,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let next_event = event_rx.recv_timeout(wait);
-        // Do not dispatch privileged control/input/media events if the OS-level
-        // pipe peer no longer matches the Service process observed at handshake.
+        // Check even on receive timeout: media capture, rendering and outbound
+        // telemetry continue without inbound events. A vanished/replaced pipe
+        // peer must not leave those paths running indefinitely.
         // This remains a continuity check, not LocalSystem authorization.
-        if next_event.is_ok() {
+        {
             // A failed native identity query is also a lost trust boundary.
             // Release held keys/buttons before returning its error; `?` here
             // would exit without releasing remote input.
