@@ -75,7 +75,7 @@ foreach ($needle in @('StartName','StartMode','PathName.Trim()','SCM registered 
 foreach ($needle in @('GetOwner([Security.Principal.SecurityIdentifier])', 'owner SID unavailable', "'S-1-5-32-544','S-1-5-18'")) {
     if (-not $source.Contains($needle)) { throw "Owner SID validation missing: $needle" }
 }
-if ($source.Contains("if ($acl.Owner -notmatch")) {
+if ($source.Contains('if ($acl.Owner -notmatch')) {
     throw 'Localized ACL owner-name comparison must not control trust'
 }
 'PASS: SCM ancestry owner validation uses stable SIDs'
