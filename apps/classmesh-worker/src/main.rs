@@ -159,11 +159,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Reconcile the Service-visible readiness from actual capture ownership
         // after every event, including SuspendMedia and failed backend paths.
         // A stale true must not survive a dropped DXGI capture.
-        update_worker_capture_readiness(
+        if let Err(error) = update_worker_capture_readiness(
             &mut runtime_capabilities,
             capture.as_ref().map(|active| active.state()),
             |next| publish_worker_capabilities(&pipe, std::process::id(), actual_session, next),
-        )?;
+        ) {
+            // A failed capability publish ends the trusted IPC loop. Do not
+            // leave remote keys or mouse buttons held while unwinding.
+            release_tracked_input(&mut input_injector);
+            return Err(error.into());
+        }
         let now = Instant::now();
         let mut wait = if capture.is_some() {
             capture_due
