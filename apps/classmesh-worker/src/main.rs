@@ -60,9 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ready = read_one_frame(&pipe)?;
     match ready.message().map_err(ipc_message_error)? {
-        IpcMessage::ServiceReady => {
-            eprintln!("ClassMesh Worker IPC peer validated by Service");
-        }
+        IpcMessage::ServiceReady => {}
         other => {
             return Err(format!("unexpected IPC handshake message: {other:?}").into());
         }
@@ -76,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if pipe.server_process_id()? != primary_service_pid {
         return Err("Worker IPC server process changed during handshake".into());
     }
+    eprintln!("ClassMesh Worker IPC ServiceReady received; Session 0/PID continuity checked (LocalSystem authorization unverified)");
     let (event_tx, event_rx) = mpsc::sync_channel(WORKER_IPC_EVENT_QUEUE_CAPACITY);
     let reader_pipe = pipe.try_clone()?;
     let _ipc_thread = spawn_ipc_reader(reader_pipe, event_tx);
@@ -1853,8 +1852,11 @@ fn read_one_frame(
         let mut frames = decoder
             .push_bytes(&buffer[..read])
             .map_err(ipc_frame_error)?;
-        if !frames.is_empty() {
-            return Ok(frames.remove(0));
+        if frames.len() > 1 {
+            return Err("ClassMesh Service sent multiple IPC frames before handshake completed".into());
+        }
+        if let Some(frame) = frames.pop() {
+            return Ok(frame);
         }
     }
 }
