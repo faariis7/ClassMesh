@@ -748,6 +748,11 @@ fn control_connection_label(context: Option<&TeacherInteractionUiContext>) -> &'
 impl eframe::App for TeacherEguiShell {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_control_bridge();
+        // std::sync::mpsc does not wake egui. Poll while the QUIC-owned
+        // bridge exists so idle windows observe disconnects and new sessions.
+        if self.control_bridge.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         self.handle_navigation_shortcuts(ctx);
         egui::TopBottomPanel::top("classmesh_teacher_navigation").show(ctx, |ui| {
             self.navigation(ui);
