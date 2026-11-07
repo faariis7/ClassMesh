@@ -1901,7 +1901,11 @@ fn read_one_frame(
     use classmesh_windows_runtime::ipc::IpcFrameDecoder;
 
     let mut decoder = IpcFrameDecoder::default();
-    let mut buffer = [0_u8; 4096];
+    // Read exactly one byte at a time during the one-off handshake. A bulk
+    // read could consume the beginning of the next Service command and leave
+    // it buffered in this decoder, which is dropped when the authenticated
+    // reader starts. Never consume bytes belonging to the next frame here.
+    let mut buffer = [0_u8; 1];
     loop {
         let read = pipe.read(&mut buffer)?;
         if read == 0 {
