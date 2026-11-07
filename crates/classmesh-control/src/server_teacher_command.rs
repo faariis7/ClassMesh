@@ -28,6 +28,26 @@ pub enum ServiceTeacherCommandError {
     Transport(ControlTransportError),
     Dispatch(PrivilegedDispatchError),
     FileTransferDisabled,
+    SessionRetired,
+}
+
+#[derive(Default)]
+struct ExecutionState {
+    retired: bool,
+}
+
+impl ExecutionState {
+    fn retire(&mut self) {
+        self.retired = true;
+    }
+
+    fn ensure_active(&self) -> Result<(), ServiceTeacherCommandError> {
+        if self.retired {
+            Err(ServiceTeacherCommandError::SessionRetired)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Session-owned command receiver. A reconnect or new Hello must construct a
@@ -36,6 +56,7 @@ pub struct ServiceTeacherCommandReceiver {
     connection: Connection,
     channel: ControlChannel,
     guard: AuthenticatedControlGuard,
+    execution_state: ExecutionState,
 }
 
 impl ServiceTeacherCommandReceiver {
@@ -120,6 +141,7 @@ impl ServiceTeacherCommandReceiver {
             connection,
             channel,
             guard,
+            execution_state: ExecutionState::default(),
         })
     }
 
@@ -131,6 +153,7 @@ impl ServiceTeacherCommandReceiver {
         authorization: &LiveAuthorizationStore,
         now_unix_ms: impl Fn() -> u64,
     ) -> Result<PrivilegedControlCommand, ServiceTeacherCommandError> {
+        self.ensure_active()?;
         self.verify(authorization, now_unix_ms())?;
         let envelope = self
             .channel
@@ -169,7 +192,17 @@ impl ServiceTeacherCommandReceiver {
         Fut: std::future::Future<Output = Result<(), E>>,
     {
         let command = self.receive_authorized(authorization, now_unix_ms).await?;
-        Ok(execute(command).await)
+        let result = execute(command).await;
+        if result.is_err() {
+            self.execution_state.retire();
+            self.connection
+                .close(0u32.into(), b"teacher command execution failed");
+        }
+        Ok(result)
+    }
+
+    fn ensure_active(&self) -> Result<(), ServiceTeacherCommandError> {
+        self.execution_state.ensure_active()
     }
 
     fn verify(
@@ -214,6 +247,22 @@ fn is_file_transfer(envelope: &ControlEnvelope) -> bool {
 mod tests {
     use super::*;
     use classmesh_protocol::control_wire::{FileTransferCancel, Heartbeat};
+
+    #[test]
+    fn failed_execution_retires_receiver_without_replay() {
+        let mut state = ExecutionState::default();
+        assert!(state.ensure_active().is_ok());
+        state.retire();
+        assert!(matches!(
+            state.ensure_active(),
+            Err(ServiceTeacherCommandError::SessionRetired)
+        ));
+        state.retire();
+        assert!(matches!(
+            state.ensure_active(),
+            Err(ServiceTeacherCommandError::SessionRetired)
+        ));
+    }
 
     #[test]
     fn file_transfer_is_disabled_but_heartbeat_is_not_misclassified() {
