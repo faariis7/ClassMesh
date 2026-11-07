@@ -1935,47 +1935,6 @@ fn read_one_frame_from_reader(
     }
 }
 
-#[cfg(test)]
-mod handshake_boundary_regression {
-    use super::*;
-    use classmesh_windows_runtime::ipc::{IpcControlCommand, IpcFrame, IpcFrameDecoder};
-
-    #[test]
-    fn ready_followed_by_fragmented_command_preserves_all_command_bytes() {
-        let ready = IpcFrame::service_ready().encode().unwrap();
-        let command = IpcFrame::control(IpcControlCommand::LockWorkstation)
-            .encode()
-            .unwrap();
-        let mut wire = ready.clone();
-        wire.extend_from_slice(&command[..3]);
-        wire.extend_from_slice(&command[3..]);
-        let mut cursor = 0;
-        let received = read_one_frame_from_reader(|buf| {
-            let n = buf.len().min(wire.len() - cursor);
-            buf[..n].copy_from_slice(&wire[cursor..cursor + n]);
-            cursor += n;
-            Ok(n)
-        })
-        .unwrap();
-        assert!(matches!(
-            received.message().unwrap(),
-            classmesh_windows_runtime::ipc::IpcMessage::ServiceReady
-        ));
-        assert_eq!(
-            cursor,
-            ready.len(),
-            "handshake must not consume command bytes"
-        );
-        let mut decoder = IpcFrameDecoder::default();
-        let frames = decoder.push_bytes(&wire[cursor..]).unwrap();
-        assert_eq!(frames.len(), 1);
-        assert!(matches!(
-            frames[0].message().unwrap(),
-            classmesh_windows_runtime::ipc::IpcMessage::Control(_)
-        ));
-    }
-}
-
 #[cfg(windows)]
 fn capture_error(error: classmesh_capture_win::CaptureFailure) -> std::io::Error {
     std::io::Error::other(format!("DXGI capture error: {error:?}"))
@@ -2807,5 +2766,46 @@ mod focused_profile_tests {
             FocusedWorkerProfile::from_reconfigure(&odd_geometry),
             Err("worker.media.invalid_geometry")
         );
+    }
+}
+
+#[cfg(test)]
+mod handshake_boundary_regression {
+    use super::*;
+    use classmesh_windows_runtime::ipc::{IpcControlCommand, IpcFrame, IpcFrameDecoder};
+
+    #[test]
+    fn ready_followed_by_fragmented_command_preserves_all_command_bytes() {
+        let ready = IpcFrame::service_ready().encode().unwrap();
+        let command = IpcFrame::control(IpcControlCommand::LockWorkstation)
+            .encode()
+            .unwrap();
+        let mut wire = ready.clone();
+        wire.extend_from_slice(&command[..3]);
+        wire.extend_from_slice(&command[3..]);
+        let mut cursor = 0;
+        let received = read_one_frame_from_reader(|buf| {
+            let n = buf.len().min(wire.len() - cursor);
+            buf[..n].copy_from_slice(&wire[cursor..cursor + n]);
+            cursor += n;
+            Ok(n)
+        })
+        .unwrap();
+        assert!(matches!(
+            received.message().unwrap(),
+            classmesh_windows_runtime::ipc::IpcMessage::ServiceReady
+        ));
+        assert_eq!(
+            cursor,
+            ready.len(),
+            "handshake must not consume command bytes"
+        );
+        let mut decoder = IpcFrameDecoder::default();
+        let frames = decoder.push_bytes(&wire[cursor..]).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert!(matches!(
+            frames[0].message().unwrap(),
+            classmesh_windows_runtime::ipc::IpcMessage::Control(_)
+        ));
     }
 }
