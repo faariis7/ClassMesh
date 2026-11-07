@@ -421,9 +421,7 @@ mod windows_service_app {
 
                     match pipe.try_clone() {
                         Ok(reader) => {
-                            self.capabilities
-                                .activate(worker_generation, process_id, session.0);
-                            let _capability_reader = spawn_worker_capability_reader(
+                            let capability_reader = spawn_worker_capability_reader(
                                 reader,
                                 WorkerCapabilityReaderRuntime {
                                     capabilities: Arc::clone(&self.capabilities),
@@ -451,6 +449,16 @@ mod windows_service_app {
                                     session_id: session.0,
                                 },
                             );
+                            if let Err(error) = capability_reader {
+                                eprintln!(
+                                    "Worker capability reader thread could not start for pid {process_id}: {error}"
+                                );
+                                let _ = process.terminate(1);
+                                let decision = self.watchdog.launch_failed(session);
+                                return self.apply_restart_decision(decision);
+                            }
+                            self.capabilities
+                                .activate(worker_generation, process_id, session.0);
                         }
                         Err(error) => {
                             eprintln!(
@@ -1038,7 +1046,7 @@ mod windows_service_app {
         pipe: NamedPipeServer,
         runtime: WorkerCapabilityReaderRuntime,
         identity: WorkerCapabilityReaderIdentity,
-    ) -> thread::JoinHandle<()> {
+    ) -> std::io::Result<thread::JoinHandle<()>> {
         let WorkerCapabilityReaderRuntime {
             capabilities,
             encoder_capability_cache,
@@ -1054,7 +1062,7 @@ mod windows_service_app {
             process_id: expected_process_id,
             session_id: expected_session_id,
         } = identity;
-        thread::spawn(move || {
+        thread::Builder::new().name("classmesh-worker-capability-reader".into()).spawn(move || {
             let mut decoder = IpcFrameDecoder::default();
             let mut buffer = [0_u8; 4096];
 
