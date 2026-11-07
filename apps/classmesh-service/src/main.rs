@@ -463,7 +463,19 @@ mod windows_service_app {
                                 .activate(worker_generation, process_id, session.0);
                             // The reader must not observe EOF or a report before its
                             // generation is active; otherwise an early clear can be lost.
-                            let _ = reader_start_tx.send(());
+                            if reader_start_tx.send(()).is_err() {
+                                eprintln!(
+                                    "Worker capability reader exited before activation for pid {process_id}; refusing Worker activation"
+                                );
+                                let _ = self.capabilities.clear_report_if_current(
+                                    worker_generation,
+                                    process_id,
+                                    session.0,
+                                );
+                                let _ = process.terminate(1);
+                                let decision = self.watchdog.launch_failed(session);
+                                return self.apply_restart_decision(decision);
+                            }
                         }
                         Err(error) => {
                             eprintln!(
