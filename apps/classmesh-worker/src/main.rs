@@ -1898,21 +1898,31 @@ fn spawn_ipc_reader(
 fn read_one_frame(
     pipe: &classmesh_win32::NamedPipeClient,
 ) -> Result<classmesh_windows_runtime::ipc::IpcFrame, Box<dyn std::error::Error>> {
-    use classmesh_windows_runtime::ipc::IpcFrameDecoder;
+    read_one_frame_from_reader(|buffer| {
+        pipe.read(buffer)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+    })
+}
 
+// Keep the handshake reader byte-exact: the next Service command may already
+// be in the byte-stream pipe, and a second decoder owns that command.
+#[cfg(any(windows, test))]
+fn read_one_frame_from_reader(
+    mut read: impl FnMut(&mut [u8]) -> Result<usize, Box<dyn std::error::Error>>,
+) -> Result<classmesh_windows_runtime::ipc::IpcFrame, Box<dyn std::error::Error>> {
+    use classmesh_windows_runtime::ipc::IpcFrameDecoder;
     let mut decoder = IpcFrameDecoder::default();
-    // Read exactly one byte at a time during the one-off handshake. A bulk
-    // read could consume the beginning of the next Service command and leave
-    // it buffered in this decoder, which is dropped when the authenticated
-    // reader starts. Never consume bytes belonging to the next frame here.
     let mut buffer = [0_u8; 1];
     loop {
-        let read = pipe.read(&mut buffer)?;
-        if read == 0 {
+        let count = read(&mut buffer)?;
+        if count == 0 {
             return Err("ClassMesh Service IPC pipe closed during handshake".into());
         }
+        if count > buffer.len() {
+            return Err("ClassMesh Service IPC reader exceeded buffer capacity".into());
+        }
         let mut frames = decoder
-            .push_bytes(&buffer[..read])
+            .push_bytes(&buffer[..count])
             .map_err(ipc_frame_error)?;
         if frames.len() > 1 {
             return Err(
@@ -1925,12 +1935,53 @@ fn read_one_frame(
     }
 }
 
+#[cfg(test)]
+mod handshake_boundary_regression {
+    use super::*;
+    use classmesh_windows_runtime::ipc::{IpcControlCommand, IpcFrame, IpcFrameDecoder};
+
+    #[test]
+    fn ready_followed_by_fragmented_command_preserves_all_command_bytes() {
+        let ready = IpcFrame::service_ready().encode().unwrap();
+        let command = IpcFrame::control(IpcControlCommand::LockWorkstation)
+            .encode()
+            .unwrap();
+        let mut wire = ready.clone();
+        wire.extend_from_slice(&command[..3]);
+        wire.extend_from_slice(&command[3..]);
+        let mut cursor = 0;
+        let received = read_one_frame_from_reader(|buf| {
+            let n = buf.len().min(wire.len() - cursor);
+            buf[..n].copy_from_slice(&wire[cursor..cursor + n]);
+            cursor += n;
+            Ok(n)
+        })
+        .unwrap();
+        assert!(matches!(
+            received.message().unwrap(),
+            classmesh_windows_runtime::ipc::IpcMessage::ServiceReady
+        ));
+        assert_eq!(
+            cursor,
+            ready.len(),
+            "handshake must not consume command bytes"
+        );
+        let mut decoder = IpcFrameDecoder::default();
+        let frames = decoder.push_bytes(&wire[cursor..]).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert!(matches!(
+            frames[0].message().unwrap(),
+            classmesh_windows_runtime::ipc::IpcMessage::Control(_)
+        ));
+    }
+}
+
 #[cfg(windows)]
 fn capture_error(error: classmesh_capture_win::CaptureFailure) -> std::io::Error {
     std::io::Error::other(format!("DXGI capture error: {error:?}"))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn ipc_frame_error(error: classmesh_windows_runtime::ipc::IpcFrameError) -> std::io::Error {
     std::io::Error::other(format!("IPC frame error: {error:?}"))
 }
