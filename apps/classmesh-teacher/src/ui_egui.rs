@@ -948,6 +948,10 @@ mod tests {
         event_tx
             .send(TeacherUiControlEvent::Authenticated(first))
             .unwrap();
+        // Establish the authenticated epoch before queuing a new user intent.
+        // An action created offline must be retired at first authentication.
+        app.poll_control_bridge();
+        assert!(app.teacher_interaction_context.is_some());
         app.queue_action(TeacherUiAction::SelectDevice(Some(MonitoringSourceId(7))));
         app.poll_control_bridge();
         assert!(
@@ -970,6 +974,35 @@ mod tests {
     }
 
     #[test]
+    fn pre_authenticated_selection_cannot_be_replayed_after_session_establishment() {
+        use std::sync::mpsc::sync_channel;
+        let (event_tx, event_rx) = sync_channel(2);
+        let (action_tx, action_rx) = sync_channel(1);
+        let mut app = TeacherEguiShell::default();
+        app.attach_control_bridge(TeacherUiControlBridge::new(event_rx, action_tx));
+
+        // An offline selection must not be promoted into an authenticated
+        // QUIC session just because the peer connects in a later frame.
+        app.queue_action(TeacherUiAction::SelectDevice(Some(MonitoringSourceId(7))));
+        app.poll_control_bridge();
+        assert!(app.pending_action.is_some());
+        assert!(action_rx.try_recv().is_err());
+
+        event_tx
+            .send(TeacherUiControlEvent::Authenticated(interaction_context(
+                BTreeSet::new(),
+            )))
+            .unwrap();
+        app.poll_control_bridge();
+        assert!(app.teacher_interaction_context.is_some());
+        assert!(app.pending_action.is_none());
+        assert!(
+            action_rx.try_recv().is_err(),
+            "pre-authentication selection must never cross into the new session"
+        );
+    }
+
+    #[test]
     fn full_control_channel_retries_only_until_disconnect() {
         use std::sync::mpsc::sync_channel;
         let (event_tx, event_rx) = sync_channel(4);
@@ -982,6 +1015,10 @@ mod tests {
                 BTreeSet::new(),
             )))
             .unwrap();
+        // Backpressure applies to commands queued in an already authenticated
+        // epoch, not stale pre-authentication commands (which must be dropped).
+        app.poll_control_bridge();
+        assert!(app.teacher_interaction_context.is_some());
         app.queue_action(TeacherUiAction::SelectDevice(Some(MonitoringSourceId(7))));
         app.poll_control_bridge();
         assert!(
