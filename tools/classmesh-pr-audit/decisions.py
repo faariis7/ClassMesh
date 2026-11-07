@@ -154,6 +154,8 @@ def analyze_v2(snapshot):
     cycles = build_dependencies(prs, entries, report["repo"], report["target_branch"])
     for pr, entry in zip(prs, entries):
         enrich(pr, entry, snapshot, report["collection_gaps"])
+        if "stability" in entry:
+            pr["stability"] = entry["stability"]
     order, chains, unsortable = prioritize(prs)
     counts = Counter(pr["readiness_stage"] for pr in prs)
     categories = Counter(c for pr in prs for c in pr["classifications"])
@@ -179,4 +181,7 @@ def analyze_v2(snapshot):
         "الملاحظة التاريخية لم تُثبت محلولة؛ RESOLVED يصف حالة GitHub المسجلة فقط",
         "المالكون المقترحون أدوار لا تكليفات فعلية؛ حجم العمل تقدير بعدد الشروط وليس بساعات",
         "تغير التعليقات والمراجعات والسياسات أثناء الجمع قد لا يُكتشف؛ أعد الفحص قبل القرار النهائي"]
+    for key in ("collection_diagnostics", "collection_metrics"):
+        if key in snapshot:
+            report[key] = snapshot[key]
     return clean(report)

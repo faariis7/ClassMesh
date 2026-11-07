@@ -41,13 +41,36 @@ class GitHub:
         self.max_pages = max_pages
         self.requests = 0
         self.circuit = None
+        self.started = time.monotonic()
+        self.reserve_requests = 0
+        self.reserve_seconds = 0
+        self.metrics = {}
 
     def _call(self, arguments, source, text_mode=False):
+        started, before = time.monotonic(), self.requests
+        result = self._transport(arguments, source, text_mode)
+        category = ("logs" if text_mode else "reviews" if source == "graphql" else
+                    "jobs" if "/attempts/" in source else "commits" if "/git/commits/" in source else
+                    "security" if "/code-scanning/" in source else "other")
+        metric = self.metrics.setdefault(category, {"requests": 0, "seconds": 0, "skipped": 0, "errors": {}})
+        metric["requests"] += self.requests - before
+        metric["skipped"] += int(self.requests == before)
+        metric["seconds"] = round(metric["seconds"] + time.monotonic() - started, 4)
+        if not is_known(result):
+            code = result["error"]["code"]
+            metric["errors"][code] = metric["errors"].get(code, 0) + 1
+        return result
+
+    def _transport(self, arguments, source, text_mode=False):
         if self.circuit:
             return unknown(self.circuit, source)
-        remaining = self.deadline - time.monotonic()
-        if remaining <= 0 or self.requests >= self.max_requests:
-            return unknown("BUDGET_EXHAUSTED", source)
+        remaining = self.deadline - time.monotonic() - self.reserve_seconds
+        cause = "DEADLINE" if remaining <= 0 else "REQUEST_LIMIT" if self.requests >= self.max_requests - self.reserve_requests else None
+        if cause:
+            code = "EXECUTION_BUDGET_RESERVED" if self.reserve_requests or self.reserve_seconds else "BUDGET_EXHAUSTED"
+            result = unknown(code, source)
+            result["error"]["cause"] = cause
+            return result
         self.requests += 1
         env = dict(os.environ)
         # GH_DEBUG=api could otherwise expose headers in captured diagnostics.
@@ -244,6 +267,21 @@ def fingerprint(pr):
         return None
 
 
+def reviewer_permission(gh, prefix, login):
+    """Read base approval authority, preserving unavailable/invalid evidence."""
+    endpoint = f"{prefix}/collaborators/{quote(login, safe='')}/permission"
+    response = gh.get(endpoint)
+    if not is_known(response):
+        return response
+    data = response["data"]
+    # GitHub maps maintain/triage to write/read; accept the historical names
+    # too, but never infer authority from an unknown/custom role string.
+    if not isinstance(data, dict) or data.get("permission") not in (
+            "admin", "maintain", "write", "triage", "read", "none"):
+        return unknown("INVALID_REVIEWER_PERMISSION", endpoint)
+    return known(data["permission"])
+
+
 def collect(gh, repo, target_branch):
     """Keep data in memory. A second observation detects moving refs/inventory."""
     prefix = "repos/" + repo
@@ -291,12 +329,11 @@ def collect(gh, repo, target_branch):
         if sha not in commits:
             commits[sha] = gh.get(f"{prefix}/git/commits/{sha}")
         entry["head_commit"] = commits[sha]
-        from execution_evidence import collect_execution_proofs
-        entry["execution_proofs"] = collect_execution_proofs(gh, repo, pr, entry["checks"], entry["runs"], commits, entry["policy"])
         entry["statuses"] = gh.pages(f"{prefix}/commits/{sha}/statuses")
-        entry["reviews"] = gh.pages(path + "/reviews")
-        entry["threads"] = review_threads(gh, repo, number)
-        entry["comments"] = gh.pages(f"{prefix}/issues/{number}/comments")
+        from review_evidence import collect_reviews
+        bundle = collect_reviews(gh, repo, number)
+        for key in ("reviews", "threads", "comments"):
+            entry[key] = known(bundle["data"][key]) if is_known(bundle) else bundle
         entry["files"] = gh.pages(path + "/files")
         if is_known(entry["files"]) and len(entry["files"]["data"]) != pr.get("changed_files"):
             entry["files"] = unknown("FILES_TRUNCATED", path + "/files", entry["files"]["data"])
@@ -307,17 +344,10 @@ def collect(gh, repo, target_branch):
             login = user.get("login")
             if review.get("state") not in ("APPROVED", "CHANGES_REQUESTED") or not isinstance(login, str):
                 continue
-            if login not in permissions:
-                raw = gh.get(f"{prefix}/collaborators/{quote(login, safe='')}/permission")
-                if is_known(raw) and isinstance(raw["data"], dict) and isinstance(raw["data"].get("permission"), str):
-                    permissions[login] = known(raw["data"]["permission"])
-                else:
-                    permissions[login] = unknown("REVIEWER_PERMISSION_UNAVAILABLE", "collaborator permission")
-            entry["permissions"][login] = permissions[login]
-        after = gh.get(path)
-        stable = (is_known(detail) and is_known(after) and fingerprint(pr) is not None
-                  and fingerprint(pr) == fingerprint(after["data"]))
-        entry["stable"] = known(True) if stable else unknown("SNAPSHOT_CHANGED_OR_UNAVAILABLE", path)
+            key = login.casefold()
+            if key not in permissions:
+                permissions[key] = reviewer_permission(gh, prefix, login)
+            entry["permissions"][login] = permissions[key]
     from execution_evidence import declared_dependencies
     open_ids = {entry["number"] for entry in snapshot["pulls"]}
     dependency_cache = {}
@@ -330,22 +360,50 @@ def collect(gh, repo, target_branch):
                 if number not in dependency_cache:
                     dependency_cache[number] = gh.get(f"{prefix}/pulls/{number}")
                 entry["dependency_details"][str(number)] = dependency_cache[number]
+    # Structured core evidence for every PR precedes slow logs. Reserve a
+    # bounded share for closing observations; skipped proofs stay UNKNOWN.
+    from execution_evidence import collect_execution_proofs
+    gh.reserve_requests = 2 * len(snapshot["pulls"]) + len(branches) + len(permissions) + 2
+    gh.reserve_seconds = min(60, max(0, gh.deadline - time.monotonic()) * 0.2)
+    jobs_cache = {}
+    for entry in snapshot["pulls"]:
+        if "checks" not in entry:
+            continue
+        pr = entry["detail"].get("data") or entry["initial"]
+        entry["execution_proofs"] = collect_execution_proofs(
+            gh, repo, pr, entry["checks"], entry["runs"], commits, entry["policy"], jobs_cache)
+    gh.reserve_requests = gh.reserve_seconds = 0
+    from stability import close_entry, close_inventory, close_permissions, status, branch_sha
+    from review_evidence import collect_reviews
+    # A distinct closing cache: never reuse the opening permission observation.
+    # One new request per case-insensitive login, shared across affected PRs.
+    closing_permissions = {}
+    for entry in snapshot["pulls"]:
+        if "reviews" not in entry:
+            continue
+        bundle = collect_reviews(gh, repo, entry["number"])
+        observed_permissions = {}
+        for login in entry["permissions"]:
+            key = login.casefold()
+            if key not in closing_permissions:
+                closing_permissions[key] = reviewer_permission(gh, prefix, login)
+            observed_permissions[login] = closing_permissions[key]
+        after = gh.get(f"{prefix}/pulls/{entry['number']}")
+        close_entry(entry, after, bundle)
+        close_permissions(entry, observed_permissions)
     for branch, before in branches.items():
         after = gh.get(f"{prefix}/branches/{quote(branch, safe='')}")
-        try:
-            stable = is_known(before) and is_known(after) and before["data"]["commit"]["sha"] == after["data"]["commit"]["sha"]
-        except (KeyError, TypeError):
-            stable = False
-        if not stable:
+        value = status(before, after, branch_sha, "BASE_BRANCH_CHANGED", "BASE_BRANCH_UNAVAILABLE")
+        if not is_known(value):
             for entry in snapshot["pulls"]:
                 pr = entry["detail"].get("data") or entry.get("initial", {})
                 if isinstance(pr, dict) and isinstance(pr.get("base"), dict) and pr["base"].get("ref") == branch:
-                    entry["stable"] = unknown("BASE_CHANGED_OR_UNAVAILABLE", "base branch")
+                    entry["stable"] = entry["refs_stable"] = value
+                    entry.setdefault("stability", {})["base_branch"] = value
     last = gh.pages(prefix + "/pulls?state=open&sort=created&direction=asc")
-    before_fps = [fingerprint(pr) for pr in discovery.get("data", [])]
-    after_fps = [fingerprint(pr) for pr in last.get("data", [])]
-    stable = is_known(discovery) and is_known(last) and None not in before_fps + after_fps and before_fps == after_fps
-    snapshot["inventory_stable"] = known(True) if stable else unknown("INVENTORY_CHANGED_OR_UNAVAILABLE", "pulls")
+    close_inventory(snapshot, last)
     snapshot["finished_at"] = utc_now()
     snapshot["request_count"] = gh.requests
+    snapshot["collection_metrics"] = {"requests": gh.requests,
+        "wall_seconds": round(time.monotonic() - gh.started, 3), "by_category": gh.metrics}
     return snapshot
