@@ -782,6 +782,23 @@ fn teacher_native_options() -> eframe::NativeOptions {
     }
 }
 
+/// Launch with channels supplied by the authenticated QUIC runtime. The
+/// caller must own the session producer and command consumer for the lifetime
+/// of this window; the UI never constructs or impersonates a live session.
+pub fn run_teacher_ui_with_control_bridge(bridge: TeacherUiControlBridge) -> eframe::Result<()> {
+    eframe::run_native(
+        APP_TITLE,
+        teacher_native_options(),
+        Box::new(move |_creation_context| {
+            let mut app = TeacherEguiShell::default();
+            app.attach_control_bridge(bridge);
+            Ok(Box::new(app))
+        }),
+    )
+}
+
+/// Standalone UI remains explicitly disconnected until a real QUIC owner
+/// supplies its authenticated control bridge.
 pub fn run_teacher_ui() -> eframe::Result<()> {
     eframe::run_native(
         APP_TITLE,
