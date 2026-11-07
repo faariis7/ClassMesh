@@ -10,8 +10,8 @@ use std::time::Instant;
 use classmesh_control::client_session::ClientControlSession;
 use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::teacher_playback_receive::{
-    AuthenticatedTeacherReceiveError, TeacherControlSequenceGuard,
-    receive_guarded_authenticated_teacher_control,
+    AuthenticatedTeacherControlMessage, AuthenticatedTeacherReceiveError,
+    TeacherControlSequenceGuard, receive_guarded_authenticated_teacher_control,
 };
 use classmesh_protocol::control_wire::ControlEnvelope;
 use classmesh_security::PrincipalId;
@@ -25,7 +25,13 @@ use crate::receiver_playback_ui::TeacherPlaybackUiProjection;
 /// A single outcome from the *one* owner of the multiplexed control channel.
 #[derive(Debug)]
 pub enum TeacherPlaybackSessionEvent {
-    Playback(TeacherPlaybackCounters),
+    /// A verified live QUIC observation plus the projection counters. Keep the
+    /// privately constructed proof so the owning runtime can forward it to
+    /// the native Teacher window without fabricating a trusted envelope.
+    Playback {
+        counters: TeacherPlaybackCounters,
+        verified: AuthenticatedTeacherControlMessage,
+    },
     OtherControl(ControlEnvelope),
 }
 
@@ -148,6 +154,6 @@ impl TeacherPlaybackSessionOwner {
             .projection
             .accept_verified_from_source(self.source_id, &verified, monotonic_now())
             .map_err(TeacherPlaybackSessionError::Diagnostic)?;
-        Ok(TeacherPlaybackSessionEvent::Playback(counters))
+        Ok(TeacherPlaybackSessionEvent::Playback { counters, verified })
     }
 }
