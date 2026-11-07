@@ -454,8 +454,12 @@ mod windows_service_app {
                         }
                         Err(error) => {
                             eprintln!(
-                                "Worker capability IPC reader unavailable; control remains active: {error}"
+                                "Worker capability IPC reader unavailable for pid {process_id}, session {}; refusing unaudited Worker activation: {error}",
+                                session.0
                             );
+                            let _ = process.terminate(1);
+                            let decision = self.watchdog.launch_failed(session);
+                            return self.apply_restart_decision(decision);
                         }
                     }
 
