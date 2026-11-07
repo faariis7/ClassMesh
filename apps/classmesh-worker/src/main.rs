@@ -1,4 +1,6 @@
 #[cfg(windows)]
+mod service_token;
+#[cfg(windows)]
 mod telemetry_native;
 
 #[cfg(windows)]
@@ -41,6 +43,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pipe_name = parse_pipe_name(&args)?;
     let pipe = NamedPipeClient::connect(&pipe_name, Duration::from_secs(5))?;
+    // Bind the handshake to the OS-observed pipe server before sending Worker
+    // identity. A ServiceReady payload alone is not peer authentication.
+    let primary_service_pid = pipe.server_process_id()?;
+    if primary_service_pid == 0 || primary_service_pid == std::process::id() {
+        return Err("invalid Worker IPC server process identity".into());
+    }
+    // A Service-owned pipe must originate in Windows Session 0. Reject a
+    // same-user Session 1 pipe before disclosing WorkerHello. This is only
+    // an additional OS-level boundary, not LocalSystem token authentication.
+    if pipe.server_session_id()? != 0 {
+        return Err("Worker IPC server is not running in Windows Session 0".into());
+    }
+    // Never disclose WorkerHello to a Session 0 process without a kernel-verified
+    // LocalSystem token. The pipe PID is OS-reported, not supplied by the peer.
+    service_token::require_local_system(primary_service_pid)?;
     let hello = IpcFrame::worker_hello(std::process::id(), actual_session)
         .encode()
         .map_err(ipc_frame_error)?;
@@ -48,18 +65,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ready = read_one_frame(&pipe)?;
     match ready.message().map_err(ipc_message_error)? {
-        IpcMessage::ServiceReady => {
-            eprintln!("ClassMesh Worker IPC peer validated by Service");
-        }
+        IpcMessage::ServiceReady => {}
         other => {
             return Err(format!("unexpected IPC handshake message: {other:?}").into());
         }
     }
 
-    // Pin the original privileged control pipe's native Service PID before
-    // considering any optional diagnostic grant. Worker report bytes and
-    // the secondary telemetry address are not Service authentication.
-    let primary_service_pid = pipe.server_process_id()?;
+    // Fail closed if the native pipe server identity changes during handshake.
+    // This is continuity checking, not proof of a LocalSystem Service token.
+    if pipe.server_session_id()? != 0 {
+        return Err("Worker IPC server session changed during handshake".into());
+    }
+    if pipe.server_process_id()? != primary_service_pid {
+        return Err("Worker IPC server process changed during handshake".into());
+    }
+    service_token::require_local_system(primary_service_pid)?;
+    eprintln!(
+        "ClassMesh Worker IPC ServiceReady received; Session 0/PID and LocalSystem token checked (SCM registration and policy authorization unverified)"
+    );
     let (event_tx, event_rx) = mpsc::sync_channel(WORKER_IPC_EVENT_QUEUE_CAPACITY);
     let reader_pipe = pipe.try_clone()?;
     let _ipc_thread = spawn_ipc_reader(reader_pipe, event_tx);
@@ -119,14 +142,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut native_telemetry_sender: Option<telemetry_native::BestEffortReceiverSender> = None;
 
     loop {
+        // Before publishing readiness or touching capture/media state, reject a
+        // pipe peer that vanished or changed while the previous tick was idle.
+        // The post-wait check below still protects event dispatch after blocking.
+        let pre_tick_peer = (|| -> Result<bool, Box<dyn std::error::Error>> {
+            Ok(pipe.server_process_id()? == primary_service_pid && pipe.server_session_id()? == 0)
+        })();
+        match pre_tick_peer {
+            Ok(true) => {}
+            Ok(false) => {
+                release_tracked_input(&mut input_injector);
+                return Err("Worker IPC server identity changed before media tick".into());
+            }
+            Err(error) => {
+                release_tracked_input(&mut input_injector);
+                return Err(format!(
+                    "Worker IPC server identity query failed before media tick: {error}"
+                )
+                .into());
+            }
+        }
         // Reconcile the Service-visible readiness from actual capture ownership
         // after every event, including SuspendMedia and failed backend paths.
         // A stale true must not survive a dropped DXGI capture.
-        update_worker_capture_readiness(
+        if let Err(error) = update_worker_capture_readiness(
             &mut runtime_capabilities,
             capture.as_ref().map(|active| active.state()),
             |next| publish_worker_capabilities(&pipe, std::process::id(), actual_session, next),
-        )?;
+        ) {
+            // A failed capability publish ends the trusted IPC loop. Do not
+            // leave remote keys or mouse buttons held while unwinding.
+            release_tracked_input(&mut input_injector);
+            return Err(error);
+        }
         let now = Instant::now();
         let mut wait = if capture.is_some() {
             capture_due
@@ -143,7 +191,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             wait = wait.min(Duration::from_millis(10));
         }
 
-        match event_rx.recv_timeout(wait) {
+        let next_event = event_rx.recv_timeout(wait);
+        // Check even on receive timeout: media capture, rendering and outbound
+        // telemetry continue without inbound events. A vanished/replaced pipe
+        // peer must not leave those paths running indefinitely.
+        // This remains a continuity check, not LocalSystem authorization.
+        {
+            // A failed native identity query is also a lost trust boundary.
+            // Release held keys/buttons before returning its error; `?` here
+            // would exit without releasing remote input.
+            let peer_identity = (|| -> Result<bool, Box<dyn std::error::Error>> {
+                Ok(pipe.server_process_id()? == primary_service_pid
+                    && pipe.server_session_id()? == 0)
+            })();
+            match peer_identity {
+                Ok(true) => {}
+                Ok(false) => {
+                    release_tracked_input(&mut input_injector);
+                    return Err("Worker IPC server identity changed before event dispatch".into());
+                }
+                Err(error) => {
+                    release_tracked_input(&mut input_injector);
+                    return Err(format!("Worker IPC server identity query failed: {error}").into());
+                }
+            }
+        }
+        match next_event {
             Ok(WorkerEvent::Control(command)) => match command {
                 classmesh_windows_runtime::ipc::IpcControlCommand::SuspendMedia => {
                     release_tracked_input(&mut input_injector);
@@ -1825,20 +1898,39 @@ fn spawn_ipc_reader(
 fn read_one_frame(
     pipe: &classmesh_win32::NamedPipeClient,
 ) -> Result<classmesh_windows_runtime::ipc::IpcFrame, Box<dyn std::error::Error>> {
-    use classmesh_windows_runtime::ipc::IpcFrameDecoder;
+    read_one_frame_from_reader(|buffer| {
+        pipe.read(buffer)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+    })
+}
 
+// Keep the handshake reader byte-exact: the next Service command may already
+// be in the byte-stream pipe, and a second decoder owns that command.
+#[cfg(any(windows, test))]
+fn read_one_frame_from_reader(
+    mut read: impl FnMut(&mut [u8]) -> Result<usize, Box<dyn std::error::Error>>,
+) -> Result<classmesh_windows_runtime::ipc::IpcFrame, Box<dyn std::error::Error>> {
+    use classmesh_windows_runtime::ipc::IpcFrameDecoder;
     let mut decoder = IpcFrameDecoder::default();
-    let mut buffer = [0_u8; 4096];
+    let mut buffer = [0_u8; 1];
     loop {
-        let read = pipe.read(&mut buffer)?;
-        if read == 0 {
+        let count = read(&mut buffer)?;
+        if count == 0 {
             return Err("ClassMesh Service IPC pipe closed during handshake".into());
         }
+        if count > buffer.len() {
+            return Err("ClassMesh Service IPC reader exceeded buffer capacity".into());
+        }
         let mut frames = decoder
-            .push_bytes(&buffer[..read])
+            .push_bytes(&buffer[..count])
             .map_err(ipc_frame_error)?;
-        if !frames.is_empty() {
-            return Ok(frames.remove(0));
+        if frames.len() > 1 {
+            return Err(
+                "ClassMesh Service sent multiple IPC frames before handshake completed".into(),
+            );
+        }
+        if let Some(frame) = frames.pop() {
+            return Ok(frame);
         }
     }
 }
@@ -1848,7 +1940,7 @@ fn capture_error(error: classmesh_capture_win::CaptureFailure) -> std::io::Error
     std::io::Error::other(format!("DXGI capture error: {error:?}"))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn ipc_frame_error(error: classmesh_windows_runtime::ipc::IpcFrameError) -> std::io::Error {
     std::io::Error::other(format!("IPC frame error: {error:?}"))
 }
@@ -2674,5 +2766,46 @@ mod focused_profile_tests {
             FocusedWorkerProfile::from_reconfigure(&odd_geometry),
             Err("worker.media.invalid_geometry")
         );
+    }
+}
+
+#[cfg(test)]
+mod handshake_boundary_regression {
+    use super::*;
+    use classmesh_windows_runtime::ipc::{IpcControlCommand, IpcFrame, IpcFrameDecoder};
+
+    #[test]
+    fn ready_followed_by_fragmented_command_preserves_all_command_bytes() {
+        let ready = IpcFrame::service_ready().encode().unwrap();
+        let command = IpcFrame::control(IpcControlCommand::LockWorkstation)
+            .encode()
+            .unwrap();
+        let mut wire = ready.clone();
+        wire.extend_from_slice(&command[..3]);
+        wire.extend_from_slice(&command[3..]);
+        let mut cursor = 0;
+        let received = read_one_frame_from_reader(|buf| {
+            let n = buf.len().min(wire.len() - cursor);
+            buf[..n].copy_from_slice(&wire[cursor..cursor + n]);
+            cursor += n;
+            Ok(n)
+        })
+        .unwrap();
+        assert!(matches!(
+            received.message().unwrap(),
+            classmesh_windows_runtime::ipc::IpcMessage::ServiceReady
+        ));
+        assert_eq!(
+            cursor,
+            ready.len(),
+            "handshake must not consume command bytes"
+        );
+        let mut decoder = IpcFrameDecoder::default();
+        let frames = decoder.push_bytes(&wire[cursor..]).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert!(matches!(
+            frames[0].message().unwrap(),
+            classmesh_windows_runtime::ipc::IpcMessage::Control(_)
+        ));
     }
 }

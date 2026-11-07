@@ -27,8 +27,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-    GetNamedPipeClientSessionId, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    GetNamedPipeClientSessionId, GetNamedPipeServerProcessId, GetNamedPipeServerSessionId,
+    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentProcess, WaitForSingleObject};
 
@@ -679,6 +679,17 @@ impl NamedPipeClient {
             });
         }
         Ok(pid)
+    }
+
+    /// Kernel-reported server session for the connected Worker IPC handle.
+    /// Session 0 is necessary for SCM Service ownership, but is not sufficient
+    /// to authenticate a LocalSystem token or authorize a control message.
+    pub fn server_session_id(&self) -> Result<u32, PipeError> {
+        let mut session_id = u32::MAX;
+        if unsafe { GetNamedPipeServerSessionId(self.handle, &mut session_id) } == 0 {
+            return Err(last_error("NamedPipeServerSessionId"));
+        }
+        Ok(session_id)
     }
 
     pub fn try_clone(&self) -> Result<Self, PipeError> {
