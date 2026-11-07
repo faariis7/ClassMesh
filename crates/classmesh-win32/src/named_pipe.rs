@@ -128,7 +128,79 @@ pub struct NamedPipeServer {
 // The HANDLE is uniquely owned by this wrapper and Windows permits pipe I/O from another thread.
 unsafe impl Send for NamedPipeServer {}
 
+struct IoCancellationThread(HANDLE);
+// An owned duplicate with THREAD_TERMINATE only, used solely for CancelSynchronousIo.
+unsafe impl Send for IoCancellationThread {}
+impl Drop for IoCancellationThread {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
 impl NamedPipeServer {
+    /// A bounded primary Worker startup sequence on a dedicated synchronous-I/O
+    /// thread. Cancellation cannot target control/media/reader threads. The
+    /// caller must retire the launch on timeout, even if I/O won the cancel race.
+    pub fn with_worker_startup_deadline<T: Send>(
+        &mut self,
+        timeout: Duration,
+        operation: impl FnOnce(&mut Self) -> T + Send,
+    ) -> Result<T, PipeError> {
+        use windows_sys::Win32::System::IO::CancelSynchronousIo;
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, THREAD_TERMINATE};
+        if timeout.is_zero() || timeout > Duration::from_secs(5) || self.overlapped {
+            return Err(PipeError {
+                stage: "WorkerStartupDeadlineArgument",
+                win32_error: 87,
+            });
+        }
+        let (thread_tx, thread_rx) = std::sync::mpsc::sync_channel(1);
+        let mut cancellation: Option<IoCancellationThread> = None;
+        crate::sync_deadline::run_with_deadline(
+            timeout,
+            move || {
+                let mut handle = null_mut();
+                // SAFETY: duplicate this dedicated thread's pseudo-handle with
+                // only the right documented for CancelSynchronousIo. Ownership
+                // moves to the joining caller, never identified by reused TID.
+                if unsafe {
+                    DuplicateHandle(
+                        GetCurrentProcess(),
+                        GetCurrentThread(),
+                        GetCurrentProcess(),
+                        &mut handle,
+                        THREAD_TERMINATE,
+                        0,
+                        0,
+                    )
+                } == 0
+                {
+                    return Err(last_error("WorkerStartupCancellationHandle"));
+                }
+                let _ = thread_tx.send(IoCancellationThread(handle));
+                Ok(operation(self))
+            },
+            || {
+                if cancellation.is_none() {
+                    cancellation = thread_rx.try_recv().ok();
+                }
+                // SAFETY: the dedicated scoped thread and its native HANDLE remain
+                // alive until joined. Retry/drain even if no I/O was pending yet.
+                if let Some(thread) = cancellation.as_ref() {
+                    unsafe { CancelSynchronousIo(thread.0) };
+                }
+            },
+        )
+        .map_err(|error| PipeError {
+            stage: "WorkerStartupDeadline",
+            win32_error: match error {
+                crate::sync_deadline::DeadlineError::Expired => WAIT_TIMEOUT,
+                crate::sync_deadline::DeadlineError::Spawn => 8,
+                crate::sync_deadline::DeadlineError::ThreadExited => 31,
+            },
+        })?
+    }
+
     /// Opt-in, read-only runtime qualification. Never accepts control input.
     /// Only the exact OS-observed operator PID/session receives a small snapshot.
     /// Dedicated diagnostic thread only; pending I/O is cancelled and drained.
@@ -942,9 +1014,7 @@ fn last_error(stage: &'static str) -> PipeError {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "experimental-trusted-policy")]
-    #[test]
-    fn runtime_probe_attests_native_pid_session_before_sampling_metadata() {
+    fn current_test_sid() -> Vec<u8> {
         use windows_sys::Win32::Security::{
             GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
         };
@@ -975,6 +1045,54 @@ mod tests {
         let sid =
             unsafe { std::slice::from_raw_parts(user.User.Sid.cast::<u8>(), sid_len) }.to_vec();
         unsafe { CloseHandle(token) };
+        sid
+    }
+
+    #[test]
+    fn worker_startup_deadline_cancels_native_connect_and_stalled_hello() {
+        for stalled_hello in [false, true] {
+            let name = format!(
+                "ClassMesh-startup-deadline-{}-{stalled_hello}",
+                std::process::id()
+            );
+            let mut server = NamedPipeServer::create_for_user(&name, &current_test_sid()).unwrap();
+            let _silent_client = stalled_hello
+                .then(|| NamedPipeClient::connect(&name, Duration::from_secs(1)).unwrap());
+            let started = Instant::now();
+            let result = server.with_worker_startup_deadline(Duration::from_millis(50), |pipe| {
+                pipe.accept_expected(std::process::id(), crate::current_session_id().unwrap())?;
+                pipe.read(&mut [0u8; 1])
+            });
+            assert_eq!(result.unwrap_err().win32_error, WAIT_TIMEOUT);
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "native I/O cancellation must drain"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_startup_deadline_accepts_real_native_bytes() {
+        let name = format!("ClassMesh-startup-positive-{}", std::process::id());
+        let mut server = NamedPipeServer::create_for_user(&name, &current_test_sid()).unwrap();
+        let client = NamedPipeClient::connect(&name, Duration::from_secs(1)).unwrap();
+        client.write_all(b"native").unwrap();
+        let bytes = server
+            .with_worker_startup_deadline(Duration::from_secs(1), |pipe| {
+                pipe.accept_expected(std::process::id(), crate::current_session_id().unwrap())
+                    .unwrap();
+                let mut bytes = [0u8; 6];
+                assert_eq!(pipe.read(&mut bytes).unwrap(), 6);
+                bytes
+            })
+            .unwrap();
+        assert_eq!(&bytes, b"native");
+    }
+
+    #[cfg(feature = "experimental-trusted-policy")]
+    #[test]
+    fn runtime_probe_attests_native_pid_session_before_sampling_metadata() {
+        let sid = current_test_sid();
         let pid = std::process::id();
         let session = crate::current_session_id().unwrap();
         for (index, expected_pid, expected_session) in [

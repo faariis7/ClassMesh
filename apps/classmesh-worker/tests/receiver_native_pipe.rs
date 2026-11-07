@@ -105,16 +105,13 @@ fn production_worker_rejects_untrusted_native_server_before_hello() {
         .spawn()
         .unwrap();
     let worker_pid = worker.id();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let result = server.accept_expected(worker_pid, session).map(|_| {
+    let observed = server.with_worker_startup_deadline(Duration::from_secs(5), |server| {
+        server.accept_expected(worker_pid, session).map(|_| {
             let mut byte = [0u8; 1];
             // EOF/error must occur without even one byte of WorkerHello.
             !matches!(server.read(&mut byte), Ok(n) if n > 0)
-        });
-        let _ = tx.send(result);
+        })
     });
-    let observed = rx.recv_timeout(Duration::from_secs(10));
     let _ = worker.kill();
     let output = worker.wait_with_output().unwrap();
     assert!(

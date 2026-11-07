@@ -80,10 +80,13 @@ an unrelated process or delete a replacement service by name alone.
   are absent. Do not infer cross-account process/token query rights from the
   same-account hosted test. The positive run must qualify those rights without
   granting debug privilege or weakening process/token DACLs.
-- Existing primary Service `accept_expected` and handshake reads remain
-  synchronous: a Worker that never connects or stalls can block startup/stop.
-  The external runner deadlines detect absent evidence, but do not fix this
-  production cancellation gap. Treat it as unresolved pending native review.
+- The primary accept + Hello/Ready sequence now shares a five-second logical
+  deadline on a dedicated thread, cancelled with `CancelSynchronousIo` and
+  joined before any pipe/buffer is released. Late completion never activates
+  Worker. Portable RED/GREEN covers deadline/cancel/drain semantics; native
+  tests cover absent client, stalled Hello and actual bytes. A faulty driver
+  can delay the required cancellation drain beyond the logical deadline;
+  freeing live kernel I/O memory or terminating a Rust thread is unsafe.
 - New observer/unsafe Win32 code needs independent qualified security review.
   Physical #288/#411, Teacher UI and deployed QUIC/video remain separate gates.
   No merge, production installation or rollout is authorized by this report.

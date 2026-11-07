@@ -128,8 +128,9 @@ pub(crate) fn require_local_system(pid: u32) -> io::Result<ServiceProcess> {
 mod tests {
     #[test]
     fn retained_process_handle_detects_exit() {
-        let mut child = std::process::Command::new("cmd.exe")
-            .args(["/C", "ping -n 30 127.0.0.1 >NUL"])
+        let mut child = std::process::Command::new("ping.exe")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
         // Exercise the same rights and retained-object wait as production;
@@ -155,8 +156,9 @@ mod tests {
         // A real OS process token, not a mocked SID: the child inherits the
         // interactive test runner identity and must not impersonate Service.
         // Avoid running this assertion under LocalSystem CI agents.
-        let mut child = std::process::Command::new("cmd.exe")
-            .args(["/C", "ping -n 8 127.0.0.1 >NUL"])
+        let mut child = std::process::Command::new("ping.exe")
+            .args(["-n", "8", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
             .spawn()
             .expect("spawn non-service child");
         let result = super::require_local_system(child.id());
@@ -175,8 +177,9 @@ mod tests {
         // A negative-only suite also passes when *every* live Service is
         // rejected before the SID check. Exercise the actual OpenProcess /
         // wait path with a live child and require rejection at TokenUser.
-        let mut child = std::process::Command::new("cmd.exe")
-            .args(["/C", "ping -n 30 127.0.0.1 >NUL"])
+        let mut child = std::process::Command::new("ping.exe")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
             .spawn()
             .expect("spawn live native peer");
         let result = super::require_local_system(child.id());
