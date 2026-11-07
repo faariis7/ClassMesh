@@ -421,6 +421,7 @@ mod windows_service_app {
 
                     match pipe.try_clone() {
                         Ok(reader) => {
+                            let (reader_start_tx, reader_start_rx) = std::sync::mpsc::channel();
                             let capability_reader = spawn_worker_capability_reader(
                                 reader,
                                 WorkerCapabilityReaderRuntime {
@@ -448,6 +449,7 @@ mod windows_service_app {
                                     process_id,
                                     session_id: session.0,
                                 },
+                                reader_start_rx,
                             );
                             if let Err(error) = capability_reader {
                                 eprintln!(
@@ -459,6 +461,9 @@ mod windows_service_app {
                             }
                             self.capabilities
                                 .activate(worker_generation, process_id, session.0);
+                            // The reader must not observe EOF or a report before its
+                            // generation is active; otherwise an early clear can be lost.
+                            let _ = reader_start_tx.send(());
                         }
                         Err(error) => {
                             eprintln!(
@@ -1046,6 +1051,7 @@ mod windows_service_app {
         pipe: NamedPipeServer,
         runtime: WorkerCapabilityReaderRuntime,
         identity: WorkerCapabilityReaderIdentity,
+        start_rx: std::sync::mpsc::Receiver<()>,
     ) -> std::io::Result<thread::JoinHandle<()>> {
         let WorkerCapabilityReaderRuntime {
             capabilities,
@@ -1063,6 +1069,9 @@ mod windows_service_app {
             session_id: expected_session_id,
         } = identity;
         thread::Builder::new().name("classmesh-worker-capability-reader".into()).spawn(move || {
+            if start_rx.recv().is_err() {
+                return;
+            }
             let mut decoder = IpcFrameDecoder::default();
             let mut buffer = [0_u8; 4096];
 
