@@ -86,6 +86,9 @@ function Assert-ClassMeshWorkerReport($Report, [string]$WorkerPath, [string]$Wor
 }
 
 function Invoke-ClassMeshWorkerRuntimeQualification([uint32]$ServiceProcessId, [string]$WorkerPath, [string]$WorkerHash) {
+    $service = [Diagnostics.Process]::GetProcessById($ServiceProcessId)
+    $null = $service.SafeHandle # Keep the SCM process object alive; prevent PID reuse.
+    try {
     $first = Wait-ClassMeshWorkerReport $ServiceProcessId
     $worker = Assert-ClassMeshWorkerReport $first $WorkerPath $WorkerHash
     try {
@@ -98,9 +101,9 @@ function Invoke-ClassMeshWorkerRuntimeQualification([uint32]$ServiceProcessId, [
     try {
         if ($restarted.worker_pid -eq $first.worker_pid) { throw 'Worker PID was reused during qualification; evidence ambiguous' }
         # Abrupt loss must close the real retained Service process boundary in Worker.
-        $service = [Diagnostics.Process]::GetProcessById($ServiceProcessId)
-        try { $null = $service.SafeHandle; $service.Kill(); if (-not $service.WaitForExit(5000)) { throw 'Service loss timed out' } }
-        finally { $service.Dispose() }
+        if ($service.HasExited) { throw 'FAIL_CLOSED: Service exited before intentional loss test' }
+        $service.Kill()
+        if (-not $service.WaitForExit(5000)) { throw 'Service loss timed out' }
         if (-not $worker.WaitForExit(5000)) { throw 'FAIL_CLOSED: Worker survived Service loss' }
     } finally { $worker.Dispose() }
     [pscustomobject]@{
@@ -114,4 +117,5 @@ function Invoke-ClassMeshWorkerRuntimeQualification([uint32]$ServiceProcessId, [
         worker_exited_after_service_loss = $true
         physical_qualification = $false
     } | ConvertTo-Json -Compress
+    } finally { $service.Dispose() }
 }

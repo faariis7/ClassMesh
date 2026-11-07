@@ -942,6 +942,101 @@ fn last_error(stage: &'static str) -> PipeError {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "experimental-trusted-policy")]
+    #[test]
+    fn runtime_probe_attests_native_pid_session_before_sampling_metadata() {
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        };
+        use windows_sys::Win32::System::Threading::OpenProcessToken;
+        let mut token = null_mut();
+        assert_ne!(
+            unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) },
+            0
+        );
+        let mut required = 0;
+        unsafe { GetTokenInformation(token, TokenUser, null_mut(), 0, &mut required) };
+        assert!((8..=4096).contains(&required));
+        let mut storage = vec![0usize; (required as usize).div_ceil(size_of::<usize>())];
+        assert_ne!(
+            unsafe {
+                GetTokenInformation(
+                    token,
+                    TokenUser,
+                    storage.as_mut_ptr().cast(),
+                    required,
+                    &mut required,
+                )
+            },
+            0
+        );
+        let user = unsafe { &*storage.as_ptr().cast::<TOKEN_USER>() };
+        let sid_len = unsafe { GetLengthSid(user.User.Sid) } as usize;
+        let sid =
+            unsafe { std::slice::from_raw_parts(user.User.Sid.cast::<u8>(), sid_len) }.to_vec();
+        unsafe { CloseHandle(token) };
+        let pid = std::process::id();
+        let session = crate::current_session_id().unwrap();
+        for (index, expected_pid, expected_session) in [
+            (0, pid, session),
+            (1, pid + 1, session),
+            (2, pid, session + 1),
+        ] {
+            let name = format!("ClassMesh-runtime-native-{pid}-{index}");
+            let server_name = name.clone();
+            let sid = sid.clone();
+            let server = std::thread::spawn(move || {
+                let mut sampled = false;
+                let result = NamedPipeServer::publish_runtime_probe(
+                    &server_name,
+                    &sid,
+                    expected_pid,
+                    expected_session,
+                    || {
+                        sampled = true;
+                        b"native-report\n".to_vec()
+                    },
+                );
+                (result, sampled)
+            });
+            // An outbound server permits read access only. Use a real Windows
+            // client handle, never synthetic PipePeer or a forged JSON PID.
+            let wide = wide_null(OsStr::new(&normalize_pipe_name(&name)));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let client = loop {
+                let handle = unsafe {
+                    CreateFileW(
+                        wide.as_ptr(),
+                        GENERIC_READ,
+                        0,
+                        null(),
+                        OPEN_EXISTING,
+                        0,
+                        null_mut(),
+                    )
+                };
+                if handle != INVALID_HANDLE_VALUE {
+                    break handle;
+                }
+                assert!(Instant::now() < deadline, "native probe unavailable");
+                thread::sleep(Duration::from_millis(1));
+            };
+            let mut bytes = [0u8; 32];
+            let received = read_handle(client, &mut bytes);
+            unsafe { CloseHandle(client) };
+            let (result, sampled) = server.join().unwrap();
+            if index == 0 {
+                assert!(result.is_ok(), "{result:?}");
+                assert!(sampled);
+                assert_eq!(&bytes[..received.unwrap()], b"native-report\n");
+            } else {
+                assert_eq!(result.unwrap_err().stage, "RuntimeProbeObserverIdentity");
+                assert!(!sampled, "untrusted process must not even sample metadata");
+                assert!(!matches!(received, Ok(n) if n > 0));
+            }
+        }
+    }
+
     #[test]
     fn attested_peer_bridge_rejects_wrong_os_peer_and_stale_request() {
         use crate::sensitive_pipe_name::{
