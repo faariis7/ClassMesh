@@ -17,6 +17,7 @@ mod windows_app {
     };
     use classmesh_control::x509_issuance::issue_certificate;
     use classmesh_identity_win::{CngMachineKey, CngRcgenSigningKey};
+    use classmesh_lab::enrollment_cli_role::EnrollmentCliRole;
     use classmesh_protocol::control_wire::{EnrollmentRequest, EnrollmentResult, PrincipalRole};
     use classmesh_security::PrincipalId;
     use prost::Message;
@@ -33,6 +34,7 @@ mod windows_app {
 
     #[derive(Debug)]
     struct Config {
+        role: EnrollmentCliRole,
         request: PathBuf,
         ca_cert: PathBuf,
         ca_key_name: String,
@@ -43,6 +45,7 @@ mod windows_app {
     impl Config {
         fn parse() -> Result<Self, String> {
             let mut args = std::env::args().skip(1);
+            let mut role = EnrollmentCliRole::Teacher;
             let mut request = None;
             let mut ca_cert = None;
             let mut ca_key_name = None;
@@ -55,6 +58,7 @@ mod windows_app {
                         .ok_or_else(|| format!("missing value after {arg}"))
                 };
                 match arg.as_str() {
+                    "--role" => role = EnrollmentCliRole::parse(&value()?)?,
                     "--request" => request = Some(PathBuf::from(value()?)),
                     "--ca-cert" => ca_cert = Some(PathBuf::from(value()?)),
                     "--ca-key-name" => ca_key_name = Some(value()?),
@@ -74,6 +78,7 @@ mod windows_app {
             }
 
             Ok(Self {
+                role,
                 request: request
                     .ok_or_else(|| format!("--request is required\n\n{}", Self::usage()))?,
                 ca_cert: ca_cert
@@ -87,7 +92,7 @@ mod windows_app {
         }
 
         fn usage() -> &'static str {
-            "ClassMesh offline enrollment authority\n\n\
+            "ClassMesh offline enrollment authority (--role teacher|student-device; default teacher)\n\n\
 Required:\n\
   --request <teacher-request.pb>\n\
   --ca-cert <authority-ca.der>\n\
@@ -96,7 +101,7 @@ Required:\n\
 Optional:\n\
   --lifetime-hours <1..168>   default: 24\n\n\
 The CA private key must already exist as a non-exportable machine-scoped CNG key.\n\
-This tool approves only validated Teacher requests and refuses output overwrite."
+The selected role must explicitly match the request. Default role: Teacher."
         }
     }
 
@@ -157,8 +162,12 @@ This tool approves only validated Teacher requests and refuses output overwrite.
         let request = EnrollmentRequest::decode(request_bytes.as_slice())?;
         validate_enrollment_request(ENROLLMENT_MIN_VERSION, &request)
             .map_err(|error| format!("enrollment request rejected: {error:?}"))?;
-        if request.role != PrincipalRole::Teacher as i32 {
-            return Err("authority slice approves only Teacher enrollment requests".into());
+        let expected = match config.role {
+            EnrollmentCliRole::Teacher => PrincipalRole::Teacher as i32,
+            EnrollmentCliRole::StudentDevice => PrincipalRole::StudentDevice as i32,
+        };
+        if request.role != expected {
+            return Err("enrollment request role does not match operator-approved role".into());
         }
 
         let principal_id = PrincipalId(
@@ -233,6 +242,7 @@ This tool approves only validated Teacher requests and refuses output overwrite.
         file.sync_all()?;
 
         println!("enrollment_result=approved");
+        println!("enrollment_role={}", config.role.common_name_label());
         println!("principal_id={}", hex(&principal_id.0));
         println!(
             "credential_fingerprint_sha256={}",
