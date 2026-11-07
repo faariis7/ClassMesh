@@ -1,4 +1,5 @@
 use eframe::egui;
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::Instant;
 
 use classmesh_protocol::{Capability, control_wire::ControlEnvelope};
@@ -53,6 +54,32 @@ fn section_scroll_salt(section: TeacherUiSection) -> Option<&'static str> {
     }
 }
 
+/// The authenticated QUIC owner, not the UI, is the only producer of these
+/// observations. A bound context alone never proves Service liveness.
+#[derive(Debug)]
+pub enum TeacherUiControlEvent {
+    Authenticated(TeacherInteractionUiContext),
+    Disconnected,
+}
+
+/// A bounded handoff to the real QUIC owner. No synthetic success or network
+/// connection is created by attaching the bridge.
+#[derive(Debug)]
+pub struct TeacherUiControlBridge {
+    events: Receiver<TeacherUiControlEvent>,
+    actions: SyncSender<TeacherUiAction>,
+}
+
+impl TeacherUiControlBridge {
+    #[must_use]
+    pub fn new(
+        events: Receiver<TeacherUiControlEvent>,
+        actions: SyncSender<TeacherUiAction>,
+    ) -> Self {
+        Self { events, actions }
+    }
+}
+
 #[derive(Debug)]
 pub struct TeacherEguiShell {
     shell: TeacherUiShellState,
@@ -68,6 +95,7 @@ pub struct TeacherEguiShell {
     staged_file_candidate: Option<TeacherStagedFileCandidate>,
     teacher_interaction_draft: TeacherInteractionDraft,
     pending_action: Option<TeacherUiAction>,
+    control_bridge: Option<TeacherUiControlBridge>,
 }
 
 impl Default for TeacherEguiShell {
@@ -93,6 +121,7 @@ impl Default for TeacherEguiShell {
             staged_file_candidate: None,
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
+            control_bridge: None,
         }
     }
 }
@@ -122,6 +151,58 @@ impl TeacherEguiShell {
             staged_file_candidate: None,
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
+            control_bridge: None,
+        }
+    }
+
+    /// Only attach a receiver owned by the authenticated QUIC runtime.
+    /// Replacing the runtime invalidates the previous session immediately.
+    pub fn attach_control_bridge(&mut self, bridge: TeacherUiControlBridge) {
+        self.clear_teacher_interaction_context();
+        self.control_bridge = Some(bridge);
+    }
+
+    fn poll_control_bridge(&mut self) {
+        // Drain bounded transport observations before considering any UI action.
+        // A dropped producer means disconnect, never persistent liveness.
+        for _ in 0..64 {
+            let event = match self.control_bridge.as_ref() {
+                Some(bridge) => bridge.events.try_recv(),
+                None => return,
+            };
+            match event {
+                Ok(TeacherUiControlEvent::Authenticated(context)) => {
+                    if context.control_session_id == 0 {
+                        self.clear_teacher_interaction_context();
+                    } else {
+                        self.set_teacher_interaction_context(context);
+                    }
+                }
+                Ok(TeacherUiControlEvent::Disconnected) => {
+                    self.clear_teacher_interaction_context();
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.clear_teacher_interaction_context();
+                    self.control_bridge = None;
+                    return;
+                }
+            }
+        }
+        // A UI click is merely a request. A full/closed channel must never
+        // imply that the authenticated Service accepted or applied it.
+        if self.teacher_interaction_context.is_none() {
+            return;
+        }
+        if let Some(action) = self.take_pending_action() {
+            let result = self
+                .control_bridge
+                .as_ref()
+                .map(|bridge| bridge.actions.try_send(action));
+            if matches!(result, Some(Err(TrySendError::Disconnected(_)))) {
+                self.clear_teacher_interaction_context();
+                self.control_bridge = None;
+            }
         }
     }
 
@@ -660,6 +741,7 @@ fn control_connection_label(context: Option<&TeacherInteractionUiContext>) -> &'
 
 impl eframe::App for TeacherEguiShell {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_control_bridge();
         self.handle_navigation_shortcuts(ctx);
         egui::TopBottomPanel::top("classmesh_teacher_navigation").show(ctx, |ui| {
             self.navigation(ui);
@@ -718,6 +800,35 @@ mod tests {
     use crate::ui_shell::{TeacherFocusUiAction, TeacherPresentationUiAction};
 
     use super::*;
+
+    #[test]
+    fn authenticated_bridge_disconnect_retires_context_without_fake_liveness() {
+        use std::sync::mpsc::sync_channel;
+        let (event_tx, event_rx) = sync_channel(2);
+        let (action_tx, _action_rx) = sync_channel(1);
+        let mut app = TeacherEguiShell::default();
+        app.attach_control_bridge(TeacherUiControlBridge::new(event_rx, action_tx));
+        assert!(app.teacher_interaction_context.is_none());
+        event_tx
+            .send(TeacherUiControlEvent::Authenticated(interaction_context(
+                BTreeSet::new(),
+            )))
+            .unwrap();
+        app.poll_control_bridge();
+        assert!(app.teacher_interaction_context.is_some());
+        event_tx.send(TeacherUiControlEvent::Disconnected).unwrap();
+        app.poll_control_bridge();
+        assert!(app.teacher_interaction_context.is_none());
+        event_tx
+            .send(TeacherUiControlEvent::Authenticated(interaction_context(
+                BTreeSet::new(),
+            )))
+            .unwrap();
+        drop(event_tx);
+        app.poll_control_bridge();
+        assert!(app.teacher_interaction_context.is_none());
+        assert!(app.control_bridge.is_none());
+    }
 
     #[test]
     fn native_window_status_never_claims_control_without_authenticated_session() {
