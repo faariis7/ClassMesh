@@ -158,6 +158,7 @@ impl TeacherEguiShell {
     /// Only attach a receiver owned by the authenticated QUIC runtime.
     /// Replacing the runtime invalidates the previous session immediately.
     pub fn attach_control_bridge(&mut self, bridge: TeacherUiControlBridge) {
+        self.pending_action = None;
         self.clear_teacher_interaction_context();
         self.control_bridge = Some(bridge);
     }
@@ -182,6 +183,7 @@ impl TeacherEguiShell {
                     }
                 }
                 Ok(TeacherUiControlEvent::Disconnected) => {
+                    self.pending_action = None;
                     self.clear_teacher_interaction_context();
                 }
                 Err(TryRecvError::Empty) => {
@@ -189,6 +191,7 @@ impl TeacherEguiShell {
                     break;
                 }
                 Err(TryRecvError::Disconnected) => {
+                    self.pending_action = None;
                     self.clear_teacher_interaction_context();
                     self.control_bridge = None;
                     return;
@@ -205,9 +208,18 @@ impl TeacherEguiShell {
                 .control_bridge
                 .as_ref()
                 .map(|bridge| bridge.actions.try_send(action));
-            if matches!(result, Some(Err(TrySendError::Disconnected(_)))) {
-                self.clear_teacher_interaction_context();
-                self.control_bridge = None;
+            match result {
+                Some(Err(TrySendError::Full(action))) => {
+                    // Backpressure is not delivery. Retry only while the same
+                    // authenticated session remains bound; never claim success.
+                    self.pending_action = Some(action);
+                }
+                Some(Err(TrySendError::Disconnected(_))) => {
+                    self.pending_action = None;
+                    self.clear_teacher_interaction_context();
+                    self.control_bridge = None;
+                }
+                _ => {}
             }
         }
     }
@@ -881,6 +893,47 @@ mod tests {
         );
         app.poll_control_bridge();
         assert!(app.teacher_interaction_context.is_none());
+    }
+
+    #[test]
+    fn full_control_channel_retries_only_until_disconnect() {
+        use std::sync::mpsc::sync_channel;
+        let (event_tx, event_rx) = sync_channel(4);
+        let (action_tx, action_rx) = sync_channel(1);
+        action_tx.send(TeacherUiAction::SelectDevice(None)).unwrap();
+        let mut app = TeacherEguiShell::default();
+        app.attach_control_bridge(TeacherUiControlBridge::new(event_rx, action_tx));
+        event_tx
+            .send(TeacherUiControlEvent::Authenticated(interaction_context(
+                BTreeSet::new(),
+            )))
+            .unwrap();
+        app.queue_action(TeacherUiAction::SelectDevice(Some(MonitoringSourceId(7))));
+        app.poll_control_bridge();
+        assert!(
+            app.pending_action.is_some(),
+            "full channel must not silently drop an intent"
+        );
+        let _ = action_rx.try_recv().unwrap();
+        app.poll_control_bridge();
+        assert!(matches!(
+            action_rx.try_recv(),
+            Ok(TeacherUiAction::SelectDevice(Some(MonitoringSourceId(7))))
+        ));
+        assert!(app.pending_action.is_none());
+        action_rx.try_recv().err(); // channel is now empty
+        app.queue_action(TeacherUiAction::SelectDevice(Some(MonitoringSourceId(8))));
+        event_tx.send(TeacherUiControlEvent::Disconnected).unwrap();
+        app.poll_control_bridge();
+        assert!(app.teacher_interaction_context.is_none());
+        assert!(
+            app.pending_action.is_none(),
+            "disconnect must retire queued intents"
+        );
+        assert!(
+            action_rx.try_recv().is_err(),
+            "disconnect must not forward stale intent"
+        );
     }
 
     #[test]
