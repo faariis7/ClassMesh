@@ -104,7 +104,13 @@ function Invoke-ClassMeshWorkerRuntimeQualification([uint32]$ServiceProcessId, [
         if ($service.HasExited) { throw 'FAIL_CLOSED: Service exited before intentional loss test' }
         $service.Kill()
         if (-not $service.WaitForExit(5000)) { throw 'Service loss timed out' }
-        if (-not $worker.WaitForExit(5000)) { throw 'FAIL_CLOSED: Worker survived Service loss' }
+        if (-not $worker.WaitForExit(5000)) {
+            # The retained object is the attested test-owned Worker, even on
+            # failure. Do not leave an orphan or claim graceful loss recovery.
+            $worker.Kill()
+            if (-not $worker.WaitForExit(5000)) { throw 'FAIL_CLOSED: orphan test Worker cleanup failed' }
+            throw 'FAIL_CLOSED: Worker survived Service loss; test-owned orphan terminated'
+        }
     } finally { $worker.Dispose() }
     [pscustomobject]@{
         service_pid = $ServiceProcessId
