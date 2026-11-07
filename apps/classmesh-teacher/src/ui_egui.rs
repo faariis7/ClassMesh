@@ -1,4 +1,5 @@
 use eframe::egui;
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::Instant;
 
 use classmesh_protocol::{Capability, control_wire::ControlEnvelope};
@@ -53,6 +54,32 @@ fn section_scroll_salt(section: TeacherUiSection) -> Option<&'static str> {
     }
 }
 
+/// The authenticated QUIC owner, not the UI, is the only producer of these
+/// observations. A bound context alone never proves Service liveness.
+#[derive(Debug)]
+pub enum TeacherUiControlEvent {
+    Authenticated(TeacherInteractionUiContext),
+    Disconnected,
+}
+
+/// A bounded handoff to the real QUIC owner. No synthetic success or network
+/// connection is created by attaching the bridge.
+#[derive(Debug)]
+pub struct TeacherUiControlBridge {
+    events: Receiver<TeacherUiControlEvent>,
+    actions: SyncSender<TeacherUiAction>,
+}
+
+impl TeacherUiControlBridge {
+    #[must_use]
+    pub fn new(
+        events: Receiver<TeacherUiControlEvent>,
+        actions: SyncSender<TeacherUiAction>,
+    ) -> Self {
+        Self { events, actions }
+    }
+}
+
 #[derive(Debug)]
 pub struct TeacherEguiShell {
     shell: TeacherUiShellState,
@@ -68,6 +95,7 @@ pub struct TeacherEguiShell {
     staged_file_candidate: Option<TeacherStagedFileCandidate>,
     teacher_interaction_draft: TeacherInteractionDraft,
     pending_action: Option<TeacherUiAction>,
+    control_bridge: Option<TeacherUiControlBridge>,
 }
 
 impl Default for TeacherEguiShell {
@@ -93,6 +121,7 @@ impl Default for TeacherEguiShell {
             staged_file_candidate: None,
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
+            control_bridge: None,
         }
     }
 }
@@ -122,6 +151,64 @@ impl TeacherEguiShell {
             staged_file_candidate: None,
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
+            control_bridge: None,
+        }
+    }
+
+    /// Only attach a receiver owned by the authenticated QUIC runtime.
+    /// Replacing the runtime invalidates the previous session immediately.
+    pub fn attach_control_bridge(&mut self, bridge: TeacherUiControlBridge) {
+        self.clear_teacher_interaction_context();
+        self.control_bridge = Some(bridge);
+    }
+
+    fn poll_control_bridge(&mut self) {
+        // Drain bounded transport observations before considering any UI action.
+        // A dropped producer means disconnect, never persistent liveness.
+        // Never forward an action while a terminal disconnect may still be
+        // queued behind a saturated observation batch. Drain in a later frame.
+        let mut event_batch_exhausted = true;
+        for _ in 0..64 {
+            let event = match self.control_bridge.as_ref() {
+                Some(bridge) => bridge.events.try_recv(),
+                None => return,
+            };
+            match event {
+                Ok(TeacherUiControlEvent::Authenticated(context)) => {
+                    if context.control_session_id == 0 {
+                        self.clear_teacher_interaction_context();
+                    } else {
+                        self.set_teacher_interaction_context(context);
+                    }
+                }
+                Ok(TeacherUiControlEvent::Disconnected) => {
+                    self.clear_teacher_interaction_context();
+                }
+                Err(TryRecvError::Empty) => {
+                    event_batch_exhausted = false;
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.clear_teacher_interaction_context();
+                    self.control_bridge = None;
+                    return;
+                }
+            }
+        }
+        // A UI click is merely a request. A full/closed channel must never
+        // imply that the authenticated Service accepted or applied it.
+        if event_batch_exhausted || self.teacher_interaction_context.is_none() {
+            return;
+        }
+        if let Some(action) = self.take_pending_action() {
+            let result = self
+                .control_bridge
+                .as_ref()
+                .map(|bridge| bridge.actions.try_send(action));
+            if matches!(result, Some(Err(TrySendError::Disconnected(_)))) {
+                self.clear_teacher_interaction_context();
+                self.control_bridge = None;
+            }
         }
     }
 
@@ -135,7 +222,10 @@ impl TeacherEguiShell {
             reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
             // Focus carries a device ID but no session epoch. A new authenticated
             // session must not inherit a previously queued UI intent.
-            if matches!(self.pending_action, Some(TeacherUiAction::Focus(_))) {
+            if matches!(
+                self.pending_action,
+                Some(TeacherUiAction::Focus(_) | TeacherUiAction::TeacherInteraction(_))
+            ) {
                 self.pending_action = None;
             }
             // Diagnostics intents carry a source but no session epoch.
@@ -162,11 +252,15 @@ impl TeacherEguiShell {
         // Retire any intent queued under the old authenticated session.
         // A new offline ResumeThumbnail click can still be queued afterward.
         if self.teacher_interaction_context.is_some()
-            && matches!(self.pending_action, Some(TeacherUiAction::Focus(_)))
+            && matches!(
+                self.pending_action,
+                Some(TeacherUiAction::Focus(_) | TeacherUiAction::TeacherInteraction(_))
+            )
         {
             self.pending_action = None;
         }
         self.teacher_interaction_context = None;
+        // Retire the authenticated playback ledger and diagnostics intents together.
         self.retire_pending_diagnostics_override();
         self.playback = None;
         reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
@@ -366,7 +460,12 @@ impl TeacherEguiShell {
         };
         match focus {
             crate::ui_shell::TeacherFocusUiAction::RequestInteractive { .. } => {
-                !row.interactive_active
+                self.teacher_interaction_context
+                    .as_ref()
+                    .is_some_and(|context| {
+                        context.control_session_id != 0 && context.source_id == source_id
+                    })
+                    && !row.interactive_active
                     && row.health.presence == classmesh_core::presence::PresenceState::Online
                     && row.health.service_ready
                     && row.health.worker_ready
@@ -634,11 +733,30 @@ impl TeacherEguiShell {
     }
 }
 
+// The window can start before any authenticated QUIC session exists. Never
+// present an offline console as connected just because the process is running.
+// A context injected by a client is not proof of a currently live Service link.
+fn control_connection_label(context: Option<&TeacherInteractionUiContext>) -> &'static str {
+    match context {
+        Some(context) if context.control_session_id != 0 => {
+            "Session context bound — live Service connection unverified"
+        }
+        _ => "Offline — no authenticated control session",
+    }
+}
+
 impl eframe::App for TeacherEguiShell {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_control_bridge();
         self.handle_navigation_shortcuts(ctx);
         egui::TopBottomPanel::top("classmesh_teacher_navigation").show(ctx, |ui| {
             self.navigation(ui);
+        });
+
+        egui::TopBottomPanel::bottom("classmesh_teacher_connection_status").show(ctx, |ui| {
+            ui.small(control_connection_label(
+                self.teacher_interaction_context.as_ref(),
+            ));
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -688,6 +806,79 @@ mod tests {
     use crate::ui_shell::{TeacherFocusUiAction, TeacherPresentationUiAction};
 
     use super::*;
+
+    #[test]
+    fn authenticated_bridge_disconnect_retires_context_without_fake_liveness() {
+        use std::sync::mpsc::sync_channel;
+        let (event_tx, event_rx) = sync_channel(2);
+        let (action_tx, _action_rx) = sync_channel(1);
+        let mut app = TeacherEguiShell::default();
+        app.attach_control_bridge(TeacherUiControlBridge::new(event_rx, action_tx));
+        assert!(app.teacher_interaction_context.is_none());
+        event_tx
+            .send(TeacherUiControlEvent::Authenticated(interaction_context(
+                BTreeSet::new(),
+            )))
+            .unwrap();
+        app.poll_control_bridge();
+        assert!(app.teacher_interaction_context.is_some());
+        event_tx.send(TeacherUiControlEvent::Disconnected).unwrap();
+        app.poll_control_bridge();
+        assert!(app.teacher_interaction_context.is_none());
+        event_tx
+            .send(TeacherUiControlEvent::Authenticated(interaction_context(
+                BTreeSet::new(),
+            )))
+            .unwrap();
+        drop(event_tx);
+        app.poll_control_bridge();
+        assert!(app.teacher_interaction_context.is_none());
+        assert!(app.control_bridge.is_none());
+    }
+
+    #[test]
+    fn bridge_backlog_must_not_dispatch_before_terminal_disconnect() {
+        use std::sync::mpsc::sync_channel;
+        let (event_tx, event_rx) = sync_channel(128);
+        let (action_tx, action_rx) = sync_channel(1);
+        let mut app = TeacherEguiShell::default();
+        app.attach_control_bridge(TeacherUiControlBridge::new(event_rx, action_tx));
+        for _ in 0..65 {
+            event_tx
+                .send(TeacherUiControlEvent::Authenticated(interaction_context(
+                    BTreeSet::new(),
+                )))
+                .unwrap();
+        }
+        event_tx.send(TeacherUiControlEvent::Disconnected).unwrap();
+        app.queue_action(TeacherUiAction::SelectDevice(Some(MonitoringSourceId(7))));
+        app.poll_control_bridge();
+        assert!(
+            action_rx.try_recv().is_err(),
+            "must not dispatch while control events remain unread"
+        );
+        app.poll_control_bridge();
+        assert!(app.teacher_interaction_context.is_none());
+    }
+
+    #[test]
+    fn native_window_status_never_claims_control_without_authenticated_session() {
+        assert_eq!(
+            control_connection_label(None),
+            "Offline — no authenticated control session"
+        );
+        let mut context = interaction_context(BTreeSet::new());
+        context.control_session_id = 0;
+        assert_eq!(
+            control_connection_label(Some(&context)),
+            "Offline — no authenticated control session"
+        );
+        context.control_session_id = 77;
+        assert_eq!(
+            control_connection_label(Some(&context)),
+            "Session context bound — live Service connection unverified"
+        );
+    }
 
     fn send_navigation_key(
         app: &mut TeacherEguiShell,
@@ -840,6 +1031,54 @@ mod tests {
     }
 
     #[test]
+    fn queued_focus_start_requires_nonzero_control_session_at_handoff() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let start = TeacherUiAction::Focus(TeacherFocusUiAction::RequestInteractive {
+            source_id: MonitoringSourceId(7),
+        });
+        app.queue_action(start.clone());
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "offline UI cannot start focus"
+        );
+
+        let mut zero = interaction_context(BTreeSet::new());
+        zero.control_session_id = 0;
+        app.set_teacher_interaction_context(zero);
+        app.queue_action(start.clone());
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "zero session is not authorized"
+        );
+
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
+        app.queue_action(start.clone());
+        assert_eq!(app.take_pending_action(), Some(start));
+    }
+
+    #[test]
+    fn queued_focus_start_rejects_session_bound_to_different_device() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let mut other = interaction_context(BTreeSet::new());
+        other.source_id = MonitoringSourceId(8);
+        app.set_teacher_interaction_context(other);
+        app.queue_action(TeacherUiAction::Focus(
+            TeacherFocusUiAction::RequestInteractive {
+                source_id: MonitoringSourceId(7),
+            },
+        ));
+        assert_eq!(
+            app.take_pending_action(),
+            None,
+            "a session for another device must never authorize focus"
+        );
+    }
+
+    #[test]
     fn queued_focus_start_is_retired_on_control_session_replacement_but_not_refresh() {
         let mut app = TeacherEguiShell::default();
         select_test_device(&mut app);
@@ -945,6 +1184,9 @@ mod tests {
     fn queued_focus_handoff_requires_matching_interactive_state_but_allows_offline_resume() {
         let mut app = TeacherEguiShell::default();
         select_test_device(&mut app);
+        // Focus requests are legal only with a nonzero bound control session.
+        // The separate offline test verifies that missing/zero sessions deny.
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
         let start = TeacherUiAction::Focus(TeacherFocusUiAction::RequestInteractive {
             source_id: MonitoringSourceId(7),
         });
@@ -1226,6 +1468,28 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_discards_receiver_playback_binding_and_counters() {
+        let now = Instant::now();
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let context =
+            interaction_context(BTreeSet::from([Capability::ReceiverPlaybackDiagnostics]));
+        app.set_teacher_interaction_context(context.clone());
+        app.set_receiver_playback_context(MonitoringSourceId(7), bound_playback())
+            .unwrap();
+        app.accept_authenticated_receiver_playback(&playback_frame(), now)
+            .unwrap();
+        assert!(app.playback.is_some());
+        app.clear_teacher_interaction_context();
+        assert!(
+            app.playback.is_none(),
+            "disconnect must erase old playback ledger"
+        );
+        app.set_teacher_interaction_context(context);
+        assert_eq!(app.visible_receiver_playback_at(now), None);
+    }
+
+    #[test]
     fn clearing_diagnostics_erases_previous_authenticated_playback() {
         let now = Instant::now();
         let mut app = TeacherEguiShell::default();
@@ -1298,6 +1562,28 @@ mod tests {
         reconnected.control_session_id = 78;
         app.set_teacher_interaction_context(reconnected);
 
+        assert_eq!(app.take_pending_action(), None);
+    }
+
+    #[test]
+    fn queued_teacher_message_cannot_cross_session_rebind_or_disconnect() {
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        let old = interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+        app.set_teacher_interaction_context(old.clone());
+        app.queue_teacher_interaction_request(TeacherInteractionUiRequest::Message(
+            "old session".to_owned(),
+        ));
+        let mut next = old.clone();
+        next.control_session_id = 78;
+        app.set_teacher_interaction_context(next);
+        assert_eq!(app.take_pending_action(), None);
+
+        app.queue_teacher_interaction_request(TeacherInteractionUiRequest::Message(
+            "disconnected".to_owned(),
+        ));
+        app.clear_teacher_interaction_context();
+        app.set_teacher_interaction_context(old);
         assert_eq!(app.take_pending_action(), None);
     }
 
