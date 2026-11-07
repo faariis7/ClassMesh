@@ -124,6 +124,25 @@ mod tests {
     }
 
     #[test]
+    fn live_process_reaches_token_authentication() {
+        // A negative-only suite also passes when *every* live Service is
+        // rejected before the SID check. Exercise the actual OpenProcess /
+        // wait path with a live child and require rejection at TokenUser.
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/C", "ping -n 30 127.0.0.1 >NUL"])
+            .spawn()
+            .expect("spawn live native peer");
+        let result = super::require_local_system(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(
+            result.expect_err("non-SYSTEM peer").to_string(),
+            "pipe server is not LocalSystem",
+            "a live process must reach the real token SID check"
+        );
+    }
+
+    #[test]
     fn reject_exited_process_pid() {
         // A PID from a terminated process must not authorize an IPC peer.
         // Even if Windows temporarily retains the process object, its user
