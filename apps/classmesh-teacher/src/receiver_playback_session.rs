@@ -10,7 +10,8 @@ use std::time::Instant;
 use classmesh_control::client_session::ClientControlSession;
 use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::teacher_playback_receive::{
-    AuthenticatedTeacherReceiveError, receive_authenticated_teacher_control,
+    AuthenticatedTeacherReceiveError, TeacherControlSequenceGuard,
+    receive_guarded_authenticated_teacher_control,
 };
 use classmesh_protocol::control_wire::ControlEnvelope;
 use classmesh_security::PrincipalId;
@@ -32,7 +33,6 @@ pub enum TeacherPlaybackSessionEvent {
 pub enum TeacherPlaybackSessionError {
     Retired,
     ControlSessionMismatch,
-    ControlSequenceRegression,
     Receive(AuthenticatedTeacherReceiveError),
     Diagnostic(TeacherPlaybackDiagnosticError),
 }
@@ -49,7 +49,7 @@ pub struct TeacherPlaybackSessionOwner {
     source_id: MonitoringSourceId,
     binding: TeacherPlaybackBinding,
     active: bool,
-    last_control_sequence: Option<u64>,
+    control_sequence_guard: TeacherControlSequenceGuard,
     projection: TeacherPlaybackUiProjection,
 }
 
@@ -64,7 +64,7 @@ impl TeacherPlaybackSessionOwner {
             source_id,
             binding,
             active: true,
-            last_control_sequence: None,
+            control_sequence_guard: TeacherControlSequenceGuard::default(),
             projection: TeacherPlaybackUiProjection::new(source_id, binding)?,
         })
     }
@@ -96,7 +96,7 @@ impl TeacherPlaybackSessionOwner {
 
     fn retire_current(&mut self) {
         self.active = false;
-        self.last_control_sequence = None;
+        self.control_sequence_guard = TeacherControlSequenceGuard::default();
         self.projection.revoke(self.source_id, self.binding);
     }
 
@@ -124,11 +124,12 @@ impl TeacherPlaybackSessionOwner {
             self.retire_current();
             return Err(TeacherPlaybackSessionError::ControlSessionMismatch);
         }
-        let verified = match receive_authenticated_teacher_control(
+        let verified = match receive_guarded_authenticated_teacher_control(
             session,
             authorization,
             self.expected_student,
             wall_clock_ms,
+            &mut self.control_sequence_guard,
         )
         .await
         {
@@ -138,19 +139,6 @@ impl TeacherPlaybackSessionOwner {
                 return Err(TeacherPlaybackSessionError::Receive(error));
             }
         };
-        // The single owning dispatcher must fence the outer control sequence
-        // across playback AND unrelated control envelopes. The inner receiver
-        // sequence is independent and cannot authorize a replayed envelope.
-        let outer_sequence = verified.envelope().sequence;
-        if outer_sequence == 0
-            || self
-                .last_control_sequence
-                .is_some_and(|previous| outer_sequence <= previous)
-        {
-            self.retire_current();
-            return Err(TeacherPlaybackSessionError::ControlSequenceRegression);
-        }
-        self.last_control_sequence = Some(outer_sequence);
         if verified.receiver_playback().is_none() {
             return Ok(TeacherPlaybackSessionEvent::OtherControl(
                 verified.into_envelope(),
