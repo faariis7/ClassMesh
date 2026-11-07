@@ -165,6 +165,9 @@ impl TeacherEguiShell {
     fn poll_control_bridge(&mut self) {
         // Drain bounded transport observations before considering any UI action.
         // A dropped producer means disconnect, never persistent liveness.
+        // Never forward an action while a terminal disconnect may still be
+        // queued behind a saturated observation batch. Drain in a later frame.
+        let mut event_batch_exhausted = true;
         for _ in 0..64 {
             let event = match self.control_bridge.as_ref() {
                 Some(bridge) => bridge.events.try_recv(),
@@ -181,7 +184,10 @@ impl TeacherEguiShell {
                 Ok(TeacherUiControlEvent::Disconnected) => {
                     self.clear_teacher_interaction_context();
                 }
-                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Empty) => {
+                    event_batch_exhausted = false;
+                    break;
+                }
                 Err(TryRecvError::Disconnected) => {
                     self.clear_teacher_interaction_context();
                     self.control_bridge = None;
@@ -191,7 +197,7 @@ impl TeacherEguiShell {
         }
         // A UI click is merely a request. A full/closed channel must never
         // imply that the authenticated Service accepted or applied it.
-        if self.teacher_interaction_context.is_none() {
+        if event_batch_exhausted || self.teacher_interaction_context.is_none() {
             return;
         }
         if let Some(action) = self.take_pending_action() {
@@ -828,6 +834,31 @@ mod tests {
         app.poll_control_bridge();
         assert!(app.teacher_interaction_context.is_none());
         assert!(app.control_bridge.is_none());
+    }
+
+    #[test]
+    fn bridge_backlog_must_not_dispatch_before_terminal_disconnect() {
+        use std::sync::mpsc::sync_channel;
+        let (event_tx, event_rx) = sync_channel(128);
+        let (action_tx, action_rx) = sync_channel(1);
+        let mut app = TeacherEguiShell::default();
+        app.attach_control_bridge(TeacherUiControlBridge::new(event_rx, action_tx));
+        for _ in 0..65 {
+            event_tx
+                .send(TeacherUiControlEvent::Authenticated(interaction_context(
+                    BTreeSet::new(),
+                )))
+                .unwrap();
+        }
+        event_tx.send(TeacherUiControlEvent::Disconnected).unwrap();
+        app.queue_action(TeacherUiAction::SelectDevice(Some(MonitoringSourceId(7))));
+        app.poll_control_bridge();
+        assert!(
+            action_rx.try_recv().is_err(),
+            "must not dispatch while control events remain unread"
+        );
+        app.poll_control_bridge();
+        assert!(app.teacher_interaction_context.is_none());
     }
 
     #[test]
