@@ -232,14 +232,10 @@ impl TeacherEguiShell {
             != Some((context.source_id, context.control_session_id))
         {
             reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
-            // Focus carries a device ID but no session epoch. A new authenticated
-            // session must not inherit a previously queued UI intent.
-            if matches!(
-                self.pending_action,
-                Some(TeacherUiAction::Focus(_) | TeacherUiAction::TeacherInteraction(_))
-            ) {
-                self.pending_action = None;
-            }
+            // Every queued action belongs to the old session, including
+            // SelectDevice and presentation intents with no session epoch.
+            // Never forward them into a newly authenticated QUIC session.
+            self.pending_action = None;
             // Diagnostics intents carry a source but no session epoch.
             // A reconnect must not replay a pre-reconnect override.
             self.retire_pending_diagnostics_override();
@@ -893,6 +889,41 @@ mod tests {
         );
         app.poll_control_bridge();
         assert!(app.teacher_interaction_context.is_none());
+    }
+
+    #[test]
+    fn authenticated_session_rotation_retires_pending_selection() {
+        use std::sync::mpsc::sync_channel;
+        let (event_tx, event_rx) = sync_channel(4);
+        let (action_tx, action_rx) = sync_channel(1);
+        action_tx.send(TeacherUiAction::SelectDevice(None)).unwrap();
+        let mut app = TeacherEguiShell::default();
+        app.attach_control_bridge(TeacherUiControlBridge::new(event_rx, action_tx));
+        let first = interaction_context(BTreeSet::new());
+        let mut next = interaction_context(BTreeSet::new());
+        next.control_session_id = first.control_session_id + 1;
+        event_tx
+            .send(TeacherUiControlEvent::Authenticated(first))
+            .unwrap();
+        app.queue_action(TeacherUiAction::SelectDevice(Some(MonitoringSourceId(7))));
+        app.poll_control_bridge();
+        assert!(
+            app.pending_action.is_some(),
+            "backpressure should retain intent"
+        );
+        event_tx
+            .send(TeacherUiControlEvent::Authenticated(next))
+            .unwrap();
+        let _ = action_rx.try_recv().unwrap();
+        app.poll_control_bridge();
+        assert!(
+            app.pending_action.is_none(),
+            "old session intent must be retired"
+        );
+        assert!(
+            action_rx.try_recv().is_err(),
+            "must not forward stale selection"
+        );
     }
 
     #[test]
