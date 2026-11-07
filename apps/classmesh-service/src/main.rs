@@ -421,9 +421,8 @@ mod windows_service_app {
 
                     match pipe.try_clone() {
                         Ok(reader) => {
-                            self.capabilities
-                                .activate(worker_generation, process_id, session.0);
-                            let _capability_reader = spawn_worker_capability_reader(
+                            let (reader_start_tx, reader_start_rx) = std::sync::mpsc::channel();
+                            let capability_reader = spawn_worker_capability_reader(
                                 reader,
                                 WorkerCapabilityReaderRuntime {
                                     capabilities: Arc::clone(&self.capabilities),
@@ -450,12 +449,42 @@ mod windows_service_app {
                                     process_id,
                                     session_id: session.0,
                                 },
+                                reader_start_rx,
                             );
+                            if let Err(error) = capability_reader {
+                                eprintln!(
+                                    "Worker capability reader thread could not start for pid {process_id}: {error}"
+                                );
+                                let _ = process.terminate(1);
+                                let decision = self.watchdog.launch_failed(session);
+                                return self.apply_restart_decision(decision);
+                            }
+                            self.capabilities
+                                .activate(worker_generation, process_id, session.0);
+                            // The reader must not observe EOF or a report before its
+                            // generation is active; otherwise an early clear can be lost.
+                            if reader_start_tx.send(()).is_err() {
+                                eprintln!(
+                                    "Worker capability reader exited before activation for pid {process_id}; refusing Worker activation"
+                                );
+                                let _ = self.capabilities.clear_report_if_current(
+                                    worker_generation,
+                                    process_id,
+                                    session.0,
+                                );
+                                let _ = process.terminate(1);
+                                let decision = self.watchdog.launch_failed(session);
+                                return self.apply_restart_decision(decision);
+                            }
                         }
                         Err(error) => {
                             eprintln!(
-                                "Worker capability IPC reader unavailable; control remains active: {error}"
+                                "Worker capability IPC reader unavailable for pid {process_id}, session {}; refusing unaudited Worker activation: {error}",
+                                session.0
                             );
+                            let _ = process.terminate(1);
+                            let decision = self.watchdog.launch_failed(session);
+                            return self.apply_restart_decision(decision);
                         }
                     }
 
@@ -1034,7 +1063,8 @@ mod windows_service_app {
         pipe: NamedPipeServer,
         runtime: WorkerCapabilityReaderRuntime,
         identity: WorkerCapabilityReaderIdentity,
-    ) -> thread::JoinHandle<()> {
+        start_rx: std::sync::mpsc::Receiver<()>,
+    ) -> std::io::Result<thread::JoinHandle<()>> {
         let WorkerCapabilityReaderRuntime {
             capabilities,
             encoder_capability_cache,
@@ -1050,7 +1080,10 @@ mod windows_service_app {
             process_id: expected_process_id,
             session_id: expected_session_id,
         } = identity;
-        thread::spawn(move || {
+        thread::Builder::new().name("classmesh-worker-capability-reader".into()).spawn(move || {
+            if start_rx.recv().is_err() {
+                return;
+            }
             let mut decoder = IpcFrameDecoder::default();
             let mut buffer = [0_u8; 4096];
 
