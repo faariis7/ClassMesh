@@ -153,6 +153,25 @@ impl ServiceTeacherCommandReceiver {
             .map_err(ServiceTeacherCommandError::Dispatch)
     }
 
+    /// Run one authenticated command through a Service-owned async executor.
+    /// The executor receives only an already authorized command; it must apply
+    /// its own Worker/session ownership checks before performing side effects.
+    /// An executor error is terminal for this receiver: callers must drop the
+    /// connection rather than retrying a consumed command or replaying it.
+    pub async fn receive_and_execute<F, Fut, E>(
+        &mut self,
+        authorization: &LiveAuthorizationStore,
+        now_unix_ms: impl Fn() -> u64,
+        execute: F,
+    ) -> Result<Result<(), E>, ServiceTeacherCommandError>
+    where
+        F: FnOnce(PrivilegedControlCommand) -> Fut,
+        Fut: std::future::Future<Output = Result<(), E>>,
+    {
+        let command = self.receive_authorized(authorization, now_unix_ms).await?;
+        Ok(execute(command).await)
+    }
+
     fn verify(
         &self,
         authorization: &LiveAuthorizationStore,
