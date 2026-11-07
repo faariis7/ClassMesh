@@ -839,6 +839,7 @@ struct WorkerCapabilitySnapshot {
     process_id: u32,
     session_id: u32,
     flags: u8,
+    report_received: bool,
 }
 
 #[derive(Debug, Default)]
@@ -858,6 +859,7 @@ impl WorkerCapabilityState {
             process_id,
             session_id,
             flags: 0,
+            report_received: false,
         };
     }
 
@@ -887,6 +889,7 @@ impl WorkerCapabilityState {
             return false;
         }
         snapshot.flags = 0;
+        snapshot.report_received = false;
         true
     }
 
@@ -943,7 +946,18 @@ impl WorkerCapabilityState {
             flags |= WORKER_CAP_TELEMETRY_GRANT_V11;
         }
         snapshot.flags = flags;
+        snapshot.report_received = true;
         true
+    }
+
+    #[cfg(any(test, feature = "experimental-trusted-policy"))]
+    pub(crate) fn runtime_report(&self) -> Option<(u64, u32, u32)> {
+        let snapshot = *self.lock_snapshot();
+        (snapshot.report_received && snapshot.generation != 0).then_some((
+            snapshot.generation,
+            snapshot.process_id,
+            snapshot.session_id,
+        ))
     }
 
     /// Optional telemetry grant is only safe for the exact authenticated
@@ -4847,6 +4861,21 @@ mod tests {
         assert!(!state.receiver_telemetry_grant_supported(7, 44, 8));
         assert!(!state.has_native_playback_grant());
         assert!(!state.receiver_telemetry_grant_supported(6, 42, 7));
+    }
+
+    #[test]
+    fn runtime_report_requires_received_message_and_clears_on_restart_or_eof() {
+        let state = WorkerCapabilityState::default();
+        state.activate(1, 42, 7);
+        assert_eq!(state.runtime_report(), None);
+        assert!(state.apply_report(1, 42, 7, false, false, false));
+        assert_eq!(state.runtime_report(), Some((1, 42, 7)));
+        state.activate(2, 43, 7);
+        assert!(!state.apply_report(1, 42, 7, true, true, true));
+        assert_eq!(state.runtime_report(), None);
+        assert!(state.apply_report(2, 43, 7, false, false, false));
+        assert!(state.clear_report_if_current(2, 43, 7));
+        assert_eq!(state.runtime_report(), None);
     }
 
     #[test]

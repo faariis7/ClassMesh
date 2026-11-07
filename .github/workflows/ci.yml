@@ -117,6 +117,13 @@ jobs:
       - name: Test opt-in trusted Service config parser
         run: cargo test -p classmesh-service --features experimental-trusted-policy trusted_config_parser_matches_existing_version_one_contract
 
+      - name: Test decoded Worker runtime report lifecycle
+        run: cargo test -p classmesh-service --features experimental-trusted-policy runtime_report_requires_received_message
+
+      - name: Test nonmutating Worker runtime qualification entry
+        shell: pwsh
+        run: .\scripts\tests\mvp_service_worker_runtime.ps1
+
       - name: Build opt-in trusted policy Service
         run: cargo build -p classmesh-service --features experimental-trusted-policy
 

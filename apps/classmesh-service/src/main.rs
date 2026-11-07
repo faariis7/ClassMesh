@@ -2,6 +2,8 @@
 mod control_runtime;
 #[cfg(windows)]
 pub mod file_transfer_storage;
+#[cfg(all(windows, feature = "experimental-trusted-policy"))]
+mod ipc_qualification;
 #[cfg(windows)]
 pub mod monitoring;
 #[cfg(windows)]
@@ -2127,6 +2129,16 @@ mod windows_service_app {
             FileTransferSourceSession::new(WindowsFileTransferOutboxSource::new(outbox_root));
 
         let worker_capabilities = Arc::new(WorkerCapabilityState::default());
+        #[cfg(feature = "experimental-trusted-policy")]
+        let _runtime_probe =
+            match crate::ipc_qualification::RuntimeProbe::start(Arc::clone(&worker_capabilities)) {
+                Ok(probe) => probe,
+                Err(error) => {
+                    eprintln!("Service runtime qualification rejected: {error}");
+                    set_stopped_with_exit(&status_handle, 5)?;
+                    return Ok(());
+                }
+            };
         let presentation_feedback = PresentationFeedbackBus::default();
         let control_dispatch = ControlRuntimeDispatch::new(
             input_channels,

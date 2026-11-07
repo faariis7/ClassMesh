@@ -129,6 +129,67 @@ pub struct NamedPipeServer {
 unsafe impl Send for NamedPipeServer {}
 
 impl NamedPipeServer {
+    /// Opt-in, read-only runtime qualification. Never accepts control input.
+    /// Only the exact OS-observed operator PID/session receives a small snapshot.
+    /// Dedicated diagnostic thread only; pending I/O is cancelled and drained.
+    #[cfg(feature = "experimental-trusted-policy")]
+    pub fn publish_runtime_probe(
+        name: &str,
+        user_sid: &[u8],
+        observer_pid: u32,
+        observer_session: u32,
+        snapshot: impl FnOnce() -> Vec<u8>,
+    ) -> Result<(), PipeError> {
+        use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_OUTBOUND;
+        let mut pipe = Self::create_for_user_mode(
+            name,
+            user_sid,
+            PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+        )?;
+        let peer = pipe.wait_for_overlapped_peer(Duration::from_millis(250))?;
+        if observer_pid == 0
+            || peer.process_id() != observer_pid
+            || peer.session_id() != observer_session
+        {
+            return Err(PipeError {
+                stage: "RuntimeProbeObserverIdentity",
+                win32_error: 5,
+            });
+        }
+        let bytes = snapshot();
+        if bytes.is_empty() || bytes.len() > 128 {
+            return Err(PipeError {
+                stage: "RuntimeProbeSnapshotSize",
+                win32_error: 87,
+            });
+        }
+        let count = telemetry_overlapped_io(
+            pipe.handle,
+            Duration::from_millis(250),
+            "RuntimeProbeWrite",
+            |request| {
+                // SAFETY: immutable bounded buffer and OVERLAPPED remain alive
+                // until the shared primitive completes or cancels AND drains I/O.
+                unsafe {
+                    WriteFile(
+                        pipe.handle,
+                        bytes.as_ptr(),
+                        bytes.len() as u32,
+                        null_mut(),
+                        request,
+                    )
+                }
+            },
+        )?;
+        if count != bytes.len() {
+            return Err(PipeError {
+                stage: "RuntimeProbePartialWrite",
+                win32_error: 29,
+            });
+        }
+        Ok(())
+    }
+
     pub fn create_for_user(name: &str, user_sid: &[u8]) -> Result<Self, PipeError> {
         Self::create_for_user_mode(
             name,
