@@ -9,13 +9,17 @@ use crate::authorization::AuthenticatedControlGuard;
 use crate::dispatch::{
     PrivilegedControlCommand, PrivilegedDispatchError, dispatch_privileged_command,
 };
-use crate::handshake::{EstablishedAuthenticatedPeer, EstablishedControlSession};
+use crate::handshake::{
+    EstablishedAuthenticatedPeer, EstablishedControlSession, HandshakeError, ServerHelloConfig,
+    server_hello_enrolled,
+};
 use crate::live_authorization::{LiveAuthorizationError, LiveAuthorizationStore};
 use crate::peer_identity::{PeerIdentityError, authenticated_peer_identity};
 use crate::quic::{ControlChannel, ControlTransportError};
 
 #[derive(Debug)]
 pub enum ServiceTeacherCommandError {
+    Handshake(HandshakeError),
     WrongRole,
     WrongPrincipalKind,
     InvalidSession,
@@ -35,6 +39,38 @@ pub struct ServiceTeacherCommandReceiver {
 }
 
 impl ServiceTeacherCommandReceiver {
+    /// Accept an enrolled Teacher Hello and bind the resulting session to this
+    /// exact QUIC connection and channel. The Service must supply a TLS endpoint
+    /// requiring enrolled client certificates; no unauthenticated Hello fallback.
+    pub async fn accept_enrolled(
+        connection: Connection,
+        mut channel: ControlChannel,
+        config: &ServerHelloConfig,
+        authorization: &LiveAuthorizationStore,
+        now_unix_ms: u64,
+    ) -> Result<Self, ServiceTeacherCommandError> {
+        let snapshot = authorization
+            .snapshot()
+            .map_err(ServiceTeacherCommandError::Authorization)?;
+        let (established, peer) = server_hello_enrolled(
+            &connection,
+            &mut channel,
+            config,
+            snapshot.store(),
+            now_unix_ms,
+        )
+        .await
+        .map_err(ServiceTeacherCommandError::Handshake)?;
+        Self::new(
+            connection,
+            channel,
+            &established,
+            peer,
+            authorization,
+            now_unix_ms,
+        )
+    }
+
     /// `established` and `peer` MUST come from `server_hello_enrolled` on this
     /// very connection/channel, with enrolled mTLS client verification enabled.
     /// The constructor rechecks the live credential before any command is read.
