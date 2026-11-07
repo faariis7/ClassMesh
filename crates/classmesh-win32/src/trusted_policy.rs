@@ -172,6 +172,20 @@ pub fn provision_installed(epoch: u64, bytes: &[u8]) -> io::Result<()> {
 pub fn provision_startup_inputs(identity: &[u8], config: &[u8]) -> io::Result<()> {
     provision_inputs_at("ClassMesh", identity, config)
 }
+/// Validate the same candidate policy, machine identity, non-exportable CNG key
+/// and control config used by `provision_fresh_install`, but WITHOUT creating
+/// any ProgramData/Registry state. This checks candidate consistency only; it
+/// does not establish an issuer trust root, Service readiness, or that the
+/// destination namespace is unused. The caller must separately verify those.
+pub fn check_fresh_install_candidate(
+    epoch: u64,
+    policy: &[u8],
+    identity: &[u8],
+    config: &[u8],
+) -> io::Result<()> {
+    preflight_fresh_install(epoch, policy, identity, config)
+}
+
 /// Provision all required inputs of a fresh opt-in Service installation. No
 /// filesystem or Registry creation occurs before the candidate policy, machine
 /// credential, non-exportable CNG key and config agree. A crash after the first
@@ -1122,6 +1136,21 @@ mod tests {
         }))
         .unwrap();
         let config = br#"{"version":1,"bind_address":"127.0.0.1:5151","multicast_interface":null}"#;
+        // A valid candidate must be inspectable WITHOUT installing a Registry
+        // anchor, creating a ProgramData root, or altering the existing VM.
+        check_fresh_install_candidate(1, &policy, &identity, config).unwrap();
+        assert!(
+            !policy_root.exists(),
+            "preflight must not create policy root"
+        );
+        assert!(
+            !startup_root.exists(),
+            "preflight must not create startup root"
+        );
+        assert!(check_fresh_install_candidate(1, &policy, b"bad identity", config).is_err());
+        assert!(check_fresh_install_candidate(1, &policy, &identity, b"bad config").is_err());
+        assert!(!policy_root.exists());
+        assert!(!startup_root.exists());
         // An existing policy must not become startable by a failed attempt to
         // seed startup inputs for a different fresh installation.
         let existing_scope = format!("ClassMesh-anchor-probe-fresh-existing-{suffix}");
