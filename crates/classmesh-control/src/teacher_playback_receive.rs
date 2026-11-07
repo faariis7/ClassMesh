@@ -239,6 +239,15 @@ pub async fn receive_guarded_authenticated_teacher_control(
     {
         return Err(AuthenticatedTeacherReceiveError::GuardConnectionMismatch);
     }
+    // A new Hello on the same transport is a different control session.
+    // Reject a stale guard before reading its first frame, just as for a
+    // reconnect on a different QUIC connection.
+    if guard
+        .bound_session_id
+        .is_some_and(|bound| bound != session.established.control_session_id)
+    {
+        return Err(AuthenticatedTeacherReceiveError::GuardSessionMismatch);
+    }
     let verified = receive_authenticated_teacher_control(
         session,
         authorization,
@@ -739,6 +748,52 @@ mod tests {
         ));
         assert_eq!(guard.last_sequence, Some(7));
         assert_eq!(guard.bound_connection_id, Some(11));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_guard_rejects_new_hello_before_consuming_frame() -> TestResult {
+        let mut pair = pair(true).await?;
+        let mut guard = TeacherControlSequenceGuard::default();
+        let first = report(SESSION);
+        pair.server_channel.send(&first).await?;
+        let _ = receive_guarded_authenticated_teacher_control(
+            &mut pair.client,
+            &pair.authorization,
+            EXPECTED,
+            || 150,
+            &mut guard,
+        )
+        .await?;
+
+        // Simulate a new authenticated Hello on the same QUIC transport.
+        // Its first frame must remain available to the new session owner.
+        pair.client.established.control_session_id = SESSION + 1;
+        pair.server_channel.send(&report(SESSION + 1)).await?;
+        assert!(matches!(
+            receive_guarded_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150,
+                &mut guard,
+            )
+            .await,
+            Err(AuthenticatedTeacherReceiveError::GuardSessionMismatch)
+        ));
+        let mut fresh_guard = TeacherControlSequenceGuard::default();
+        assert!(
+            receive_guarded_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150,
+                &mut fresh_guard,
+            )
+            .await?
+            .receiver_playback()
+            .is_some()
+        );
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
