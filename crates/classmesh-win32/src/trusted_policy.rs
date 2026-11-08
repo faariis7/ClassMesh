@@ -14,8 +14,8 @@ use crate::{
     registry_epoch::RegistryAnchor,
 };
 use classmesh_security::{
-    AuthorizationStore, CredentialFingerprint, PrincipalId, persistence::DurableAuthorizationState,
-    policy_epoch::encode_bound_policy_checkpoint,
+    AuthorizationStore, CredentialFingerprint, PrincipalId, PrincipalKind,
+    persistence::DurableAuthorizationState, policy_epoch::encode_bound_policy_checkpoint,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -320,8 +320,18 @@ fn verify_identity_authorization(
     }
     let leaf = identity.certificate_chain_der.first().ok_or_else(denied)?;
     let fingerprint = CredentialFingerprint(Sha256::digest(leaf).into());
-    if authorization.principal_for_credential(fingerprint, now_ms)
-        != Some(PrincipalId(identity.principal_id))
+    let device_id = PrincipalId(identity.principal_id);
+    if authorization.principal_for_credential(fingerprint, now_ms) != Some(device_id) {
+        return Err(denied());
+    }
+    // The protected LocalSystem Service is a StudentDevice endpoint. Merely
+    // finding a valid credential in the policy is insufficient: a separately
+    // enrolled Teacher or an Administrator/Worker/Service principal must never
+    // be rebound as the device's machine identity, even when its certificate
+    // and non-exportable CNG key match exactly.
+    if !authorization
+        .principal(device_id)
+        .is_some_and(|principal| principal.kind == PrincipalKind::StudentDevice)
     {
         return Err(denied());
     }
