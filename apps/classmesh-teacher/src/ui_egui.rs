@@ -65,6 +65,15 @@ fn section_scroll_salt(section: TeacherUiSection) -> Option<&'static str> {
 /// observations. A bound context alone never proves Service liveness.
 #[derive(Debug)]
 pub enum TeacherUiControlEvent {
+    /// Atomic first verified observation: never publish partial auth/binding
+    /// when the bounded UI queue can accept only part of a bootstrap.
+    VerifiedBootstrap {
+        context: TeacherInteractionUiContext,
+        binding: TeacherPlaybackBinding,
+        source_id: MonitoringSourceId,
+        verified: AuthenticatedTeacherControlMessage,
+        received_at: Instant,
+    },
     Authenticated(TeacherInteractionUiContext),
     /// Establish a read-only playback binding only after the trusted QUIC
     /// owner has resolved its student-to-source mapping and live session.
@@ -278,6 +287,29 @@ impl TeacherEguiShell {
                 None => return,
             };
             match event {
+                Ok(TeacherUiControlEvent::VerifiedBootstrap {
+                    context,
+                    binding,
+                    source_id,
+                    verified,
+                    received_at,
+                }) => {
+                    // One bounded queue slot owns the complete first observation.
+                    // A full queue cannot leave partial authenticated UI state.
+                    if context.control_session_id != 0 {
+                        self.set_teacher_interaction_context(context);
+                        if self
+                            .set_receiver_playback_context(source_id, binding)
+                            .is_ok()
+                        {
+                            let _ = self.accept_verified_receiver_playback(
+                                source_id,
+                                &verified,
+                                received_at,
+                            );
+                        }
+                    }
+                }
                 Ok(TeacherUiControlEvent::Authenticated(context)) => {
                     if context.control_session_id == 0 {
                         self.clear_teacher_interaction_context();
