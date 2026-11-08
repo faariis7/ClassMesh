@@ -1,5 +1,8 @@
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 pub mod clipboard_bounds;
+// Observation/model only; neither Service nor Worker enables this lab feature.
+#[cfg(feature = "experimental-service-peer-probe")]
+pub mod service_peer_probe;
 pub mod sensitive_pipe_name;
 pub mod telemetry_pipe_name;
 pub use sensitive_pipe_name::{
