@@ -369,7 +369,6 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
     Ok(())
 }
 
-
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_window_pump_routes_real_quic_proof_with_original_receipt_instant() -> TestResult {
@@ -446,7 +445,10 @@ async fn native_window_pump_exposes_backpressure_and_preserves_nonplayback() -> 
         receiver.try_recv()?,
         TeacherUiControlEvent::Disconnected
     ));
-    assert!(receiver.try_recv().is_err(), "do not claim the busy UI got a report");
+    assert!(
+        receiver.try_recv().is_err(),
+        "do not claim the busy UI got a report"
+    );
 
     let mut other = report();
     other.sequence += 1;
@@ -475,7 +477,10 @@ async fn native_window_pump_exposes_backpressure_and_preserves_nonplayback() -> 
         envelope.payload,
         Some(control_envelope::Payload::Heartbeat(_))
     ));
-    assert!(receiver.try_recv().is_err(), "no fake playback event is allowed");
+    assert!(
+        receiver.try_recv().is_err(),
+        "no fake playback event is allowed"
+    );
     Ok(())
 }
 
