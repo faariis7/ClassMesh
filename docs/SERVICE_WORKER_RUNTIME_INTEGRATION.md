@@ -1,6 +1,8 @@
 # Service / Worker runtime integration (#688, Draft #713)
 
-Base: #710 `4c08347131ff70080163ef45970609e08009c01b`.
+Original base: #710 `4c08347131ff70080163ef45970609e08009c01b`.
+Continuation synchronized the independent working branch with integration
+`c141df23caf07e58dffd4dffe2dad208dad4818e`; no PR was merged and neither integration nor main was modified.
 #700 already supplies guarded SCM registration, #708 the Worker native peer
 checks, and #712 fail-closed Service capability-reader activation. Reuse them.
 
@@ -78,8 +80,12 @@ an unrelated process or delete a replacement service by name alone.
   The protected positive/restart/Service-loss runner has not been run because
   independent review, approved enrollment/install and exclusive VM authority
   are absent. Do not infer cross-account process/token query rights from the
-  same-account hosted test. The positive run must qualify those rights without
-  granting debug privilege or weakening process/token DACLs.
+  same-account hosted test. Microsoft explicitly documents the different-account
+  debug-privilege requirement for `OpenProcessToken`; the current Worker is not
+  granted that privilege. This is an unresolved authentication-design premise,
+  not a measured native denial. Do not grant debug privilege, relax token/process
+  DACLs or substitute unrelated token handles to make qualification pass.
+  [Microsoft OpenProcessToken](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken)
 - The primary accept + Hello/Ready sequence now shares a five-second logical
   deadline on a dedicated thread, cancelled with `CancelSynchronousIo` and
   joined before any pipe/buffer is released. Late completion never activates
@@ -90,3 +96,38 @@ an unrelated process or delete a replacement service by name alone.
 - New observer/unsafe Win32 code needs independent qualified security review.
   Physical #288/#411, Teacher UI and deployed QUIC/video remain separate gates.
   No merge, production installation or rollout is authorized by this report.
+
+## Independent automated source review follow-up
+
+A separate read-only reviewer inspected the actual `4c083471..e20c11b` source.
+This is source review, not an independently approved CA/enrollment/install or VM
+authorization. It found qualification evidence/lifetime defects now fixed:
+
+- Retain Worker SafeHandle before CIM/image/token queries, require that same live
+  object before/after attestation, and recheck native creation time.
+- Require the restarted Worker to be live immediately before intentional Service
+  loss. Record actual Service and Worker exit timestamps and the Worker exit code;
+  Worker exit must follow actual Service exit, not merely injection intent.
+- On exceptional waits, timeouts or unexpected Service exit, terminate only the
+  already-attested retained Worker. Preserve the original failure and attach
+  cleanup-failure details instead of losing the cause or leaving an orphan.
+
+The regression reproduced the old function emitting
+`worker_exited_after_service_loss=true` for a child already exited before peer
+loss (RED). The fix rejects that condition before terminating the peer, and a
+second real dependent child exits only after peer loss with its actual code/time
+recorded (GREEN). Additional RED/GREEN cases reproduce and fix an orphan on a
+wait exception and on unexpected peer exit before injection. These are real OS process-lifecycle tests with report/CIM
+admission stubbed; they are explicitly **not** Service/LocalSystem/IPC proof.
+The separate reviewer independently reran all four real-child cases successfully
+and found no remaining defects in this scoped correction; the blockers below
+remain open, so this is not a completed-runtime or merge approval.
+
+The review also identified the inherited #700 ancestry guard as potentially
+over-restrictive: it treats inherit-only mutation ACEs and create-sibling rights
+on the volume root as mutation of the executable subtree. Actual VM ACLs were
+not measured. The gate remains unchanged pending a reviewed, path-specific
+policy; do not change filesystem permissions or skip the gate to run the test.
+The observer also retains only numeric operator PID/session, so operator PID
+reuse can expose its small metadata snapshot to another same-user process;
+there is no command/credential ingress. This remains a source-review limitation.

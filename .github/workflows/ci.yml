@@ -120,9 +120,11 @@ jobs:
       - name: Test decoded Worker runtime report lifecycle
         run: cargo test -p classmesh-service --features experimental-trusted-policy runtime_report_requires_received_message
 
-      - name: Test nonmutating Worker runtime qualification entry
+      - name: Test Worker runtime qualification safety
         shell: pwsh
-        run: .\scripts\tests\mvp_service_worker_runtime.ps1
+        run: |
+          .\scripts\tests\mvp_service_worker_runtime.ps1
+          .\scripts\tests\mvp_service_worker_process_lifecycle.ps1
 
       - name: Build opt-in trusted policy Service
         run: cargo build -p classmesh-service --features experimental-trusted-policy

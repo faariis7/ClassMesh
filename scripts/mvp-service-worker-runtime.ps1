@@ -60,6 +60,14 @@ function Wait-ClassMeshWorkerReport([uint32]$ServiceProcessId, [uint64]$AfterGen
 }
 
 function Assert-ClassMeshWorkerReport($Report, [string]$WorkerPath, [string]$WorkerHash) {
+    # Pin the kernel process object BEFORE any separate PID-based CIM query.
+    # Keep it live across attestation; never acquire a replacement object after
+    # checking the image/token of an earlier PID incarnation.
+    $process = [Diagnostics.Process]::GetProcessById($Report.worker_pid)
+    try {
+    $null = $process.SafeHandle
+    if ($process.HasExited) { throw 'FAIL_CLOSED: Worker exited before identity attestation' }
+    $creationTime = $process.StartTime.ToUniversalTime()
     $worker = Get-CimInstance Win32_Process -Filter "ProcessId=$($Report.worker_pid)"
     $operator = [Security.Principal.WindowsIdentity]::GetCurrent()
     $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
@@ -80,9 +88,12 @@ function Assert-ClassMeshWorkerReport($Report, [string]$WorkerPath, [string]$Wor
     if ($service.SessionId -ne 0 -or $serviceOwner.ReturnValue -ne 0 -or $serviceOwner.Sid -ne 'S-1-5-18') {
         throw 'FAIL_CLOSED: Service runtime token/session changed'
     }
-    $process = [Diagnostics.Process]::GetProcessById($Report.worker_pid)
-    $null = $process.SafeHandle # Retain the actual process object across termination/wait.
+    $process.Refresh()
+    if ($process.HasExited -or $process.StartTime.ToUniversalTime() -ne $creationTime) {
+        throw 'FAIL_CLOSED: Worker process lifetime changed during identity attestation'
+    }
     return $process
+    } catch { $process.Dispose(); throw }
 }
 
 function Invoke-ClassMeshWorkerRuntimeQualification([uint32]$ServiceProcessId, [string]$WorkerPath, [string]$WorkerHash) {
@@ -93,25 +104,46 @@ function Invoke-ClassMeshWorkerRuntimeQualification([uint32]$ServiceProcessId, [
     $worker = Assert-ClassMeshWorkerReport $first $WorkerPath $WorkerHash
     try {
         # Kill only the attested test-owned process; exercise the production watchdog.
+        if ($worker.HasExited) { throw 'FAIL_CLOSED: first Worker exited before restart injection' }
         $worker.Kill()
         if (-not $worker.WaitForExit(5000)) { throw 'Worker test termination timed out' }
     } finally { $worker.Dispose() }
     $restarted = Wait-ClassMeshWorkerReport $ServiceProcessId $first.generation
     $worker = Assert-ClassMeshWorkerReport $restarted $WorkerPath $WorkerHash
+    $lossVerified = $false
+    $lossFailure = $null
     try {
         if ($restarted.worker_pid -eq $first.worker_pid) { throw 'Worker PID was reused during qualification; evidence ambiguous' }
         # Abrupt loss must close the real retained Service process boundary in Worker.
         if ($service.HasExited) { throw 'FAIL_CLOSED: Service exited before intentional loss test' }
+        if ($worker.HasExited) { throw 'FAIL_CLOSED: Worker exited before Service loss injection' }
+        $lossInjectedAtUtc = [DateTime]::UtcNow
         $service.Kill()
         if (-not $service.WaitForExit(5000)) { throw 'Service loss timed out' }
+        $serviceExitAtUtc = $service.ExitTime.ToUniversalTime()
         if (-not $worker.WaitForExit(5000)) {
-            # The retained object is the attested test-owned Worker, even on
-            # failure. Do not leave an orphan or claim graceful loss recovery.
-            $worker.Kill()
-            if (-not $worker.WaitForExit(5000)) { throw 'FAIL_CLOSED: orphan test Worker cleanup failed' }
-            throw 'FAIL_CLOSED: Worker survived Service loss; test-owned orphan terminated'
+            throw 'FAIL_CLOSED: Worker survived Service loss'
         }
-    } finally { $worker.Dispose() }
+        $workerExitAtUtc = $worker.ExitTime.ToUniversalTime()
+        $workerExitCode = $worker.ExitCode
+        if ($workerExitAtUtc -lt $serviceExitAtUtc) { throw 'FAIL_CLOSED: Worker exit preceded actual Service exit' }
+        $lossVerified = $true
+    } catch { $lossFailure = $_; throw }
+    finally {
+        try {
+            # Cover every failure with an attested Worker, including unexpected
+            # Service exit before injection. This retained process is test-owned;
+            # never reopen a numeric PID for destructive cleanup.
+            if (-not $lossVerified -and -not $worker.HasExited) {
+                $worker.Kill()
+                if (-not $worker.WaitForExit(5000)) { throw 'FAIL_CLOSED: orphan test Worker cleanup timed out' }
+            }
+        } catch {
+            if ($null -eq $lossFailure) { throw }
+            $lossFailure.Exception.Data['RetainedWorkerCleanupFailure'] = $_.Exception.Message
+            Write-Warning "Retained test Worker cleanup failed: $($_.Exception.Message); original qualification failure preserved"
+        } finally { $worker.Dispose() }
+    }
     [pscustomobject]@{
         service_pid = $ServiceProcessId
         first_worker_pid = $first.worker_pid
@@ -121,6 +153,10 @@ function Invoke-ClassMeshWorkerRuntimeQualification([uint32]$ServiceProcessId, [
         decoded_worker_report = $true
         worker_restart = $true
         worker_exited_after_service_loss = $true
+        service_loss_injected_at_utc = $lossInjectedAtUtc.ToString('O')
+        service_exit_at_utc = $serviceExitAtUtc.ToString('O')
+        worker_exit_at_utc = $workerExitAtUtc.ToString('O')
+        worker_exit_code = $workerExitCode
         physical_qualification = $false
     } | ConvertTo-Json -Compress
     } finally { $service.Dispose() }
