@@ -369,6 +369,116 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
     Ok(())
 }
 
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_window_pump_routes_real_quic_proof_with_original_receipt_instant() -> TestResult {
+    use classmesh_teacher::receiver_playback_session::TeacherPlaybackSessionOwner;
+    use classmesh_teacher::ui_egui::{
+        TeacherPlaybackUiPumpOutcome, TeacherUiControlEvent, pump_authenticated_playback_once,
+    };
+    use std::sync::mpsc::sync_channel;
+
+    let mut pair = pair().await?;
+    let now = Instant::now();
+    let mut owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, binding())
+        .map_err(|error| format!("{error:?}"))?;
+    let (sender, receiver) = sync_channel(1);
+
+    pair.server_channel.send(&report()).await?;
+    let outcome = pump_authenticated_playback_once(
+        &mut owner,
+        &mut pair.client,
+        &pair.live_auth,
+        &sender,
+        || 150,
+        || now,
+    )
+    .await
+    .map_err(|error| format!("{error:?}"))?;
+    assert!(matches!(
+        outcome,
+        TeacherPlaybackUiPumpOutcome::PlaybackQueued
+    ));
+    let TeacherUiControlEvent::VerifiedPlayback {
+        source_id,
+        verified,
+        received_at,
+    } = receiver.try_recv()?
+    else {
+        panic!("the authenticated playback event must reach the UI queue")
+    };
+    assert_eq!(source_id, SOURCE);
+    assert_eq!(received_at, now);
+    assert_eq!(verified.receiver_playback().unwrap().presented_frames, 89);
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_window_pump_exposes_backpressure_and_preserves_nonplayback() -> TestResult {
+    use classmesh_teacher::receiver_playback_session::TeacherPlaybackSessionOwner;
+    use classmesh_teacher::ui_egui::{
+        TeacherPlaybackUiPumpOutcome, TeacherUiControlEvent, pump_authenticated_playback_once,
+    };
+    use std::sync::mpsc::sync_channel;
+
+    let mut pair = pair().await?;
+    let now = Instant::now();
+    let mut owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, binding())
+        .map_err(|error| format!("{error:?}"))?;
+    let (sender, receiver) = sync_channel(1);
+
+    sender.send(TeacherUiControlEvent::Disconnected)?;
+    pair.server_channel.send(&report()).await?;
+    let outcome = pump_authenticated_playback_once(
+        &mut owner,
+        &mut pair.client,
+        &pair.live_auth,
+        &sender,
+        || 150,
+        || now,
+    )
+    .await
+    .map_err(|error| format!("{error:?}"))?;
+    assert!(matches!(outcome, TeacherPlaybackUiPumpOutcome::WindowBusy));
+    assert!(matches!(
+        receiver.try_recv()?,
+        TeacherUiControlEvent::Disconnected
+    ));
+    assert!(receiver.try_recv().is_err(), "do not claim the busy UI got a report");
+
+    let mut other = report();
+    other.sequence += 1;
+    other.payload = Some(control_envelope::Payload::Heartbeat(
+        classmesh_protocol::control_wire::Heartbeat {
+            monotonic_time_us: 100,
+            control_session_id: CONTROL_SESSION,
+            media: 1,
+        },
+    ));
+    pair.server_channel.send(&other).await?;
+    let outcome = pump_authenticated_playback_once(
+        &mut owner,
+        &mut pair.client,
+        &pair.live_auth,
+        &sender,
+        || 150,
+        || now,
+    )
+    .await
+    .map_err(|error| format!("{error:?}"))?;
+    let TeacherPlaybackUiPumpOutcome::OtherControl(envelope) = outcome else {
+        panic!("verified non-playback must remain with the control dispatcher")
+    };
+    assert!(matches!(
+        envelope.payload,
+        Some(control_envelope::Payload::Heartbeat(_))
+    ));
+    assert!(receiver.try_recv().is_err(), "no fake playback event is allowed");
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn policy_revocation_retires_live_teacher_owner_and_hides_stale_playback() -> TestResult {
     use classmesh_teacher::receiver_playback_session::{
