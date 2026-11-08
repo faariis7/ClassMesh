@@ -1123,7 +1123,7 @@ mod tests {
         let principal = [7_u8; 32];
         let policy = serde_json::to_vec(&serde_json::json!({
             "version": 1,
-            "principals": [{"id": principal, "kind": 4, "enabled": true,
+            "principals": [{"id": principal, "kind": 2, "enabled": true,
                 "permissions": [], "credentials": [{"fingerprint": fingerprint,
                     "state": 1, "issued_at_unix_ms": 0,
                     "expires_at_unix_ms": null, "revoked_at_unix_ms": null}]}]
@@ -1139,6 +1139,24 @@ mod tests {
         // A valid candidate must be inspectable WITHOUT installing a Registry
         // anchor, creating a ProgramData root, or altering the existing VM.
         check_fresh_install_candidate(1, &policy, &identity, config).unwrap();
+        // RED regression: a legitimately signed and authorized Teacher,
+        // Administrator, Service or Worker credential must NEVER be adopted as
+        // the privileged StudentDevice machine identity for the protected SCM
+        // Service. Matching public keys alone cannot establish principal role.
+        for forbidden_kind in [1_u8, 3, 4, 5] {
+            let mut wrong_role: serde_json::Value = serde_json::from_slice(&policy).unwrap();
+            wrong_role["principals"][0]["kind"] = forbidden_kind.into();
+            assert!(
+                check_fresh_install_candidate(
+                    1,
+                    &serde_json::to_vec(&wrong_role).unwrap(),
+                    &identity,
+                    config,
+                )
+                .is_err(),
+                "principal role {forbidden_kind} must not provision as StudentDevice",
+            );
+        }
         assert!(
             !policy_root.exists(),
             "preflight must not create policy root"
