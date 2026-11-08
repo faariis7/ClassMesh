@@ -493,6 +493,51 @@ async fn native_window_pump_exposes_backpressure_and_preserves_nonplayback() -> 
 
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_enrolled_ui_owner_closes_without_a_gui_and_denies_replaced_session() -> TestResult {
+    use classmesh_teacher::connected_runtime::TeacherConnectedPlaybackError;
+    use classmesh_teacher::connected_ui_launcher::start_enrolled_teacher_ui_runtime;
+    use classmesh_teacher::receiver_playback_session::TeacherPlaybackSessionOwner;
+    use std::ops::ControlFlow;
+
+    // The production GUI's bounded action channel must be the runtime's
+    // shutdown signal. After the window disappears, no orphan QUIC owner may
+    // continue reading, sending, or advertising a live Teacher session.
+    let first_pair = pair().await?;
+    let owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, binding())
+        .map_err(|error| format!("{error:?}"))?;
+    let (bridge, thread) =
+        start_enrolled_teacher_ui_runtime(owner, first_pair.client, first_pair.live_auth, |_| {
+            ControlFlow::Continue(())
+        })?;
+    drop(bridge);
+    assert!(matches!(
+        thread.join().expect("control thread must not panic"),
+        Err(TeacherConnectedPlaybackError::ActionChannelClosed)
+    ));
+
+    // An old trusted roster binding must not bootstrap the UI through a
+    // different Hello session or reuse another connection's authority.
+    let second_pair = pair().await?;
+    let mut stale = binding();
+    stale.control_session_id += 1;
+    let owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, stale)
+        .map_err(|error| format!("{error:?}"))?;
+    let (bridge, thread) = start_enrolled_teacher_ui_runtime(
+        owner,
+        second_pair.client,
+        second_pair.live_auth,
+        |_| ControlFlow::Continue(()),
+    )?;
+    assert!(matches!(
+        thread.join().expect("control thread must not panic"),
+        Err(TeacherConnectedPlaybackError::SessionMismatch)
+    ));
+    drop(bridge);
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn continuous_teacher_runtime_requires_verified_report_before_window_authentication()
 -> TestResult {
     use classmesh_teacher::connected_runtime::drive_authenticated_teacher_playback;
