@@ -78,6 +78,13 @@ impl TeacherPlaybackSessionOwner {
         })
     }
 
+    /// The trusted enrollment/roster source this authenticated QUIC owner
+    /// was created for. Never source playback identity from a GUI selection.
+    #[must_use]
+    pub fn source_id(&self) -> MonitoringSourceId {
+        self.source_id
+    }
+
     #[must_use]
     pub fn visible(
         &self,
