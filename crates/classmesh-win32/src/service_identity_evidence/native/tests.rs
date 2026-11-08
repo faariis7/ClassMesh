@@ -99,3 +99,27 @@ fn reserved_token_information_is_never_queried_as_a_dword() {
             .contains("unsupported scalar token information class")
     );
 }
+
+#[test]
+fn restriction_history_consumes_only_the_class_specific_boolean() {
+    // Deliberately poison bytes outside ReturnLength: they are not output.
+    for (byte, expected) in [(0, false), (1, true), (0x80, true), (0xff, true)] {
+        let mut buffer = TokenData {
+            class: TokenHasRestrictions,
+            words: vec![usize::MAX],
+            used: 1,
+        };
+        unsafe { *buffer.words.as_mut_ptr().cast::<u8>() = byte };
+        assert_eq!(buffer.restriction_history().unwrap(), expected);
+        for size in [0, 2, 3, 4, size_of::<usize>()] {
+            buffer.used = size;
+            assert!(buffer.restriction_history().is_err());
+        }
+    }
+    let wrong_class = TokenData {
+        class: TokenUIAccess,
+        words: vec![0],
+        used: 1,
+    };
+    assert!(wrong_class.restriction_history().is_err());
+}
