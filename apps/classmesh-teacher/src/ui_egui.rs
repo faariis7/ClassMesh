@@ -2,6 +2,8 @@ use eframe::egui;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::Instant;
 
+use classmesh_control::client_session::ClientControlSession;
+use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::teacher_playback_receive::AuthenticatedTeacherControlMessage;
 use classmesh_protocol::Capability;
 use classmesh_protocol::control_wire::ControlEnvelope;
@@ -20,7 +22,9 @@ use crate::presentation_view::{
 use crate::receiver_playback_diagnostics::{
     TeacherPlaybackBinding, TeacherPlaybackCounters, TeacherPlaybackDiagnosticError,
 };
-use crate::receiver_playback_session::TeacherPlaybackSessionEvent;
+use crate::receiver_playback_session::{
+    TeacherPlaybackSessionError, TeacherPlaybackSessionEvent, TeacherPlaybackSessionOwner,
+};
 use crate::receiver_playback_ui::TeacherPlaybackUiProjection;
 use crate::ui_actions::{
     TeacherInteractionDraft, reset_teacher_interaction_draft, show_device_actions,
@@ -107,6 +111,57 @@ impl TeacherUiControlEvent {
             }),
             TeacherPlaybackSessionEvent::OtherControl(envelope) => Err(Box::new(envelope)),
         }
+    }
+}
+
+/// Result from forwarding one actual authenticated QUIC control message.
+#[derive(Debug)]
+pub enum TeacherPlaybackUiPumpOutcome {
+    /// The genuine verified playback observation entered the bounded UI queue.
+    PlaybackQueued,
+    /// An occupied UI queue is not successful delivery or proof of media liveness.
+    /// No stale report is retained for replay.
+    WindowBusy,
+    /// Unrelated authenticated control belongs to the owning dispatcher.
+    OtherControl(Box<ControlEnvelope>),
+}
+
+/// The caller owns this session and its sole event sender; if an error occurs,
+/// it must drop that sender and retire the session so the GUI fails closed.
+#[derive(Debug)]
+pub enum TeacherPlaybackUiPumpError {
+    Receive(Box<TeacherPlaybackSessionError>),
+    WindowDisconnected,
+}
+
+/// Receive ONE message from the already enrolled, authenticated QUIC owner
+/// and forward real signed playback to the Windows UI without a second
+/// network reader, a synthesized certificate, or a forged Service connection.
+/// The source comes only from the trusted owner/roster binding. A bounded
+/// full channel is reported explicitly, not counted as successful playback.
+pub async fn pump_authenticated_playback_once(
+    owner: &mut TeacherPlaybackSessionOwner,
+    session: &mut ClientControlSession,
+    authorization: &LiveAuthorizationStore,
+    event_tx: &SyncSender<TeacherUiControlEvent>,
+    wall_clock_ms: impl Fn() -> u64,
+    monotonic_now: impl Fn() -> Instant,
+) -> Result<TeacherPlaybackUiPumpOutcome, TeacherPlaybackUiPumpError> {
+    let source_id = owner.source_id();
+    let event = owner
+        .receive_next(session, authorization, wall_clock_ms, monotonic_now)
+        .await
+        .map_err(|error| TeacherPlaybackUiPumpError::Receive(Box::new(error)))?;
+
+    match TeacherUiControlEvent::from_verified_session_playback(source_id, event) {
+        Ok(event) => match event_tx.try_send(event) {
+            Ok(()) => Ok(TeacherPlaybackUiPumpOutcome::PlaybackQueued),
+            Err(TrySendError::Full(_)) => Ok(TeacherPlaybackUiPumpOutcome::WindowBusy),
+            Err(TrySendError::Disconnected(_)) => {
+                Err(TeacherPlaybackUiPumpError::WindowDisconnected)
+            }
+        },
+        Err(other) => Ok(TeacherPlaybackUiPumpOutcome::OtherControl(other)),
     }
 }
 
