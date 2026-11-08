@@ -1,5 +1,6 @@
 pub mod classroom_grid;
 pub mod classroom_view;
+pub mod connected_command;
 #[cfg(windows)]
 pub mod connected_runtime;
 pub mod device_diagnostics;
