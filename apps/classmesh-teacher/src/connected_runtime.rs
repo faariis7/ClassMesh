@@ -110,21 +110,18 @@ pub async fn drive_authenticated_teacher_playback(
                 ..
             } => {
                 if !bootstrapped {
-                    // All three observations must originate from a *real*
-                    // verified network report. If bounded queue space is
-                    // unavailable the owned sender is dropped on return.
                     send_window_event(
                         &events,
-                        TeacherUiControlEvent::Authenticated(context.clone()),
-                    )?;
-                    send_window_event(
-                        &events,
-                        TeacherUiControlEvent::PlaybackBound {
-                            source_id: owner.source_id(),
+                        TeacherUiControlEvent::VerifiedBootstrap {
+                            context: context.clone(),
                             binding,
+                            source_id: owner.source_id(),
+                            verified,
+                            received_at,
                         },
                     )?;
                     bootstrapped = true;
+                    continue;
                 }
                 send_window_event(
                     &events,
