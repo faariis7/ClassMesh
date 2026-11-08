@@ -1,6 +1,8 @@
 //! Authenticated Teacher interaction send path over the already-owned QUIC session.
 //! No new listener, credentials, enrollment, or concurrent control-channel reader.
 
+use std::sync::mpsc::{Receiver, TryRecvError};
+
 use classmesh_control::NegotiatedHello;
 use classmesh_control::client_session::ClientControlSession;
 use classmesh_control::live_authorization::{LiveAuthorizationError, LiveAuthorizationStore};
@@ -17,7 +19,7 @@ use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::receiver_playback_diagnostics::TeacherPlaybackBinding;
 use crate::receiver_playback_session::TeacherPlaybackSessionOwner;
-use crate::ui_shell::TeacherInteractionUiAction;
+use crate::ui_shell::{TeacherInteractionUiAction, TeacherUiAction};
 
 /// No local GUI snapshot grants permission. The active enrolled QUIC peer,
 /// live authorization snapshot and Service remain the trust authorities.
@@ -230,6 +232,116 @@ impl TeacherCommandSender {
         session
             .connection
             .close(0u32.into(), b"teacher command session retired");
+    }
+}
+
+/// A one-shot, non-blocking transfer from the native UI's bounded action
+/// mailbox to the authenticated session's *existing* QUIC owner. Non-network
+/// actions are returned unchanged for the central dispatcher; no second
+/// network reader or local source of authority is created here.
+#[derive(Debug)]
+pub enum QueuedTeacherUiAction {
+    Empty,
+    Closed,
+    Local(TeacherUiAction),
+    Interaction(TeacherInteractionUiAction),
+}
+
+pub fn next_queued_teacher_ui_action(actions: &Receiver<TeacherUiAction>) -> QueuedTeacherUiAction {
+    match actions.try_recv() {
+        Ok(TeacherUiAction::TeacherInteraction(action)) => {
+            QueuedTeacherUiAction::Interaction(action)
+        }
+        Ok(action) => QueuedTeacherUiAction::Local(action),
+        Err(TryRecvError::Empty) => QueuedTeacherUiAction::Empty,
+        Err(TryRecvError::Disconnected) => QueuedTeacherUiAction::Closed,
+    }
+}
+
+/// `Written` means only that the authenticated QUIC send completed, not that
+/// the Student Service accepted or executed the request. Its authoritative
+/// acknowledgement must be correlated by the sole incoming reader.
+#[derive(Debug)]
+pub enum TeacherUiCommandDispatch {
+    Empty,
+    Closed,
+    Local(TeacherUiAction),
+    Written(u64),
+}
+
+/// Call only from the owner of the authenticated client session between
+/// reads; never concurrently with a second session reader. Invalid or stale
+/// requests are rejected by `TeacherCommandSender`, and failed writes cannot
+/// be requeued or retried under an ambiguous sequence number.
+pub async fn dispatch_next_queued_teacher_ui_action(
+    actions: &Receiver<TeacherUiAction>,
+    owner: &TeacherPlaybackSessionOwner,
+    session: &mut ClientControlSession,
+    authorization: &LiveAuthorizationStore,
+    sender: &mut TeacherCommandSender,
+    now_ms: impl Fn() -> u64,
+) -> Result<TeacherUiCommandDispatch, TeacherCommandSendError> {
+    match next_queued_teacher_ui_action(actions) {
+        QueuedTeacherUiAction::Empty => Ok(TeacherUiCommandDispatch::Empty),
+        QueuedTeacherUiAction::Closed => Ok(TeacherUiCommandDispatch::Closed),
+        QueuedTeacherUiAction::Local(action) => Ok(TeacherUiCommandDispatch::Local(action)),
+        QueuedTeacherUiAction::Interaction(action) => sender
+            .send(owner, session, authorization, &action, now_ms)
+            .await
+            .map(TeacherUiCommandDispatch::Written),
+    }
+}
+
+#[cfg(test)]
+mod queued_ui_action_tests {
+    use super::*;
+    use crate::ui_shell::{TeacherInteractionUiAction, TeacherUiAction};
+    use classmesh_protocol::control_wire::{
+        TeacherInteractionRequest, TeacherMessage, teacher_interaction_request,
+    };
+    use std::sync::mpsc::sync_channel;
+
+    #[test]
+    fn queued_ui_actions_are_delivered_once_and_non_network_intents_are_preserved() {
+        let (tx, rx) = sync_channel(2);
+        assert!(matches!(
+            next_queued_teacher_ui_action(&rx),
+            QueuedTeacherUiAction::Empty
+        ));
+        tx.try_send(TeacherUiAction::SelectDevice(Some(MonitoringSourceId(7))))
+            .unwrap();
+        assert!(matches!(
+            next_queued_teacher_ui_action(&rx),
+            QueuedTeacherUiAction::Local(TeacherUiAction::SelectDevice(Some(MonitoringSourceId(
+                7
+            ))))
+        ));
+        let interaction = TeacherInteractionUiAction {
+            source_id: MonitoringSourceId(7),
+            control_session_id: 55,
+            request: TeacherInteractionRequest {
+                action: Some(teacher_interaction_request::Action::Message(
+                    TeacherMessage {
+                        text_utf8: "Classroom message".to_owned(),
+                    },
+                )),
+            },
+        };
+        tx.try_send(TeacherUiAction::TeacherInteraction(interaction.clone()))
+            .unwrap();
+        match next_queued_teacher_ui_action(&rx) {
+            QueuedTeacherUiAction::Interaction(received) => assert_eq!(received, interaction),
+            other => panic!("expected exact session-bound interaction; got {other:?}"),
+        }
+        assert!(matches!(
+            next_queued_teacher_ui_action(&rx),
+            QueuedTeacherUiAction::Empty
+        ));
+        drop(tx);
+        assert!(matches!(
+            next_queued_teacher_ui_action(&rx),
+            QueuedTeacherUiAction::Closed
+        ));
     }
 }
 
@@ -558,13 +670,48 @@ mod authenticated_quic_tests {
                 .await,
             Err(TeacherCommandSendError::SourceMismatch)
         ));
-        assert_eq!(
-            sender
-                .send(&owner, &mut session, &live_auth, &action(SOURCE), || 150)
-                .await
-                .map_err(|e| format!("{e:?}"))?,
-            1
-        );
+        let (ui_sender, ui_actions) = std::sync::mpsc::sync_channel(2);
+        assert!(matches!(
+            dispatch_next_queued_teacher_ui_action(
+                &ui_actions,
+                &owner,
+                &mut session,
+                &live_auth,
+                &mut sender,
+                || 150
+            )
+            .await
+            .map_err(|e| format!("{e:?}"))?,
+            TeacherUiCommandDispatch::Empty
+        ));
+        ui_sender.try_send(TeacherUiAction::SelectDevice(Some(SOURCE)))?;
+        assert!(matches!(
+            dispatch_next_queued_teacher_ui_action(
+                &ui_actions,
+                &owner,
+                &mut session,
+                &live_auth,
+                &mut sender,
+                || 150
+            )
+            .await
+            .map_err(|e| format!("{e:?}"))?,
+            TeacherUiCommandDispatch::Local(TeacherUiAction::SelectDevice(Some(SOURCE)))
+        ));
+        ui_sender.try_send(TeacherUiAction::TeacherInteraction(action(SOURCE)))?;
+        assert!(matches!(
+            dispatch_next_queued_teacher_ui_action(
+                &ui_actions,
+                &owner,
+                &mut session,
+                &live_auth,
+                &mut sender,
+                || 150
+            )
+            .await
+            .map_err(|e| format!("{e:?}"))?,
+            TeacherUiCommandDispatch::Written(1)
+        ));
         assert_eq!(
             sender
                 .send(&owner, &mut session, &live_auth, &action(SOURCE), || 150)
