@@ -409,7 +409,11 @@ async fn native_window_pump_routes_real_quic_proof_with_original_receipt_instant
     };
     assert_eq!(source_id, SOURCE);
     assert_eq!(received_at, now);
-    assert_eq!(verified.receiver_playback().unwrap().presented_frames, 89);
+    assert!(matches!(
+        verified.receiver_playback().unwrap().payload.as_ref(),
+        Some(control_envelope::Payload::ReceiverPlaybackDiagnostic(diagnostic))
+            if diagnostic.presented_frames == 89
+    ));
     Ok(())
 }
 
