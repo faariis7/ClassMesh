@@ -85,6 +85,12 @@ impl TeacherPlaybackSessionOwner {
         self.source_id
     }
 
+    /// Exact presentation/stream/epoch binding assigned by the roster owner.
+    #[must_use]
+    pub fn binding(&self) -> TeacherPlaybackBinding {
+        self.binding
+    }
+
     #[must_use]
     pub fn visible(
         &self,
