@@ -11,8 +11,14 @@ name = "classmesh-trusted-provision"
 path = "src/bin/trusted_provision.rs"
 required-features = ["experimental-trusted-policy"]
 
+[[bin]]
+name = "classmesh-service-identity-evidence"
+path = "src/bin/service_identity_evidence.rs"
+required-features = ["experimental-service-identity-evidence"]
+
 [features]
 default = []
+experimental-service-identity-evidence = ["dep:serde", "dep:serde_json"]
 experimental-trusted-policy = ["dep:classmesh-security", "dep:classmesh-identity-win", "dep:serde", "dep:serde_json", "dep:sha2", "dep:rustls"]
 
 [dependencies]
@@ -32,6 +38,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
     "Win32_System_LibraryLoader",
     "Win32_System_DataExchange",
     "Win32_System_Environment",
@@ -43,6 +50,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Shutdown",
     "Win32_System_StationsAndDesktops",
     "Win32_System_Threading",
+    "Win32_System_Services",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

@@ -1,0 +1,55 @@
+diff --git a/crates/classmesh-win32/src/service_peer_probe/native.rs b/crates/classmesh-win32/src/service_peer_probe/native.rs
+index e5593e8..ad4dc7f 100644
+--- a/crates/classmesh-win32/src/service_peer_probe/native.rs
++++ b/crates/classmesh-win32/src/service_peer_probe/native.rs
+@@ -468 +468 @@ impl UnqualifiedObservation<'_> {
+-        self.image.recheck()
++        finish_observation(&self.process, || self.image.recheck())
+@@ -471,0 +472,12 @@ impl UnqualifiedObservation<'_> {
++// Extract the existing check-before-slow-work ordering for an independent
++// deterministic regression. This RED patch deliberately preserves the bug.
++fn finish_observation(
++    process: &ObservedProcess,
++    verify: impl FnOnce() -> io::Result<()>,
++) -> io::Result<()> {
++    if !process.is_alive()? {
++        return Err(denied("candidate process exited"));
++    }
++    verify()
++}
++
+diff --git a/crates/classmesh-win32/src/service_peer_probe/native/tests.rs b/crates/classmesh-win32/src/service_peer_probe/native/tests.rs
+index 3013df3..1798ca6 100644
+--- a/crates/classmesh-win32/src/service_peer_probe/native/tests.rs
++++ b/crates/classmesh-win32/src/service_peer_probe/native/tests.rs
+@@ -298,0 +299,30 @@ fn scm_absence_is_an_error_without_registration_or_fallback() {
++#[test]
++fn identity_evidence_race_exit_during_final_sample_is_rejected() {
++    let mut child = spawn_child();
++    let process = ObservedProcess::open(child.0.id()).unwrap();
++    let result = finish_observation(&process, || {
++        child.0.kill().unwrap();
++        wait_child(&mut child);
++        Ok(())
++    });
++    assert!(
++        result.is_err(),
++        "IDENTITY_EVIDENCE_RACE: exited process accepted after final sample"
++    );
++}
++
++#[test]
++fn identity_evidence_race_original_image_error_is_preserved() {
++    let mut child = spawn_child();
++    let process = ObservedProcess::open(child.0.id()).unwrap();
++    let result = finish_observation(&process, || {
++        child.0.kill().unwrap();
++        wait_child(&mut child);
++        Err(io::Error::other("original image observation failure"))
++    });
++    assert_eq!(
++        result.unwrap_err().to_string(),
++        "original image observation failure"
++    );
++}
++

@@ -36,6 +36,12 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: Test ordinary-caller evidence refusal rules
+        run: cargo test -p classmesh-win32 --features experimental-service-identity-evidence service_identity_evidence --lib
+
+      - name: Clippy ordinary-caller evidence
+        run: cargo clippy -p classmesh-win32 --all-targets --features experimental-service-identity-evidence -- -D warnings
+
       - name: Synthetic media lab
         run: cargo run -p classmesh-lab --bin classmesh-lab
 
@@ -89,6 +95,60 @@ jobs:
           }
           New-Item -ItemType Directory -Path phase10-native-telemetry-bundle -Force | Out-Null
           Copy-Item -LiteralPath $bins[0].FullName -Destination phase10-native-telemetry-bundle/classmesh-win32-native-tests.exe
+
+      - name: Test native unchanged-caller evidence
+        timeout-minutes: 3
+        run: cargo test -p classmesh-win32 --features experimental-service-identity-evidence service_identity_evidence --lib
+
+      - name: Test streaming evidence output bounds
+        shell: pwsh
+        run: .\scripts\tests\service_identity_output_bounds.ps1
+
+      - name: Clippy native identity evidence
+        run: cargo clippy -p classmesh-win32 --all-targets --features experimental-service-identity-evidence -- -D warnings
+
+      - name: Build read-only identity evidence tool
+        run: cargo build -p classmesh-win32 --features experimental-service-identity-evidence --bin classmesh-service-identity-evidence
+
+      - name: Record actual current-context measurement or refusal
+        timeout-minutes: 2
+        shell: pwsh
+        env:
+          CLASSMESH_EVIDENCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: .\scripts\tests\service_identity_evidence.ps1 -Binary target/debug/classmesh-service-identity-evidence.exe -EvidenceDir "${{ runner.temp }}/service-identity-evidence"
+
+      - name: Stage exact read-only evidence toolkit
+        shell: pwsh
+        run: |
+          $kit = '${{ runner.temp }}/service-identity-evidence/toolkit'
+          New-Item -ItemType Directory -Path "$kit/scripts/tests" -Force | Out-Null
+          Copy-Item target/debug/classmesh-service-identity-evidence.exe "$kit/"
+          Copy-Item scripts/tests/service_identity_evidence.ps1 "$kit/scripts/tests/"
+          Copy-Item scripts/service-identity-output.ps1 "$kit/scripts/"
+          Copy-Item docs/SERVICE_WORKER_SECURITY_ACCEPTANCE.md "$kit/"
+
+      - name: Upload non-authorizing identity evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: service-identity-evidence
+          path: ${{ runner.temp }}/service-identity-evidence/
+          if-no-files-found: error
+          retention-days: 7
+
+      # An exact detached review checkout, NOT a merge/import into integration.
+      - name: Checkout isolated 716 race review source
+        uses: actions/checkout@v5
+        with:
+          ref: d546360dd60c4108f91b48d51c9f3b9fbc4357a7
+          path: target/identity-race-source
+          persist-credentials: false
+
+      - name: Prove actual owned-process race RED then GREEN
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/identity-race-build
+        run: .\scripts\tests\service_identity_race_patch.ps1 -SourceDir "${{ github.workspace }}/target/identity-race-source" -PatchDir "${{ github.workspace }}/patches/service-identity-evidence"
 
       - name: Build media diagnostics
         run: cargo build -p classmesh-worker --bin classmesh-media-probe --bin classmesh-media-receiver --bin classmesh-media-recovery-probe --release
