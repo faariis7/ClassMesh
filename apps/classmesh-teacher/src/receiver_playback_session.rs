@@ -31,6 +31,9 @@ pub enum TeacherPlaybackSessionEvent {
     Playback {
         counters: TeacherPlaybackCounters,
         verified: AuthenticatedTeacherControlMessage,
+        /// The monotonic instant sampled when the signed QUIC report was
+        /// accepted, not when a potentially backlogged GUI dequeues it.
+        received_at: Instant,
     },
     OtherControl(ControlEnvelope),
 }
@@ -150,10 +153,15 @@ impl TeacherPlaybackSessionOwner {
                 verified.into_envelope(),
             ));
         }
+        let received_at = monotonic_now();
         let counters = self
             .projection
-            .accept_verified_from_source(self.source_id, &verified, monotonic_now())
+            .accept_verified_from_source(self.source_id, &verified, received_at)
             .map_err(TeacherPlaybackSessionError::Diagnostic)?;
-        Ok(TeacherPlaybackSessionEvent::Playback { counters, verified })
+        Ok(TeacherPlaybackSessionEvent::Playback {
+            counters,
+            verified,
+            received_at,
+        })
     }
 }

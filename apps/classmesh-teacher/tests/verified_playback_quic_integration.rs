@@ -308,7 +308,15 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
         .await
         .map_err(|error| format!("{error:?}"))?;
     match event {
-        TeacherPlaybackSessionEvent::Playback { counters, verified } => {
+        TeacherPlaybackSessionEvent::Playback {
+            counters,
+            verified,
+            received_at,
+        } => {
+            assert_eq!(
+                received_at, now,
+                "pass the original verified receive instant to the UI"
+            );
             assert_eq!(counters.presented_frames, 89);
             assert!(verified.receiver_playback().is_some());
             let mut ui_projection = TeacherPlaybackUiProjection::new(SOURCE, binding())
@@ -319,6 +327,33 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
                     .map_err(|error| format!("{error:?}"))?,
                 counters
             );
+            #[cfg(windows)]
+            {
+                // The real authenticated QUIC proof must cross the typed UI
+                // boundary with the original receive instant, not a newly
+                // sampled timestamp that could refresh a delayed report.
+                use classmesh_teacher::ui_egui::TeacherUiControlEvent;
+                let event = TeacherUiControlEvent::from_verified_session_playback(
+                    SOURCE,
+                    TeacherPlaybackSessionEvent::Playback {
+                        counters,
+                        verified,
+                        received_at,
+                    },
+                )
+                .expect("verified playback must be routed to the UI");
+                let TeacherUiControlEvent::VerifiedPlayback {
+                    source_id,
+                    verified: proof,
+                    received_at: ui_received_at,
+                } = event
+                else {
+                    panic!("verified QUIC playback was not routed to the window");
+                };
+                assert_eq!(source_id, SOURCE);
+                assert_eq!(ui_received_at, now);
+                assert!(proof.receiver_playback().is_some());
+            }
         }
         TeacherPlaybackSessionEvent::OtherControl(_) => {
             panic!("playback report was not dispatched")

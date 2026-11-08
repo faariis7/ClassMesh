@@ -4,7 +4,6 @@ use std::time::Instant;
 
 use classmesh_control::teacher_playback_receive::AuthenticatedTeacherControlMessage;
 use classmesh_protocol::Capability;
-#[cfg(test)]
 use classmesh_protocol::control_wire::ControlEnvelope;
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
@@ -21,6 +20,7 @@ use crate::presentation_view::{
 use crate::receiver_playback_diagnostics::{
     TeacherPlaybackBinding, TeacherPlaybackCounters, TeacherPlaybackDiagnosticError,
 };
+use crate::receiver_playback_session::TeacherPlaybackSessionEvent;
 use crate::receiver_playback_ui::TeacherPlaybackUiProjection;
 use crate::ui_actions::{
     TeacherInteractionDraft, reset_teacher_interaction_draft, show_device_actions,
@@ -84,6 +84,30 @@ pub enum TeacherUiControlEvent {
         binding: TeacherPlaybackBinding,
     },
     Disconnected,
+}
+
+impl TeacherUiControlEvent {
+    /// Preserve the original receive timestamp and private authenticated
+    /// QUIC proof when passing a playback observation to the native window.
+    /// Unrelated control messages go back to the owning dispatcher, never
+    /// silently become playback or get dropped by the UI adapter.
+    pub fn from_verified_session_playback(
+        source_id: MonitoringSourceId,
+        event: TeacherPlaybackSessionEvent,
+    ) -> Result<Self, ControlEnvelope> {
+        match event {
+            TeacherPlaybackSessionEvent::Playback {
+                verified,
+                received_at,
+                ..
+            } => Ok(Self::VerifiedPlayback {
+                source_id,
+                verified,
+                received_at,
+            }),
+            TeacherPlaybackSessionEvent::OtherControl(envelope) => Err(envelope),
+        }
+    }
 }
 
 /// A bounded handoff to the real QUIC owner. No synthetic success or network
@@ -1021,6 +1045,16 @@ mod tests {
             app.playback.is_none(),
             "exact owner teardown must retire playback"
         );
+    }
+
+    #[test]
+    fn playback_event_adapter_returns_unrelated_control_without_forging_ui_media() {
+        let envelope = playback_frame();
+        let result = TeacherUiControlEvent::from_verified_session_playback(
+            MonitoringSourceId(7),
+            TeacherPlaybackSessionEvent::OtherControl(envelope.clone()),
+        );
+        assert_eq!(result.unwrap_err(), envelope);
     }
 
     #[test]
