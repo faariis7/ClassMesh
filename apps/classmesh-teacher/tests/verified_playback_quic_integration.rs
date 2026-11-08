@@ -64,7 +64,10 @@ async fn pair() -> Result<Pair, Box<dyn Error + Send + Sync>> {
     let mut client_endpoint =
         Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
     client_endpoint.set_default_client_config(client_config_with_roots(roots)?);
-    let capabilities = BTreeSet::from([Capability::ReceiverPlaybackDiagnostics]);
+    let capabilities = BTreeSet::from([
+        Capability::ReceiverPlaybackDiagnostics,
+        Capability::TeacherMessage,
+    ]);
     let negotiated = capabilities.clone();
     let server_task = tokio::spawn(async move {
         let conn = accept(&server).await.map_err(|e| e.to_string())?;
@@ -572,6 +575,107 @@ async fn continuous_teacher_runtime_requires_verified_report_before_window_authe
     assert_eq!(received_at, now);
     assert!(verified.receiver_playback().is_some());
     assert!(receiver.try_recv().is_err());
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authenticated_duplex_runtime_sends_ui_command_while_receiver_remains_waiting() -> TestResult
+{
+    use classmesh_protocol::control_wire::{
+        TeacherInteractionRequest, TeacherMessage, teacher_interaction_request,
+    };
+    use classmesh_teacher::connected_runtime::{
+        TeacherDuplexDispatch, drive_authenticated_teacher_duplex,
+    };
+    use classmesh_teacher::receiver_playback_session::TeacherPlaybackSessionOwner;
+    use classmesh_teacher::ui_egui::TeacherUiControlEvent;
+    use classmesh_teacher::ui_shell::{TeacherInteractionUiAction, TeacherUiAction};
+    use std::ops::ControlFlow;
+    use std::sync::mpsc::sync_channel;
+    use tokio::time::timeout;
+
+    let mut pair = pair().await?;
+    pair.server_channel.send(&report()).await?;
+    let Pair {
+        _client_endpoint,
+        _server_endpoint,
+        _server_connection,
+        mut server_channel,
+        client,
+        live_auth,
+    } = pair;
+    let owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, binding())
+        .map_err(|err| format!("{err:?}"))?;
+    let (event_tx, event_rx) = sync_channel(8);
+    let (action_tx, action_rx) = sync_channel(4);
+    let now = Instant::now();
+    let runtime = tokio::spawn(async move {
+        let mut owner = owner;
+        drive_authenticated_teacher_duplex(
+            &mut owner,
+            client,
+            &live_auth,
+            event_tx,
+            action_rx,
+            |event| match event {
+                TeacherDuplexDispatch::OtherControl(envelope)
+                    if matches!(
+                        envelope.payload,
+                        Some(control_envelope::Payload::Heartbeat(_))
+                    ) =>
+                {
+                    ControlFlow::Break(())
+                }
+                TeacherDuplexDispatch::CommandWritten(_) => ControlFlow::Continue(()),
+                TeacherDuplexDispatch::LocalAction(_) => ControlFlow::Continue(()),
+                TeacherDuplexDispatch::OtherControl(_) => ControlFlow::Continue(()),
+            },
+            (|| 150, || now),
+        )
+        .await
+    });
+    let first = tokio::task::spawn_blocking(move || event_rx.recv_timeout(Duration::from_secs(3)))
+        .await??;
+    assert!(
+        matches!(first, TeacherUiControlEvent::VerifiedBootstrap { .. }),
+        "must not accept or send UI commands before the first verified playback report"
+    );
+
+    action_tx.send(TeacherUiAction::TeacherInteraction(
+        TeacherInteractionUiAction {
+            source_id: SOURCE,
+            control_session_id: CONTROL_SESSION,
+            request: TeacherInteractionRequest {
+                action: Some(teacher_interaction_request::Action::Message(
+                    TeacherMessage {
+                        text_utf8: "Live classroom message".into(),
+                    },
+                )),
+            },
+        },
+    ))?;
+    // The server emits no additional message until the Teacher command is
+    // received. A read-only driver would deadlock here.
+    let received = timeout(Duration::from_secs(3), server_channel.receive()).await??;
+    assert_eq!(received.control_session_id, CONTROL_SESSION);
+    assert!(matches!(
+        received.payload,
+        Some(control_envelope::Payload::TeacherInteractionRequest(_))
+    ));
+    let mut finished = report();
+    finished.sequence = 3;
+    finished.payload = Some(control_envelope::Payload::Heartbeat(
+        classmesh_protocol::control_wire::Heartbeat {
+            monotonic_time_us: 44,
+            control_session_id: CONTROL_SESSION,
+            media: 1,
+        },
+    ));
+    server_channel.send(&finished).await?;
+    timeout(Duration::from_secs(3), runtime)
+        .await??
+        .map_err(|err| format!("{err:?}"))?;
     Ok(())
 }
 
