@@ -2,9 +2,10 @@ use eframe::egui;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::Instant;
 
+use classmesh_control::client_session::ClientControlSession;
+use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::teacher_playback_receive::AuthenticatedTeacherControlMessage;
 use classmesh_protocol::Capability;
-#[cfg(test)]
 use classmesh_protocol::control_wire::ControlEnvelope;
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
@@ -20,6 +21,9 @@ use crate::presentation_view::{
 };
 use crate::receiver_playback_diagnostics::{
     TeacherPlaybackBinding, TeacherPlaybackCounters, TeacherPlaybackDiagnosticError,
+};
+use crate::receiver_playback_session::{
+    TeacherPlaybackSessionError, TeacherPlaybackSessionEvent, TeacherPlaybackSessionOwner,
 };
 use crate::receiver_playback_ui::TeacherPlaybackUiProjection;
 use crate::ui_actions::{
@@ -62,7 +66,103 @@ fn section_scroll_salt(section: TeacherUiSection) -> Option<&'static str> {
 #[derive(Debug)]
 pub enum TeacherUiControlEvent {
     Authenticated(TeacherInteractionUiContext),
+    /// Establish a read-only playback binding only after the trusted QUIC
+    /// owner has resolved its student-to-source mapping and live session.
+    /// This carries no counters and does not prove a media stream is active.
+    PlaybackBound {
+        source_id: MonitoringSourceId,
+        binding: TeacherPlaybackBinding,
+    },
+    /// An already verified enrolled QUIC receive result. The message proof
+    /// cannot be constructed from a bare caller-supplied ControlEnvelope.
+    /// Preserve the original receive time so a delayed channel cannot make
+    /// old playback counters look fresh when they reach the window.
+    VerifiedPlayback {
+        source_id: MonitoringSourceId,
+        verified: AuthenticatedTeacherControlMessage,
+        received_at: Instant,
+    },
+    /// Exact-bound retirement must never revoke a replacement stream/epoch.
+    PlaybackRetired {
+        source_id: MonitoringSourceId,
+        binding: TeacherPlaybackBinding,
+    },
     Disconnected,
+}
+
+impl TeacherUiControlEvent {
+    /// Preserve the original receive timestamp and private authenticated
+    /// QUIC proof when passing a playback observation to the native window.
+    /// Unrelated control messages go back to the owning dispatcher, never
+    /// silently become playback or get dropped by the UI adapter.
+    pub fn from_verified_session_playback(
+        source_id: MonitoringSourceId,
+        event: TeacherPlaybackSessionEvent,
+    ) -> Result<Self, Box<ControlEnvelope>> {
+        match event {
+            TeacherPlaybackSessionEvent::Playback {
+                verified,
+                received_at,
+                ..
+            } => Ok(Self::VerifiedPlayback {
+                source_id,
+                verified,
+                received_at,
+            }),
+            TeacherPlaybackSessionEvent::OtherControl(envelope) => Err(Box::new(envelope)),
+        }
+    }
+}
+
+/// Result from forwarding one actual authenticated QUIC control message.
+#[derive(Debug)]
+pub enum TeacherPlaybackUiPumpOutcome {
+    /// The genuine verified playback observation entered the bounded UI queue.
+    PlaybackQueued,
+    /// An occupied UI queue is not successful delivery or proof of media liveness.
+    /// No stale report is retained for replay.
+    WindowBusy,
+    /// Unrelated authenticated control belongs to the owning dispatcher.
+    OtherControl(Box<ControlEnvelope>),
+}
+
+/// The caller owns this session and its sole event sender; if an error occurs,
+/// it must drop that sender and retire the session so the GUI fails closed.
+#[derive(Debug)]
+pub enum TeacherPlaybackUiPumpError {
+    Receive(Box<TeacherPlaybackSessionError>),
+    WindowDisconnected,
+}
+
+/// Receive ONE message from the already enrolled, authenticated QUIC owner
+/// and forward real signed playback to the Windows UI without a second
+/// network reader, a synthesized certificate, or a forged Service connection.
+/// The source comes only from the trusted owner/roster binding. A bounded
+/// full channel is reported explicitly, not counted as successful playback.
+pub async fn pump_authenticated_playback_once(
+    owner: &mut TeacherPlaybackSessionOwner,
+    session: &mut ClientControlSession,
+    authorization: &LiveAuthorizationStore,
+    event_tx: &SyncSender<TeacherUiControlEvent>,
+    wall_clock_ms: impl Fn() -> u64,
+    monotonic_now: impl Fn() -> Instant,
+) -> Result<TeacherPlaybackUiPumpOutcome, TeacherPlaybackUiPumpError> {
+    let source_id = owner.source_id();
+    let event = owner
+        .receive_next(session, authorization, wall_clock_ms, monotonic_now)
+        .await
+        .map_err(|error| TeacherPlaybackUiPumpError::Receive(Box::new(error)))?;
+
+    match TeacherUiControlEvent::from_verified_session_playback(source_id, event) {
+        Ok(event) => match event_tx.try_send(event) {
+            Ok(()) => Ok(TeacherPlaybackUiPumpOutcome::PlaybackQueued),
+            Err(TrySendError::Full(_)) => Ok(TeacherPlaybackUiPumpOutcome::WindowBusy),
+            Err(TrySendError::Disconnected(_)) => {
+                Err(TeacherPlaybackUiPumpError::WindowDisconnected)
+            }
+        },
+        Err(other) => Ok(TeacherPlaybackUiPumpOutcome::OtherControl(other)),
+    }
 }
 
 /// A bounded handoff to the real QUIC owner. No synthetic success or network
@@ -184,6 +284,26 @@ impl TeacherEguiShell {
                     } else {
                         self.set_teacher_interaction_context(context);
                     }
+                }
+                Ok(TeacherUiControlEvent::PlaybackBound { source_id, binding }) => {
+                    // A new binding alone cannot show any counters. Reject it
+                    // unless the current authenticated session and capability
+                    // match this exact source and presentation lifecycle.
+                    let _ = self.set_receiver_playback_context(source_id, binding);
+                }
+                Ok(TeacherUiControlEvent::VerifiedPlayback {
+                    source_id,
+                    verified,
+                    received_at,
+                }) => {
+                    // Only the network boundary can construct this proof.
+                    // The UI still rechecks current source, session, negotiated
+                    // capability, binding and replay before publishing it.
+                    let _ =
+                        self.accept_verified_receiver_playback(source_id, &verified, received_at);
+                }
+                Ok(TeacherUiControlEvent::PlaybackRetired { source_id, binding }) => {
+                    let _ = self.revoke_receiver_playback_context(source_id, binding);
                 }
                 Ok(TeacherUiControlEvent::Disconnected) => {
                     self.pending_action = None;
@@ -907,6 +1027,112 @@ mod tests {
         app.poll_control_bridge();
         assert!(app.teacher_interaction_context.is_none());
         assert!(app.control_bridge.is_none());
+    }
+
+    #[test]
+    fn playback_bridge_requires_exact_authenticated_binding_and_retires_only_exact_owner() {
+        use std::sync::mpsc::sync_channel;
+
+        let (event_tx, event_rx) = sync_channel(8);
+        let (action_tx, _action_rx) = sync_channel(1);
+        let mut app = TeacherEguiShell::default();
+        select_test_device(&mut app);
+        app.attach_control_bridge(TeacherUiControlBridge::new(event_rx, action_tx));
+
+        // No authenticated QUIC owner: even a plausible media binding is inert.
+        event_tx
+            .send(TeacherUiControlEvent::PlaybackBound {
+                source_id: MonitoringSourceId(7),
+                binding: bound_playback(),
+            })
+            .unwrap();
+        app.poll_control_bridge();
+        assert!(app.playback.is_none());
+
+        event_tx
+            .send(TeacherUiControlEvent::Authenticated(interaction_context(
+                BTreeSet::from([Capability::ReceiverPlaybackDiagnostics]),
+            )))
+            .unwrap();
+        event_tx
+            .send(TeacherUiControlEvent::PlaybackBound {
+                source_id: MonitoringSourceId(8),
+                binding: bound_playback(),
+            })
+            .unwrap();
+        app.poll_control_bridge();
+        assert!(
+            app.playback.is_none(),
+            "other-device playback must be rejected"
+        );
+
+        event_tx
+            .send(TeacherUiControlEvent::PlaybackBound {
+                source_id: MonitoringSourceId(7),
+                binding: bound_playback(),
+            })
+            .unwrap();
+        app.poll_control_bridge();
+        assert!(app.playback.is_some());
+
+        let mut old = bound_playback();
+        old.control_session_id += 1;
+        event_tx
+            .send(TeacherUiControlEvent::PlaybackRetired {
+                source_id: MonitoringSourceId(7),
+                binding: old,
+            })
+            .unwrap();
+        app.poll_control_bridge();
+        assert!(
+            app.playback.is_some(),
+            "stale teardown must not revoke current playback"
+        );
+
+        event_tx
+            .send(TeacherUiControlEvent::PlaybackRetired {
+                source_id: MonitoringSourceId(7),
+                binding: bound_playback(),
+            })
+            .unwrap();
+        app.poll_control_bridge();
+        assert!(
+            app.playback.is_none(),
+            "exact owner teardown must retire playback"
+        );
+    }
+
+    #[test]
+    fn playback_event_adapter_returns_unrelated_control_without_forging_ui_media() {
+        let envelope = playback_frame();
+        let result = TeacherUiControlEvent::from_verified_session_playback(
+            MonitoringSourceId(7),
+            TeacherPlaybackSessionEvent::OtherControl(envelope.clone()),
+        );
+        assert_eq!(*result.unwrap_err(), envelope);
+    }
+
+    #[test]
+    fn bridge_playback_sample_requires_the_real_verified_quic_proof_type() {
+        // No public API may promote a caller-created bare ControlEnvelope to
+        // playback; this event must carry the verified, privately constructed
+        // result of live authenticated QUIC receive.
+        fn event_from_verified(
+            source_id: MonitoringSourceId,
+            verified: AuthenticatedTeacherControlMessage,
+            received_at: Instant,
+        ) -> TeacherUiControlEvent {
+            TeacherUiControlEvent::VerifiedPlayback {
+                source_id,
+                verified,
+                received_at,
+            }
+        }
+        let _: fn(
+            MonitoringSourceId,
+            AuthenticatedTeacherControlMessage,
+            Instant,
+        ) -> TeacherUiControlEvent = event_from_verified;
     }
 
     #[test]
