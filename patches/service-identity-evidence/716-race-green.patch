@@ -1,0 +1,27 @@
+diff --git a/crates/classmesh-win32/src/service_peer_probe/native.rs b/crates/classmesh-win32/src/service_peer_probe/native.rs
+index ad4dc7f..00b0e98 100644
+--- a/crates/classmesh-win32/src/service_peer_probe/native.rs
++++ b/crates/classmesh-win32/src/service_peer_probe/native.rs
+@@ -469,8 +469,7 @@ impl UnqualifiedObservation<'_> {
+     }
+ }
+ 
+-// Extract the existing check-before-slow-work ordering for an independent
+-// deterministic regression. This RED patch deliberately preserves the bug.
++// Completion requires the same retained object to remain alive after slow work.
+ fn finish_observation(
+     process: &ObservedProcess,
+     verify: impl FnOnce() -> io::Result<()>,
+@@ -478,7 +477,11 @@ fn finish_observation(
+     if !process.is_alive()? {
+         return Err(denied("candidate process exited"));
+     }
+-    verify()
++    verify()?;
++    if !process.is_alive()? {
++        return Err(denied("candidate process exited during final observation"));
++    }
++    Ok(())
+ }
+ 
+ #[cfg(test)]
