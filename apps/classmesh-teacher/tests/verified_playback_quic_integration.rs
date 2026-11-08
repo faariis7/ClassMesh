@@ -488,6 +488,188 @@ async fn native_window_pump_exposes_backpressure_and_preserves_nonplayback() -> 
     Ok(())
 }
 
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn continuous_teacher_runtime_requires_verified_report_before_window_authentication() -> TestResult {
+    use classmesh_teacher::connected_runtime::drive_authenticated_teacher_playback;
+    use classmesh_teacher::receiver_playback_session::TeacherPlaybackSessionOwner;
+    use classmesh_teacher::ui_egui::TeacherUiControlEvent;
+    use std::ops::ControlFlow;
+    use std::sync::mpsc::sync_channel;
+
+    let mut pair = pair().await?;
+    let now = Instant::now();
+    let mut owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, binding())
+        .map_err(|error| format!("{error:?}"))?;
+    let (sender, receiver) = sync_channel(8);
+
+    let mut before = report();
+    before.payload = Some(control_envelope::Payload::Heartbeat(
+        classmesh_protocol::control_wire::Heartbeat {
+            monotonic_time_us: 101,
+            control_session_id: CONTROL_SESSION,
+            media: 1,
+        },
+    ));
+    pair.server_channel.send(&before).await?;
+    let mut actual = report();
+    actual.sequence = 3;
+    pair.server_channel.send(&actual).await?;
+    let mut after = before;
+    after.sequence = 4;
+    pair.server_channel.send(&after).await?;
+
+    let mut nonplayback_seen = 0;
+    drive_authenticated_teacher_playback(
+        &mut owner,
+        &mut pair.client,
+        &pair.live_auth,
+        sender,
+        |envelope| {
+            assert!(matches!(
+                envelope.payload,
+                Some(control_envelope::Payload::Heartbeat(_))
+            ));
+            nonplayback_seen += 1;
+            if nonplayback_seen == 1 {
+                assert!(
+                    receiver.try_recv().is_err(),
+                    "a negotiated Hello or unrelated heartbeat is not proof of live playback"
+                );
+                ControlFlow::Continue(())
+            } else {
+                ControlFlow::Break(())
+            }
+        },
+        || 150,
+        || now,
+    )
+    .await
+    .map_err(|error| format!("{error:?}"))?;
+
+    assert_eq!(nonplayback_seen, 2);
+    let first = receiver.try_recv()?;
+    let TeacherUiControlEvent::Authenticated(context) = first else {
+        panic!("first authenticated playback must establish the exact UI context")
+    };
+    assert_eq!(context.source_id, SOURCE);
+    assert_eq!(context.control_session_id, CONTROL_SESSION);
+    assert!(context.capabilities.contains(&Capability::ReceiverPlaybackDiagnostics));
+    let TeacherUiControlEvent::PlaybackBound { source_id, binding: bound } =
+        receiver.try_recv()?
+    else {
+        panic!("verified playback must establish its exact presentation binding")
+    };
+    assert_eq!(source_id, SOURCE);
+    assert_eq!(bound, binding());
+    let TeacherUiControlEvent::VerifiedPlayback {
+        source_id,
+        verified,
+        received_at,
+    } = receiver.try_recv()?
+    else {
+        panic!("live QUIC proof must reach the bounded UI channel")
+    };
+    assert_eq!(source_id, SOURCE);
+    assert_eq!(received_at, now);
+    assert!(verified.receiver_playback().is_some());
+    assert!(receiver.try_recv().is_err());
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn continuous_teacher_runtime_rejects_unnegotiated_or_wrong_session_before_ui_bootstrap() -> TestResult {
+    use classmesh_teacher::connected_runtime::{
+        TeacherConnectedPlaybackError, drive_authenticated_teacher_playback,
+    };
+    use classmesh_teacher::receiver_playback_session::TeacherPlaybackSessionOwner;
+    use std::ops::ControlFlow;
+    use std::sync::mpsc::sync_channel;
+
+    let mut pair = pair().await?;
+    let now = Instant::now();
+    let mut owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, binding())
+        .map_err(|error| format!("{error:?}"))?;
+    pair.client.established.negotiated.capabilities.clear();
+    let (sender, receiver) = sync_channel(8);
+    assert!(matches!(
+        drive_authenticated_teacher_playback(
+            &mut owner,
+            &mut pair.client,
+            &pair.live_auth,
+            sender,
+            |_| ControlFlow::Continue(()),
+            || 150,
+            || now,
+        )
+        .await,
+        Err(TeacherConnectedPlaybackError::NotNegotiated)
+    ));
+    assert!(receiver.try_recv().is_err());
+
+    let mut pair = pair().await?;
+    let mut wrong_binding = binding();
+    wrong_binding.control_session_id += 1;
+    let mut owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, wrong_binding)
+        .map_err(|error| format!("{error:?}"))?;
+    let (sender, receiver) = sync_channel(8);
+    assert!(matches!(
+        drive_authenticated_teacher_playback(
+            &mut owner,
+            &mut pair.client,
+            &pair.live_auth,
+            sender,
+            |_| ControlFlow::Continue(()),
+            || 150,
+            || now,
+        )
+        .await,
+        Err(TeacherConnectedPlaybackError::SessionMismatch)
+    ));
+    assert!(receiver.try_recv().is_err());
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn continuous_teacher_runtime_full_window_queue_terminates_without_silent_success() -> TestResult {
+    use classmesh_teacher::connected_runtime::{
+        TeacherConnectedPlaybackError, drive_authenticated_teacher_playback,
+    };
+    use classmesh_teacher::receiver_playback_session::TeacherPlaybackSessionOwner;
+    use std::ops::ControlFlow;
+    use std::sync::mpsc::sync_channel;
+
+    let mut pair = pair().await?;
+    let now = Instant::now();
+    let mut owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, binding())
+        .map_err(|error| format!("{error:?}"))?;
+    let (sender, receiver) = sync_channel(1);
+    pair.server_channel.send(&report()).await?;
+    assert!(matches!(
+        drive_authenticated_teacher_playback(
+            &mut owner,
+            &mut pair.client,
+            &pair.live_auth,
+            sender,
+            |_| ControlFlow::Continue(()),
+            || 150,
+            || now,
+        )
+        .await,
+        Err(TeacherConnectedPlaybackError::WindowBusy)
+    ));
+    // An initial context may have been queued, but the sole sender has been
+    // dropped: the UI drains the channel and must clear the partial context.
+    assert!(receiver.try_recv().is_ok());
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Disconnected)
+    ));
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn policy_revocation_retires_live_teacher_owner_and_hides_stale_playback() -> TestResult {
     use classmesh_teacher::receiver_playback_session::{
