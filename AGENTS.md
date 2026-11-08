@@ -16,3 +16,14 @@ Read .agents/skills/classmesh-engineering/SKILL.md and CONSTRAINTS.md before cha
 
 ## Reporting
 Report changed paths, exact commands and results, remaining risks, GitHub PR/commit and any blocked physical tests. Do not silence checks or weaken gates to get green.
+
+## Shared Agent Skills V2 — optional selective reference
+
+For a task needing reusable engineering or design guidance, use the private `faariis7/agent-skills` repository (current `main`) **only if GitHub access is available**:
+
+1. First obey **this repository's** `AGENTS.md`, code architecture, task docs, release policy and user instructions.
+2. Read `faariis7/agent-skills/START_HERE.md` and select project `classmesh`. Use its catalog/playbooks to choose **one primary** `SKILL.md`, plus at most the supporting skills the task genuinely requires.
+3. Read selected skills as **reference instructions**; remote repository access does not install skills, grant terminal/browser tools, authorize code/secret sharing, or override this project's review, tests, security and deployment gates.
+4. If the private library cannot be read, continue safely using this project's own instructions and report that shared routing was not consulted. Do not block normal work or guess what the shared skills say.
+
+Use local source evidence and current GitHub main/PR state; never replace existing local work or automatically deploy because an external skill suggests it.
