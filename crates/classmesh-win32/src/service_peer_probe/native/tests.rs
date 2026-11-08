@@ -56,8 +56,10 @@ fn owned_recipient_child() {
     // No caller can use this test as an authentication result.
     let mut line = String::new();
     BufReader::new(std::io::stdin())
+        .take(128)
         .read_line(&mut line)
         .unwrap();
+    assert!(line.ends_with('\n'), "incomplete bounded fixture transfer");
     let v: Vec<u64> = line
         .split_whitespace()
         .map(|s| s.parse().unwrap())
@@ -145,6 +147,60 @@ fn rejects_nonprocess_and_excessive_rights_without_exposing_them() {
     );
     let excessive = unsafe { OwnedHandle::from_raw_handle(raw) };
     assert!(ObservedProcess::from_readonly_handle(excessive).is_err());
+    let mut raw: HANDLE = std::ptr::null_mut();
+    assert_ne!(
+        unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                child.0.as_raw_handle(),
+                GetCurrentProcess(),
+                &mut raw,
+                super::super::READ_ONLY_PROCESS_RIGHTS,
+                1,
+                0,
+            )
+        },
+        0
+    );
+    let inheritable = unsafe { OwnedHandle::from_raw_handle(raw) };
+    assert!(ObservedProcess::from_readonly_handle(inheritable).is_err());
+}
+
+#[test]
+fn substituted_live_process_copy_fails_recipient_identity_check() {
+    let mut child = spawn_child();
+    let intended = ObservedProcess::open(std::process::id())
+        .unwrap()
+        .identity();
+    let mut remote: HANDLE = std::ptr::null_mut();
+    // The recipient gets its own process object, NOT the expected parent.
+    // It must reject even though the object is live and rights are minimal.
+    assert_ne!(
+        unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                child.0.as_raw_handle(),
+                child.0.as_raw_handle(),
+                &mut remote,
+                super::super::READ_ONLY_PROCESS_RIGHTS,
+                0,
+                0,
+            )
+        },
+        0
+    );
+    writeln!(
+        child.0.stdin.take().unwrap(),
+        "{} {} {}",
+        remote as usize,
+        intended.pid,
+        intended.created
+    )
+    .unwrap();
+    assert!(
+        !wait_child(&mut child).success(),
+        "substitution must fail in real child"
+    );
 }
 
 #[test]
@@ -162,9 +218,11 @@ fn retained_process_observes_owned_child_death_without_pid_reopen() {
 
 #[test]
 fn actual_pipe_owner_is_observed_and_closed_pipe_is_rejected() {
-    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_GENERIC_READ, OPEN_EXISTING};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_GENERIC_READ, OPEN_EXISTING, PIPE_ACCESS_OUTBOUND,
+    };
     use windows_sys::Win32::System::Pipes::{
-        CreateNamedPipeW, DisconnectNamedPipe, PIPE_ACCESS_OUTBOUND, PIPE_REJECT_REMOTE_CLIENTS,
+        CreateNamedPipeW, DisconnectNamedPipe, PIPE_REJECT_REMOTE_CLIENTS,
     };
     static SERIAL: AtomicU64 = AtomicU64::new(0);
     let name = format!(
@@ -218,7 +276,7 @@ fn image_hash_comes_from_retained_file_and_does_not_create_signer_authority() {
         std::env::temp_dir().join(format!("classmesh-peer-image-{}.bin", std::process::id()));
     std::fs::write(&path, b"abc").unwrap();
     {
-        let image = ImageSample::open(&path).unwrap();
+        let mut image = ImageSample::open(&path).unwrap();
         assert_eq!(
             image.sha256(),
             [
@@ -236,4 +294,21 @@ fn image_hash_comes_from_retained_file_and_does_not_create_signer_authority() {
 #[test]
 fn scm_absence_is_an_error_without_registration_or_fallback() {
     assert!(ServiceReader::open("ClassMesh-peer-probe-never-installed-713").is_err());
+}
+
+#[test]
+fn image_sample_rejects_relative_network_and_device_names_before_open() {
+    for path in [
+        r"relative.exe",
+        r"\\host\share\image.exe",
+        r"\\?\C:\image.exe",
+        r"\\.\NUL",
+        r"C:\image.exe:stream",
+        r"C:\folder\..\image.exe",
+    ] {
+        assert_eq!(
+            ImageSample::open(Path::new(path)).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
 }

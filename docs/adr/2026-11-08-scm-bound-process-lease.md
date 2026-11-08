@@ -21,6 +21,14 @@ SYNCHRONIZE), noninheritable, never DUPLICATE_SAME_ACCESS. Read-only handles do
 not prevent an already compromised recipient from duplicating/forwarding its
 own handle; that adversary is not made safe by this design.
 
+SCM status is the most recently reported status, and QueryServiceConfig returns
+the configuration for the **next start** if configuration changed while running.
+It does not prove the current primary token account. Future approval must cover
+an installed activation/update invariant (stopped service, exact configuration,
+reviewed image and start) or another independent current-account proof. A
+LocalSystem configuration string alone cannot replace that evidence. This is
+another reason the collector emits unqualified observations only.
+
 ## Ordering proposed for future review, not activated here
 
 1. Read a fixed local `ClassMeshService` SCM object using CONNECT and only
@@ -86,12 +94,29 @@ observations NEVER authorize IPC and do not implement a bootstrap listener or
 parse remote numeric handles. Model success is named `NeedsQualifiedReview`.
 No token handle is sent anywhere. No signing certificates, trust pins or
 protected state are created. No SCM mutation APIs are used.
+Only already-owned fixture pipe handles may be used for the prototype; connecting
+to a live product pipe can consume an admission slot and is not passive reading.
+Hosted children prove same-account mechanics, not standard-user qualification
+unless their actual token elevation/privileges are separately established.
 
 The native collector does not implement external signed authority, protected
 ancestry pinning or a complete image-to-process identity lease. Therefore it
 cannot produce an authenticated Service session even when observations match.
 This is an explicit refusal to cross the unresolved trust boundary. Native
 child/stdin tests prove mechanisms only; they do not simulate a security approval.
+
+Bounds: fixed-size SCM query buffers, bounded strings, zero-time process waits,
+128MiB streaming file ceiling and 10-second parent-side child-result deadlines.
+The observer performs synchronous local SCM/file metadata/open/read calls:
+these have **no enforced wall-clock deadline** under an RPC/filesystem/driver
+stall. Image inputs are operator-owned ordinary absolute local fixture paths;
+direct UNC/device/ADS/dot paths and leaf reparse points are rejected. Ancestor
+reparse races and mapped drives are not pinned/attested. Do not invoke this
+collector on arbitrary untrusted paths or call it a bounded production startup
+path. It is not wired into any startup. A future runtime must replace these
+calls with reviewed bounded acquisition/cancellation without abandoned I/O.
+Image recheck requires exclusive Rust mutable access to serialize its cursor;
+any failed combined recheck terminally invalidates that observation object.
 
 ## Acceptance / evidence boundary
 
@@ -109,9 +134,30 @@ child/stdin tests prove mechanisms only; they do not simulate a security approva
 - Actual cross-account LocalSystem IPC, protected SCM runtime and physical
   hardware evidence remain NOT PROVEN. Automated review is not qualified approval.
 
+## Execution record
+
+- Portable test-first commit `a47b8ee`: missing model API RED; implemented model
+  passes 4 focused tests (including 21 mismatch cases and terminal invalidation).
+- Native test-first commit `ac5e3cd`: [Windows run 42473689278](https://github.com/faariis7/ClassMesh/actions/runs/42473689278)
+  reached the new opt-in native step and failed on missing observer APIs. Its
+  default Windows workspace tests and Portable Rust passed. This is compile
+  RED, not a measured native authentication failure.
+- Local workspace tests/Clippy, opt-in model/Clippy, rustfmt and Windows GNU
+  cross-target tests compilation/Clippy pass. Cross-compilation is not Windows
+  execution. Final exact-head native runtime/full CI/security results are to be
+  recorded in the Draft PR.
+- Independent design review found no blocker for this observation-only scope.
+  Source review identified cursor concurrency and file/SCM wall-time limits;
+  mutable rechecks serialize the cursor and the explicit acquisition limitations
+  above preserve the lab-only boundary. Final code review is separate from
+  qualified security/CA/install approval, which is still absent.
+
 ## Primary sources checked 2026-11-08
 
 - [OpenProcessToken cross-account remarks](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken)
 - [DuplicateHandle destination, masks and inheritance](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle)
 - [Process access rights](https://learn.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights)
 - [SCM and service access rights](https://learn.microsoft.com/en-us/windows/win32/services/service-security-and-access-rights)
+- [SCM configuration describes next start](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryserviceconfigw)
+- [SCM status freshness and PID validity](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryservicestatusex)
+- [Actual object granted-access observation](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntqueryobject)
