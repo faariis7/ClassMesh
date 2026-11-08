@@ -297,6 +297,22 @@ fn scm_absence_is_an_error_without_registration_or_fallback() {
 }
 
 #[test]
+fn read_existing_windows_rpc_scm_configuration_without_mutation() {
+    // Read a Windows-owned service only to exercise the real SCM buffer/parser
+    // positive path. It is NOT a ClassMesh process or authentication fixture.
+    // No start/stop/configuration rights are requested or used.
+    let reader = ServiceReader::open("RpcSs").unwrap();
+    let observed = reader.observe().unwrap();
+    assert!(!observed.binary_command.is_empty());
+    assert!(!observed.account.is_empty());
+    assert_ne!(observed.pid, 0);
+    assert_eq!(
+        observed.state,
+        windows_sys::Win32::System::Services::SERVICE_RUNNING
+    );
+}
+
+#[test]
 fn image_sample_rejects_relative_network_and_device_names_before_open() {
     for path in [
         r"relative.exe",

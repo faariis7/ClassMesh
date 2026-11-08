@@ -146,6 +146,12 @@ any failed combined recheck terminally invalidates that observation object.
   cross-target tests compilation/Clippy pass. Cross-compilation is not Windows
   execution. Final exact-head native runtime/full CI/security results are to be
   recorded in the Draft PR.
+- Implementation `d52e7c1`: [Windows run 42474378137](https://github.com/faariis7/ClassMesh/actions/runs/42474378137)
+  passed default workspace tests and the new native prototype test step. This
+  executes actual minimum-right child copies, object substitution rejection,
+  retained process death, fixture pipe ownership/disconnection and retained-file
+  sampling. The follow-up adds a read-only positive SCM configuration parse
+  against existing Windows RpcSs; it is not ClassMesh/LocalSystem proof.
 - Independent design review found no blocker for this observation-only scope.
   Source review identified cursor concurrency and file/SCM wall-time limits;
   mutable rechecks serialize the cursor and the explicit acquisition limitations
