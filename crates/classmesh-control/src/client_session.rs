@@ -7,13 +7,42 @@ use tokio::time::sleep;
 
 use crate::ControlHello;
 use crate::handshake::{EstablishedControlSession, HandshakeError, client_hello};
-use crate::quic::{ControlChannel, ControlTransportError, connect, validate_reconnect_policy};
+use crate::quic::{
+    ControlChannel, ControlReceiveHalf, ControlSendHalf, ControlTransportError, connect,
+    validate_reconnect_policy,
+};
 
 #[derive(Debug)]
 pub struct ClientControlSession {
     pub connection: Connection,
     pub channel: ControlChannel,
     pub established: EstablishedControlSession,
+}
+
+/// Two *halves of the same already authenticated QUIC stream*; this is not
+/// another connection or a second network reader. The single receive owner
+/// can keep a frame read in flight while the send owner handles a UI command.
+/// Dropping a partially read receive future is unsafe; retain the reader task
+/// until it completes or retire this entire session and reconnect afresh.
+#[derive(Debug)]
+pub struct SplitClientControlSession {
+    pub connection: Connection,
+    pub sender: ControlSendHalf,
+    pub receiver: ControlReceiveHalf,
+    pub established: EstablishedControlSession,
+}
+
+impl ClientControlSession {
+    #[must_use]
+    pub fn into_split(self) -> SplitClientControlSession {
+        let (sender, receiver) = self.channel.into_split();
+        SplitClientControlSession {
+            connection: self.connection,
+            sender,
+            receiver,
+            established: self.established,
+        }
+    }
 }
 
 /// Establishes a fresh control transport + stream + Hello session with bounded retries.
@@ -190,6 +219,98 @@ mod tests {
         assert_eq!(server_session.control_session_id, 88);
         server_connection.close(0_u32.into(), b"reconnect test complete");
         server.close(0_u32.into(), b"reconnect test complete");
+        client.wait_idle().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn split_authenticated_session_writes_while_one_inbound_reader_waits() -> TestResult {
+        use classmesh_protocol::control_wire::{
+            ControlEnvelope, Heartbeat, ProtocolVersion as WireVersion, control_envelope,
+        };
+        use tokio::time::timeout;
+
+        let certified = generate_simple_self_signed(vec!["classmesh.local".to_owned()])?;
+        let certificate = CertificateDer::from(certified.cert);
+        let private_key = PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
+        let server = Endpoint::server(
+            server_config_with_certificate(vec![certificate.clone()], private_key.into())?,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        )?;
+        let server_address = server.local_addr()?;
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate)?;
+        let mut client = Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
+        client.set_default_client_config(client_config_with_roots(roots)?);
+
+        let request = ControlEnvelope {
+            control_session_id: 55,
+            sequence: 2,
+            request_id: 2,
+            protocol_version: Some(WireVersion { major: 0, minor: 2 }),
+            payload: Some(control_envelope::Payload::Heartbeat(Heartbeat {
+                monotonic_time_us: 100,
+                control_session_id: 55,
+                media: 1,
+            })),
+        };
+        let response = ControlEnvelope {
+            sequence: 3,
+            request_id: 3,
+            ..request.clone()
+        };
+        let expected_request = request.clone();
+        let expected_response = response.clone();
+        let server_task = tokio::spawn(async move {
+            let connection = accept(&server).await.map_err(|e| e.to_string())?;
+            let mut channel = ControlChannel::accept(&connection, DEFAULT_IO_TIMEOUT)
+                .await
+                .map_err(|e| e.to_string())?;
+            server_hello(
+                &mut channel,
+                &ServerHelloConfig {
+                    local_version: ProtocolVersion { major: 0, minor: 2 },
+                    local_capabilities: BTreeSet::from([Capability::UdpUnicast]),
+                    control_session_id: 55,
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            let observed = channel.receive().await.map_err(|e| e.to_string())?;
+            assert_eq!(observed, expected_request);
+            channel.send(&response).await.map_err(|e| e.to_string())?;
+            Ok::<_, String>((server, connection))
+        });
+
+        let established = connect_client_session_with_retries(
+            &client,
+            server_address,
+            "classmesh.local",
+            &hello(),
+            DEFAULT_IO_TIMEOUT,
+            RecoveryPolicy {
+                max_attempts: 1,
+                base_backoff_ms: 1,
+                max_backoff_ms: 1,
+            },
+        )
+        .await?;
+        let mut split = established.into_split();
+        assert_eq!(split.established.control_session_id, 55);
+        // Retain the actual in-flight receive future. Never cancel/drop a
+        // partially consumed length-prefix or body merely to send a command.
+        let read = split.receiver.receive();
+        tokio::pin!(read);
+        assert!(timeout(Duration::from_millis(25), &mut read).await.is_err());
+        timeout(Duration::from_secs(3), split.sender.send(&request)).await??;
+        assert_eq!(
+            timeout(Duration::from_secs(3), &mut read).await??,
+            expected_response
+        );
+        let (server, server_connection) = server_task.await??;
+        split.connection.close(0_u32.into(), b"test complete");
+        server_connection.close(0_u32.into(), b"test complete");
+        server.close(0_u32.into(), b"test complete");
         client.wait_idle().await;
         Ok(())
     }

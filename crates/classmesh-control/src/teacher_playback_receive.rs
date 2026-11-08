@@ -3,15 +3,19 @@
 
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::future::Future;
+
+use quinn::Connection;
 
 use classmesh_protocol::control_wire::{ControlEnvelope, control_envelope};
 use classmesh_protocol::{Capability, ControlRole};
 use classmesh_security::{PrincipalId, PrincipalKind};
 
 use crate::client_session::ClientControlSession;
+use crate::handshake::EstablishedControlSession;
 use crate::live_authorization::{LiveAuthorizationError, LiveAuthorizationStore};
 use crate::peer_identity::{PeerIdentityError, authenticated_peer_identity};
-use crate::quic::ControlTransportError;
+use crate::quic::{ControlReceiveHalf, ControlTransportError};
 
 /// Returns either a verified playback envelope or another verified control
 /// message for the owning session dispatcher. It never drops an unrelated
@@ -58,6 +62,27 @@ pub struct TeacherControlSequenceGuard {
 }
 
 impl TeacherControlSequenceGuard {
+    fn ensure_same_route(
+        &self,
+        connection_id: usize,
+        control_session_id: u64,
+    ) -> Result<(), AuthenticatedTeacherReceiveError> {
+        // A replaced transport or Hello must fail BEFORE reading its first frame.
+        if self
+            .bound_connection_id
+            .is_some_and(|bound| bound != connection_id)
+        {
+            return Err(AuthenticatedTeacherReceiveError::GuardConnectionMismatch);
+        }
+        if self
+            .bound_session_id
+            .is_some_and(|bound| bound != control_session_id)
+        {
+            return Err(AuthenticatedTeacherReceiveError::GuardSessionMismatch);
+        }
+        Ok(())
+    }
+
     /// Bind to one QUIC connection; a reconnect requires a fresh guard.
     pub fn admit_on_connection(
         &mut self,
@@ -138,25 +163,27 @@ impl Error for AuthenticatedTeacherReceiveError {}
 /// expiring during the read cannot be admitted with a pre-read timestamp.
 /// This does not authenticate an endpoint created with untrusted TLS settings,
 /// and does not connect a GUI or enable Phase 10 telemetry by default.
-pub async fn receive_authenticated_teacher_control(
-    session: &mut ClientControlSession,
+async fn receive_authenticated_teacher_control_over(
+    connection: &Connection,
+    established: &EstablishedControlSession,
+    incoming: impl Future<Output = Result<ControlEnvelope, ControlTransportError>>,
     authorization: &LiveAuthorizationStore,
     expected_student: PrincipalId,
     now_unix_ms: impl Fn() -> u64,
 ) -> Result<AuthenticatedTeacherControlMessage, AuthenticatedTeacherReceiveError> {
-    if session.established.negotiated.role != ControlRole::Teacher {
+    if established.negotiated.role != ControlRole::Teacher {
         return Err(AuthenticatedTeacherReceiveError::WrongRole);
     }
-    if session.established.control_session_id == 0 {
+    if established.control_session_id == 0 {
         return Err(AuthenticatedTeacherReceiveError::InvalidSession);
     }
-    let verify_peer = |session: &ClientControlSession| {
+    let verify_peer = || {
         // Never reuse a policy snapshot across awaited network I/O.
         let snapshot = authorization
             .snapshot()
             .map_err(AuthenticatedTeacherReceiveError::Authorization)?;
         let store = snapshot.store();
-        let peer = authenticated_peer_identity(&session.connection, store, now_unix_ms())
+        let peer = authenticated_peer_identity(connection, store, now_unix_ms())
             .map_err(AuthenticatedTeacherReceiveError::PeerIdentity)?;
         if peer.principal_id() != expected_student {
             return Err(AuthenticatedTeacherReceiveError::WrongPrincipal);
@@ -166,21 +193,19 @@ pub async fn receive_authenticated_teacher_control(
         }
         Ok(())
     };
-    verify_peer(session)?;
-    let envelope = session
-        .channel
-        .receive()
+    verify_peer()?;
+    let envelope = incoming
         .await
         .map_err(AuthenticatedTeacherReceiveError::Transport)?;
-    verify_peer(session)?;
+    verify_peer()?;
 
-    if envelope.control_session_id != session.established.control_session_id {
+    if envelope.control_session_id != established.control_session_id {
         return Err(AuthenticatedTeacherReceiveError::SessionMismatch);
     }
     // This channel multiplexes both playback and privileged control.
     // Never hand a TLS-verified *non-playback* envelope to its separate
     // dispatcher under a different or missing protocol contract.
-    let negotiated = session.established.negotiated.version;
+    let negotiated = established.negotiated.version;
     if !envelope.protocol_version.as_ref().is_some_and(|wire| {
         wire.major == u32::from(negotiated.major) && wire.minor == u32::from(negotiated.minor)
     }) {
@@ -203,7 +228,7 @@ pub async fn receive_authenticated_teacher_control(
         Some(control_envelope::Payload::ReceiverPlaybackDiagnostic(_))
     );
     if is_playback {
-        let contract = &session.established.negotiated;
+        let contract = &established.negotiated;
         if contract.version.major != 0
             || contract.version.minor < 8
             || !contract
@@ -219,6 +244,46 @@ pub async fn receive_authenticated_teacher_control(
     })
 }
 
+pub async fn receive_authenticated_teacher_control(
+    session: &mut ClientControlSession,
+    authorization: &LiveAuthorizationStore,
+    expected_student: PrincipalId,
+    now_unix_ms: impl Fn() -> u64,
+) -> Result<AuthenticatedTeacherControlMessage, AuthenticatedTeacherReceiveError> {
+    receive_authenticated_teacher_control_over(
+        &session.connection,
+        &session.established,
+        session.channel.receive(),
+        authorization,
+        expected_student,
+        now_unix_ms,
+    )
+    .await
+}
+
+/// The sole verified incoming owner of a post-Hello split control stream.
+/// This reads the identical envelope contract/policy as the unsplit API.
+/// Another task may write through the matching send half, but no second task
+/// may consume this reader or cancel an in-flight partially read frame.
+pub async fn receive_authenticated_teacher_control_on_split(
+    connection: &Connection,
+    established: &EstablishedControlSession,
+    receiver: &mut ControlReceiveHalf,
+    authorization: &LiveAuthorizationStore,
+    expected_student: PrincipalId,
+    now_unix_ms: impl Fn() -> u64,
+) -> Result<AuthenticatedTeacherControlMessage, AuthenticatedTeacherReceiveError> {
+    receive_authenticated_teacher_control_over(
+        connection,
+        established,
+        receiver.receive(),
+        authorization,
+        expected_student,
+        now_unix_ms,
+    )
+    .await
+}
+
 /// Receive a verified Teacher control message and enforce per-session replay
 /// ordering before it can reach the owning dispatcher. The caller must retain
 /// the same guard for the lifetime of this authenticated control session.
@@ -230,26 +295,36 @@ pub async fn receive_guarded_authenticated_teacher_control(
     now_unix_ms: impl Fn() -> u64,
     guard: &mut TeacherControlSequenceGuard,
 ) -> Result<AuthenticatedTeacherControlMessage, AuthenticatedTeacherReceiveError> {
-    // Fail closed before consuming a frame from a different authenticated
-    // connection. The old guard must never drain the reconnect's first frame.
     let connection_id = session.connection.stable_id();
-    if guard
-        .bound_connection_id
-        .is_some_and(|bound| bound != connection_id)
-    {
-        return Err(AuthenticatedTeacherReceiveError::GuardConnectionMismatch);
-    }
-    // A new Hello on the same transport is a different control session.
-    // Reject a stale guard before reading its first frame, just as for a
-    // reconnect on a different QUIC connection.
-    if guard
-        .bound_session_id
-        .is_some_and(|bound| bound != session.established.control_session_id)
-    {
-        return Err(AuthenticatedTeacherReceiveError::GuardSessionMismatch);
-    }
+    guard.ensure_same_route(connection_id, session.established.control_session_id)?;
     let verified = receive_authenticated_teacher_control(
         session,
+        authorization,
+        expected_student,
+        now_unix_ms,
+    )
+    .await?;
+    guard.admit_on_connection(connection_id, verified)
+}
+
+/// Replay-guarded split receiver. Exactly one reader retains its guard for
+/// this authenticated Hello+QUIC connection, even while the sending half is
+/// driven independently. A retired or replaced route rejects before I/O.
+pub async fn receive_guarded_authenticated_teacher_control_on_split(
+    connection: &Connection,
+    established: &EstablishedControlSession,
+    receiver: &mut ControlReceiveHalf,
+    authorization: &LiveAuthorizationStore,
+    expected_student: PrincipalId,
+    now_unix_ms: impl Fn() -> u64,
+    guard: &mut TeacherControlSequenceGuard,
+) -> Result<AuthenticatedTeacherControlMessage, AuthenticatedTeacherReceiveError> {
+    let connection_id = connection.stable_id();
+    guard.ensure_same_route(connection_id, established.control_session_id)?;
+    let verified = receive_authenticated_teacher_control_on_split(
+        connection,
+        established,
+        receiver,
         authorization,
         expected_student,
         now_unix_ms,
