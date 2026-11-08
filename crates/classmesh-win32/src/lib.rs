@@ -1,5 +1,7 @@
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 pub mod clipboard_bounds;
+#[cfg(feature = "experimental-service-identity-evidence")]
+pub mod service_identity_evidence;
 pub mod sensitive_pipe_name;
 pub mod telemetry_pipe_name;
 pub use sensitive_pipe_name::{
