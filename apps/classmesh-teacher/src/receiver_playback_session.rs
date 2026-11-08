@@ -91,6 +91,19 @@ impl TeacherPlaybackSessionOwner {
         self.binding
     }
 
+    /// Expected enrolled StudentDevice, assigned by the trusted roster owner.
+    /// An identity value is not proof of a verified TLS peer.
+    #[must_use]
+    pub fn expected_student(&self) -> PrincipalId {
+        self.expected_student
+    }
+
+    /// A prior terminal receive error or exact session retirement forbids reuse.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
     #[must_use]
     pub fn visible(
         &self,
