@@ -10,9 +10,9 @@ try {
     if (@(git status --porcelain).Count -ne 0) { throw 'Race checkout must start clean' }
     $red = Join-Path $PatchDir '716-race-red.patch'
     $green = Join-Path $PatchDir '716-race-green.patch'
-    git apply --check $red
+    git apply --check --unidiff-zero $red
     if ($LASTEXITCODE -ne 0) { throw 'RED patch does not apply exactly' }
-    git apply $red
+    git apply --unidiff-zero $red
     if ($LASTEXITCODE -ne 0) { throw 'RED patch failed' }
     $output = @(cargo test -p classmesh-win32 --features experimental-service-peer-probe identity_evidence_race_ --lib -- --nocapture 2>&1)
     $redExit = $LASTEXITCODE
@@ -21,9 +21,9 @@ try {
     if ($redExit -eq 0 -or $text -notmatch 'IDENTITY_EVIDENCE_RACE: exited process accepted after final sample' -or $text -notmatch 'test result: FAILED\. 1 passed; 1 failed') {
         throw 'RED must be the actual owned-child observation race, not compilation/environment failure'
     }
-    git apply --check $green
+    git apply --check --unidiff-zero $green
     if ($LASTEXITCODE -ne 0) { throw 'GREEN patch does not apply exactly' }
-    git apply $green
+    git apply --unidiff-zero $green
     if ($LASTEXITCODE -ne 0) { throw 'GREEN patch failed' }
     cargo test -p classmesh-win32 --features experimental-service-peer-probe identity_evidence_race_ --lib -- --nocapture
     if ($LASTEXITCODE -ne 0) { throw 'Repaired native race tests failed' }
