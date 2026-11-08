@@ -1,5 +1,110 @@
 //! Non-authorizing lab prototype. See docs/adr/2026-11-08-scm-bound-process-lease.md.
 
+#[cfg(windows)]
+pub mod native;
+
+/// Exact minimum process mask. This is not a token or duplication right.
+pub const READ_ONLY_PROCESS_RIGHTS: u32 = 0x0010_1000;
+
+/// Synthetic identity used ONLY by the rejection model, not native authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    pub created: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Complete,
+    Partial,
+    Broken,
+}
+
+/// Caller-fabricated model inputs, never accepted by product authentication.
+#[derive(Debug, Clone)]
+pub struct Evidence {
+    pub pipe_pid: u32,
+    pub pipe_session: u32,
+    pub scm_pid: u32,
+    pub scm_running_own_system: bool,
+    pub registered_image: Option<[u8; 32]>,
+    pub running_image: Option<[u8; 32]>,
+    pub service: ProcessIdentity,
+    pub recipient: ProcessIdentity,
+    pub recipient_account_matches: bool,
+    pub epoch: u64,
+    pub rights: u32,
+    pub inheritable: bool,
+    pub service_alive: bool,
+    pub transport: Transport,
+}
+
+/// Success means only that no synthetic rejection condition was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NeedsQualifiedReview;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rejected;
+
+#[derive(Debug)]
+pub struct RejectionModel {
+    service: ProcessIdentity,
+    recipient: ProcessIdentity,
+    epoch: u64,
+    image: [u8; 32],
+    rejected: bool,
+}
+
+impl RejectionModel {
+    pub fn new(
+        service: ProcessIdentity,
+        recipient: ProcessIdentity,
+        epoch: u64,
+        image: [u8; 32],
+    ) -> Result<Self, Rejected> {
+        if service.pid == 0
+            || recipient.pid == 0
+            || service.pid == recipient.pid
+            || service.created == 0
+            || recipient.created == 0
+            || epoch == 0
+        {
+            return Err(Rejected);
+        }
+        Ok(Self {
+            service,
+            recipient,
+            epoch,
+            image,
+            rejected: false,
+        })
+    }
+
+    /// Every mismatch terminally invalidates this model generation. It never
+    /// authorizes a session, even on matching caller-provided observations.
+    pub fn observe(&mut self, e: &Evidence) -> Result<NeedsQualifiedReview, Rejected> {
+        self.rejected |= e.pipe_pid != self.service.pid
+            || e.pipe_session != 0
+            || e.scm_pid != self.service.pid
+            || !e.scm_running_own_system
+            || e.registered_image != Some(self.image)
+            || e.running_image != Some(self.image)
+            || e.service != self.service
+            || e.recipient != self.recipient
+            || !e.recipient_account_matches
+            || e.epoch != self.epoch
+            || e.rights != READ_ONLY_PROCESS_RIGHTS
+            || e.inheritable
+            || !e.service_alive
+            || e.transport != Transport::Complete;
+        if self.rejected {
+            Err(Rejected)
+        } else {
+            Ok(NeedsQualifiedReview)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12,8 +117,14 @@ mod tests {
             scm_running_own_system: true,
             registered_image: Some([3; 32]),
             running_image: Some([3; 32]),
-            service: ProcessIdentity { pid: 50, created: 100 },
-            recipient: ProcessIdentity { pid: 60, created: 200 },
+            service: ProcessIdentity {
+                pid: 50,
+                created: 100,
+            },
+            recipient: ProcessIdentity {
+                pid: 60,
+                created: 200,
+            },
             recipient_account_matches: true,
             epoch: 7,
             rights: READ_ONLY_PROCESS_RIGHTS,
@@ -84,6 +195,14 @@ mod tests {
         let e = evidence();
         assert!(RejectionModel::new(e.service, e.recipient, 0, [3; 32]).is_err());
         assert!(RejectionModel::new(e.service, e.service, 7, [3; 32]).is_err());
-        assert!(RejectionModel::new(ProcessIdentity { pid: 0, created: 0 }, e.recipient, 7, [3; 32]).is_err());
+        assert!(
+            RejectionModel::new(
+                ProcessIdentity { pid: 0, created: 0 },
+                e.recipient,
+                7,
+                [3; 32]
+            )
+            .is_err()
+        );
     }
 }

@@ -36,6 +36,12 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: Test non-authorizing Service peer rejection model
+        run: cargo test -p classmesh-win32 --features experimental-service-peer-probe service_peer_probe --lib
+
+      - name: Clippy Service peer prototype
+        run: cargo clippy -p classmesh-win32 --all-targets --features experimental-service-peer-probe -- -D warnings
+
       - name: Synthetic media lab
         run: cargo run -p classmesh-lab --bin classmesh-lab
 
@@ -89,6 +95,12 @@ jobs:
           }
           New-Item -ItemType Directory -Path phase10-native-telemetry-bundle -Force | Out-Null
           Copy-Item -LiteralPath $bins[0].FullName -Destination phase10-native-telemetry-bundle/classmesh-win32-native-tests.exe
+
+      - name: Test non-authorizing Service peer native prototype
+        run: cargo test -p classmesh-win32 --features experimental-service-peer-probe service_peer_probe --lib -- --nocapture
+
+      - name: Clippy Service peer native prototype
+        run: cargo clippy -p classmesh-win32 --all-targets --features experimental-service-peer-probe -- -D warnings
 
       - name: Build media diagnostics
         run: cargo build -p classmesh-worker --bin classmesh-media-probe --bin classmesh-media-receiver --bin classmesh-media-recovery-probe --release
