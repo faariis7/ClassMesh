@@ -599,7 +599,12 @@ async fn continuous_teacher_runtime_rejects_unnegotiated_or_wrong_session_before
     let now = Instant::now();
     let mut owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, binding())
         .map_err(|error| format!("{error:?}"))?;
-    first_pair.client.established.negotiated.capabilities.clear();
+    first_pair
+        .client
+        .established
+        .negotiated
+        .capabilities
+        .clear();
     let (sender, receiver) = sync_channel(8);
     assert!(matches!(
         drive_authenticated_teacher_playback(
