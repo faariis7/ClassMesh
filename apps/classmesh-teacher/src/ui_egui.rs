@@ -94,7 +94,7 @@ impl TeacherUiControlEvent {
     pub fn from_verified_session_playback(
         source_id: MonitoringSourceId,
         event: TeacherPlaybackSessionEvent,
-    ) -> Result<Self, ControlEnvelope> {
+    ) -> Result<Self, Box<ControlEnvelope>> {
         match event {
             TeacherPlaybackSessionEvent::Playback {
                 verified,
@@ -105,7 +105,7 @@ impl TeacherUiControlEvent {
                 verified,
                 received_at,
             }),
-            TeacherPlaybackSessionEvent::OtherControl(envelope) => Err(envelope),
+            TeacherPlaybackSessionEvent::OtherControl(envelope) => Err(Box::new(envelope)),
         }
     }
 }
@@ -1054,7 +1054,7 @@ mod tests {
             MonitoringSourceId(7),
             TeacherPlaybackSessionEvent::OtherControl(envelope.clone()),
         );
-        assert_eq!(result.unwrap_err(), envelope);
+        assert_eq!(*result.unwrap_err(), envelope);
     }
 
     #[test]
