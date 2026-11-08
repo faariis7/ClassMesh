@@ -550,8 +550,15 @@ async fn continuous_teacher_runtime_requires_verified_report_before_window_authe
 
     assert_eq!(nonplayback_seen, 2);
     let first = receiver.try_recv()?;
-    let TeacherUiControlEvent::Authenticated(context) = first else {
-        panic!("first authenticated playback must establish the exact UI context")
+    let TeacherUiControlEvent::VerifiedBootstrap {
+        context,
+        binding: bound,
+        source_id,
+        verified,
+        received_at,
+    } = first
+    else {
+        panic!("first authenticated playback must arrive atomically")
     };
     assert_eq!(context.source_id, SOURCE);
     assert_eq!(context.control_session_id, CONTROL_SESSION);
@@ -560,24 +567,8 @@ async fn continuous_teacher_runtime_requires_verified_report_before_window_authe
             .capabilities
             .contains(&Capability::ReceiverPlaybackDiagnostics)
     );
-    let TeacherUiControlEvent::PlaybackBound {
-        source_id,
-        binding: bound,
-    } = receiver.try_recv()?
-    else {
-        panic!("verified playback must establish its exact presentation binding")
-    };
     assert_eq!(source_id, SOURCE);
     assert_eq!(bound, binding());
-    let TeacherUiControlEvent::VerifiedPlayback {
-        source_id,
-        verified,
-        received_at,
-    } = receiver.try_recv()?
-    else {
-        panic!("live QUIC proof must reach the bounded UI channel")
-    };
-    assert_eq!(source_id, SOURCE);
     assert_eq!(received_at, now);
     assert!(verified.receiver_playback().is_some());
     assert!(receiver.try_recv().is_err());
@@ -652,6 +643,7 @@ async fn continuous_teacher_runtime_full_window_queue_terminates_without_silent_
         TeacherConnectedPlaybackError, drive_authenticated_teacher_playback,
     };
     use classmesh_teacher::receiver_playback_session::TeacherPlaybackSessionOwner;
+    use classmesh_teacher::ui_egui::TeacherUiControlEvent;
     use std::ops::ControlFlow;
     use std::sync::mpsc::sync_channel;
 
@@ -660,6 +652,7 @@ async fn continuous_teacher_runtime_full_window_queue_terminates_without_silent_
     let mut owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, binding())
         .map_err(|error| format!("{error:?}"))?;
     let (sender, receiver) = sync_channel(1);
+    sender.send(TeacherUiControlEvent::Disconnected)?;
     pair.server_channel.send(&report()).await?;
     assert!(matches!(
         drive_authenticated_teacher_playback(
@@ -674,9 +667,11 @@ async fn continuous_teacher_runtime_full_window_queue_terminates_without_silent_
         .await,
         Err(TeacherConnectedPlaybackError::WindowBusy)
     ));
-    // An initial context may have been queued, but the sole sender has been
-    // dropped: the UI drains the channel and must clear the partial context.
-    assert!(receiver.try_recv().is_ok());
+    // A full queue must not publish any partial authenticated bootstrap.
+    assert!(matches!(
+        receiver.try_recv()?,
+        TeacherUiControlEvent::Disconnected
+    ));
     assert!(matches!(
         receiver.try_recv(),
         Err(std::sync::mpsc::TryRecvError::Disconnected)
