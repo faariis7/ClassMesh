@@ -42,6 +42,9 @@ pub enum TeacherConnectedPlaybackError {
     /// Existing GUI action sender was dropped: a dead window cannot retain an
     /// apparently healthy authenticated control path.
     ActionChannelClosed,
+    /// Creating the isolated network owner thread's Tokio event loop failed;
+    /// the GUI must remain offline rather than treating that as a connection.
+    RuntimeInitialization(std::io::Error),
     /// The UI is not allowed to mint control authority before a genuine
     /// verified playback observation established its exact source/session.
     NotBootstrapped,
