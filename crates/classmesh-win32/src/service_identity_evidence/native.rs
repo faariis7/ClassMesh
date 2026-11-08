@@ -46,7 +46,15 @@ impl TokenData {
             return Err(invalid("unavailable or oversized token information"));
         }
         let mut words = vec![0usize; (size as usize).div_ceil(size_of::<usize>())];
-        let capacity = size;
+        // Class 21 returns BOOLEAN, but its output pointer must be DWORD
+        // aligned. Keep at least a DWORD accessible, and retain ReturnLength
+        // separately: allocation padding is never class-specific output.
+        let capacity = if class == TokenHasRestrictions {
+            size.max(size_of::<u32>() as u32)
+        } else {
+            size
+        };
+        words.resize((capacity as usize).div_ceil(size_of::<usize>()), 0);
         if unsafe {
             GetTokenInformation(token, class, words.as_mut_ptr().cast(), capacity, &mut size)
         } == 0
@@ -80,6 +88,15 @@ impl TokenData {
         Ok(unsafe {
             std::ptr::read_unaligned(self.words.as_ptr().cast::<u8>().add(offset).cast::<T>())
         })
+    }
+    fn restriction_history(&self) -> io::Result<bool> {
+        // Microsoft maintainer clarification: BOOLEAN at a DWORD-aligned
+        // address, ReturnLength == 1; bytes after byte 0 are not output.
+        // https://github.com/microsoft/win32metadata/discussions/2308
+        if self.class != TokenHasRestrictions || self.used != 1 {
+            return Err(invalid("unexpected restriction-history representation"));
+        }
+        Ok(self.value::<u8>(0)? != 0)
     }
     fn sid_string(&self, sid: PSID) -> io::Result<String> {
         let start = self.words.as_ptr() as usize;
@@ -135,7 +152,6 @@ fn scalar(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> io::Result<u32> {
         TokenType,
         TokenElevation,
         TokenElevationType,
-        TokenHasRestrictions,
         TokenIsAppContainer,
         TokenSessionId,
         TokenUIAccess,
@@ -264,7 +280,7 @@ pub fn audit_current_caller() -> io::Result<CallerAudit> {
         service_account: matches!(user_sid.as_str(), "S-1-5-18" | "S-1-5-19" | "S-1-5-20"),
         debug_present,
         unexpected_privileges,
-        restricted: scalar(raw, TokenHasRestrictions)? != 0
+        restricted: TokenData::get(raw, TokenHasRestrictions)?.restriction_history()?
             || TokenData::get(raw, TokenRestrictedSids)?.value::<u32>(0)? != 0,
         app_container: scalar(raw, TokenIsAppContainer)? != 0,
         impersonating,

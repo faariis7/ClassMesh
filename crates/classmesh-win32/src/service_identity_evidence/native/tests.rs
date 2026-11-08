@@ -102,6 +102,7 @@ fn reserved_token_information_is_never_queried_as_a_dword() {
 
 #[test]
 fn restriction_history_consumes_only_the_class_specific_boolean() {
+    assert!(scalar(std::ptr::null_mut(), TokenHasRestrictions).is_err());
     // Deliberately poison bytes outside ReturnLength: they are not output.
     for (byte, expected) in [(0, false), (1, true), (0x80, true), (0xff, true)] {
         let mut buffer = TokenData {

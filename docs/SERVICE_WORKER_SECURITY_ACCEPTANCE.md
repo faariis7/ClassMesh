@@ -171,8 +171,18 @@ does not reserve a machine, enable a scheduled task or authorize installation.
 - [SCM config may describe next start](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryserviceconfigw)
 - [CreateProcessAsUser can enable privileges temporarily](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw)
 - [Documented token classes; TokenIsRestricted reserved](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ne-winnt-token_information_class)
+- [Microsoft maintainer class-21 correction: aligned BOOLEAN, not DWORD](https://github.com/microsoft/win32metadata/discussions/2308)
 - [Key export and access-control properties are separate](https://learn.microsoft.com/en-us/windows/win32/seccng/key-storage-property-identifiers)
 - [NCryptSignHash startup placement warning](https://learn.microsoft.com/en-us/windows/win32/api/ncrypt/nf-ncrypt-ncryptsignhash)
 
 Exact new code/CI results and reviewer disposition are recorded in this Draft
 PR, separately from qualified security approval and actual protected runtime.
+
+The first native audit failed on a short token value. Field diagnostics in
+`c3985de` established class 21 returned one byte, not four. Microsoft maintainer
+guidance above corrects the DWORD documentation: decode the one returned BOOLEAN
+byte from DWORD-aligned storage, with at least four bytes allocated; ignore
+padding and reject every unexpected length. The regression poisons padding and
+tests zero/nonzero BOOLEAN values plus wrong class/length refusals. This is an
+experimental measurement-parser correction, not authorization to change the
+production authentication contract or a claim about a standard-user result.
