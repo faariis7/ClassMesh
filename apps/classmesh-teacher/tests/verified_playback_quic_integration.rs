@@ -296,7 +296,9 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
                 Some(control_envelope::Payload::Heartbeat(_))
             ));
         }
-        TeacherPlaybackSessionEvent::Playback(_) => panic!("nonplayback message was misclassified"),
+        TeacherPlaybackSessionEvent::Playback { .. } => {
+            panic!("nonplayback message was misclassified")
+        }
     }
     assert_eq!(owner.visible(SOURCE, now), None);
 
@@ -306,8 +308,17 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
         .await
         .map_err(|error| format!("{error:?}"))?;
     match event {
-        TeacherPlaybackSessionEvent::Playback(counters) => {
+        TeacherPlaybackSessionEvent::Playback { counters, verified } => {
             assert_eq!(counters.presented_frames, 89);
+            assert!(verified.receiver_playback().is_some());
+            let mut ui_projection = TeacherPlaybackUiProjection::new(SOURCE, binding())
+                .map_err(|error| format!("{error:?}"))?;
+            assert_eq!(
+                ui_projection
+                    .accept_verified_from_source(SOURCE, &verified, now)
+                    .map_err(|error| format!("{error:?}"))?,
+                counters
+            );
         }
         TeacherPlaybackSessionEvent::OtherControl(_) => {
             panic!("playback report was not dispatched")
