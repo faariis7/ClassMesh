@@ -128,7 +128,140 @@ pub struct NamedPipeServer {
 // The HANDLE is uniquely owned by this wrapper and Windows permits pipe I/O from another thread.
 unsafe impl Send for NamedPipeServer {}
 
+struct IoCancellationThread(HANDLE);
+// An owned duplicate with THREAD_TERMINATE only, used solely for CancelSynchronousIo.
+unsafe impl Send for IoCancellationThread {}
+impl Drop for IoCancellationThread {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
 impl NamedPipeServer {
+    /// A bounded primary Worker startup sequence on a dedicated synchronous-I/O
+    /// thread. Cancellation cannot target control/media/reader threads. The
+    /// caller must retire the launch on timeout, even if I/O won the cancel race.
+    pub fn with_worker_startup_deadline<T: Send>(
+        &mut self,
+        timeout: Duration,
+        operation: impl FnOnce(&mut Self) -> T + Send,
+    ) -> Result<T, PipeError> {
+        use windows_sys::Win32::System::IO::CancelSynchronousIo;
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, THREAD_TERMINATE};
+        if timeout.is_zero() || timeout > Duration::from_secs(5) || self.overlapped {
+            return Err(PipeError {
+                stage: "WorkerStartupDeadlineArgument",
+                win32_error: 87,
+            });
+        }
+        let (thread_tx, thread_rx) = std::sync::mpsc::sync_channel(1);
+        let mut cancellation: Option<IoCancellationThread> = None;
+        crate::sync_deadline::run_with_deadline(
+            timeout,
+            move || {
+                let mut handle = null_mut();
+                // SAFETY: duplicate this dedicated thread's pseudo-handle with
+                // only the right documented for CancelSynchronousIo. Ownership
+                // moves to the joining caller, never identified by reused TID.
+                if unsafe {
+                    DuplicateHandle(
+                        GetCurrentProcess(),
+                        GetCurrentThread(),
+                        GetCurrentProcess(),
+                        &mut handle,
+                        THREAD_TERMINATE,
+                        0,
+                        0,
+                    )
+                } == 0
+                {
+                    return Err(last_error("WorkerStartupCancellationHandle"));
+                }
+                let _ = thread_tx.send(IoCancellationThread(handle));
+                Ok(operation(self))
+            },
+            || {
+                if cancellation.is_none() {
+                    cancellation = thread_rx.try_recv().ok();
+                }
+                // SAFETY: the dedicated scoped thread and its native HANDLE remain
+                // alive until joined. Retry/drain even if no I/O was pending yet.
+                if let Some(thread) = cancellation.as_ref() {
+                    unsafe { CancelSynchronousIo(thread.0) };
+                }
+            },
+        )
+        .map_err(|error| PipeError {
+            stage: "WorkerStartupDeadline",
+            win32_error: match error {
+                crate::sync_deadline::DeadlineError::Expired => WAIT_TIMEOUT,
+                crate::sync_deadline::DeadlineError::Spawn => 8,
+                crate::sync_deadline::DeadlineError::ThreadExited => 31,
+            },
+        })?
+    }
+
+    /// Opt-in, read-only runtime qualification. Never accepts control input.
+    /// Only the exact OS-observed operator PID/session receives a small snapshot.
+    /// Dedicated diagnostic thread only; pending I/O is cancelled and drained.
+    #[cfg(feature = "experimental-trusted-policy")]
+    pub fn publish_runtime_probe(
+        name: &str,
+        user_sid: &[u8],
+        observer_pid: u32,
+        observer_session: u32,
+        snapshot: impl FnOnce() -> Vec<u8>,
+    ) -> Result<(), PipeError> {
+        use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_OUTBOUND;
+        let mut pipe = Self::create_for_user_mode(
+            name,
+            user_sid,
+            PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+        )?;
+        let peer = pipe.wait_for_overlapped_peer(Duration::from_millis(250))?;
+        if observer_pid == 0
+            || peer.process_id() != observer_pid
+            || peer.session_id() != observer_session
+        {
+            return Err(PipeError {
+                stage: "RuntimeProbeObserverIdentity",
+                win32_error: 5,
+            });
+        }
+        let bytes = snapshot();
+        if bytes.is_empty() || bytes.len() > 128 {
+            return Err(PipeError {
+                stage: "RuntimeProbeSnapshotSize",
+                win32_error: 87,
+            });
+        }
+        let count = telemetry_overlapped_io(
+            pipe.handle,
+            Duration::from_millis(250),
+            "RuntimeProbeWrite",
+            |request| {
+                // SAFETY: immutable bounded buffer and OVERLAPPED remain alive
+                // until the shared primitive completes or cancels AND drains I/O.
+                unsafe {
+                    WriteFile(
+                        pipe.handle,
+                        bytes.as_ptr(),
+                        bytes.len() as u32,
+                        null_mut(),
+                        request,
+                    )
+                }
+            },
+        )?;
+        if count != bytes.len() {
+            return Err(PipeError {
+                stage: "RuntimeProbePartialWrite",
+                win32_error: 29,
+            });
+        }
+        Ok(())
+    }
+
     pub fn create_for_user(name: &str, user_sid: &[u8]) -> Result<Self, PipeError> {
         Self::create_for_user_mode(
             name,
@@ -880,6 +1013,147 @@ fn last_error(stage: &'static str) -> PipeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn current_test_sid() -> Vec<u8> {
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        };
+        use windows_sys::Win32::System::Threading::OpenProcessToken;
+        let mut token = null_mut();
+        assert_ne!(
+            unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) },
+            0
+        );
+        let mut required = 0;
+        unsafe { GetTokenInformation(token, TokenUser, null_mut(), 0, &mut required) };
+        assert!((8..=4096).contains(&required));
+        let mut storage = vec![0usize; (required as usize).div_ceil(size_of::<usize>())];
+        assert_ne!(
+            unsafe {
+                GetTokenInformation(
+                    token,
+                    TokenUser,
+                    storage.as_mut_ptr().cast(),
+                    required,
+                    &mut required,
+                )
+            },
+            0
+        );
+        let user = unsafe { &*storage.as_ptr().cast::<TOKEN_USER>() };
+        let sid_len = unsafe { GetLengthSid(user.User.Sid) } as usize;
+        let sid =
+            unsafe { std::slice::from_raw_parts(user.User.Sid.cast::<u8>(), sid_len) }.to_vec();
+        unsafe { CloseHandle(token) };
+        sid
+    }
+
+    #[test]
+    fn worker_startup_deadline_cancels_native_connect_and_stalled_hello() {
+        for stalled_hello in [false, true] {
+            let name = format!(
+                "ClassMesh-startup-deadline-{}-{stalled_hello}",
+                std::process::id()
+            );
+            let mut server = NamedPipeServer::create_for_user(&name, &current_test_sid()).unwrap();
+            let _silent_client = stalled_hello
+                .then(|| NamedPipeClient::connect(&name, Duration::from_secs(1)).unwrap());
+            let started = Instant::now();
+            let result = server.with_worker_startup_deadline(Duration::from_millis(50), |pipe| {
+                pipe.accept_expected(std::process::id(), crate::current_session_id().unwrap())?;
+                pipe.read(&mut [0u8; 1])
+            });
+            assert_eq!(result.unwrap_err().win32_error, WAIT_TIMEOUT);
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "native I/O cancellation must drain"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_startup_deadline_accepts_real_native_bytes() {
+        let name = format!("ClassMesh-startup-positive-{}", std::process::id());
+        let mut server = NamedPipeServer::create_for_user(&name, &current_test_sid()).unwrap();
+        let client = NamedPipeClient::connect(&name, Duration::from_secs(1)).unwrap();
+        client.write_all(b"native").unwrap();
+        let bytes = server
+            .with_worker_startup_deadline(Duration::from_secs(1), |pipe| {
+                pipe.accept_expected(std::process::id(), crate::current_session_id().unwrap())
+                    .unwrap();
+                let mut bytes = [0u8; 6];
+                assert_eq!(pipe.read(&mut bytes).unwrap(), 6);
+                bytes
+            })
+            .unwrap();
+        assert_eq!(&bytes, b"native");
+    }
+
+    #[cfg(feature = "experimental-trusted-policy")]
+    #[test]
+    fn runtime_probe_attests_native_pid_session_before_sampling_metadata() {
+        let sid = current_test_sid();
+        let pid = std::process::id();
+        let session = crate::current_session_id().unwrap();
+        for (index, expected_pid, expected_session) in [
+            (0, pid, session),
+            (1, pid + 1, session),
+            (2, pid, session + 1),
+        ] {
+            let name = format!("ClassMesh-runtime-native-{pid}-{index}");
+            let server_name = name.clone();
+            let sid = sid.clone();
+            let server = std::thread::spawn(move || {
+                let mut sampled = false;
+                let result = NamedPipeServer::publish_runtime_probe(
+                    &server_name,
+                    &sid,
+                    expected_pid,
+                    expected_session,
+                    || {
+                        sampled = true;
+                        b"native-report\n".to_vec()
+                    },
+                );
+                (result, sampled)
+            });
+            // An outbound server permits read access only. Use a real Windows
+            // client handle, never synthetic PipePeer or a forged JSON PID.
+            let wide = wide_null(OsStr::new(&normalize_pipe_name(&name)));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let client = loop {
+                let handle = unsafe {
+                    CreateFileW(
+                        wide.as_ptr(),
+                        GENERIC_READ,
+                        0,
+                        null(),
+                        OPEN_EXISTING,
+                        0,
+                        null_mut(),
+                    )
+                };
+                if handle != INVALID_HANDLE_VALUE {
+                    break handle;
+                }
+                assert!(Instant::now() < deadline, "native probe unavailable");
+                thread::sleep(Duration::from_millis(1));
+            };
+            let mut bytes = [0u8; 32];
+            let received = read_handle(client, &mut bytes);
+            unsafe { CloseHandle(client) };
+            let (result, sampled) = server.join().unwrap();
+            if index == 0 {
+                assert!(result.is_ok(), "{result:?}");
+                assert!(sampled);
+                assert_eq!(&bytes[..received.unwrap()], b"native-report\n");
+            } else {
+                assert_eq!(result.unwrap_err().stage, "RuntimeProbeObserverIdentity");
+                assert!(!sampled, "untrusted process must not even sample metadata");
+                assert!(!matches!(received, Ok(n) if n > 0));
+            }
+        }
+    }
 
     #[test]
     fn attested_peer_bridge_rejects_wrong_os_peer_and_stale_request() {

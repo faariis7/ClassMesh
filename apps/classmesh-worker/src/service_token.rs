@@ -11,9 +11,11 @@ use windows_sys::Win32::Security::{
     TOKEN_USER, TokenUser, WinLocalSystemSid,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
+    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    WaitForSingleObject,
 };
 
+#[derive(Debug)]
 struct Handle(HANDLE);
 impl Drop for Handle {
     fn drop(&mut self) {
@@ -24,7 +26,25 @@ impl Drop for Handle {
     }
 }
 
-pub(crate) fn require_local_system(pid: u32) -> io::Result<()> {
+#[derive(Debug)]
+pub(crate) struct ServiceProcess(Handle);
+
+impl ServiceProcess {
+    pub(crate) fn require_running(&self) -> io::Result<()> {
+        // Retain this exact process object for the IPC lifetime. A new OpenProcess
+        // by numeric PID on each tick could authenticate a reused PID after exit.
+        match unsafe { WaitForSingleObject(self.0.0, 0) } {
+            WAIT_TIMEOUT => Ok(()),
+            windows_sys::Win32::Foundation::WAIT_FAILED => Err(io::Error::last_os_error()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "pipe server process exited",
+            )),
+        }
+    }
+}
+
+pub(crate) fn require_local_system(pid: u32) -> io::Result<ServiceProcess> {
     if pid == 0 || pid == std::process::id() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -32,7 +52,13 @@ pub(crate) fn require_local_system(pid: u32) -> io::Result<()> {
         ));
     }
     // SAFETY: read-only query of the kernel process object.
-    let process = Handle(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) });
+    let process = Handle(unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    });
     if process.0.is_null() {
         return Err(io::Error::last_os_error());
     }
@@ -40,15 +66,11 @@ pub(crate) fn require_local_system(pid: u32) -> io::Result<()> {
     // code. Query the process object's signaled state instead of interpreting
     // its exit code as proof of liveness; zero timeout never blocks Worker.
     // SAFETY: process is a valid owned process handle, queried without waiting.
-    if unsafe { WaitForSingleObject(process.0, 0) } != WAIT_TIMEOUT {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "pipe server process exited or liveness is unverified",
-        ));
-    }
+    let process = ServiceProcess(process);
+    process.require_running()?;
     let mut raw_token = null_mut();
     // SAFETY: process handle is live and raw_token is writable.
-    if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut raw_token) } == 0 {
+    if unsafe { OpenProcessToken(process.0.0, TOKEN_QUERY, &mut raw_token) } == 0 {
         return Err(io::Error::last_os_error());
     }
     let token = Handle(raw_token);
@@ -98,18 +120,45 @@ pub(crate) fn require_local_system(pid: u32) -> io::Result<()> {
             "pipe server is not LocalSystem",
         ));
     }
-    Ok(())
+    process.require_running()?;
+    Ok(process)
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
+    fn retained_process_handle_detects_exit() {
+        let mut child = std::process::Command::new("ping.exe")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        // Exercise the same rights and retained-object wait as production;
+        // this is liveness coverage, not a fabricated LocalSystem credential.
+        let handle = super::Handle(unsafe {
+            super::OpenProcess(
+                super::PROCESS_QUERY_LIMITED_INFORMATION | super::PROCESS_SYNCHRONIZE,
+                0,
+                child.id(),
+            )
+        });
+        assert!(!handle.0.is_null());
+        let process = super::ServiceProcess(handle);
+        let live = process.require_running();
+        let _ = child.kill();
+        let _ = child.wait();
+        live.expect("retained native process is alive");
+        assert!(process.require_running().is_err());
+    }
+
+    #[test]
     fn reject_foreign_interactive_user_process() {
         // A real OS process token, not a mocked SID: the child inherits the
         // interactive test runner identity and must not impersonate Service.
         // Avoid running this assertion under LocalSystem CI agents.
-        let mut child = std::process::Command::new("cmd.exe")
-            .args(["/C", "ping -n 8 127.0.0.1 >NUL"])
+        let mut child = std::process::Command::new("ping.exe")
+            .args(["-n", "8", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
             .spawn()
             .expect("spawn non-service child");
         let result = super::require_local_system(child.id());
@@ -120,6 +169,26 @@ mod tests {
                 .expect_err("interactive child must not be trusted as Service")
                 .kind(),
             std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn live_process_reaches_token_authentication() {
+        // A negative-only suite also passes when *every* live Service is
+        // rejected before the SID check. Exercise the actual OpenProcess /
+        // wait path with a live child and require rejection at TokenUser.
+        let mut child = std::process::Command::new("ping.exe")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn live native peer");
+        let result = super::require_local_system(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(
+            result.expect_err("non-SYSTEM peer").to_string(),
+            "pipe server is not LocalSystem",
+            "a live process must reach the real token SID check"
         );
     }
 

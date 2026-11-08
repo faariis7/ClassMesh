@@ -89,6 +89,45 @@ fn current_user_sid_for_test() -> Vec<u8> {
     copy
 }
 
+#[test]
+fn production_worker_rejects_untrusted_native_server_before_hello() {
+    let session = current_session_id().unwrap();
+    let name = format!(
+        "ClassMesh-untrusted-{}-{}",
+        std::process::id(),
+        NEXT_PIPE.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut server = NamedPipeServer::create_for_user(&name, &current_user_sid_for_test()).unwrap();
+    let mut worker = Command::new(env!("CARGO_BIN_EXE_classmesh-worker"))
+        .args(["--session", &session.to_string(), "--pipe", &name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let worker_pid = worker.id();
+    let observed = server.with_worker_startup_deadline(Duration::from_secs(5), |server| {
+        server.accept_expected(worker_pid, session).map(|_| {
+            let mut byte = [0u8; 1];
+            // EOF/error must occur without even one byte of WorkerHello.
+            !matches!(server.read(&mut byte), Ok(n) if n > 0)
+        })
+    });
+    let _ = worker.kill();
+    let output = worker.wait_with_output().unwrap();
+    assert!(
+        observed
+            .expect("bounded untrusted-server rejection")
+            .unwrap()
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not running in Windows Session 0")
+            || stderr.contains("pipe server is not LocalSystem"),
+        "must reject at a real native identity boundary: {stderr}"
+    );
+}
+
 fn identity(process_id: u32, session_id: u32) -> ReceiverTelemetryBinding {
     ReceiverTelemetryBinding {
         process_id,

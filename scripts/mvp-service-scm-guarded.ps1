@@ -6,6 +6,8 @@ param(
     [string]$TrustedProvisionExe,
     [string]$ExpectedServiceSha256,
     [string]$ExpectedProvisionSha256,
+    [switch]$QualifyWorkerIpc,
+    [string]$ExpectedWorkerSha256,
     [switch]$SecurityReviewApproved,
     [switch]$DisposableVmApproved
 )
@@ -13,6 +15,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $serviceName = 'ClassMeshService'
 if ($Mode -eq 'Plan') {
+    if ($QualifyWorkerIpc) { 'WORKER_IPC_QUALIFICATION_PLAN_ONLY: same approval/protected install gates; opt-in protected-policy Service, pinned Worker, real decoded report, Worker restart and abrupt Service loss. No mutation.' }
     'SCM_PLAN_ONLY: requires independently approved enrollment, protected install, elevated interactive admin, exact binary SHA256, successful --verify-startup, protected path/ACL, and exclusive disposable VM. No mutation.'
     return
 }
@@ -85,6 +88,12 @@ function Assert-ProtectedFile([string]$Path, [string]$ExpectedHash) {
 if (-not $ServiceExe -or -not $TrustedProvisionExe) { throw 'FAIL_CLOSED: both executable paths required' }
 Assert-ProtectedFile $ServiceExe $ExpectedServiceSha256
 Assert-ProtectedFile $TrustedProvisionExe $ExpectedProvisionSha256
+if ($QualifyWorkerIpc) {
+    if ($ExpectedWorkerSha256 -cnotmatch '^[a-fA-F0-9]{64}$') { throw 'FAIL_CLOSED: exact Worker SHA256 required' }
+    $workerPath = Join-Path (Split-Path -Parent $ServiceExe) 'classmesh-worker.exe'
+    Assert-ProtectedFile $workerPath $ExpectedWorkerSha256
+    . (Join-Path $PSScriptRoot 'mvp-service-worker-runtime.ps1')
+}
 if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
     throw 'FAIL_CLOSED: ClassMeshService already exists; never replace or delete it'
 }
@@ -98,6 +107,10 @@ try {
     Assert-ProtectedFile $ServiceExe $ExpectedServiceSha256
     Assert-ProtectedFile $TrustedProvisionExe $ExpectedProvisionSha256
     $bin = '"' + (Get-Item -LiteralPath $ServiceExe).FullName + '"'
+    if ($QualifyWorkerIpc) {
+        Assert-ProtectedFile $workerPath $ExpectedWorkerSha256
+        $bin += ' --worker-ipc-observer ' + $PID + ' ' + [Diagnostics.Process]::GetCurrentProcess().SessionId
+    }
     $expectedCommand = $bin
     $output = & sc.exe create $serviceName 'binPath=' $bin 'start=' 'demand' 'type=' 'own' 'obj=' 'LocalSystem' 2>&1
     if ($LASTEXITCODE -ne 0) { throw "SCM create failed: $($output -join ' | ')" }
@@ -167,6 +180,9 @@ try {
         throw 'FAIL_CLOSED: SCM process or registration changed during runtime attestation'
     }
     "SCM_LOCALSYSTEM_RUNNING_PID=$($svc.ProcessId); IMAGE_PIN_VERIFIED; WORKER_IPC_NOT_YET_PROVEN"
+    if ($QualifyWorkerIpc) {
+        Invoke-ClassMeshWorkerRuntimeQualification $svc.ProcessId $workerPath $ExpectedWorkerSha256
+    }
 } finally {
     if ($created) {
         # Never stop/delete a service whose SCM identity changed after our create.

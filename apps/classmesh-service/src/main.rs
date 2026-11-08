@@ -2,6 +2,8 @@
 mod control_runtime;
 #[cfg(windows)]
 pub mod file_transfer_storage;
+#[cfg(all(windows, feature = "experimental-trusted-policy"))]
+mod ipc_qualification;
 #[cfg(windows)]
 pub mod monitoring;
 #[cfg(windows)]
@@ -399,17 +401,15 @@ mod windows_service_app {
             match launch_worker_in_session(session.0, executable, &extra_args) {
                 Ok(mut process) => {
                     let process_id = process.process_id();
-                    if let Err(error) = pipe.accept_expected(process_id, session.0) {
-                        eprintln!(
-                            "Worker IPC peer validation failed for pid {process_id}, session {}: {error}",
-                            session.0
-                        );
-                        let _ = process.terminate(1);
-                        let decision = self.watchdog.launch_failed(session);
-                        return self.apply_restart_decision(decision);
-                    }
-
-                    if let Err(error) = authenticate_worker(&pipe, process_id, session) {
+                    let handshake = pipe
+                        .with_worker_startup_deadline(Duration::from_secs(5), |pipe| {
+                            pipe.accept_expected(process_id, session.0)
+                                .map_err(|e| format!("Worker native peer rejected: {e}"))?;
+                            authenticate_worker(pipe, process_id, session)
+                        })
+                        .map_err(|e| e.to_string())
+                        .and_then(|result| result);
+                    if let Err(error) = handshake {
                         eprintln!(
                             "Worker IPC handshake failed for pid {process_id}, session {}: {error}",
                             session.0
@@ -2127,6 +2127,16 @@ mod windows_service_app {
             FileTransferSourceSession::new(WindowsFileTransferOutboxSource::new(outbox_root));
 
         let worker_capabilities = Arc::new(WorkerCapabilityState::default());
+        #[cfg(feature = "experimental-trusted-policy")]
+        let _runtime_probe =
+            match crate::ipc_qualification::RuntimeProbe::start(Arc::clone(&worker_capabilities)) {
+                Ok(probe) => probe,
+                Err(error) => {
+                    eprintln!("Service runtime qualification rejected: {error}");
+                    set_stopped_with_exit(&status_handle, 5)?;
+                    return Ok(());
+                }
+            };
         let presentation_feedback = PresentationFeedbackBus::default();
         let control_dispatch = ControlRuntimeDispatch::new(
             input_channels,

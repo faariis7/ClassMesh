@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // Never disclose WorkerHello to a Session 0 process without a kernel-verified
     // LocalSystem token. The pipe PID is OS-reported, not supplied by the peer.
-    service_token::require_local_system(primary_service_pid)?;
+    let service_process = service_token::require_local_system(primary_service_pid)?;
     let hello = IpcFrame::worker_hello(std::process::id(), actual_session)
         .encode()
         .map_err(ipc_frame_error)?;
@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if pipe.server_process_id()? != primary_service_pid {
         return Err("Worker IPC server process changed during handshake".into());
     }
-    service_token::require_local_system(primary_service_pid)?;
+    service_process.require_running()?;
     eprintln!(
         "ClassMesh Worker IPC ServiceReady received; Session 0/PID and LocalSystem token checked (SCM registration and policy authorization unverified)"
     );
@@ -146,6 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // pipe peer that vanished or changed while the previous tick was idle.
         // The post-wait check below still protects event dispatch after blocking.
         let pre_tick_peer = (|| -> Result<bool, Box<dyn std::error::Error>> {
+            service_process.require_running()?;
             Ok(pipe.server_process_id()? == primary_service_pid && pipe.server_session_id()? == 0)
         })();
         match pre_tick_peer {
@@ -201,6 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Release held keys/buttons before returning its error; `?` here
             // would exit without releasing remote input.
             let peer_identity = (|| -> Result<bool, Box<dyn std::error::Error>> {
+                service_process.require_running()?;
                 Ok(pipe.server_process_id()? == primary_service_pid
                     && pipe.server_session_id()? == 0)
             })();
