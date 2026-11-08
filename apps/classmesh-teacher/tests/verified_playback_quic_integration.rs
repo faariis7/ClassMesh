@@ -595,17 +595,17 @@ async fn continuous_teacher_runtime_rejects_unnegotiated_or_wrong_session_before
     use std::ops::ControlFlow;
     use std::sync::mpsc::sync_channel;
 
-    let mut pair = pair().await?;
+    let mut first_pair = pair().await?;
     let now = Instant::now();
     let mut owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, binding())
         .map_err(|error| format!("{error:?}"))?;
-    pair.client.established.negotiated.capabilities.clear();
+    first_pair.client.established.negotiated.capabilities.clear();
     let (sender, receiver) = sync_channel(8);
     assert!(matches!(
         drive_authenticated_teacher_playback(
             &mut owner,
-            &mut pair.client,
-            &pair.live_auth,
+            &mut first_pair.client,
+            &first_pair.live_auth,
             sender,
             |_| ControlFlow::Continue(()),
             || 150,
