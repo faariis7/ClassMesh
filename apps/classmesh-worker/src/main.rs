@@ -1124,7 +1124,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
             }
             CaptureStep::NoFrame => {
-                capture_due = Instant::now();
+                // A quiet desktop can produce no DXGI updates for extended periods.
+                // Bound polling without blocking the authenticated IPC/control loop.
+                capture_due = next_no_frame_capture_due(active_focused_profile);
             }
             CaptureStep::RetryAfter { delay_ms, reason } => {
                 encoder_benchmark = None;
@@ -1340,6 +1342,22 @@ fn next_capture_due(profile: Option<FocusedWorkerProfile>) -> std::time::Instant
         return now;
     };
     now.checked_add(profile.capture_interval()).unwrap_or(now)
+}
+
+#[cfg(windows)]
+fn no_frame_poll_interval(profile: Option<FocusedWorkerProfile>) -> std::time::Duration {
+    profile
+        .map(FocusedWorkerProfile::capture_interval)
+        .unwrap_or(std::time::Duration::from_millis(16))
+}
+
+#[cfg(windows)]
+fn next_no_frame_capture_due(profile: Option<FocusedWorkerProfile>) -> std::time::Instant {
+    let now = std::time::Instant::now();
+    let interval = no_frame_poll_interval(profile);
+    // A configured high-FPS stream still gets its requested cadence, while
+    // an idle unconfigured capture cannot spin at full CPU speed.
+    now.checked_add(interval).unwrap_or(now)
 }
 
 #[cfg(windows)]
@@ -2747,6 +2765,19 @@ mod focused_profile_tests {
         assert_eq!(profile.bitrate_kbps, 1_500);
         assert_eq!(
             profile.capture_interval(),
+            std::time::Duration::from_micros(33_333)
+        );
+    }
+
+    #[test]
+    fn idle_capture_pacing_preserves_configured_frame_interval() {
+        assert_eq!(
+            no_frame_poll_interval(None),
+            std::time::Duration::from_millis(16)
+        );
+        let profile = FocusedWorkerProfile::from_reconfigure(&reconfigure()).unwrap();
+        assert_eq!(
+            no_frame_poll_interval(Some(profile)),
             std::time::Duration::from_micros(33_333)
         );
     }
