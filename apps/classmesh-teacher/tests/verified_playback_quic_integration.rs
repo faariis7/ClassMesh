@@ -490,7 +490,8 @@ async fn native_window_pump_exposes_backpressure_and_preserves_nonplayback() -> 
 
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn continuous_teacher_runtime_requires_verified_report_before_window_authentication() -> TestResult {
+async fn continuous_teacher_runtime_requires_verified_report_before_window_authentication()
+-> TestResult {
     use classmesh_teacher::connected_runtime::drive_authenticated_teacher_playback;
     use classmesh_teacher::receiver_playback_session::TeacherPlaybackSessionOwner;
     use classmesh_teacher::ui_egui::TeacherUiControlEvent;
@@ -554,9 +555,15 @@ async fn continuous_teacher_runtime_requires_verified_report_before_window_authe
     };
     assert_eq!(context.source_id, SOURCE);
     assert_eq!(context.control_session_id, CONTROL_SESSION);
-    assert!(context.capabilities.contains(&Capability::ReceiverPlaybackDiagnostics));
-    let TeacherUiControlEvent::PlaybackBound { source_id, binding: bound } =
-        receiver.try_recv()?
+    assert!(
+        context
+            .capabilities
+            .contains(&Capability::ReceiverPlaybackDiagnostics)
+    );
+    let TeacherUiControlEvent::PlaybackBound {
+        source_id,
+        binding: bound,
+    } = receiver.try_recv()?
     else {
         panic!("verified playback must establish its exact presentation binding")
     };
@@ -579,7 +586,8 @@ async fn continuous_teacher_runtime_requires_verified_report_before_window_authe
 
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn continuous_teacher_runtime_rejects_unnegotiated_or_wrong_session_before_ui_bootstrap() -> TestResult {
+async fn continuous_teacher_runtime_rejects_unnegotiated_or_wrong_session_before_ui_bootstrap()
+-> TestResult {
     use classmesh_teacher::connected_runtime::{
         TeacherConnectedPlaybackError, drive_authenticated_teacher_playback,
     };
@@ -633,7 +641,8 @@ async fn continuous_teacher_runtime_rejects_unnegotiated_or_wrong_session_before
 
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn continuous_teacher_runtime_full_window_queue_terminates_without_silent_success() -> TestResult {
+async fn continuous_teacher_runtime_full_window_queue_terminates_without_silent_success()
+-> TestResult {
     use classmesh_teacher::connected_runtime::{
         TeacherConnectedPlaybackError, drive_authenticated_teacher_playback,
     };
