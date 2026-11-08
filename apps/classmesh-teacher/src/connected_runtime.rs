@@ -7,18 +7,25 @@
 //! into a live playback UI state.
 
 use std::ops::ControlFlow;
-use std::sync::mpsc::{SyncSender, TrySendError};
-use std::time::Instant;
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
+use std::time::{Duration, Instant};
 
 use classmesh_control::client_session::ClientControlSession;
 use classmesh_control::live_authorization::LiveAuthorizationStore;
+use classmesh_control::teacher_playback_receive::{
+    TeacherControlSequenceGuard, receive_guarded_authenticated_teacher_control_on_split,
+};
 use classmesh_protocol::{Capability, control_wire::ControlEnvelope};
 
+use crate::connected_command::{
+    QueuedTeacherUiAction, TeacherCommandSendError, TeacherCommandSender,
+    next_queued_teacher_ui_action,
+};
 use crate::receiver_playback_session::{
     TeacherPlaybackSessionError, TeacherPlaybackSessionEvent, TeacherPlaybackSessionOwner,
 };
 use crate::ui_egui::TeacherUiControlEvent;
-use crate::ui_shell::TeacherInteractionUiContext;
+use crate::ui_shell::{TeacherInteractionUiContext, TeacherUiAction};
 
 #[derive(Debug)]
 pub enum TeacherConnectedPlaybackError {
@@ -32,6 +39,13 @@ pub enum TeacherConnectedPlaybackError {
     /// native window sees terminal disconnect rather than partial readiness.
     WindowBusy,
     WindowDisconnected,
+    /// Existing GUI action sender was dropped: a dead window cannot retain an
+    /// apparently healthy authenticated control path.
+    ActionChannelClosed,
+    /// The UI is not allowed to mint control authority before a genuine
+    /// verified playback observation established its exact source/session.
+    NotBootstrapped,
+    Command(TeacherCommandSendError),
 }
 
 fn send_window_event(
@@ -110,21 +124,18 @@ pub async fn drive_authenticated_teacher_playback(
                 ..
             } => {
                 if !bootstrapped {
-                    // All three observations must originate from a *real*
-                    // verified network report. If bounded queue space is
-                    // unavailable the owned sender is dropped on return.
                     send_window_event(
                         &events,
-                        TeacherUiControlEvent::Authenticated(context.clone()),
-                    )?;
-                    send_window_event(
-                        &events,
-                        TeacherUiControlEvent::PlaybackBound {
-                            source_id: owner.source_id(),
+                        TeacherUiControlEvent::VerifiedBootstrap {
+                            context: context.clone(),
                             binding,
+                            source_id: owner.source_id(),
+                            verified,
+                            received_at,
                         },
                     )?;
                     bootstrapped = true;
+                    continue;
                 }
                 send_window_event(
                     &events,
@@ -134,6 +145,196 @@ pub async fn drive_authenticated_teacher_playback(
                         received_at,
                     },
                 )?;
+            }
+        }
+    }
+}
+
+/// The only dispatcher-visible outcomes of the owned duplex control runtime.
+/// `CommandWritten` means a QUIC write completed, NEVER Service execution.
+#[derive(Debug)]
+pub enum TeacherDuplexDispatch {
+    OtherControl(ControlEnvelope),
+    LocalAction(TeacherUiAction),
+    CommandWritten(u64),
+}
+
+/// Run real Teacher GUI observations and actions on one existing enrolled QUIC
+/// connection and one sole replay-guarded network reader. The already-proven
+/// Hello/control session is consumed; no new certificate, source roster, or
+/// transport listener can be created here.
+///
+/// A single receive future remains pinned across all action-mailbox polls.
+/// Dropping a partially read length-prefixed QUIC frame just to write an
+/// action could desynchronize the next read, so this runtime only drops it
+/// when retiring the ENTIRE connection. The caller owns independently
+/// approved enrollment/provisioning and must never substitute a fake session.
+/// The shipped offline Teacher UI does not invoke this path automatically.
+///
+/// The external dispatcher receives non-playback control envelopes untouched,
+/// local-only UI actions untouched, and notification of a network write. No
+/// action receipt claims remote authorization, ack, or Worker execution.
+pub async fn drive_authenticated_teacher_duplex(
+    owner: &mut TeacherPlaybackSessionOwner,
+    session: ClientControlSession,
+    authorization: &LiveAuthorizationStore,
+    events: SyncSender<TeacherUiControlEvent>,
+    actions: Receiver<TeacherUiAction>,
+    mut dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()>,
+    clocks: (impl Fn() -> u64, impl Fn() -> Instant),
+) -> Result<(), TeacherConnectedPlaybackError> {
+    let binding = owner.binding();
+    if !owner.is_active() {
+        return Err(TeacherConnectedPlaybackError::Receive(Box::new(
+            TeacherPlaybackSessionError::Retired,
+        )));
+    }
+    if session.established.control_session_id != binding.control_session_id {
+        return Err(TeacherConnectedPlaybackError::SessionMismatch);
+    }
+    let negotiated = &session.established.negotiated;
+    if negotiated.version.major != 0
+        || negotiated.version.minor < 8
+        || !negotiated
+            .capabilities
+            .contains(&Capability::ReceiverPlaybackDiagnostics)
+    {
+        return Err(TeacherConnectedPlaybackError::NotNegotiated);
+    }
+    let context = TeacherInteractionUiContext {
+        source_id: owner.source_id(),
+        control_session_id: binding.control_session_id,
+        version: negotiated.version,
+        capabilities: negotiated.capabilities.clone(),
+    };
+    let mut split = session.into_split();
+    let mut reader_guard = TeacherControlSequenceGuard::default();
+    let mut command_sender = TeacherCommandSender::default();
+    let mut tick = tokio::time::interval(Duration::from_millis(15));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut bootstrapped = false;
+
+    loop {
+        // Keep this SAME in-flight read future alive across the whole inner
+        // action loop. It owns the only receive half and replay ledger.
+        let incoming = receive_guarded_authenticated_teacher_control_on_split(
+            &split.connection,
+            &split.established,
+            &mut split.receiver,
+            authorization,
+            owner.expected_student(),
+            &clocks.0,
+            &mut reader_guard,
+        );
+        tokio::pin!(incoming);
+        let received = loop {
+            tokio::select! {
+                biased;
+                frame = &mut incoming => break frame,
+                _ = tick.tick() => {
+                    match next_queued_teacher_ui_action(&actions) {
+                        QueuedTeacherUiAction::Empty => {}
+                        QueuedTeacherUiAction::Closed => {
+                            owner.retire_exact(owner.source_id(), binding);
+                            split.connection.close(0u32.into(), b"Teacher UI action channel closed");
+                            return Err(TeacherConnectedPlaybackError::ActionChannelClosed);
+                        }
+                        QueuedTeacherUiAction::Local(local) => {
+                            if dispatch(TeacherDuplexDispatch::LocalAction(local)).is_break() {
+                                owner.retire_exact(owner.source_id(), binding);
+                                split.connection.close(0u32.into(), b"Teacher runtime dispatcher completed");
+                                return Ok(());
+                            }
+                        }
+                        QueuedTeacherUiAction::Interaction(action) => {
+                            if !bootstrapped {
+                                owner.retire_exact(owner.source_id(), binding);
+                                split.connection.close(0u32.into(), b"Teacher unverified UI command");
+                                return Err(TeacherConnectedPlaybackError::NotBootstrapped);
+                            }
+                            match command_sender.send_on_split(
+                                owner,
+                                (&split.connection, &split.established),
+                                &mut split.sender,
+                                authorization,
+                                &action,
+                                &clocks.0,
+                            ).await {
+                                Ok(request_id) => {
+                                    // This is only successful transmission. Service
+                                    // authorization and ACK must arrive separately.
+                                    if dispatch(TeacherDuplexDispatch::CommandWritten(request_id)).is_break() {
+                                        owner.retire_exact(owner.source_id(), binding);
+                                        split.connection.close(0u32.into(), b"Teacher runtime dispatcher completed");
+                                        return Ok(());
+                                    }
+                                }
+                                Err(error) => {
+                                    owner.retire_exact(owner.source_id(), binding);
+                                    split.connection.close(0u32.into(), b"Teacher command send rejected");
+                                    return Err(TeacherConnectedPlaybackError::Command(error));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        // The in-flight read has just completed: stop borrowing the sole
+        // receive half/guard and hand its privately verified proof to owner.
+        let verified = match received {
+            Ok(verified) => verified,
+            Err(error) => {
+                owner.retire_exact(owner.source_id(), binding);
+                split
+                    .connection
+                    .close(0u32.into(), b"Teacher authenticated receive failed");
+                return Err(TeacherConnectedPlaybackError::Receive(Box::new(
+                    TeacherPlaybackSessionError::Receive(error),
+                )));
+            }
+        };
+        let event = owner
+            .accept_guarded_verified(verified, (clocks.1)())
+            .map_err(|error| TeacherConnectedPlaybackError::Receive(Box::new(error)))?;
+        match event {
+            TeacherPlaybackSessionEvent::OtherControl(envelope) => {
+                if dispatch(TeacherDuplexDispatch::OtherControl(envelope)).is_break() {
+                    owner.retire_exact(owner.source_id(), binding);
+                    split
+                        .connection
+                        .close(0u32.into(), b"Teacher runtime dispatcher completed");
+                    return Ok(());
+                }
+            }
+            TeacherPlaybackSessionEvent::Playback {
+                verified,
+                received_at,
+                ..
+            } => {
+                let ui_event = if bootstrapped {
+                    TeacherUiControlEvent::VerifiedPlayback {
+                        source_id: owner.source_id(),
+                        verified,
+                        received_at,
+                    }
+                } else {
+                    TeacherUiControlEvent::VerifiedBootstrap {
+                        context: context.clone(),
+                        binding,
+                        source_id: owner.source_id(),
+                        verified,
+                        received_at,
+                    }
+                };
+                if let Err(error) = send_window_event(&events, ui_event) {
+                    owner.retire_exact(owner.source_id(), binding);
+                    split
+                        .connection
+                        .close(0u32.into(), b"Teacher UI backpressure");
+                    return Err(error);
+                }
+                bootstrapped = true;
             }
         }
     }

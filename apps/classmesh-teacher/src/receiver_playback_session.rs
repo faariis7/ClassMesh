@@ -174,12 +174,30 @@ impl TeacherPlaybackSessionOwner {
                 return Err(TeacherPlaybackSessionError::Receive(error));
             }
         };
+        self.accept_guarded_verified(verified, monotonic_now())
+    }
+
+    /// Project an already authenticated *and replay-guarded* receive from the
+    /// sole split QUIC reader. The runtime is responsible for retaining its
+    /// guard for the complete Hello session; the proof type is opaque to UI.
+    /// A bare ControlEnvelope cannot enter this path.
+    pub(crate) fn accept_guarded_verified(
+        &mut self,
+        verified: AuthenticatedTeacherControlMessage,
+        received_at: Instant,
+    ) -> Result<TeacherPlaybackSessionEvent, TeacherPlaybackSessionError> {
+        if !self.active {
+            return Err(TeacherPlaybackSessionError::Retired);
+        }
+        if verified.envelope().control_session_id != self.binding.control_session_id {
+            self.retire_current();
+            return Err(TeacherPlaybackSessionError::ControlSessionMismatch);
+        }
         if verified.receiver_playback().is_none() {
             return Ok(TeacherPlaybackSessionEvent::OtherControl(
                 verified.into_envelope(),
             ));
         }
-        let received_at = monotonic_now();
         let counters = self
             .projection
             .accept_verified_from_source(self.source_id, &verified, received_at)

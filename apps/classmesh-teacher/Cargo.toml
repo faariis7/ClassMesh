@@ -19,6 +19,7 @@ quinn = "0.11.12"
 classmesh-capture-win = { path = "../../crates/classmesh-capture-win" }
 classmesh-worker = { path = "../classmesh-worker" }
 eframe = { version = "=0.32.3", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 [dev-dependencies]
 rcgen = { version = "0.14", features = ["x509-parser"] }
