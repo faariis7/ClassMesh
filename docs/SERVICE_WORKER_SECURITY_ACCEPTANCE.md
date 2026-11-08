@@ -82,6 +82,34 @@ and patched-source static checks are requested.
 
 ## What the qualified reviewer must decide
 
+Existing code offers machine-key possession primitives, **not an independent
+process/account/image attestation primitive**. On c141df23:
+
+- `CngMachineKey::sign_sha256_digest` and the existing rustls CNG signer/resolver
+  can reuse maintained P-256/TLS machinery. Key export policy 0 is nonexportability,
+  not proof of exclusive Service use or the calling process's token/image.
+  `cng.rs` does not establish an explicit key security-descriptor policy, and
+  its named key is reopened for operations; access and replacement/rotation
+  continuity must be reviewed independently.
+- Service-local `load_control_state` binds active credential to stable principal
+  and checks expiry/nonexportability. It is not an independent Worker verifier
+  for externally pinned certificate-chain trust or the required StudentDevice
+  role. Credential mappings assume an already cryptographically verified peer.
+- `TrustedPolicySession` retains protected Service inputs; it does not provision
+  an ordinary-user-readable independent Worker trust anchor. The future v12 HMAC
+  challenge already requires a trusted key provisioner and cannot bootstrap it.
+
+Review options are explicit: (A) retain mandatory native account/image proof,
+with denied reads terminal; (B) propose an independently enrolled endpoint-key
+identity model, acknowledging a NEW trust decision and still-unproven token/
+image claims; (C) combine endpoint identity with independent native evidence.
+Signing Service-claimed PID/image fields does not make them OS attestations.
+Do not implement B as a transparent fallback. Worker pins must come from protected
+installer/CA authority, not Service arguments or a presented self-signed cert.
+Any future protocol must bind freshness, endpoint/generation, expected stable
+principal and role, prevent replay/relay/signing-oracle use, and review signing
+placement/stalls (Microsoft warns against NCryptSignHash in Service startup).
+
 1. Current-account proof: direct OS token observation under the ordinary caller,
    or precisely identified independent OS provider/launch witness. Define its
    permissions, replay/liveness binding, machine trust and failure semantics.
@@ -142,6 +170,9 @@ does not reserve a machine, enable a scheduled task or authorize installation.
 - [Primary/impersonation token membership distinction](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-checktokenmembership)
 - [SCM config may describe next start](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryserviceconfigw)
 - [CreateProcessAsUser can enable privileges temporarily](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw)
+- [Documented token classes; TokenIsRestricted reserved](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ne-winnt-token_information_class)
+- [Key export and access-control properties are separate](https://learn.microsoft.com/en-us/windows/win32/seccng/key-storage-property-identifiers)
+- [NCryptSignHash startup placement warning](https://learn.microsoft.com/en-us/windows/win32/api/ncrypt/nf-ncrypt-ncryptsignhash)
 
 Exact new code/CI results and reviewer disposition are recorded in this Draft
 PR, separately from qualified security approval and actual protected runtime.

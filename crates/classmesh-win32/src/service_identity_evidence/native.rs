@@ -34,6 +34,7 @@ fn owned(raw: HANDLE) -> io::Result<OwnedHandle> {
 }
 
 struct TokenData {
+    class: TOKEN_INFORMATION_CLASS,
     words: Vec<usize>,
     used: usize,
 }
@@ -56,6 +57,7 @@ impl TokenData {
             return Err(invalid("token buffer size changed"));
         }
         Ok(Self {
+            class,
             words,
             used: size as usize,
         })
@@ -65,7 +67,15 @@ impl TokenData {
             .checked_add(size_of::<T>())
             .is_none_or(|end| end > self.used)
         {
-            return Err(invalid("truncated token value"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "truncated token value: class {}, offset {offset}, expected {} bytes, returned {}",
+                    self.class,
+                    size_of::<T>(),
+                    self.used
+                ),
+            ));
         }
         Ok(unsafe {
             std::ptr::read_unaligned(self.words.as_ptr().cast::<u8>().add(offset).cast::<T>())
@@ -119,6 +129,21 @@ fn token_for_process(process: HANDLE) -> io::Result<OwnedHandle> {
     owned(raw)
 }
 fn scalar(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> io::Result<u32> {
+    // Only documented DWORD/TOKEN_TYPE/elevation representations.
+    // TokenIsRestricted is RESERVED, not a supported DWORD query.
+    if ![
+        TokenType,
+        TokenElevation,
+        TokenElevationType,
+        TokenHasRestrictions,
+        TokenIsAppContainer,
+        TokenSessionId,
+        TokenUIAccess,
+    ]
+    .contains(&class)
+    {
+        return Err(invalid("unsupported scalar token information class"));
+    }
     TokenData::get(token, class)?.value(0)
 }
 fn luid(luid: LUID) -> u64 {
@@ -239,7 +264,8 @@ pub fn audit_current_caller() -> io::Result<CallerAudit> {
         service_account: matches!(user_sid.as_str(), "S-1-5-18" | "S-1-5-19" | "S-1-5-20"),
         debug_present,
         unexpected_privileges,
-        restricted: scalar(raw, TokenHasRestrictions)? != 0 || scalar(raw, TokenIsRestricted)? != 0,
+        restricted: scalar(raw, TokenHasRestrictions)? != 0
+            || TokenData::get(raw, TokenRestrictedSids)?.value::<u32>(0)? != 0,
         app_container: scalar(raw, TokenIsAppContainer)? != 0,
         impersonating,
         integrity,

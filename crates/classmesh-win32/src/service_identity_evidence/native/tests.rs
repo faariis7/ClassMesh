@@ -81,10 +81,21 @@ fn synthetic_post_measurement_context_change_invalidates_result() {
 #[test]
 fn malformed_token_buffer_is_rejected_before_sid_traversal() {
     let buffer = TokenData {
+        class: TokenUser,
         words: vec![0; 4],
         used: 8,
     };
     assert!(buffer.value::<u64>(4).is_err());
     assert!(buffer.sid_string(usize::MAX as PSID).is_err());
     assert!(buffer.sid_string(std::ptr::null_mut()).is_err());
+}
+
+#[test]
+fn reserved_token_information_is_never_queried_as_a_dword() {
+    let error = scalar(std::ptr::null_mut(), TokenIsRestricted).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported scalar token information class")
+    );
 }
