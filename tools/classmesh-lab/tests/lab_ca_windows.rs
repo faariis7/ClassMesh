@@ -316,6 +316,32 @@ fn student_cycle_reloads_real_identity_and_rejects_untrusted_results() {
         reopened,
     )
     .unwrap();
+    // RED integration gate: the *same* StudentDevice files that pass signed
+    // enrollment must be accepted by the read-only protected installer gate.
+    // Do not invoke `provision_fresh_install` or create any SCM/ProgramData state.
+    let policy_bytes = fs::read(stage.join("state/authorization.json")).unwrap();
+    let identity_bytes = fs::read(&identity).unwrap();
+    let runtime_bytes = fs::read(stage.join("config/control-runtime.json")).unwrap();
+    classmesh_win32::trusted_policy::check_fresh_install_candidate(
+        1,
+        &policy_bytes,
+        &identity_bytes,
+        &runtime_bytes,
+    )
+    .expect("real signed StudentDevice CNG bundle must pass protected read-only preflight");
+    assert!(
+        classmesh_win32::trusted_policy::check_fresh_install_candidate(
+            1,
+            &policy_bytes,
+            b"wrong-identity",
+            &runtime_bytes,
+        )
+        .is_err()
+    );
+    println!(
+        "trusted_service_preflight=PASS; source=real_CNG_StudentDevice_enrollment; writes=none"
+    );
+
     let store = DurableAuthorizationState::new(stage.join("state/authorization.json"))
         .load()
         .unwrap()
