@@ -398,3 +398,52 @@ mod ordered_ack_tests {
         );
     }
 }
+
+/// Write a completion receipt only after an authenticated reply was correlated
+/// and reported Completed. Create-new prevents overwriting prior lab evidence.
+pub fn write_completed_receipt(
+    path: &std::path::Path,
+    session: u64,
+    request: u64,
+    status: TeacherAckStatus,
+) -> std::io::Result<()> {
+    if session == 0 || request == 0 || status != TeacherAckStatus::Completed {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "only a correlated Worker Completed may produce a receipt",
+        ));
+    }
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    writeln!(file, "classmesh_teacher_message_ack_v1")?;
+    writeln!(file, "control_session_id={session}")?;
+    writeln!(file, "request_id={request}")?;
+    writeln!(file, "worker_state=Completed")?;
+    file.sync_all()
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+    #[test]
+    fn receipt_requires_completed_and_never_overwrites_evidence() {
+        let path = std::env::temp_dir().join(format!(
+            "classmesh-ack-receipt-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_file(&path);
+        assert!(write_completed_receipt(&path, 7, 19, TeacherAckStatus::Accepted).is_err());
+        assert!(!path.exists());
+        write_completed_receipt(&path, 7, 19, TeacherAckStatus::Completed).unwrap();
+        let receipt = std::fs::read_to_string(&path).unwrap();
+        assert!(receipt.contains("request_id=19"));
+        assert!(receipt.contains("worker_state=Completed"));
+        assert!(write_completed_receipt(&path, 7, 20, TeacherAckStatus::Completed).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), receipt);
+        std::fs::remove_file(path).unwrap();
+    }
+}
