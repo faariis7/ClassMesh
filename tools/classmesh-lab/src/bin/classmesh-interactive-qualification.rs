@@ -388,16 +388,6 @@ Optional:\n\
         }
     }
 
-    #[cfg(test)]
-    mod worker_message_reply_budget_tests {
-        use super::*;
-        #[test]
-        fn user_ack_qualification_waits_for_real_worker_confirmation_not_just_accepted() {
-            assert_eq!(worker_message_reply_budget(false), Duration::from_secs(3));
-            assert_eq!(worker_message_reply_budget(true), Duration::from_secs(16));
-        }
-    }
-
     // A single bounded read window handles Service's Accepted followed by
     // Worker Completed, with one deadline for the entire exchange.
     async fn receive_worker_message_result(
@@ -852,6 +842,16 @@ Optional:\n\
         endpoint.wait_idle().await;
         println!("qualification=complete control_heartbeats=responsive");
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod worker_message_reply_budget_tests {
+        use super::*;
+        #[test]
+        fn user_ack_qualification_waits_for_real_worker_confirmation_not_just_accepted() {
+            assert_eq!(worker_message_reply_budget(false), Duration::from_secs(3));
+            assert_eq!(worker_message_reply_budget(true), Duration::from_secs(16));
+        }
     }
 }
 
