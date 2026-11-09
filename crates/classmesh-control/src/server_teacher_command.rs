@@ -80,6 +80,16 @@ impl ExecutionState {
         self.retired = true;
     }
 
+    fn begin_inflight(&mut self) -> Result<(), ServiceTeacherCommandError> {
+        self.ensure_active()?;
+        self.retired = true;
+        Ok(())
+    }
+
+    fn finish_inflight(&mut self) {
+        self.retired = false;
+    }
+
     fn ensure_active(&self) -> Result<(), ServiceTeacherCommandError> {
         if self.retired {
             Err(ServiceTeacherCommandError::SessionRetired)
@@ -232,7 +242,9 @@ impl ServiceTeacherCommandReceiver {
         ) -> Fut,
         Fut: std::future::Future<Output = Result<CorrelatedWorkerOutcome, E>>,
     {
-        self.ensure_active()?;
+        // Mark the receiver unavailable before the first cancellable await.
+        // Dropping this future must not allow replay on the same session.
+        self.execution_state.begin_inflight()?;
         self.verify(authorization, now_unix_ms())?;
         let envelope = self
             .channel
@@ -301,6 +313,7 @@ impl ServiceTeacherCommandReceiver {
             self.retire_connection(b"teacher authorization changed");
             return Err(error);
         }
+        self.execution_state.finish_inflight();
         Ok(Ok(state))
     }
 
@@ -520,6 +533,23 @@ mod tests {
         state.retire();
         assert!(matches!(
             state.ensure_active(),
+            Err(ServiceTeacherCommandError::SessionRetired)
+        ));
+    }
+
+    #[test]
+    fn cancelled_inflight_command_cannot_reuse_authenticated_session() {
+        let mut state = ExecutionState::default();
+        state.begin_inflight().unwrap();
+        assert!(matches!(
+            state.begin_inflight(),
+            Err(ServiceTeacherCommandError::SessionRetired)
+        ));
+        state.finish_inflight();
+        state.begin_inflight().unwrap();
+        state.retire();
+        assert!(matches!(
+            state.begin_inflight(),
             Err(ServiceTeacherCommandError::SessionRetired)
         ));
     }
