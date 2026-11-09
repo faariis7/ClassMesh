@@ -438,11 +438,12 @@ Optional:\n\
             session_id, session.established.negotiated.capabilities
         );
 
-        if !session
-            .established
-            .negotiated
-            .capabilities
-            .contains(&Capability::UdpUnicast)
+        if !config.message_only
+            && !session
+                .established
+                .negotiated
+                .capabilities
+                .contains(&Capability::UdpUnicast)
         {
             return Err(
                 "student did not negotiate UDP unicast; Worker media capability is not ready"
