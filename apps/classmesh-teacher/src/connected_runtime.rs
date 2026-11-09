@@ -182,6 +182,10 @@ impl PendingTeacherResults {
         true
     }
 
+    fn can_send(&self) -> bool {
+        self.0.len() < 64
+    }
+
     fn verify(
         &mut self,
         envelope: &ControlEnvelope,
@@ -302,6 +306,13 @@ pub async fn drive_authenticated_teacher_duplex(
                             if !bootstrapped {
                                 owner.retire_exact(owner.source_id(), binding);
                                 split.connection.close(0u32.into(), b"Teacher unverified UI command");
+                                return Err(TeacherConnectedPlaybackError::NotBootstrapped);
+                            }
+                            // Refuse before writing: every transmitted request must
+                            // retain a correlation slot for its real Worker ACK.
+                            if !pending_results.can_send() {
+                                owner.retire_exact(owner.source_id(), binding);
+                                split.connection.close(0u32.into(), b"Teacher pending results exhausted");
                                 return Err(TeacherConnectedPlaybackError::NotBootstrapped);
                             }
                             match command_sender.send_on_split(
@@ -437,6 +448,32 @@ mod correlated_result_tests {
                 },
             )),
         }
+    }
+
+    #[test]
+    fn pending_limit_blocks_before_network_write_and_reopens_after_terminal_ack() {
+        let mut pending = PendingTeacherResults::default();
+        for id in 1..=64 {
+            assert!(pending.can_send());
+            assert!(pending.record(id, TeacherInteractionKind::Message));
+        }
+        assert!(
+            !pending.can_send(),
+            "a 65th write must not leave an untracked command"
+        );
+        assert_eq!(
+            pending.verify(
+                &response(
+                    21,
+                    1,
+                    TeacherInteractionKind::Message,
+                    TeacherInteractionState::Completed
+                ),
+                21
+            ),
+            Some(TeacherInteractionState::Completed)
+        );
+        assert!(pending.can_send());
     }
 
     #[test]
