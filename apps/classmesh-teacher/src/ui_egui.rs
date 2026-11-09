@@ -424,7 +424,7 @@ impl TeacherEguiShell {
                 }
                 Ok(TeacherUiControlEvent::Disconnected) => {
                     self.pending_action = None;
-                    self.clear_teacher_interaction_context();
+                    self.disconnect_preserving_command_history();
                 }
                 Err(TryRecvError::Empty) => {
                     event_batch_exhausted = false;
@@ -432,7 +432,7 @@ impl TeacherEguiShell {
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.pending_action = None;
-                    self.clear_teacher_interaction_context();
+                    self.disconnect_preserving_command_history();
                     self.control_bridge = None;
                     return;
                 }
@@ -456,7 +456,7 @@ impl TeacherEguiShell {
                 }
                 Some(Err(TrySendError::Disconnected(_))) => {
                     self.pending_action = None;
-                    self.clear_teacher_interaction_context();
+                    self.disconnect_preserving_command_history();
                     self.control_bridge = None;
                 }
                 _ => {}
@@ -495,6 +495,14 @@ impl TeacherEguiShell {
             self.playback = None;
         }
         self.teacher_interaction_context = Some(context);
+    }
+
+    // A lost QUIC connection is not a Worker failure or completion. Preserve
+    // the last observed results for diagnosis, while revoking all live authority.
+    fn disconnect_preserving_command_history(&mut self) {
+        let history = std::mem::take(&mut self.command_status);
+        self.clear_teacher_interaction_context();
+        self.command_status = history;
     }
 
     pub fn clear_teacher_interaction_context(&mut self) {
@@ -1054,7 +1062,15 @@ impl eframe::App for TeacherEguiShell {
             ));
             for (&request_id, &(_, state)) in self.command_status.iter().rev().take(3) {
                 let label = match state {
+                    None if self.teacher_interaction_context.is_none() => {
+                        "Connection lost — delivery unconfirmed"
+                    }
                     None => "Sent over QUIC — no Service ACK",
+                    Some(TeacherInteractionState::Accepted)
+                        if self.teacher_interaction_context.is_none() =>
+                    {
+                        "Connection lost after acceptance — completion unconfirmed"
+                    }
                     Some(TeacherInteractionState::Accepted) => {
                         "Worker accepted — completion unconfirmed"
                     }
@@ -1131,6 +1147,38 @@ mod tests {
     use crate::ui_shell::{TeacherFocusUiAction, TeacherPresentationUiAction};
 
     use super::*;
+
+    #[test]
+    fn disconnect_retains_worker_truth_but_revokes_session_authority() {
+        let mut app = TeacherEguiShell::default();
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
+        app.command_status
+            .insert(7, (77, Some(TeacherInteractionState::Completed)));
+        app.command_status
+            .insert(8, (77, Some(TeacherInteractionState::Accepted)));
+        app.command_status.insert(9, (77, None));
+        app.disconnect_preserving_command_history();
+        assert!(app.teacher_interaction_context.is_none());
+        assert_eq!(app.command_status.len(), 3);
+        assert_eq!(
+            app.command_status.get(&7).unwrap().1,
+            Some(TeacherInteractionState::Completed)
+        );
+        assert_eq!(
+            app.command_status.get(&8).unwrap().1,
+            Some(TeacherInteractionState::Accepted)
+        );
+        assert_eq!(app.command_status.get(&9).unwrap().1, None);
+        app.set_teacher_interaction_context({
+            let mut next = interaction_context(BTreeSet::new());
+            next.control_session_id = 78;
+            next
+        });
+        assert!(
+            app.command_status.is_empty(),
+            "new session cannot inherit old ACKs"
+        );
+    }
 
     #[test]
     fn worker_result_state_never_regresses_on_delayed_or_duplicate_events() {
