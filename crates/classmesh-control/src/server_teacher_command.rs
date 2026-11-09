@@ -246,6 +246,9 @@ impl ServiceTeacherCommandReceiver {
             }
         };
         self.verify(authorization, now_unix_ms())?;
+        // Reserve the next sequence before writing: never emit an ACK that
+        // cannot be recorded as consumed by this session.
+        let following_sequence = reserve_reply_sequence(self.next_reply_sequence)?;
         let response = correlated_teacher_result(
             self.guard.control_session_id(),
             self.guard.protocol_version(),
@@ -258,10 +261,7 @@ impl ServiceTeacherCommandReceiver {
             self.retire_connection(b"worker result send failed");
             return Err(ServiceTeacherCommandError::Transport(error));
         }
-        self.next_reply_sequence = self
-            .next_reply_sequence
-            .checked_add(1)
-            .ok_or(ServiceTeacherCommandError::SessionRetired)?;
+        self.next_reply_sequence = following_sequence;
         if let Err(error) = self.verify(authorization, now_unix_ms()) {
             self.retire_connection(b"teacher authorization changed");
             return Err(error);
@@ -359,6 +359,12 @@ impl ServiceTeacherCommandReceiver {
     }
 }
 
+fn reserve_reply_sequence(current: u64) -> Result<u64, ServiceTeacherCommandError> {
+    current
+        .checked_add(1)
+        .ok_or(ServiceTeacherCommandError::SessionRetired)
+}
+
 fn correlated_teacher_result(
     session_id: u64,
     version: ProtocolVersion,
@@ -444,6 +450,15 @@ mod tests {
             state.ensure_active(),
             Err(ServiceTeacherCommandError::SessionRetired)
         ));
+    }
+
+    #[test]
+    fn exhausted_reply_sequence_must_fail_before_sending_any_ack() {
+        assert!(matches!(
+            reserve_reply_sequence(u64::MAX),
+            Err(ServiceTeacherCommandError::SessionRetired)
+        ));
+        assert_eq!(reserve_reply_sequence(2).unwrap(), 3);
     }
 
     #[test]
