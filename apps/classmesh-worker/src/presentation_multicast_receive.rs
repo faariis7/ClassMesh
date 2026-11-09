@@ -123,8 +123,12 @@ impl WorkerPresentationMulticastRuntime {
 
                 let clock = Instant::now();
                 while !thread_stop.load(Ordering::Acquire) {
-                    let now_us = u64::try_from(clock.elapsed().as_micros()).unwrap_or(u64::MAX);
-                    match receiver.receive_once(now_us) {
+                    // Read timeout is 10ms, but OS scheduling can exceed the
+                    // frame expiry budget. Timestamp only after the actual
+                    // receive/timeout; never count blocked time as frame age.
+                    match receiver.receive_once_with_clock(|| {
+                        u64::try_from(clock.elapsed().as_micros()).unwrap_or(u64::MAX)
+                    }) {
                         Ok(ProtectedMulticastReceiveOutcome::Events(batch)) if batch.is_empty() => {
                         }
                         Ok(outcome) => match receive_tx.try_send(outcome) {
