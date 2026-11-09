@@ -94,8 +94,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut counters = ReceiverCounters::default();
 
     while Instant::now() < deadline {
-        let now_us = elapsed_us(started);
-        match receiver.receive_once(now_us) {
+        // Timestamp only after recv_from returns. The socket may block up to
+        // its 100ms read timeout; using the earlier loop timestamp would
+        // instantly expire a freshly arrived fragmented frame (80ms policy).
+        match receiver.receive_once_with_clock(|| elapsed_us(started)) {
             Ok(batch) => {
                 handle_events(
                     &batch.events,
