@@ -336,7 +336,27 @@ impl ServiceTeacherCommandReceiver {
         authorization: &LiveAuthorizationStore,
         now_unix_ms: impl Fn() -> u64,
     ) -> Result<PrivilegedControlCommand, ServiceTeacherCommandError> {
-        self.ensure_active()?;
+        self.execution_state.begin_inflight()?;
+        let result = self
+            .receive_authorized_inner(authorization, now_unix_ms)
+            .await;
+        match result {
+            Ok(command) => {
+                self.execution_state.finish_inflight();
+                Ok(command)
+            }
+            Err(error) => {
+                self.retire_connection(b"teacher authorized ingress failed");
+                Err(error)
+            }
+        }
+    }
+
+    async fn receive_authorized_inner(
+        &mut self,
+        authorization: &LiveAuthorizationStore,
+        now_unix_ms: impl Fn() -> u64,
+    ) -> Result<PrivilegedControlCommand, ServiceTeacherCommandError> {
         self.verify(authorization, now_unix_ms())?;
         let envelope = self
             .channel
@@ -375,17 +395,18 @@ impl ServiceTeacherCommandReceiver {
         Fut: std::future::Future<Output = Result<(), E>>,
     {
         let command = self.receive_authorized(authorization, now_unix_ms).await?;
+        // Cancellation during Worker execution must retire the consumed session.
+        self.execution_state.begin_inflight()?;
         let result = execute(command).await;
+        if result.is_ok() {
+            self.execution_state.finish_inflight();
+        }
         if result.is_err() {
             self.execution_state.retire();
             self.connection
                 .close(0u32.into(), b"teacher command execution failed");
         }
         Ok(result)
-    }
-
-    fn ensure_active(&self) -> Result<(), ServiceTeacherCommandError> {
-        self.execution_state.ensure_active()
     }
 
     fn verify(
@@ -557,6 +578,25 @@ mod tests {
             ),
             Err(ServiceTeacherCommandError::InvalidWorkerOutcome)
         ));
+    }
+
+    #[test]
+    fn cancelled_ingress_or_executor_cannot_reuse_consumed_session() {
+        let mut ingress = ExecutionState::default();
+        ingress.begin_inflight().unwrap();
+        // Dropping the async operation leaves the session retired.
+        assert!(matches!(
+            ingress.begin_inflight(),
+            Err(ServiceTeacherCommandError::SessionRetired)
+        ));
+        let mut executor = ExecutionState::default();
+        executor.begin_inflight().unwrap();
+        assert!(matches!(
+            executor.ensure_active(),
+            Err(ServiceTeacherCommandError::SessionRetired)
+        ));
+        executor.finish_inflight();
+        assert!(executor.ensure_active().is_ok());
     }
 
     #[test]
