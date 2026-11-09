@@ -9,6 +9,57 @@ const WORKER_IPC_EVENT_QUEUE_CAPACITY: usize = 128;
 const PRESENTATION_RECEIVE_DRAIN_LIMIT: usize = 8;
 
 #[cfg(windows)]
+struct TeacherInteractionReplay {
+    entries: std::collections::VecDeque<(
+        (u64, u64),
+        classmesh_protocol::control_wire::TeacherInteractionRequest,
+        classmesh_protocol::control_wire::TeacherInteractionResult,
+    )>,
+}
+
+#[cfg(windows)]
+impl TeacherInteractionReplay {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::VecDeque::new(),
+        }
+    }
+
+    fn lookup(
+        &self,
+        session_id: u64,
+        request_id: u64,
+        request: &classmesh_protocol::control_wire::TeacherInteractionRequest,
+    ) -> Result<Option<classmesh_protocol::control_wire::TeacherInteractionResult>, &'static str>
+    {
+        match self
+            .entries
+            .iter()
+            .find(|(key, _, _)| *key == (session_id, request_id))
+        {
+            Some((_, prior, result)) if prior == request => Ok(Some(result.clone())),
+            Some(_) => Err("worker.teacher_interaction.replay_payload_mismatch"),
+            None => Ok(None),
+        }
+    }
+
+    fn record(
+        &mut self,
+        session_id: u64,
+        request_id: u64,
+        request: classmesh_protocol::control_wire::TeacherInteractionRequest,
+        result: classmesh_protocol::control_wire::TeacherInteractionResult,
+    ) {
+        const MAX_REPLAY_ENTRIES: usize = 128;
+        if self.entries.len() == MAX_REPLAY_ENTRIES {
+            self.entries.pop_front();
+        }
+        self.entries
+            .push_back(((session_id, request_id), request, result));
+    }
+}
+
+#[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
@@ -120,6 +171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut captured_frames = 0_u64;
     let mut input_injector = InputInjector::default();
     let mut workstation_locker = Win32WorkstationLocker;
+    let mut teacher_interaction_replay = TeacherInteractionReplay::new();
     let mut teacher_message_presenter = Win32TeacherMessagePresenter;
     let mut open_target_launcher = Win32OpenTargetLauncher;
     let mut group_media_keys =
@@ -381,18 +433,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             Ok(WorkerEvent::TeacherInteraction(interaction)) => {
-                let result = match execute_teacher_interaction(
-                    actual_session,
+                let result = match teacher_interaction_replay.lookup(
+                    interaction.control_session_id,
+                    interaction.request_id,
                     &interaction.request,
-                    &mut teacher_message_presenter,
-                    &mut open_target_launcher,
                 ) {
-                    Ok(result) => result,
+                    Ok(Some(cached)) => cached,
                     Err(code) => {
-                        eprintln!(
-                            "ClassMesh Worker rejected malformed Teacher interaction before execution: {code}"
-                        );
+                        // Same correlation ID with different payload must never execute.
+                        eprintln!("ClassMesh Worker rejected Teacher replay: {code}");
                         continue;
+                    }
+                    Ok(None) => {
+                        let executed = match execute_teacher_interaction(
+                            actual_session,
+                            &interaction.request,
+                            &mut teacher_message_presenter,
+                            &mut open_target_launcher,
+                        ) {
+                            Ok(result) => result,
+                            Err(code) => {
+                                eprintln!(
+                                    "ClassMesh Worker rejected malformed Teacher interaction: {code}"
+                                );
+                                continue;
+                            }
+                        };
+                        // Record before writing: a broken reply pipe cannot cause
+                        // this process to execute the same command twice.
+                        teacher_interaction_replay.record(
+                            interaction.control_session_id,
+                            interaction.request_id,
+                            interaction.request.clone(),
+                            executed.clone(),
+                        );
+                        executed
                     }
                 };
                 let result = classmesh_windows_runtime::ipc::WorkerTeacherInteractionResult {
@@ -482,12 +557,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         presentation_keyframe_request_retry.reset();
                         presentation_silence.reset();
                         presentation_delivery_telemetry.reset();
-                        match classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime::start(start) {
-                            Ok(receiver) => {
-                                match classmesh_worker::presentation_decode_render::PresentationDecodeRuntime::new(
-                                    true, None,
-                                ) {
-                                    Ok(decoder) => {
+                        match classmesh_worker::presentation_decode_render::PresentationDecodeRuntime::new(
+                            true, None,
+                        ) {
+                            Ok(decoder) => match classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime::start(start) {
+                                Ok(receiver) => {
                                         eprintln!(
                                             "ClassMesh Worker multicast presentation ready: presentation={}, stream={}, group={}:{}, interface={}, teacher_source={}",
                                             start.presentation_id,
@@ -500,18 +574,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         presentation_multicast = Some(receiver);
                                         presentation_decode = Some(decoder);
                                         WorkerPresentationMulticastStartStatus::Started
-                                    }
-                                    Err(error) => {
-                                        eprintln!(
-                                            "ClassMesh Worker presentation decoder failed closed after multicast bind/join; start rejected: {error}"
-                                        );
-                                        WorkerPresentationMulticastStartStatus::Rejected
-                                    }
                                 }
-                            }
+                                Err(error) => {
+                                    eprintln!(
+                                        "ClassMesh Worker multicast receiver failed closed; control remains active: {error}"
+                                    );
+                                    WorkerPresentationMulticastStartStatus::Rejected
+                                }
+                            },
                             Err(error) => {
                                 eprintln!(
-                                    "ClassMesh Worker multicast receiver failed closed; control remains active: {error}"
+                                    "ClassMesh Worker presentation decoder unavailable before multicast network start; start rejected: {error}"
                                 );
                                 WorkerPresentationMulticastStartStatus::Rejected
                             }
@@ -560,12 +633,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         presentation_keyframe_request_retry.reset();
                         presentation_silence.reset();
                         presentation_delivery_telemetry.reset();
-                        match classmesh_worker::presentation_unicast_receive::WorkerPresentationUnicastRuntime::start(start) {
-                            Ok(receiver) => {
-                                match classmesh_worker::presentation_decode_render::PresentationDecodeRuntime::new(
-                                    true, None,
-                                ) {
-                                    Ok(decoder) => {
+                        match classmesh_worker::presentation_decode_render::PresentationDecodeRuntime::new(
+                            true, None,
+                        ) {
+                            Ok(decoder) => match classmesh_worker::presentation_unicast_receive::WorkerPresentationUnicastRuntime::start(start) {
+                                Ok(receiver) => {
                                         eprintln!(
                                             "ClassMesh Worker unicast presentation ready: presentation={}, stream={}, port={}, teacher_source={}",
                                             start.presentation_id,
@@ -576,18 +648,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         presentation_unicast = Some(receiver);
                                         presentation_decode = Some(decoder);
                                         WorkerPresentationUnicastStartStatus::Started
-                                    }
-                                    Err(error) => {
-                                        eprintln!(
-                                            "ClassMesh Worker presentation decoder failed closed after unicast bind; start rejected: {error}"
-                                        );
-                                        WorkerPresentationUnicastStartStatus::Rejected
-                                    }
                                 }
-                            }
+                                Err(error) => {
+                                    eprintln!(
+                                        "ClassMesh Worker unicast receiver failed closed; control remains active: {error}"
+                                    );
+                                    WorkerPresentationUnicastStartStatus::Rejected
+                                }
+                            },
                             Err(error) => {
                                 eprintln!(
-                                    "ClassMesh Worker unicast receiver failed closed; control remains active: {error}"
+                                    "ClassMesh Worker presentation decoder unavailable before unicast network start; start rejected: {error}"
                                 );
                                 WorkerPresentationUnicastStartStatus::Rejected
                             }
@@ -1124,7 +1195,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
             }
             CaptureStep::NoFrame => {
-                capture_due = Instant::now();
+                // A quiet desktop can produce no DXGI updates for extended periods.
+                // Bound polling without blocking the authenticated IPC/control loop.
+                capture_due = next_no_frame_capture_due(active_focused_profile);
             }
             CaptureStep::RetryAfter { delay_ms, reason } => {
                 encoder_benchmark = None;
@@ -1340,6 +1413,22 @@ fn next_capture_due(profile: Option<FocusedWorkerProfile>) -> std::time::Instant
         return now;
     };
     now.checked_add(profile.capture_interval()).unwrap_or(now)
+}
+
+#[cfg(windows)]
+fn no_frame_poll_interval(profile: Option<FocusedWorkerProfile>) -> std::time::Duration {
+    profile
+        .map(FocusedWorkerProfile::capture_interval)
+        .unwrap_or(std::time::Duration::from_millis(16))
+}
+
+#[cfg(windows)]
+fn next_no_frame_capture_due(profile: Option<FocusedWorkerProfile>) -> std::time::Instant {
+    let now = std::time::Instant::now();
+    let interval = no_frame_poll_interval(profile);
+    // A configured high-FPS stream still gets its requested cadence, while
+    // an idle unconfigured capture cannot spin at full CPU speed.
+    now.checked_add(interval).unwrap_or(now)
 }
 
 #[cfg(windows)]
@@ -2182,6 +2271,30 @@ mod focused_profile_tests {
     }
 
     #[test]
+    fn teacher_interaction_replay_returns_original_result_and_rejects_payload_substitution() {
+        use classmesh_protocol::control_wire::{
+            TeacherInteractionKind, TeacherInteractionResult, TeacherInteractionState,
+        };
+        let mut replay = super::TeacherInteractionReplay::new();
+        let first = teacher_message_request("Lesson one");
+        let result = TeacherInteractionResult {
+            kind: TeacherInteractionKind::Message as i32,
+            state: TeacherInteractionState::Accepted as i32,
+            diagnostic: String::new(),
+        };
+        assert!(replay.lookup(77, 44, &first).unwrap().is_none());
+        replay.record(77, 44, first.clone(), result.clone());
+        assert_eq!(replay.lookup(77, 44, &first).unwrap(), Some(result));
+        assert!(
+            replay
+                .lookup(77, 44, &teacher_message_request("Different"))
+                .is_err()
+        );
+        assert!(replay.lookup(78, 44, &first).unwrap().is_none());
+        assert!(replay.lookup(77, 45, &first).unwrap().is_none());
+    }
+
+    #[test]
     fn teacher_message_execution_revalidates_and_uses_injected_presenter() {
         use classmesh_protocol::control_wire::{TeacherInteractionKind, TeacherInteractionState};
 
@@ -2747,6 +2860,19 @@ mod focused_profile_tests {
         assert_eq!(profile.bitrate_kbps, 1_500);
         assert_eq!(
             profile.capture_interval(),
+            std::time::Duration::from_micros(33_333)
+        );
+    }
+
+    #[test]
+    fn idle_capture_pacing_preserves_configured_frame_interval() {
+        assert_eq!(
+            no_frame_poll_interval(None),
+            std::time::Duration::from_millis(16)
+        );
+        let profile = FocusedWorkerProfile::from_reconfigure(&reconfigure()).unwrap();
+        assert_eq!(
+            no_frame_poll_interval(Some(profile)),
             std::time::Duration::from_micros(33_333)
         );
     }
