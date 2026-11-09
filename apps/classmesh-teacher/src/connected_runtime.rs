@@ -6,6 +6,7 @@
 //! Exactly one reader owns that session. It never turns Hello/reconnect alone
 //! into a live playback UI state.
 
+use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
@@ -15,7 +16,13 @@ use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::teacher_playback_receive::{
     TeacherControlSequenceGuard, receive_guarded_authenticated_teacher_control_on_split,
 };
-use classmesh_protocol::{Capability, control_wire::ControlEnvelope};
+use classmesh_protocol::{
+    Capability,
+    control_wire::{
+        ControlEnvelope, TeacherInteractionKind, TeacherInteractionState, control_envelope,
+    },
+    teacher_interaction,
+};
 
 use crate::connected_command::{
     QueuedTeacherUiAction, TeacherCommandSendError, TeacherCommandSender,
@@ -162,6 +169,51 @@ pub enum TeacherDuplexDispatch {
     CommandWritten(u64),
 }
 
+/// Correlates only genuine authenticated responses with writes on this session.
+#[derive(Default)]
+struct PendingTeacherResults(BTreeMap<u64, TeacherInteractionKind>);
+
+impl PendingTeacherResults {
+    fn record(&mut self, request_id: u64, kind: TeacherInteractionKind) -> bool {
+        if request_id == 0 || self.0.len() >= 64 || self.0.contains_key(&request_id) {
+            return false;
+        }
+        self.0.insert(request_id, kind);
+        true
+    }
+
+    fn can_send(&self) -> bool {
+        self.0.len() < 64
+    }
+
+    fn verify(
+        &mut self,
+        envelope: &ControlEnvelope,
+        session_id: u64,
+    ) -> Option<TeacherInteractionState> {
+        if envelope.control_session_id != session_id
+            || envelope.request_id == 0
+            || envelope.sequence == 0
+        {
+            return None;
+        }
+        let Some(control_envelope::Payload::TeacherInteractionResult(result)) = &envelope.payload
+        else {
+            return None;
+        };
+        let expected = self.0.get(&envelope.request_id)?;
+        if teacher_interaction::validate_result(result).is_err() || result.kind != *expected as i32
+        {
+            return None;
+        }
+        let state = TeacherInteractionState::try_from(result.state).ok()?;
+        if state != TeacherInteractionState::Accepted {
+            self.0.remove(&envelope.request_id);
+        }
+        Some(state)
+    }
+}
+
 /// Run real Teacher GUI observations and actions on one existing enrolled QUIC
 /// connection and one sole replay-guarded network reader. The already-proven
 /// Hello/control session is consumed; no new certificate, source roster, or
@@ -213,6 +265,7 @@ pub async fn drive_authenticated_teacher_duplex(
     let mut split = session.into_split();
     let mut reader_guard = TeacherControlSequenceGuard::default();
     let mut command_sender = TeacherCommandSender::default();
+    let mut pending_results = PendingTeacherResults::default();
     let mut tick = tokio::time::interval(Duration::from_millis(15));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut bootstrapped = false;
@@ -255,6 +308,13 @@ pub async fn drive_authenticated_teacher_duplex(
                                 split.connection.close(0u32.into(), b"Teacher unverified UI command");
                                 return Err(TeacherConnectedPlaybackError::NotBootstrapped);
                             }
+                            // Refuse before writing: every transmitted request must
+                            // retain a correlation slot for its real Worker ACK.
+                            if !pending_results.can_send() {
+                                owner.retire_exact(owner.source_id(), binding);
+                                split.connection.close(0u32.into(), b"Teacher pending results exhausted");
+                                return Err(TeacherConnectedPlaybackError::NotBootstrapped);
+                            }
                             match command_sender.send_on_split(
                                 owner,
                                 (&split.connection, &split.established),
@@ -264,6 +324,17 @@ pub async fn drive_authenticated_teacher_duplex(
                                 &clocks.0,
                             ).await {
                                 Ok(request_id) => {
+                                    let kind = teacher_interaction::validate_request(&action.request)
+                                        .map_err(|_| TeacherConnectedPlaybackError::NotBootstrapped)?;
+                                    if !pending_results.record(request_id, kind) {
+                                        owner.retire_exact(owner.source_id(), binding);
+                                        split.connection.close(0u32.into(), b"Teacher pending results exhausted");
+                                        return Err(TeacherConnectedPlaybackError::NotBootstrapped);
+                                    }
+                                    send_window_event(&events, TeacherUiControlEvent::CommandWritten {
+                                        control_session_id: binding.control_session_id,
+                                        request_id,
+                                    })?;
                                     // This is only successful transmission. Service
                                     // authorization and ACK must arrive separately.
                                     if dispatch(TeacherDuplexDispatch::CommandWritten(request_id)).is_break() {
@@ -302,6 +373,16 @@ pub async fn drive_authenticated_teacher_duplex(
             .map_err(|error| TeacherConnectedPlaybackError::Receive(Box::new(error)))?;
         match event {
             TeacherPlaybackSessionEvent::OtherControl(envelope) => {
+                if let Some(state) = pending_results.verify(&envelope, binding.control_session_id) {
+                    send_window_event(
+                        &events,
+                        TeacherUiControlEvent::CommandResult {
+                            control_session_id: binding.control_session_id,
+                            request_id: envelope.request_id,
+                            state,
+                        },
+                    )?;
+                }
                 if dispatch(TeacherDuplexDispatch::OtherControl(envelope)).is_break() {
                     owner.retire_exact(owner.source_id(), binding);
                     split
@@ -340,5 +421,136 @@ pub async fn drive_authenticated_teacher_duplex(
                 bootstrapped = true;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod correlated_result_tests {
+    use super::*;
+    use classmesh_protocol::control_wire::{ProtocolVersion, TeacherInteractionResult};
+
+    fn response(
+        session: u64,
+        request: u64,
+        kind: TeacherInteractionKind,
+        state: TeacherInteractionState,
+    ) -> ControlEnvelope {
+        ControlEnvelope {
+            control_session_id: session,
+            sequence: 9,
+            request_id: request,
+            protocol_version: Some(ProtocolVersion { major: 0, minor: 8 }),
+            payload: Some(control_envelope::Payload::TeacherInteractionResult(
+                TeacherInteractionResult {
+                    kind: kind as i32,
+                    state: state as i32,
+                    diagnostic: String::new(),
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn pending_limit_blocks_before_network_write_and_reopens_after_terminal_ack() {
+        let mut pending = PendingTeacherResults::default();
+        for id in 1..=64 {
+            assert!(pending.can_send());
+            assert!(pending.record(id, TeacherInteractionKind::Message));
+        }
+        assert!(
+            !pending.can_send(),
+            "a 65th write must not leave an untracked command"
+        );
+        assert_eq!(
+            pending.verify(
+                &response(
+                    21,
+                    1,
+                    TeacherInteractionKind::Message,
+                    TeacherInteractionState::Completed
+                ),
+                21
+            ),
+            Some(TeacherInteractionState::Completed)
+        );
+        assert!(pending.can_send());
+    }
+
+    #[test]
+    fn request_and_session_correlation_prevents_false_ack() {
+        let mut pending = PendingTeacherResults::default();
+        assert!(pending.record(7, TeacherInteractionKind::Message));
+        assert_eq!(
+            pending.verify(
+                &response(
+                    22,
+                    7,
+                    TeacherInteractionKind::Message,
+                    TeacherInteractionState::Completed
+                ),
+                21
+            ),
+            None
+        );
+        assert_eq!(
+            pending.verify(
+                &response(
+                    21,
+                    8,
+                    TeacherInteractionKind::Message,
+                    TeacherInteractionState::Completed
+                ),
+                21
+            ),
+            None
+        );
+        assert_eq!(
+            pending.verify(
+                &response(
+                    21,
+                    7,
+                    TeacherInteractionKind::OpenTarget,
+                    TeacherInteractionState::Completed
+                ),
+                21
+            ),
+            None
+        );
+        assert_eq!(
+            pending.verify(
+                &response(
+                    21,
+                    7,
+                    TeacherInteractionKind::Message,
+                    TeacherInteractionState::Accepted
+                ),
+                21
+            ),
+            Some(TeacherInteractionState::Accepted)
+        );
+        assert_eq!(
+            pending.verify(
+                &response(
+                    21,
+                    7,
+                    TeacherInteractionKind::Message,
+                    TeacherInteractionState::Completed
+                ),
+                21
+            ),
+            Some(TeacherInteractionState::Completed)
+        );
+        assert_eq!(
+            pending.verify(
+                &response(
+                    21,
+                    7,
+                    TeacherInteractionKind::Message,
+                    TeacherInteractionState::Completed
+                ),
+                21
+            ),
+            None
+        );
     }
 }

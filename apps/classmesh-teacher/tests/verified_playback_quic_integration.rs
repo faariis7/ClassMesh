@@ -680,8 +680,15 @@ async fn authenticated_duplex_runtime_sends_ui_command_while_receiver_remains_wa
         )
         .await
     });
-    let first = tokio::task::spawn_blocking(move || event_rx.recv_timeout(Duration::from_secs(3)))
-        .await??;
+    // Keep the native GUI event receiver ALIVE for the entire duplex test.
+    // After the first bootstrap, the runtime now publishes a real
+    // CommandWritten status. Dropping the receiver here would correctly
+    // retire the control connection (and fail the test with connection lost).
+    let (first, event_rx) = tokio::task::spawn_blocking(move || {
+        (event_rx.recv_timeout(Duration::from_secs(3)), event_rx)
+    })
+    .await?;
+    let first = first?;
     assert!(
         matches!(first, TeacherUiControlEvent::VerifiedBootstrap { .. }),
         "must not accept or send UI commands before the first verified playback report"
@@ -708,6 +715,20 @@ async fn authenticated_duplex_runtime_sends_ui_command_while_receiver_remains_wa
         received.payload,
         Some(control_envelope::Payload::TeacherInteractionRequest(_))
     ));
+    let (written, event_rx) = tokio::task::spawn_blocking(move || {
+        (event_rx.recv_timeout(Duration::from_secs(3)), event_rx)
+    })
+    .await?;
+    assert!(
+        matches!(
+            written?,
+            TeacherUiControlEvent::CommandWritten {
+                control_session_id: CONTROL_SESSION,
+                request_id,
+            } if request_id != 0
+        ),
+        "the live GUI must receive the non-ACK write event without retiring QUIC"
+    );
     let mut finished = report();
     finished.sequence = 3;
     finished.payload = Some(control_envelope::Payload::Heartbeat(
@@ -721,6 +742,8 @@ async fn authenticated_duplex_runtime_sends_ui_command_while_receiver_remains_wa
     timeout(Duration::from_secs(3), runtime)
         .await??
         .map_err(|err| format!("{err:?}"))?;
+    // The GUI's receiver is intentionally only dropped after runtime exit.
+    drop(event_rx);
     Ok(())
 }
 
