@@ -6,7 +6,7 @@ use classmesh_control::client_session::ClientControlSession;
 use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::teacher_playback_receive::AuthenticatedTeacherControlMessage;
 use classmesh_protocol::Capability;
-use classmesh_protocol::control_wire::ControlEnvelope;
+use classmesh_protocol::control_wire::{ControlEnvelope, TeacherInteractionState};
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::classroom_grid::{MonitoringGridViewConfig, TeacherMonitoringGridViewModel};
@@ -95,6 +95,15 @@ pub enum TeacherUiControlEvent {
     PlaybackRetired {
         source_id: MonitoringSourceId,
         binding: TeacherPlaybackBinding,
+    },
+    CommandWritten {
+        control_session_id: u64,
+        request_id: u64,
+    },
+    CommandResult {
+        control_session_id: u64,
+        request_id: u64,
+        state: TeacherInteractionState,
     },
     Disconnected,
 }
@@ -208,6 +217,7 @@ pub struct TeacherEguiShell {
     teacher_interaction_draft: TeacherInteractionDraft,
     pending_action: Option<TeacherUiAction>,
     control_bridge: Option<TeacherUiControlBridge>,
+    command_status: Option<(u64, u64, Option<TeacherInteractionState>)>,
 }
 
 impl Default for TeacherEguiShell {
@@ -234,6 +244,7 @@ impl Default for TeacherEguiShell {
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
             control_bridge: None,
+            command_status: None,
         }
     }
 }
@@ -264,6 +275,7 @@ impl TeacherEguiShell {
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
             control_bridge: None,
+            command_status: None,
         }
     }
 
@@ -337,6 +349,33 @@ impl TeacherEguiShell {
                 Ok(TeacherUiControlEvent::PlaybackRetired { source_id, binding }) => {
                     let _ = self.revoke_receiver_playback_context(source_id, binding);
                 }
+                Ok(TeacherUiControlEvent::CommandWritten {
+                    control_session_id,
+                    request_id,
+                }) => {
+                    if self
+                        .teacher_interaction_context
+                        .as_ref()
+                        .is_some_and(|c| c.control_session_id == control_session_id)
+                    {
+                        self.command_status = Some((control_session_id, request_id, None));
+                    }
+                }
+                Ok(TeacherUiControlEvent::CommandResult {
+                    control_session_id,
+                    request_id,
+                    state,
+                }) => {
+                    if self
+                        .command_status
+                        .as_ref()
+                        .is_some_and(|(session, id, _)| {
+                            *session == control_session_id && *id == request_id
+                        })
+                    {
+                        self.command_status = Some((control_session_id, request_id, Some(state)));
+                    }
+                }
                 Ok(TeacherUiControlEvent::Disconnected) => {
                     self.pending_action = None;
                     self.clear_teacher_interaction_context();
@@ -387,6 +426,7 @@ impl TeacherEguiShell {
             != Some((context.source_id, context.control_session_id))
         {
             reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
+            self.command_status = None;
             // Every queued action belongs to the old session, including
             // SelectDevice and presentation intents with no session epoch.
             // Never forward them into a newly authenticated QUIC session.
@@ -423,6 +463,7 @@ impl TeacherEguiShell {
             self.pending_action = None;
         }
         self.teacher_interaction_context = None;
+        self.command_status = None;
         // Retire the authenticated playback ledger and diagnostics intents together.
         self.retire_pending_diagnostics_override();
         self.playback = None;
@@ -965,6 +1006,19 @@ impl eframe::App for TeacherEguiShell {
             ui.small(control_connection_label(
                 self.teacher_interaction_context.as_ref(),
             ));
+            if let Some((_, request_id, state)) = self.command_status {
+                let label = match state {
+                    None => "Sent over QUIC — no Service ACK",
+                    Some(TeacherInteractionState::Accepted) => {
+                        "Worker accepted — completion unconfirmed"
+                    }
+                    Some(TeacherInteractionState::Completed) => "Worker reported completed",
+                    Some(TeacherInteractionState::Rejected) => "Worker rejected command",
+                    Some(TeacherInteractionState::Failed) => "Worker reported failure",
+                    _ => "Invalid command state",
+                };
+                ui.small(format!("Request {request_id}: {label}"));
+            }
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
