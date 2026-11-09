@@ -343,8 +343,25 @@ impl UdpFrameReceiver {
         self.socket.set_read_timeout(timeout)
     }
 
+    /// Receives exactly one datagram, using a caller-provided timestamp.
+    /// The caller is responsible for making that timestamp representative of
+    /// when the packet was actually read, rather than when a blocking read
+    /// began. Prefer `receive_once_with_clock` for blocking socket loops.
     pub fn receive_once(&mut self, now_us: u64) -> Result<UdpReceiveBatch, DatagramError> {
+        self.receive_once_with_clock(|| now_us)
+    }
+
+    /// Samples the supplied monotonic clock *after* a successful socket read.
+    /// A blocking `recv_from` can wait longer than the frame's stale deadline;
+    /// pre-sampling before that wait would falsely expire valid fragments on
+    /// the next `tick`. On I/O error the clock is not invoked. This does not
+    /// alter the receiver's 80ms deadline, bounds or replay/sequence policy.
+    pub fn receive_once_with_clock(
+        &mut self,
+        clock: impl FnOnce() -> u64,
+    ) -> Result<UdpReceiveBatch, DatagramError> {
         let (packet, source) = self.socket.receive_packet()?;
+        let now_us = clock();
         let observation = self.sequence.observe(packet.header.sequence);
         self.stats.datagrams_received = self.stats.datagrams_received.saturating_add(1);
         self.stats.record_sequence_observation(observation);
@@ -409,6 +426,74 @@ mod tests {
             Codec::H264,
             (0_u8..=250).cycle().take(bytes).collect(),
         )
+    }
+
+    #[test]
+    fn media_receive_clock_is_sampled_after_blocking_read_and_not_on_timeout() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+        use std::time::Duration;
+
+        let mut receiver =
+            UdpFrameReceiver::bind(loopback_any(), ReceiverPolicy::default()).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let destination = receiver.local_addr().unwrap();
+        let transmitted = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&transmitted);
+        let sender = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(40));
+            let mut sender = UdpFrameSender::bind(
+                loopback_any(),
+                UdpSenderConfig::presentation(7, destination),
+            )
+            .unwrap();
+            flag.store(true, Ordering::Release);
+            sender.send_frame(100_000, &frame(1, 2048)).unwrap();
+        });
+        let batch = receiver
+            .receive_once_with_clock(|| {
+                assert!(
+                    transmitted.load(Ordering::Acquire),
+                    "clock must be called only AFTER socket recv_from returned"
+                );
+                100_000
+            })
+            .unwrap();
+        assert!(
+            batch.events.is_empty(),
+            "large frame must remain pending after first datagram"
+        );
+        assert!(
+            receiver.tick(100_001).is_empty(),
+            "fresh frame must not instantly expire due to the earlier blocking wait"
+        );
+        let completed = receiver.receive_once_with_clock(|| 100_001).unwrap();
+        assert!(
+            completed
+                .events
+                .iter()
+                .any(|e| matches!(e, ReceiverEvent::FrameReady(frame) if frame.frame_id == 1))
+        );
+        sender.join().unwrap();
+
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let mut sampled_on_timeout = false;
+        let timed_out = receiver.receive_once_with_clock(|| {
+            sampled_on_timeout = true;
+            999_999
+        });
+        assert!(
+            matches!(timed_out, Err(DatagramError::Io(error)) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock))
+        );
+        assert!(
+            !sampled_on_timeout,
+            "a timeout must never advance a packet timestamp"
+        );
     }
 
     #[test]
