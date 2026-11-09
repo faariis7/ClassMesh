@@ -192,6 +192,24 @@ impl TeacherMessageConfirmationRuntime {
             pending.control_session_id,
             pending.request_id,
         );
+        // The absolute bound applies even when a success is already queued:
+        // a stalled IPC loop must never forward stale Completed after expiry.
+        if pending.started.elapsed() >= Self::MAX_WAIT {
+            self.pending = None;
+            return Some(
+                classmesh_windows_runtime::ipc::WorkerTeacherInteractionResult {
+                    process_id,
+                    session_id,
+                    control_session_id: session,
+                    request_id: request,
+                    result: TeacherInteractionResult {
+                        kind: TeacherInteractionKind::Message as i32,
+                        state: TeacherInteractionState::Failed as i32,
+                        diagnostic: "teacher_interaction.confirmation_unavailable".to_owned(),
+                    },
+                },
+            );
+        }
         match pending.rx.try_recv() {
             Ok(result)
                 if (
@@ -2670,6 +2688,40 @@ mod focused_profile_tests {
         };
         assert_eq!(next.request_id, 2);
         assert_eq!(next.result.state, TeacherInteractionState::Completed as i32);
+    }
+
+    #[test]
+    fn queued_success_after_absolute_deadline_must_fail_closed() {
+        use classmesh_protocol::control_wire::TeacherInteractionState;
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let mut confirmations = TeacherMessageConfirmationRuntime {
+            pending: Some(PendingTeacherMessage {
+                process_id: 100,
+                session_id: 7,
+                control_session_id: 80,
+                request_id: 3,
+                started: std::time::Instant::now() - std::time::Duration::from_secs(14),
+                rx,
+            }),
+        };
+        tx.send(
+            classmesh_windows_runtime::ipc::WorkerTeacherInteractionResult {
+                process_id: 100,
+                session_id: 7,
+                control_session_id: 80,
+                request_id: 3,
+                result: classmesh_protocol::control_wire::TeacherInteractionResult {
+                    kind: classmesh_protocol::control_wire::TeacherInteractionKind::Message as i32,
+                    state: TeacherInteractionState::Completed as i32,
+                    diagnostic: String::new(),
+                },
+            },
+        )
+        .unwrap();
+        let reply = confirmations
+            .poll()
+            .expect("expired confirmation must terminate");
+        assert_eq!(reply.result.state, TeacherInteractionState::Failed as i32);
     }
 
     #[test]
