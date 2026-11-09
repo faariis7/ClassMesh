@@ -17,13 +17,16 @@ mod windows_app {
         DEFAULT_IO_TIMEOUT, DEFAULT_RECONNECT_POLICY, enrolled_client_config,
     };
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity, cng_client_cert_resolver};
+    use classmesh_lab::teacher_ack_probe::{TeacherAckStatus, verify_teacher_message_ack};
     use classmesh_protocol::control_wire::{
         ControlEnvelope, Heartbeat, InputEvent, KeyEvent, KeyframeRequest,
         MediaHealth as WireMediaHealth, MediaTransport, MouseMove, ProtocolVersion as WireVersion,
-        ReceiverFeedback, ReleaseAllInput, StreamKind as WireStreamKind, StreamOffer, VideoCodec,
-        VideoProfile, control_envelope, input_event,
+        ReceiverFeedback, ReleaseAllInput, StreamKind as WireStreamKind, StreamOffer,
+        TeacherInteractionRequest, TeacherMessage, VideoCodec, VideoProfile, control_envelope,
+        input_event, teacher_interaction_request,
     };
     use classmesh_protocol::media::{MEDIA_HEADER_LEN, MediaFlags, MediaPacketHeader};
+    use classmesh_protocol::teacher_interaction::{teacher_message_available, validate_message};
     use classmesh_protocol::{Capability, ControlRole, PROTOCOL_VERSION};
     use classmesh_security::PrincipalId;
     use quinn::Endpoint;
@@ -46,6 +49,7 @@ mod windows_app {
         fps: u32,
         bitrate_kbps: u32,
         input_pulse: bool,
+        teacher_message: Option<String>,
         degraded_feedback: bool,
         drop_media_after: Option<u64>,
         hold_key_vk: Option<u32>,
@@ -79,6 +83,7 @@ mod windows_app {
             let mut fps = 30_u32;
             let mut bitrate_kbps = 2_500_u32;
             let mut input_pulse = false;
+            let mut teacher_message = None;
             let mut degraded_feedback = false;
             let mut drop_media_after = None;
             let mut hold_key_vk = None;
@@ -129,6 +134,12 @@ mod windows_app {
                             .map_err(|_| "--bitrate-kbps must be an integer".to_owned())?;
                     }
                     "--input-pulse" => input_pulse = true,
+                    "--teacher-message" => {
+                        let text = value()?;
+                        validate_message(&text)
+                            .map_err(|err| format!("--teacher-message is invalid: {err:?}"))?;
+                        teacher_message = Some(text);
+                    }
                     "--degraded-feedback" => degraded_feedback = true,
                     "--drop-media-after" => {
                         drop_media_after = Some(
@@ -181,6 +192,7 @@ mod windows_app {
                 fps,
                 bitrate_kbps,
                 input_pulse,
+                teacher_message,
                 degraded_feedback,
                 drop_media_after,
                 hold_key_vk,
@@ -201,6 +213,7 @@ Optional:\n\
   --fps <n>                    default 30\n\
   --bitrate-kbps <n>           default 2500\n\
   --input-pulse                move pointer +12/-12 and ReleaseAll\n\
+  --teacher-message <text>     send real enrolled Teacher→Service→Worker message and require correlated response; never claim GUI display\n\
   --degraded-feedback          send two bounded degraded feedback samples\n\
   --drop-media-after <seconds> close UDP receiver while control heartbeats continue\n\
   --hold-key-vk <vk>           press a key then disconnect without key-up to test cleanup"
@@ -384,11 +397,16 @@ Optional:\n\
         let udp = UdpSocket::bind(config.udp_listen).await?;
         let udp_address = udp.local_addr()?;
         let principal = PrincipalId(identity.principal_id);
+        let mut capabilities =
+            BTreeSet::from([Capability::UdpUnicast, Capability::H264HardwareDecode]);
+        if config.teacher_message.is_some() {
+            capabilities.insert(Capability::TeacherMessage);
+        }
         let hello = ControlHello {
             principal_id: principal,
             role: ControlRole::Teacher,
             version: PROTOCOL_VERSION,
-            capabilities: BTreeSet::from([Capability::UdpUnicast, Capability::H264HardwareDecode]),
+            capabilities,
             hostname: std::env::var("COMPUTERNAME")
                 .unwrap_or_else(|_| "phase6f-teacher".to_owned()),
             app_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -467,6 +485,56 @@ Optional:\n\
             "stream=accepted stream_id={} udp_port={} profile={}x{}@{} bitrate_kbps={}",
             stream_id, port, config.width, config.height, config.fps, config.bitrate_kbps
         );
+
+        if let Some(text) = config.teacher_message.as_ref() {
+            if !teacher_message_available(
+                session.established.negotiated.version,
+                &session.established.negotiated.capabilities,
+            ) {
+                return Err(
+                    "TeacherMessage capability not negotiated with enrolled Service".into(),
+                );
+            }
+            sequence = sequence
+                .checked_add(1)
+                .ok_or("control sequence exhausted")?;
+            let message_request_id = sequence;
+            session
+                .channel
+                .send(&envelope(
+                    session_id,
+                    sequence,
+                    message_request_id,
+                    control_envelope::Payload::TeacherInteractionRequest(
+                        TeacherInteractionRequest {
+                            action: Some(teacher_interaction_request::Action::Message(
+                                TeacherMessage {
+                                    text_utf8: text.clone(),
+                                },
+                            )),
+                        },
+                    ),
+                ))
+                .await?;
+            // Only an actually received, source-authenticated response counts.
+            // The Service waits up to 1 second for the real Worker IPC reply.
+            let reply = timeout(Duration::from_secs(3), session.channel.receive())
+                .await
+                .map_err(|_| "timed out awaiting actual Worker message result")??;
+            let version = session.established.negotiated.version;
+            let status = verify_teacher_message_ack(
+                &reply,
+                session_id,
+                message_request_id,
+                (u32::from(version.major), u32::from(version.minor)),
+            )?;
+            match status {
+                TeacherAckStatus::Accepted => {
+                    println!("teacher_message_worker=accepted (not a displayed-frame proof)")
+                }
+                TeacherAckStatus::Completed => println!("teacher_message_worker=completed"),
+            }
+        }
 
         let media_task = tokio::spawn(receive_media(
             udp,
