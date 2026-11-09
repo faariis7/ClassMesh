@@ -41,11 +41,11 @@ fn main() {
         }
         if !matches!(
             (mode, args.len()),
-            (Some("--fresh"), 6) | (Some("--update"), 4)
+            (Some("--fresh" | "--preflight"), 6) | (Some("--update"), 4)
         ) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "usage: classmesh-trusted-provision --fresh <epoch> <policy.json> <identity.json> <control-runtime.json> | --update <epoch> <policy.json> | --verify-policy | --verify-startup",
+                "usage: classmesh-trusted-provision --preflight <epoch> <policy.json> <identity.json> <control-runtime.json> | --fresh <epoch> <policy.json> <identity.json> <control-runtime.json> | --update <epoch> <policy.json> | --verify-policy | --verify-startup",
             ));
         }
         let epoch = args[2].parse::<u64>().map_err(|_| {
@@ -55,13 +55,22 @@ fn main() {
             )
         })?;
         let policy = bounded(&args[3], 4 * 1024 * 1024)?;
-        if mode == Some("--fresh") {
+        if matches!(mode, Some("--fresh" | "--preflight")) {
             let identity = bounded(&args[4], 1024 * 1024)?;
             let config = bounded(&args[5], 64 * 1024)?;
-            classmesh_win32::trusted_policy::provision_fresh_install(
-                epoch, &policy, &identity, &config,
-            )?;
-            println!("Trusted fresh installation committed at epoch {epoch}.");
+            if mode == Some("--preflight") {
+                classmesh_win32::trusted_policy::check_fresh_install_candidate(
+                    epoch, &policy, &identity, &config,
+                )?;
+                println!(
+                    "Candidate passes protected-install preflight; no files or Registry state were created. This does not validate CA issuer trust or existing destination state."
+                );
+            } else {
+                classmesh_win32::trusted_policy::provision_fresh_install(
+                    epoch, &policy, &identity, &config,
+                )?;
+                println!("Trusted fresh installation committed at epoch {epoch}.");
+            }
         } else {
             // The trusted API requires the Service's lifetime lease to be
             // released first and rejects stale/repeated epochs and blob reuse.
@@ -73,9 +82,9 @@ fn main() {
     if let Err(error) = run() {
         if matches!(
             std::env::args().nth(1).as_deref(),
-            Some("--verify-policy" | "--verify-startup")
+            Some("--verify-policy" | "--verify-startup" | "--preflight")
         ) {
-            eprintln!("Trusted installation inspection failed closed: {error}");
+            eprintln!("Trusted inspection or candidate preflight failed closed: {error}");
         } else {
             eprintln!(
                 "Trusted policy operation was not acknowledged: {error}. Stop the Service and run --verify-policy before choosing a new epoch; never retry an old policy blindly."

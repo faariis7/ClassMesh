@@ -31,12 +31,70 @@ impl AuthenticatedTeacherControlMessage {
         self.is_playback.then_some(&self.envelope)
     }
 
+    /// Read-only authenticated envelope view for the central session owner.
+    /// This does not authorize any privileged control action.
+    #[must_use]
+    pub fn envelope(&self) -> &ControlEnvelope {
+        &self.envelope
+    }
+
     /// Give non-playback messages back to the single owning control dispatcher.
     /// The caller must not treat arbitrary messages as authenticated actions:
     /// those need their separate per-command authorization checks.
     #[must_use]
     pub fn into_envelope(self) -> ControlEnvelope {
         self.envelope
+    }
+}
+
+/// Per-session receive guard for an authorized Teacher control stream.
+/// Create a fresh guard only after a new authenticated Hello session; never
+/// reset it to accept an old sequence on the same connection.
+#[derive(Debug, Default)]
+pub struct TeacherControlSequenceGuard {
+    last_sequence: Option<u64>,
+    bound_session_id: Option<u64>,
+    bound_connection_id: Option<usize>,
+}
+
+impl TeacherControlSequenceGuard {
+    /// Bind to one QUIC connection; a reconnect requires a fresh guard.
+    pub fn admit_on_connection(
+        &mut self,
+        connection_id: usize,
+        message: AuthenticatedTeacherControlMessage,
+    ) -> Result<AuthenticatedTeacherControlMessage, AuthenticatedTeacherReceiveError> {
+        if self
+            .bound_connection_id
+            .is_some_and(|bound| bound != connection_id)
+        {
+            return Err(AuthenticatedTeacherReceiveError::GuardConnectionMismatch);
+        }
+        let admitted = self.admit(message)?;
+        self.bound_connection_id = Some(connection_id);
+        Ok(admitted)
+    }
+
+    /// Reject duplicate, zero or regressing envelope sequence numbers before
+    /// passing a verified message to the owning dispatcher.
+    pub fn admit(
+        &mut self,
+        message: AuthenticatedTeacherControlMessage,
+    ) -> Result<AuthenticatedTeacherControlMessage, AuthenticatedTeacherReceiveError> {
+        let session_id = message.envelope.control_session_id;
+        if self
+            .bound_session_id
+            .is_some_and(|bound| bound != session_id)
+        {
+            return Err(AuthenticatedTeacherReceiveError::GuardSessionMismatch);
+        }
+        let sequence = message.envelope.sequence;
+        if sequence == 0 || self.last_sequence.is_some_and(|last| sequence <= last) {
+            return Err(AuthenticatedTeacherReceiveError::ReplayedSequence);
+        }
+        self.bound_session_id = Some(session_id);
+        self.last_sequence = Some(sequence);
+        Ok(message)
     }
 }
 
@@ -48,6 +106,12 @@ pub enum AuthenticatedTeacherReceiveError {
     WrongPrincipalKind,
     NotNegotiated,
     SessionMismatch,
+    InnerSessionMismatch,
+    ProtocolVersionMismatch,
+    MissingPayload,
+    ReplayedSequence,
+    GuardSessionMismatch,
+    GuardConnectionMismatch,
     PeerIdentity(PeerIdentityError),
     Authorization(LiveAuthorizationError),
     Transport(ControlTransportError),
@@ -113,6 +177,27 @@ pub async fn receive_authenticated_teacher_control(
     if envelope.control_session_id != session.established.control_session_id {
         return Err(AuthenticatedTeacherReceiveError::SessionMismatch);
     }
+    // This channel multiplexes both playback and privileged control.
+    // Never hand a TLS-verified *non-playback* envelope to its separate
+    // dispatcher under a different or missing protocol contract.
+    let negotiated = session.established.negotiated.version;
+    if !envelope.protocol_version.as_ref().is_some_and(|wire| {
+        wire.major == u32::from(negotiated.major) && wire.minor == u32::from(negotiated.minor)
+    }) {
+        return Err(AuthenticatedTeacherReceiveError::ProtocolVersionMismatch);
+    }
+    // A payload-less envelope is not a dispatchable control command.
+    if envelope.payload.is_none() {
+        return Err(AuthenticatedTeacherReceiveError::MissingPayload);
+    }
+    // Heartbeat repeats the session identifier inside its payload. A valid
+    // outer envelope must not launder a heartbeat from another session into
+    // the owning dispatcher, even on an authenticated QUIC connection.
+    if let Some(control_envelope::Payload::Heartbeat(heartbeat)) = &envelope.payload {
+        if heartbeat.control_session_id != envelope.control_session_id {
+            return Err(AuthenticatedTeacherReceiveError::InnerSessionMismatch);
+        }
+    }
     let is_playback = matches!(
         envelope.payload,
         Some(control_envelope::Payload::ReceiverPlaybackDiagnostic(_))
@@ -132,6 +217,45 @@ pub async fn receive_authenticated_teacher_control(
         envelope,
         is_playback,
     })
+}
+
+/// Receive a verified Teacher control message and enforce per-session replay
+/// ordering before it can reach the owning dispatcher. The caller must retain
+/// the same guard for the lifetime of this authenticated control session.
+/// A new guard is only valid after a fresh authenticated Hello handshake.
+pub async fn receive_guarded_authenticated_teacher_control(
+    session: &mut ClientControlSession,
+    authorization: &LiveAuthorizationStore,
+    expected_student: PrincipalId,
+    now_unix_ms: impl Fn() -> u64,
+    guard: &mut TeacherControlSequenceGuard,
+) -> Result<AuthenticatedTeacherControlMessage, AuthenticatedTeacherReceiveError> {
+    // Fail closed before consuming a frame from a different authenticated
+    // connection. The old guard must never drain the reconnect's first frame.
+    let connection_id = session.connection.stable_id();
+    if guard
+        .bound_connection_id
+        .is_some_and(|bound| bound != connection_id)
+    {
+        return Err(AuthenticatedTeacherReceiveError::GuardConnectionMismatch);
+    }
+    // A new Hello on the same transport is a different control session.
+    // Reject a stale guard before reading its first frame, just as for a
+    // reconnect on a different QUIC connection.
+    if guard
+        .bound_session_id
+        .is_some_and(|bound| bound != session.established.control_session_id)
+    {
+        return Err(AuthenticatedTeacherReceiveError::GuardSessionMismatch);
+    }
+    let verified = receive_authenticated_teacher_control(
+        session,
+        authorization,
+        expected_student,
+        now_unix_ms,
+    )
+    .await?;
+    guard.admit_on_connection(connection_id, verified)
 }
 
 #[cfg(test)]
@@ -353,7 +477,13 @@ mod tests {
         ));
         let mut pair = pair(true).await?;
         let mut other = report(SESSION);
-        other.payload = None;
+        other.payload = Some(control_envelope::Payload::Heartbeat(
+            classmesh_protocol::control_wire::Heartbeat {
+                monotonic_time_us: 100,
+                control_session_id: SESSION,
+                media: 1,
+            },
+        ));
         pair.server_channel.send(&other).await?;
         let message = receive_authenticated_teacher_control(
             &mut pair.client,
@@ -440,6 +570,229 @@ mod tests {
             received,
             Err(AuthenticatedTeacherReceiveError::PeerIdentity(_))
         ));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_playback_envelope_must_match_authenticated_negotiated_protocol_version()
+    -> TestResult {
+        let mut pair = pair(true).await?;
+        let mut wrong = report(SESSION);
+        wrong.payload = None;
+        wrong.protocol_version = Some(WireVersion { major: 0, minor: 7 });
+        pair.server_channel.send(&wrong).await?;
+        assert!(matches!(
+            receive_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150
+            )
+            .await,
+            Err(AuthenticatedTeacherReceiveError::ProtocolVersionMismatch)
+        ));
+        let mut missing = wrong;
+        missing.protocol_version = None;
+        pair.server_channel.send(&missing).await?;
+        assert!(matches!(
+            receive_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150
+            )
+            .await,
+            Err(AuthenticatedTeacherReceiveError::ProtocolVersionMismatch)
+        ));
+        let mut good = missing;
+        good.protocol_version = Some(WireVersion { major: 0, minor: 8 });
+        pair.server_channel.send(&good).await?;
+        assert!(matches!(
+            receive_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150
+            )
+            .await,
+            Err(AuthenticatedTeacherReceiveError::MissingPayload)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authenticated_heartbeat_cannot_smuggle_a_different_inner_session() -> TestResult {
+        let mut pair = pair(true).await?;
+        let mut other = report(SESSION);
+        other.payload = Some(control_envelope::Payload::Heartbeat(
+            classmesh_protocol::control_wire::Heartbeat {
+                monotonic_time_us: 100,
+                control_session_id: SESSION + 1,
+                media: 1,
+            },
+        ));
+        pair.server_channel.send(&other).await?;
+        assert!(matches!(
+            receive_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150
+            )
+            .await,
+            Err(AuthenticatedTeacherReceiveError::InnerSessionMismatch)
+        ));
+        // A subsequent valid heartbeat remains dispatchable.
+        if let Some(control_envelope::Payload::Heartbeat(heartbeat)) = &mut other.payload {
+            heartbeat.control_session_id = SESSION;
+        }
+        pair.server_channel.send(&other).await?;
+        assert!(
+            receive_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150
+            )
+            .await?
+            .receiver_playback()
+            .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verified_control_guard_rejects_replay_and_regression() -> TestResult {
+        let mut pair = pair(true).await?;
+        let mut guard = TeacherControlSequenceGuard::default();
+        for sequence in [2, 2, 1, 0, 3] {
+            let mut envelope = report(SESSION);
+            envelope.sequence = sequence;
+            pair.server_channel.send(&envelope).await?;
+            let admitted = receive_guarded_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150,
+                &mut guard,
+            )
+            .await;
+            if sequence == 2 && guard.last_sequence == Some(2) && admitted.is_ok() {
+                continue;
+            }
+            if sequence == 3 {
+                assert!(admitted?.receiver_playback().is_some());
+            } else {
+                assert!(matches!(
+                    admitted,
+                    Err(AuthenticatedTeacherReceiveError::ReplayedSequence)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sequence_guard_cannot_be_reused_across_authenticated_sessions() {
+        let mut guard = TeacherControlSequenceGuard::default();
+        let mut first = report(SESSION);
+        first.sequence = 7;
+        assert!(
+            guard
+                .admit(AuthenticatedTeacherControlMessage {
+                    envelope: first,
+                    is_playback: true,
+                })
+                .is_ok()
+        );
+        let mut second = report(SESSION + 1);
+        second.sequence = 8;
+        assert!(matches!(
+            guard.admit(AuthenticatedTeacherControlMessage {
+                envelope: second,
+                is_playback: true,
+            }),
+            Err(AuthenticatedTeacherReceiveError::GuardSessionMismatch)
+        ));
+        assert_eq!(guard.last_sequence, Some(7));
+        assert_eq!(guard.bound_session_id, Some(SESSION));
+    }
+
+    #[test]
+    fn sequence_guard_rejects_reconnect_even_with_same_session_id() {
+        let mut guard = TeacherControlSequenceGuard::default();
+        let mut first = report(SESSION);
+        first.sequence = 7;
+        assert!(
+            guard
+                .admit_on_connection(
+                    11,
+                    AuthenticatedTeacherControlMessage {
+                        envelope: first,
+                        is_playback: true,
+                    }
+                )
+                .is_ok()
+        );
+        let mut second = report(SESSION);
+        second.sequence = 8;
+        assert!(matches!(
+            guard.admit_on_connection(
+                12,
+                AuthenticatedTeacherControlMessage {
+                    envelope: second,
+                    is_playback: true,
+                }
+            ),
+            Err(AuthenticatedTeacherReceiveError::GuardConnectionMismatch)
+        ));
+        assert_eq!(guard.last_sequence, Some(7));
+        assert_eq!(guard.bound_connection_id, Some(11));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_guard_rejects_new_hello_before_consuming_frame() -> TestResult {
+        let mut pair = pair(true).await?;
+        let mut guard = TeacherControlSequenceGuard::default();
+        let first = report(SESSION);
+        pair.server_channel.send(&first).await?;
+        let _ = receive_guarded_authenticated_teacher_control(
+            &mut pair.client,
+            &pair.authorization,
+            EXPECTED,
+            || 150,
+            &mut guard,
+        )
+        .await?;
+
+        // Simulate a new authenticated Hello on the same QUIC transport.
+        // Its first frame must remain available to the new session owner.
+        pair.client.established.control_session_id = SESSION + 1;
+        pair.server_channel.send(&report(SESSION + 1)).await?;
+        assert!(matches!(
+            receive_guarded_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150,
+                &mut guard,
+            )
+            .await,
+            Err(AuthenticatedTeacherReceiveError::GuardSessionMismatch)
+        ));
+        let mut fresh_guard = TeacherControlSequenceGuard::default();
+        assert!(
+            receive_guarded_authenticated_teacher_control(
+                &mut pair.client,
+                &pair.authorization,
+                EXPECTED,
+                || 150,
+                &mut fresh_guard,
+            )
+            .await?
+            .receiver_playback()
+            .is_some()
+        );
         Ok(())
     }
 
