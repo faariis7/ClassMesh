@@ -154,11 +154,38 @@ impl ServiceTeacherCommandReceiver {
         })
     }
 
+    /// Every ingress failure is terminal: an already consumed frame must never
+    /// be retried on the same authenticated connection after a policy, replay,
+    /// dispatch or transport failure. This includes revocation after Worker IO.
+    pub async fn receive_dispatch_and_reply<F, Fut, E>(
+        &mut self,
+        authorization: &LiveAuthorizationStore,
+        now_unix_ms: impl Fn() -> u64,
+        dispatch: F,
+    ) -> Result<Result<TeacherInteractionState, E>, ServiceTeacherCommandError>
+    where
+        F: FnOnce(
+            AuthenticatedPeerIdentity,
+            u64,
+            u64,
+            classmesh_protocol::control_wire::TeacherInteractionRequest,
+        ) -> Fut,
+        Fut: std::future::Future<Output = Result<TeacherInteractionState, E>>,
+    {
+        let result = self
+            .receive_dispatch_and_reply_inner(authorization, now_unix_ms, dispatch)
+            .await;
+        if result.is_err() {
+            self.retire_connection(b"teacher command ingress rejected");
+        }
+        result
+    }
+
     /// A Worker-owned dispatcher must return a real terminal outcome; never mint
     /// an Accepted result merely because the QUIC message was received.
     /// The authenticated identity is bound to the incoming QUIC peer, not
     /// supplied by the Teacher's request payload.
-    pub async fn receive_dispatch_and_reply<F, Fut, E>(
+    async fn receive_dispatch_and_reply_inner<F, Fut, E>(
         &mut self,
         authorization: &LiveAuthorizationStore,
         now_unix_ms: impl Fn() -> u64,
