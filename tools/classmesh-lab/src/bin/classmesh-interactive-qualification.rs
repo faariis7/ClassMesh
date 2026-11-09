@@ -537,7 +537,8 @@ Optional:\n\
                     message_request_id,
                     (u32::from(version.major), u32::from(version.minor)),
                     config.require_completed,
-                ).await?;
+                )
+                .await?;
                 match status {
                     TeacherAckStatus::Accepted => {
                         println!("teacher_message_worker=accepted (not a displayed-frame proof)")
@@ -640,7 +641,8 @@ Optional:\n\
                 message_request_id,
                 (u32::from(version.major), u32::from(version.minor)),
                 config.require_completed,
-            ).await?;
+            )
+            .await?;
             match status {
                 TeacherAckStatus::Accepted => {
                     println!("teacher_message_worker=accepted (not a displayed-frame proof)")
