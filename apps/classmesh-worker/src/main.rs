@@ -9,6 +9,57 @@ const WORKER_IPC_EVENT_QUEUE_CAPACITY: usize = 128;
 const PRESENTATION_RECEIVE_DRAIN_LIMIT: usize = 8;
 
 #[cfg(windows)]
+struct TeacherInteractionReplay {
+    entries: std::collections::VecDeque<(
+        (u64, u64),
+        classmesh_protocol::control_wire::TeacherInteractionRequest,
+        classmesh_protocol::control_wire::TeacherInteractionResult,
+    )>,
+}
+
+#[cfg(windows)]
+impl TeacherInteractionReplay {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::VecDeque::new(),
+        }
+    }
+
+    fn lookup(
+        &self,
+        session_id: u64,
+        request_id: u64,
+        request: &classmesh_protocol::control_wire::TeacherInteractionRequest,
+    ) -> Result<Option<classmesh_protocol::control_wire::TeacherInteractionResult>, &'static str>
+    {
+        match self
+            .entries
+            .iter()
+            .find(|(key, _, _)| *key == (session_id, request_id))
+        {
+            Some((_, prior, result)) if prior == request => Ok(Some(result.clone())),
+            Some(_) => Err("worker.teacher_interaction.replay_payload_mismatch"),
+            None => Ok(None),
+        }
+    }
+
+    fn record(
+        &mut self,
+        session_id: u64,
+        request_id: u64,
+        request: classmesh_protocol::control_wire::TeacherInteractionRequest,
+        result: classmesh_protocol::control_wire::TeacherInteractionResult,
+    ) {
+        const MAX_REPLAY_ENTRIES: usize = 128;
+        if self.entries.len() == MAX_REPLAY_ENTRIES {
+            self.entries.pop_front();
+        }
+        self.entries
+            .push_back(((session_id, request_id), request, result));
+    }
+}
+
+#[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
@@ -120,6 +171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut captured_frames = 0_u64;
     let mut input_injector = InputInjector::default();
     let mut workstation_locker = Win32WorkstationLocker;
+    let mut teacher_interaction_replay = TeacherInteractionReplay::new();
     let mut teacher_message_presenter = Win32TeacherMessagePresenter;
     let mut open_target_launcher = Win32OpenTargetLauncher;
     let mut group_media_keys =
@@ -381,18 +433,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             Ok(WorkerEvent::TeacherInteraction(interaction)) => {
-                let result = match execute_teacher_interaction(
-                    actual_session,
+                let result = match teacher_interaction_replay.lookup(
+                    interaction.control_session_id,
+                    interaction.request_id,
                     &interaction.request,
-                    &mut teacher_message_presenter,
-                    &mut open_target_launcher,
                 ) {
-                    Ok(result) => result,
+                    Ok(Some(cached)) => cached,
                     Err(code) => {
-                        eprintln!(
-                            "ClassMesh Worker rejected malformed Teacher interaction before execution: {code}"
-                        );
+                        // Same correlation ID with different payload must never execute.
+                        eprintln!("ClassMesh Worker rejected Teacher replay: {code}");
                         continue;
+                    }
+                    Ok(None) => {
+                        let executed = match execute_teacher_interaction(
+                            actual_session,
+                            &interaction.request,
+                            &mut teacher_message_presenter,
+                            &mut open_target_launcher,
+                        ) {
+                            Ok(result) => result,
+                            Err(code) => {
+                                eprintln!(
+                                    "ClassMesh Worker rejected malformed Teacher interaction: {code}"
+                                );
+                                continue;
+                            }
+                        };
+                        // Record before writing: a broken reply pipe cannot cause
+                        // this process to execute the same command twice.
+                        teacher_interaction_replay.record(
+                            interaction.control_session_id,
+                            interaction.request_id,
+                            interaction.request.clone(),
+                            executed.clone(),
+                        );
+                        executed
                     }
                 };
                 let result = classmesh_windows_runtime::ipc::WorkerTeacherInteractionResult {
@@ -2197,6 +2272,30 @@ mod focused_profile_tests {
                 },
             )),
         }
+    }
+
+    #[test]
+    fn teacher_interaction_replay_returns_original_result_and_rejects_payload_substitution() {
+        use classmesh_protocol::control_wire::{
+            TeacherInteractionKind, TeacherInteractionResult, TeacherInteractionState,
+        };
+        let mut replay = super::TeacherInteractionReplay::new();
+        let first = teacher_message_request("Lesson one");
+        let result = TeacherInteractionResult {
+            kind: TeacherInteractionKind::Message as i32,
+            state: TeacherInteractionState::Accepted as i32,
+            diagnostic: String::new(),
+        };
+        assert!(replay.lookup(77, 44, &first).unwrap().is_none());
+        replay.record(77, 44, first.clone(), result.clone());
+        assert_eq!(replay.lookup(77, 44, &first).unwrap(), Some(result));
+        assert!(
+            replay
+                .lookup(77, 44, &teacher_message_request("Different"))
+                .is_err()
+        );
+        assert!(replay.lookup(78, 44, &first).unwrap().is_none());
+        assert!(replay.lookup(77, 45, &first).unwrap().is_none());
     }
 
     #[test]
