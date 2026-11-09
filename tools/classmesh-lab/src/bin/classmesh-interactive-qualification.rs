@@ -18,6 +18,7 @@ mod windows_app {
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity, cng_client_cert_resolver};
     use classmesh_lab::teacher_ack_probe::{
         MessageAckProgress, TeacherAckStatus, qualification_capabilities, require_worker_completion,
+        write_completed_receipt,
     };
     use classmesh_protocol::control_wire::{
         ControlEnvelope, Heartbeat, InputEvent, KeyEvent, KeyframeRequest,
@@ -53,6 +54,7 @@ mod windows_app {
         teacher_message: Option<String>,
         message_only: bool,
         require_completed: bool,
+        ack_receipt: Option<PathBuf>,
         degraded_feedback: bool,
         drop_media_after: Option<u64>,
         hold_key_vk: Option<u32>,
@@ -89,6 +91,7 @@ mod windows_app {
             let mut teacher_message = None;
             let mut message_only = false;
             let mut require_completed = false;
+            let mut ack_receipt = None;
             let mut degraded_feedback = false;
             let mut drop_media_after = None;
             let mut hold_key_vk = None;
@@ -147,6 +150,7 @@ mod windows_app {
                     }
                     "--message-only" => message_only = true,
                     "--require-completed" => require_completed = true,
+                    "--ack-receipt" => ack_receipt = Some(PathBuf::from(value()?)),
                     "--degraded-feedback" => degraded_feedback = true,
                     "--drop-media-after" => {
                         drop_media_after = Some(
@@ -173,6 +177,9 @@ mod windows_app {
                 .ok_or_else(|| format!("--server-name is required\n\n{}", Self::usage()))?;
             let identity_path = identity_path
                 .ok_or_else(|| format!("--identity is required\n\n{}", Self::usage()))?;
+            if ack_receipt.is_some() && (!message_only || !require_completed) {
+                return Err("--ack-receipt requires --message-only and --require-completed".to_owned());
+            }
             if require_completed && teacher_message.is_none() {
                 return Err("--require-completed requires --teacher-message".to_owned());
             }
@@ -218,6 +225,7 @@ mod windows_app {
                 teacher_message,
                 message_only,
                 require_completed,
+                ack_receipt,
                 degraded_feedback,
                 drop_media_after,
                 hold_key_vk,
@@ -241,6 +249,7 @@ Optional:\n\
   --teacher-message <text>     send real enrolled Teacher→Service→Worker message and require correlated response; never claim GUI display\n\
   --message-only               qualify authenticated Teacher→Worker ACK without requiring video/StreamOffer\n\
   --require-completed          fail unless Worker explicitly reports Completed (Accepted is insufficient)\n\
+  --ack-receipt <path>         create-new completion evidence only after correlated Worker Completed\n\
   --degraded-feedback          send two bounded degraded feedback samples\n\
   --drop-media-after <seconds> close UDP receiver while control heartbeats continue\n\
   --hold-key-vk <vk>           press a key then disconnect without key-up to test cleanup"
@@ -555,6 +564,10 @@ Optional:\n\
                         println!("teacher_message_worker=accepted (not a displayed-frame proof)")
                     }
                     TeacherAckStatus::Completed => println!("teacher_message_worker=completed"),
+                }
+                if let Some(path) = &config.ack_receipt {
+                    write_completed_receipt(path, session_id, message_request_id, status)?;
+                    println!("ack_receipt=written path={}", path.display());
                 }
             }
 
