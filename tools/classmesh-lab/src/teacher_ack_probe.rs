@@ -256,6 +256,7 @@ mod acceptance_policy_tests {
 pub struct MessageAckProgress {
     last_sequence: Option<u64>,
     accepted: bool,
+    completed: bool,
 }
 impl MessageAckProgress {
     pub fn observe(
@@ -272,12 +273,14 @@ impl MessageAckProgress {
         {
             return Err(TeacherAckError::InvalidSequence);
         }
-        if self.accepted && status == TeacherAckStatus::Accepted {
+        if self.completed || (self.accepted && status == TeacherAckStatus::Accepted) {
             return Err(TeacherAckError::InvalidResult);
         }
         self.last_sequence = Some(reply.sequence);
         if status == TeacherAckStatus::Accepted {
             self.accepted = true;
+        } else {
+            self.completed = true;
         }
         Ok(status)
     }
@@ -340,6 +343,37 @@ mod ordered_ack_tests {
                 (0, 8)
             ),
             Ok(TeacherAckStatus::Completed)
+        );
+    }
+    #[test]
+    fn completed_is_terminal_and_cannot_be_replayed_or_regressed() {
+        let mut progress = MessageAckProgress::default();
+        assert_eq!(
+            progress.observe(
+                &result(10, 19, TeacherInteractionState::Completed),
+                7,
+                19,
+                (0, 8)
+            ),
+            Ok(TeacherAckStatus::Completed)
+        );
+        assert_eq!(
+            progress.observe(
+                &result(11, 19, TeacherInteractionState::Accepted),
+                7,
+                19,
+                (0, 8)
+            ),
+            Err(TeacherAckError::InvalidResult)
+        );
+        assert_eq!(
+            progress.observe(
+                &result(12, 19, TeacherInteractionState::Completed),
+                7,
+                19,
+                (0, 8)
+            ),
+            Err(TeacherAckError::InvalidResult)
         );
     }
     #[test]
