@@ -557,12 +557,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         presentation_keyframe_request_retry.reset();
                         presentation_silence.reset();
                         presentation_delivery_telemetry.reset();
-                        match classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime::start(start) {
-                            Ok(receiver) => {
-                                match classmesh_worker::presentation_decode_render::PresentationDecodeRuntime::new(
-                                    true, None,
-                                ) {
-                                    Ok(decoder) => {
+                        match classmesh_worker::presentation_decode_render::PresentationDecodeRuntime::new(
+                            true, None,
+                        ) {
+                            Ok(decoder) => match classmesh_worker::presentation_multicast_receive::WorkerPresentationMulticastRuntime::start(start) {
+                                Ok(receiver) => {
                                         eprintln!(
                                             "ClassMesh Worker multicast presentation ready: presentation={}, stream={}, group={}:{}, interface={}, teacher_source={}",
                                             start.presentation_id,
@@ -575,18 +574,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         presentation_multicast = Some(receiver);
                                         presentation_decode = Some(decoder);
                                         WorkerPresentationMulticastStartStatus::Started
-                                    }
-                                    Err(error) => {
-                                        eprintln!(
-                                            "ClassMesh Worker presentation decoder failed closed after multicast bind/join; start rejected: {error}"
-                                        );
-                                        WorkerPresentationMulticastStartStatus::Rejected
-                                    }
                                 }
-                            }
+                                Err(error) => {
+                                    eprintln!(
+                                        "ClassMesh Worker multicast receiver failed closed; control remains active: {error}"
+                                    );
+                                    WorkerPresentationMulticastStartStatus::Rejected
+                                }
+                            },
                             Err(error) => {
                                 eprintln!(
-                                    "ClassMesh Worker multicast receiver failed closed; control remains active: {error}"
+                                    "ClassMesh Worker presentation decoder unavailable before multicast network start; start rejected: {error}"
                                 );
                                 WorkerPresentationMulticastStartStatus::Rejected
                             }
@@ -635,12 +633,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         presentation_keyframe_request_retry.reset();
                         presentation_silence.reset();
                         presentation_delivery_telemetry.reset();
-                        match classmesh_worker::presentation_unicast_receive::WorkerPresentationUnicastRuntime::start(start) {
-                            Ok(receiver) => {
-                                match classmesh_worker::presentation_decode_render::PresentationDecodeRuntime::new(
-                                    true, None,
-                                ) {
-                                    Ok(decoder) => {
+                        match classmesh_worker::presentation_decode_render::PresentationDecodeRuntime::new(
+                            true, None,
+                        ) {
+                            Ok(decoder) => match classmesh_worker::presentation_unicast_receive::WorkerPresentationUnicastRuntime::start(start) {
+                                Ok(receiver) => {
                                         eprintln!(
                                             "ClassMesh Worker unicast presentation ready: presentation={}, stream={}, port={}, teacher_source={}",
                                             start.presentation_id,
@@ -651,18 +648,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         presentation_unicast = Some(receiver);
                                         presentation_decode = Some(decoder);
                                         WorkerPresentationUnicastStartStatus::Started
-                                    }
-                                    Err(error) => {
-                                        eprintln!(
-                                            "ClassMesh Worker presentation decoder failed closed after unicast bind; start rejected: {error}"
-                                        );
-                                        WorkerPresentationUnicastStartStatus::Rejected
-                                    }
                                 }
-                            }
+                                Err(error) => {
+                                    eprintln!(
+                                        "ClassMesh Worker unicast receiver failed closed; control remains active: {error}"
+                                    );
+                                    WorkerPresentationUnicastStartStatus::Rejected
+                                }
+                            },
                             Err(error) => {
                                 eprintln!(
-                                    "ClassMesh Worker unicast receiver failed closed; control remains active: {error}"
+                                    "ClassMesh Worker presentation decoder unavailable before unicast network start; start rejected: {error}"
                                 );
                                 WorkerPresentationUnicastStartStatus::Rejected
                             }
