@@ -249,7 +249,6 @@ mod acceptance_policy_tests {
     }
 }
 
-
 /// Tracks a bounded, ordered Accepted -> Completed exchange on the same
 /// authenticated control channel. A duplicate, regressing or non-monotonic
 /// response cannot be promoted to delivery evidence.
@@ -267,7 +266,10 @@ impl MessageAckProgress {
         version: (u32, u32),
     ) -> Result<TeacherAckStatus, TeacherAckError> {
         let status = verify_teacher_message_ack(reply, session, request, version)?;
-        if self.last_sequence.is_some_and(|last| reply.sequence <= last) {
+        if self
+            .last_sequence
+            .is_some_and(|last| reply.sequence <= last)
+        {
             return Err(TeacherAckError::InvalidSequence);
         }
         if self.accepted && status == TeacherAckStatus::Accepted {
@@ -303,15 +305,62 @@ mod ordered_ack_tests {
     #[test]
     fn accepted_then_completed_requires_same_request_and_increasing_sequence() {
         let mut progress = MessageAckProgress::default();
-        assert_eq!(progress.observe(&result(10, 19, TeacherInteractionState::Accepted), 7, 19, (0, 8)), Ok(TeacherAckStatus::Accepted));
-        assert_eq!(progress.observe(&result(11, 20, TeacherInteractionState::Completed), 7, 19, (0, 8)), Err(TeacherAckError::WrongRequestId));
-        assert_eq!(progress.observe(&result(10, 19, TeacherInteractionState::Completed), 7, 19, (0, 8)), Err(TeacherAckError::InvalidSequence));
-        assert_eq!(progress.observe(&result(11, 19, TeacherInteractionState::Completed), 7, 19, (0, 8)), Ok(TeacherAckStatus::Completed));
+        assert_eq!(
+            progress.observe(
+                &result(10, 19, TeacherInteractionState::Accepted),
+                7,
+                19,
+                (0, 8)
+            ),
+            Ok(TeacherAckStatus::Accepted)
+        );
+        assert_eq!(
+            progress.observe(
+                &result(11, 20, TeacherInteractionState::Completed),
+                7,
+                19,
+                (0, 8)
+            ),
+            Err(TeacherAckError::WrongRequestId)
+        );
+        assert_eq!(
+            progress.observe(
+                &result(10, 19, TeacherInteractionState::Completed),
+                7,
+                19,
+                (0, 8)
+            ),
+            Err(TeacherAckError::InvalidSequence)
+        );
+        assert_eq!(
+            progress.observe(
+                &result(11, 19, TeacherInteractionState::Completed),
+                7,
+                19,
+                (0, 8)
+            ),
+            Ok(TeacherAckStatus::Completed)
+        );
     }
     #[test]
     fn repeated_accepted_is_not_a_second_completion_event() {
         let mut progress = MessageAckProgress::default();
-        progress.observe(&result(10, 19, TeacherInteractionState::Accepted), 7, 19, (0, 8)).unwrap();
-        assert_eq!(progress.observe(&result(11, 19, TeacherInteractionState::Accepted), 7, 19, (0, 8)), Err(TeacherAckError::InvalidResult));
+        progress
+            .observe(
+                &result(10, 19, TeacherInteractionState::Accepted),
+                7,
+                19,
+                (0, 8),
+            )
+            .unwrap();
+        assert_eq!(
+            progress.observe(
+                &result(11, 19, TeacherInteractionState::Accepted),
+                7,
+                19,
+                (0, 8)
+            ),
+            Err(TeacherAckError::InvalidResult)
+        );
     }
 }
