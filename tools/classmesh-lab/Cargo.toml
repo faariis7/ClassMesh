@@ -26,5 +26,10 @@ classmesh-control = { path = "../../crates/classmesh-control" }
 classmesh-identity-win = { path = "../../crates/classmesh-identity-win" }
 classmesh-security = { path = "../../crates/classmesh-security" }
 
+[target.'cfg(windows)'.dev-dependencies]
+# Exercise the same read-only protected identity preflight used by the installer
+# against a real disposable CNG StudentDevice enrollment, not a mock bundle.
+classmesh-win32 = { path = "../../crates/classmesh-win32", features = ["experimental-trusted-policy"] }
+
 [lints]
 workspace = true
