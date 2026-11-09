@@ -78,7 +78,7 @@ pub use telemetry_pipe::{ReceiverTelemetryPipeClient, ReceiverTelemetryPipeListe
 pub use teacher_interaction::{
     OpenTargetLauncher, TeacherInteractionAcceptance, TeacherInteractionExecutionError,
     TeacherMessagePresenter, Win32OpenTargetLauncher, Win32TeacherMessagePresenter,
-    WindowsAppIdentity,
+    WindowsAppIdentity, confirm_teacher_message,
 };
 #[cfg(windows)]
 pub use workstation::{Win32WorkstationLocker, WorkstationLockError, WorkstationLocker};
