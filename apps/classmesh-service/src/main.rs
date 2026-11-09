@@ -40,7 +40,7 @@ mod windows_service_app {
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity};
     use classmesh_protocol::control_wire::{
         FileTransferState, FileTransferStatus, InputEvent, StreamReconfigure, SystemAction,
-        TeacherInteractionKind,
+        TeacherInteractionKind, TeacherInteractionState,
     };
     use classmesh_protocol::feedback::FeedbackMessage;
     #[cfg(not(feature = "experimental-trusted-policy"))]
@@ -188,7 +188,8 @@ mod windows_service_app {
         control_session_id: u64,
         request_id: u64,
         expected_kind: TeacherInteractionKind,
-        reply_tx: tokio::sync::oneshot::Sender<TeacherInteractionDispatchOutcome>,
+        reply_tx: tokio::sync::mpsc::Sender<TeacherInteractionDispatchOutcome>,
+        accepted_seen: bool,
     }
 
     impl PendingTeacherInteraction {
@@ -198,6 +199,52 @@ mod windows_service_app {
                 && result.control_session_id == self.control_session_id
                 && result.request_id == self.request_id
                 && TeacherInteractionKind::try_from(result.result.kind) == Ok(self.expected_kind)
+        }
+    }
+
+    /// Preserve an exact Worker-bound request after Accepted. Only an actual
+    /// Worker Completed/Rejected/Failed response retires the correlation.
+    fn route_worker_teacher_result(
+        pending: &mut Option<PendingTeacherInteraction>,
+        result: WorkerTeacherInteractionResult,
+    ) {
+        let Some(current) = pending.as_mut() else {
+            eprintln!("ClassMesh Service ignored stale Worker Teacher interaction result");
+            return;
+        };
+        if !current.matches(&result) {
+            eprintln!("ClassMesh Service ignored miscorrelated Worker Teacher interaction result");
+            return;
+        }
+        if classmesh_protocol::teacher_interaction::validate_result(&result.result).is_err() {
+            eprintln!("ClassMesh Service ignored malformed Worker Teacher interaction result");
+            return;
+        }
+        let state = TeacherInteractionState::try_from(result.result.state);
+        let is_accepted = state == Ok(TeacherInteractionState::Accepted);
+        if is_accepted && current.accepted_seen {
+            // A duplicate progress event is not a new action, nor a final ACK.
+            return;
+        }
+        let is_terminal = matches!(
+            state,
+            Ok(TeacherInteractionState::Completed
+                | TeacherInteractionState::Rejected
+                | TeacherInteractionState::Failed)
+        );
+        if current
+            .reply_tx
+            .try_send(TeacherInteractionDispatchOutcome::Result(result.result))
+            .is_err()
+        {
+            // An undeliverable result may not be silently reported as success.
+            *pending = None;
+            return;
+        }
+        if is_terminal {
+            *pending = None;
+        } else if is_accepted {
+            current.accepted_seen = true;
         }
     }
 
@@ -2524,22 +2571,7 @@ mod windows_service_app {
             }
 
             while let Ok(result) = worker_teacher_interaction_result_rx.try_recv() {
-                let Some(pending) = pending_teacher_interaction.as_ref() else {
-                    eprintln!("ClassMesh Service ignored stale Worker Teacher interaction result");
-                    continue;
-                };
-                if !pending.matches(&result) {
-                    eprintln!(
-                        "ClassMesh Service ignored miscorrelated Worker Teacher interaction result"
-                    );
-                    continue;
-                }
-                let pending = pending_teacher_interaction
-                    .take()
-                    .expect("pending interaction checked");
-                let _ = pending
-                    .reply_tx
-                    .send(TeacherInteractionDispatchOutcome::Result(result.result));
+                route_worker_teacher_result(&mut pending_teacher_interaction, result);
             }
 
             for _ in 0..MAX_TEACHER_INTERACTIONS_PER_TICK {
@@ -2554,7 +2586,7 @@ mod windows_service_app {
                     Err(_) => {
                         let _ = dispatch
                             .reply_tx
-                            .send(TeacherInteractionDispatchOutcome::Cancelled);
+                            .try_send(TeacherInteractionDispatchOutcome::Cancelled);
                         continue;
                     }
                 };
@@ -2564,13 +2596,13 @@ mod windows_service_app {
                 {
                     let _ = dispatch
                         .reply_tx
-                        .send(TeacherInteractionDispatchOutcome::Cancelled);
+                        .try_send(TeacherInteractionDispatchOutcome::Cancelled);
                     continue;
                 }
                 if pending_teacher_interaction.is_some() {
                     let _ = dispatch
                         .reply_tx
-                        .send(TeacherInteractionDispatchOutcome::Backpressure);
+                        .try_send(TeacherInteractionDispatchOutcome::Backpressure);
                     continue;
                 }
                 let request = ServiceTeacherInteractionRequest {
@@ -2587,17 +2619,18 @@ mod windows_service_app {
                             request_id: dispatch.request_id,
                             expected_kind,
                             reply_tx: dispatch.reply_tx,
+                            accepted_seen: false,
                         });
                     }
                     Err(WorkerControlSendError::Unavailable) => {
                         let _ = dispatch
                             .reply_tx
-                            .send(TeacherInteractionDispatchOutcome::WorkerUnavailable);
+                            .try_send(TeacherInteractionDispatchOutcome::WorkerUnavailable);
                     }
                     Err(WorkerControlSendError::WriteFailed) => {
                         let _ = dispatch
                             .reply_tx
-                            .send(TeacherInteractionDispatchOutcome::WriteFailed);
+                            .try_send(TeacherInteractionDispatchOutcome::WriteFailed);
                     }
                 }
             }
@@ -3475,7 +3508,7 @@ mod windows_service_app {
         if let Some(pending) = pending.take() {
             let _ = pending
                 .reply_tx
-                .send(TeacherInteractionDispatchOutcome::WorkerUnavailable);
+                .try_send(TeacherInteractionDispatchOutcome::WorkerUnavailable);
         }
     }
 
@@ -3604,7 +3637,7 @@ mod windows_service_app {
 
         #[test]
         fn pending_teacher_interaction_requires_exact_action_kind() {
-            let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+            let (reply_tx, _reply_rx) = tokio::sync::mpsc::channel(2);
             let pending = PendingTeacherInteraction {
                 expected_process_id: 42,
                 expected_session_id: 7,
@@ -3612,6 +3645,7 @@ mod windows_service_app {
                 request_id: 44,
                 expected_kind: TeacherInteractionKind::Message,
                 reply_tx,
+                accepted_seen: false,
             };
             let exact = WorkerTeacherInteractionResult {
                 process_id: 42,
@@ -3633,8 +3667,11 @@ mod windows_service_app {
         }
 
         #[test]
-        fn worker_change_fails_pending_teacher_interaction_instead_of_hanging() {
-            let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+        fn teacher_progress_keeps_exact_pending_after_accepted_then_relays_completed() {
+            use classmesh_protocol::control_wire::{
+                TeacherInteractionResult, TeacherInteractionState,
+            };
+            let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel(2);
             let mut pending = Some(PendingTeacherInteraction {
                 expected_process_id: 42,
                 expected_session_id: 7,
@@ -3642,6 +3679,102 @@ mod windows_service_app {
                 request_id: 44,
                 expected_kind: TeacherInteractionKind::Message,
                 reply_tx,
+                accepted_seen: false,
+            });
+            let worker = |state| WorkerTeacherInteractionResult {
+                process_id: 42,
+                session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                result: TeacherInteractionResult {
+                    kind: TeacherInteractionKind::Message as i32,
+                    state: state as i32,
+                    diagnostic: String::new(),
+                },
+            };
+            route_worker_teacher_result(&mut pending, worker(TeacherInteractionState::Accepted));
+            assert!(
+                pending.is_some(),
+                "Accepted is interim; do not consume pending request"
+            );
+            assert!(
+                matches!(reply_rx.try_recv(), Ok(TeacherInteractionDispatchOutcome::Result(result)) if result.state == TeacherInteractionState::Accepted as i32)
+            );
+            route_worker_teacher_result(&mut pending, worker(TeacherInteractionState::Accepted));
+            assert!(
+                matches!(
+                    reply_rx.try_recv(),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                ),
+                "duplicate Accepted must not become a second UI ACK"
+            );
+            let mut wrong = worker(TeacherInteractionState::Completed);
+            wrong.request_id = 45;
+            route_worker_teacher_result(&mut pending, wrong);
+            assert!(pending.is_some());
+            assert!(
+                matches!(
+                    reply_rx.try_recv(),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                ),
+                "wrong request cannot complete a message"
+            );
+            route_worker_teacher_result(&mut pending, worker(TeacherInteractionState::Completed));
+            assert!(
+                pending.is_none(),
+                "Completed is terminal and retires request"
+            );
+            assert!(
+                matches!(reply_rx.try_recv(), Ok(TeacherInteractionDispatchOutcome::Result(result)) if result.state == TeacherInteractionState::Completed as i32)
+            );
+        }
+
+        #[test]
+        fn teacher_progress_worker_failure_is_terminal_without_forged_completion() {
+            use classmesh_protocol::control_wire::{
+                TeacherInteractionResult, TeacherInteractionState,
+            };
+            let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel(2);
+            let mut pending = Some(PendingTeacherInteraction {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                expected_kind: TeacherInteractionKind::Message,
+                reply_tx,
+                accepted_seen: false,
+            });
+            route_worker_teacher_result(
+                &mut pending,
+                WorkerTeacherInteractionResult {
+                    process_id: 42,
+                    session_id: 7,
+                    control_session_id: 77,
+                    request_id: 44,
+                    result: TeacherInteractionResult {
+                        kind: TeacherInteractionKind::Message as i32,
+                        state: TeacherInteractionState::Rejected as i32,
+                        diagnostic: "worker.rejected".to_owned(),
+                    },
+                },
+            );
+            assert!(pending.is_none());
+            assert!(
+                matches!(reply_rx.try_recv(), Ok(TeacherInteractionDispatchOutcome::Result(result)) if result.state == TeacherInteractionState::Rejected as i32)
+            );
+        }
+
+        #[test]
+        fn worker_change_fails_pending_teacher_interaction_instead_of_hanging() {
+            let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel(2);
+            let mut pending = Some(PendingTeacherInteraction {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                expected_kind: TeacherInteractionKind::Message,
+                reply_tx,
+                accepted_seen: false,
             });
 
             fail_pending_teacher_interaction_on_worker_change(
@@ -3658,7 +3791,7 @@ mod windows_service_app {
 
         #[test]
         fn no_worker_change_keeps_pending_teacher_interaction() {
-            let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+            let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel(2);
             let mut pending = Some(PendingTeacherInteraction {
                 expected_process_id: 42,
                 expected_session_id: 7,
@@ -3666,6 +3799,7 @@ mod windows_service_app {
                 request_id: 44,
                 expected_kind: TeacherInteractionKind::Message,
                 reply_tx,
+                accepted_seen: false,
             });
 
             fail_pending_teacher_interaction_on_worker_change(
@@ -3676,7 +3810,7 @@ mod windows_service_app {
             assert!(pending.is_some());
             assert!(matches!(
                 reply_rx.try_recv(),
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ));
         }
 
