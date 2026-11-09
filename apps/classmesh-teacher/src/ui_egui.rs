@@ -44,6 +44,44 @@ use crate::ui_shell::{
     validate_teacher_interaction_ui_action,
 };
 
+// A delayed duplicate write or an out-of-order Accepted must not erase a
+// verified terminal Worker outcome. Only the matching session may update it.
+fn advance_command_status(
+    current: Option<TeacherInteractionState>,
+    incoming: TeacherInteractionState,
+) -> Option<TeacherInteractionState> {
+    match current {
+        Some(
+            TeacherInteractionState::Completed
+            | TeacherInteractionState::Rejected
+            | TeacherInteractionState::Failed,
+        ) => current,
+        Some(TeacherInteractionState::Accepted)
+            if incoming == TeacherInteractionState::Accepted =>
+        {
+            current
+        }
+        Some(TeacherInteractionState::Accepted)
+            if incoming == TeacherInteractionState::Completed
+                || incoming == TeacherInteractionState::Rejected
+                || incoming == TeacherInteractionState::Failed =>
+        {
+            Some(incoming)
+        }
+        None if matches!(
+            incoming,
+            TeacherInteractionState::Accepted
+                | TeacherInteractionState::Completed
+                | TeacherInteractionState::Rejected
+                | TeacherInteractionState::Failed
+        ) =>
+        {
+            Some(incoming)
+        }
+        _ => current,
+    }
+}
+
 const APP_TITLE: &str = "ClassMesh Teacher";
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [800.0, 600.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [600.0, 420.0];
@@ -361,12 +399,16 @@ impl TeacherEguiShell {
                     {
                         // Bound UI history to the same 64 outstanding requests as the network owner.
                         // Never turn a write into an acknowledgement.
-                        if !self.command_status.contains_key(&request_id) && self.command_status.len() >= 64 {
+                        if !self.command_status.contains_key(&request_id)
+                            && self.command_status.len() >= 64
+                        {
                             if let Some(oldest) = self.command_status.keys().next().copied() {
                                 self.command_status.remove(&oldest);
                             }
                         }
-                        self.command_status.insert(request_id, (control_session_id, None));
+                        self.command_status
+                            .entry(request_id)
+                            .or_insert((control_session_id, None));
                     }
                 }
                 Ok(TeacherUiControlEvent::CommandResult {
@@ -376,7 +418,7 @@ impl TeacherEguiShell {
                 }) => {
                     if let Some((session, status)) = self.command_status.get_mut(&request_id) {
                         if *session == control_session_id {
-                            *status = Some(state);
+                            *status = advance_command_status(*status, state);
                         }
                     }
                 }
@@ -1089,6 +1131,26 @@ mod tests {
     use crate::ui_shell::{TeacherFocusUiAction, TeacherPresentationUiAction};
 
     use super::*;
+
+    #[test]
+    fn worker_result_state_never_regresses_on_delayed_or_duplicate_events() {
+        use TeacherInteractionState::*;
+        assert_eq!(advance_command_status(None, Accepted), Some(Accepted));
+        assert_eq!(
+            advance_command_status(Some(Accepted), Completed),
+            Some(Completed)
+        );
+        assert_eq!(
+            advance_command_status(Some(Completed), Accepted),
+            Some(Completed)
+        );
+        assert_eq!(
+            advance_command_status(Some(Rejected), Completed),
+            Some(Rejected)
+        );
+        assert_eq!(advance_command_status(Some(Failed), Accepted), Some(Failed));
+        assert_eq!(advance_command_status(None, Completed), Some(Completed));
+    }
 
     #[test]
     fn authenticated_bridge_disconnect_retires_context_without_fake_liveness() {
