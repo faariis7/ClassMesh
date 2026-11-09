@@ -5,7 +5,6 @@ fn main() {
 
 #[cfg(windows)]
 mod windows_app {
-    use std::collections::BTreeSet;
     use std::error::Error;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::PathBuf;
@@ -17,7 +16,9 @@ mod windows_app {
         DEFAULT_IO_TIMEOUT, DEFAULT_RECONNECT_POLICY, enrolled_client_config,
     };
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity, cng_client_cert_resolver};
-    use classmesh_lab::teacher_ack_probe::{TeacherAckStatus, verify_teacher_message_ack};
+    use classmesh_lab::teacher_ack_probe::{
+        TeacherAckStatus, qualification_capabilities, verify_teacher_message_ack,
+    };
     use classmesh_protocol::control_wire::{
         ControlEnvelope, Heartbeat, InputEvent, KeyEvent, KeyframeRequest,
         MediaHealth as WireMediaHealth, MediaTransport, MouseMove, ProtocolVersion as WireVersion,
@@ -412,14 +413,16 @@ Optional:\n\
         let mut endpoint = Endpoint::client(bind)?;
         endpoint.set_default_client_config(enrolled_client_config(roots, resolver)?);
 
-        let udp = UdpSocket::bind(config.udp_listen).await?;
-        let udp_address = udp.local_addr()?;
+        // Message-only qualification uses authenticated QUIC only. Do not
+        // bind a media socket or require a free UDP receive port.
+        let udp = if config.message_only {
+            None
+        } else {
+            Some(UdpSocket::bind(config.udp_listen).await?)
+        };
         let principal = PrincipalId(identity.principal_id);
-        let mut capabilities =
-            BTreeSet::from([Capability::UdpUnicast, Capability::H264HardwareDecode]);
-        if config.teacher_message.is_some() {
-            capabilities.insert(Capability::TeacherMessage);
-        }
+        let capabilities =
+            qualification_capabilities(config.message_only, config.teacher_message.is_some());
         let hello = ControlHello {
             principal_id: principal,
             role: ControlRole::Teacher,
@@ -520,7 +523,8 @@ Optional:\n\
         }
 
         let stream_id = 6_001_u32;
-        let port = udp_address.port();
+        let udp = udp.ok_or("media qualification requires UDP receiver")?;
+        let port = udp.local_addr()?.port();
         let parameters = {
             let [high, low] = port.to_be_bytes();
             vec![1, high, low]

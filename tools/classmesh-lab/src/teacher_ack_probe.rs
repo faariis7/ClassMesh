@@ -192,3 +192,38 @@ mod tests {
         }
     }
 }
+
+/// An ACK-only qualification must not advertise media capabilities that it
+/// cannot exercise, or require a UDP port to be available.
+pub fn qualification_capabilities(
+    message_only: bool,
+    with_message: bool,
+) -> std::collections::BTreeSet<classmesh_protocol::Capability> {
+    use classmesh_protocol::Capability;
+    let mut caps = std::collections::BTreeSet::new();
+    if !message_only {
+        caps.insert(Capability::UdpUnicast);
+        caps.insert(Capability::H264HardwareDecode);
+    }
+    if with_message {
+        caps.insert(Capability::TeacherMessage);
+    }
+    caps
+}
+
+#[cfg(test)]
+mod qualification_capability_tests {
+    use super::qualification_capabilities;
+    use classmesh_protocol::Capability;
+    #[test]
+    fn ack_only_never_advertises_or_requires_media() {
+        let caps = qualification_capabilities(true, true);
+        assert_eq!(caps.len(), 1);
+        assert!(caps.contains(&Capability::TeacherMessage));
+        assert!(!caps.contains(&Capability::UdpUnicast));
+        assert!(!caps.contains(&Capability::H264HardwareDecode));
+        let media = qualification_capabilities(false, true);
+        assert!(media.contains(&Capability::UdpUnicast));
+        assert!(media.contains(&Capability::H264HardwareDecode));
+    }
+}
