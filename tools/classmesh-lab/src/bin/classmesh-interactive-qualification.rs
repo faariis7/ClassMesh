@@ -377,8 +377,29 @@ Optional:\n\
         stats
     }
 
+    // A genuine bounded Windows message acknowledgement can arrive after
+    // Service's 15-second terminal deadline, not within the old 3 seconds.
+    // Retain the short deadline for request-only Accepted qualification.
+    fn worker_message_reply_budget(require_completed: bool) -> Duration {
+        if require_completed {
+            Duration::from_secs(16)
+        } else {
+            Duration::from_secs(3)
+        }
+    }
+
+    #[cfg(test)]
+    mod worker_message_reply_budget_tests {
+        use super::*;
+        #[test]
+        fn user_ack_qualification_waits_for_real_worker_confirmation_not_just_accepted() {
+            assert_eq!(worker_message_reply_budget(false), Duration::from_secs(3));
+            assert_eq!(worker_message_reply_budget(true), Duration::from_secs(16));
+        }
+    }
+
     // A single bounded read window handles Service's Accepted followed by
-    // Worker Completed. The entire exchange has one deadline, not 3s per event.
+    // Worker Completed, with one deadline for the entire exchange.
     async fn receive_worker_message_result(
         channel: &mut classmesh_control::quic::ControlChannel,
         session_id: u64,
@@ -398,9 +419,9 @@ Optional:\n\
             require_worker_completion(status)?;
             Ok::<TeacherAckStatus, Box<dyn Error + Send + Sync>>(status)
         };
-        timeout(Duration::from_secs(3), exchange)
+        timeout(worker_message_reply_budget(require_completed), exchange)
             .await
-            .map_err(|_| "timed out awaiting actual Worker completion".into())?
+            .map_err(|_| String::from("timed out awaiting actual Worker completion"))?
     }
 
     pub async fn run() -> AppResult {
