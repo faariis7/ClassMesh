@@ -172,8 +172,15 @@ mod windows_app {
             if message_only && teacher_message.is_none() {
                 return Err("--message-only requires --teacher-message".to_owned());
             }
-            if message_only && (input_pulse || degraded_feedback || drop_media_after.is_some() || hold_key_vk.is_some()) {
-                return Err("--message-only cannot combine with media/input qualification flags".to_owned());
+            if message_only
+                && (input_pulse
+                    || degraded_feedback
+                    || drop_media_after.is_some()
+                    || hold_key_vk.is_some())
+            {
+                return Err(
+                    "--message-only cannot combine with media/input qualification flags".to_owned(),
+                );
             }
             if seconds == 0 {
                 return Err("--seconds must be greater than zero".to_owned());
@@ -455,56 +462,58 @@ Optional:\n\
 
         if config.message_only {
             if let Some(text) = config.teacher_message.as_ref() {
-            if !teacher_message_available(
-                session.established.negotiated.version,
-                &session.established.negotiated.capabilities,
-            ) {
-                return Err(
-                    "TeacherMessage capability not negotiated with enrolled Service".into(),
-                );
-            }
-            sequence = sequence
-                .checked_add(1)
-                .ok_or("control sequence exhausted")?;
-            let message_request_id = sequence;
-            session
-                .channel
-                .send(&envelope(
-                    session_id,
-                    sequence,
-                    message_request_id,
-                    control_envelope::Payload::TeacherInteractionRequest(
-                        TeacherInteractionRequest {
-                            action: Some(teacher_interaction_request::Action::Message(
-                                TeacherMessage {
-                                    text_utf8: text.clone(),
-                                },
-                            )),
-                        },
-                    ),
-                ))
-                .await?;
-            // Only an actually received, source-authenticated response counts.
-            // The Service waits up to 1 second for the real Worker IPC reply.
-            let reply = timeout(Duration::from_secs(3), session.channel.receive())
-                .await
-                .map_err(|_| "timed out awaiting actual Worker message result")??;
-            let version = session.established.negotiated.version;
-            let status = verify_teacher_message_ack(
-                &reply,
-                session_id,
-                message_request_id,
-                (u32::from(version.major), u32::from(version.minor)),
-            )?;
-            match status {
-                TeacherAckStatus::Accepted => {
-                    println!("teacher_message_worker=accepted (not a displayed-frame proof)")
+                if !teacher_message_available(
+                    session.established.negotiated.version,
+                    &session.established.negotiated.capabilities,
+                ) {
+                    return Err(
+                        "TeacherMessage capability not negotiated with enrolled Service".into(),
+                    );
                 }
-                TeacherAckStatus::Completed => println!("teacher_message_worker=completed"),
+                sequence = sequence
+                    .checked_add(1)
+                    .ok_or("control sequence exhausted")?;
+                let message_request_id = sequence;
+                session
+                    .channel
+                    .send(&envelope(
+                        session_id,
+                        sequence,
+                        message_request_id,
+                        control_envelope::Payload::TeacherInteractionRequest(
+                            TeacherInteractionRequest {
+                                action: Some(teacher_interaction_request::Action::Message(
+                                    TeacherMessage {
+                                        text_utf8: text.clone(),
+                                    },
+                                )),
+                            },
+                        ),
+                    ))
+                    .await?;
+                // Only an actually received, source-authenticated response counts.
+                // The Service waits up to 1 second for the real Worker IPC reply.
+                let reply = timeout(Duration::from_secs(3), session.channel.receive())
+                    .await
+                    .map_err(|_| "timed out awaiting actual Worker message result")??;
+                let version = session.established.negotiated.version;
+                let status = verify_teacher_message_ack(
+                    &reply,
+                    session_id,
+                    message_request_id,
+                    (u32::from(version.major), u32::from(version.minor)),
+                )?;
+                match status {
+                    TeacherAckStatus::Accepted => {
+                        println!("teacher_message_worker=accepted (not a displayed-frame proof)")
+                    }
+                    TeacherAckStatus::Completed => println!("teacher_message_worker=completed"),
+                }
             }
-        }
 
-            session.connection.close(0_u32.into(), b"teacher message ACK qualification complete");
+            session
+                .connection
+                .close(0_u32.into(), b"teacher message ACK qualification complete");
             endpoint.wait_idle().await;
             println!("qualification=message_ack_only (no media or display proof)");
             return Ok(());
@@ -555,7 +564,6 @@ Optional:\n\
             "stream=accepted stream_id={} udp_port={} profile={}x{}@{} bitrate_kbps={}",
             stream_id, port, config.width, config.height, config.fps, config.bitrate_kbps
         );
-
 
         if let Some(text) = config.teacher_message.as_ref() {
             if !teacher_message_available(
