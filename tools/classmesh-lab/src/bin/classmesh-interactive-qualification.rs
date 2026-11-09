@@ -50,6 +50,7 @@ mod windows_app {
         bitrate_kbps: u32,
         input_pulse: bool,
         teacher_message: Option<String>,
+        message_only: bool,
         degraded_feedback: bool,
         drop_media_after: Option<u64>,
         hold_key_vk: Option<u32>,
@@ -84,6 +85,7 @@ mod windows_app {
             let mut bitrate_kbps = 2_500_u32;
             let mut input_pulse = false;
             let mut teacher_message = None;
+            let mut message_only = false;
             let mut degraded_feedback = false;
             let mut drop_media_after = None;
             let mut hold_key_vk = None;
@@ -140,6 +142,7 @@ mod windows_app {
                             .map_err(|err| format!("--teacher-message is invalid: {err:?}"))?;
                         teacher_message = Some(text);
                     }
+                    "--message-only" => message_only = true,
                     "--degraded-feedback" => degraded_feedback = true,
                     "--drop-media-after" => {
                         drop_media_after = Some(
@@ -166,6 +169,12 @@ mod windows_app {
                 .ok_or_else(|| format!("--server-name is required\n\n{}", Self::usage()))?;
             let identity_path = identity_path
                 .ok_or_else(|| format!("--identity is required\n\n{}", Self::usage()))?;
+            if message_only && teacher_message.is_none() {
+                return Err("--message-only requires --teacher-message".to_owned());
+            }
+            if message_only && (input_pulse || degraded_feedback || drop_media_after.is_some() || hold_key_vk.is_some()) {
+                return Err("--message-only cannot combine with media/input qualification flags".to_owned());
+            }
             if seconds == 0 {
                 return Err("--seconds must be greater than zero".to_owned());
             }
@@ -193,6 +202,7 @@ mod windows_app {
                 bitrate_kbps,
                 input_pulse,
                 teacher_message,
+                message_only,
                 degraded_feedback,
                 drop_media_after,
                 hold_key_vk,
@@ -214,6 +224,7 @@ Optional:\n\
   --bitrate-kbps <n>           default 2500\n\
   --input-pulse                move pointer +12/-12 and ReleaseAll\n\
   --teacher-message <text>     send real enrolled Teacher→Service→Worker message and require correlated response; never claim GUI display\n\
+  --message-only               qualify authenticated Teacher→Worker ACK without requiring video/StreamOffer\n\
   --degraded-feedback          send two bounded degraded feedback samples\n\
   --drop-media-after <seconds> close UDP receiver while control heartbeats continue\n\
   --hold-key-vk <vk>           press a key then disconnect without key-up to test cleanup"
@@ -439,53 +450,7 @@ Optional:\n\
             );
         }
 
-        let stream_id = 6_001_u32;
-        let port = udp_address.port();
-        let parameters = {
-            let [high, low] = port.to_be_bytes();
-            vec![1, high, low]
-        };
         let mut sequence = 2_u64;
-        let offer_request_id = 2_u64;
-        let offer = StreamOffer {
-            stream_id: u64::from(stream_id),
-            kind: WireStreamKind::Interactive as i32,
-            transport: MediaTransport::UdpUnicast as i32,
-            profile: Some(VideoProfile {
-                width: config.width,
-                height: config.height,
-                fps: config.fps,
-                bitrate_kbps: config.bitrate_kbps,
-                codec: VideoCodec::H264 as i32,
-            }),
-            transport_parameters: parameters,
-        };
-        session
-            .channel
-            .send(&envelope(
-                session_id,
-                sequence,
-                offer_request_id,
-                control_envelope::Payload::StreamOffer(offer),
-            ))
-            .await?;
-        let answer_envelope = session.channel.receive().await?;
-        let Some(control_envelope::Payload::StreamAnswer(answer)) = answer_envelope.payload else {
-            return Err("expected StreamAnswer".into());
-        };
-        if answer.stream_id != u64::from(stream_id)
-            || answer_envelope.request_id != offer_request_id
-        {
-            return Err("StreamAnswer correlation mismatch".into());
-        }
-        if !answer.accepted {
-            return Err(format!("interactive stream rejected: {}", answer.rejection_reason).into());
-        }
-        println!(
-            "stream=accepted stream_id={} udp_port={} profile={}x{}@{} bitrate_kbps={}",
-            stream_id, port, config.width, config.height, config.fps, config.bitrate_kbps
-        );
-
         if let Some(text) = config.teacher_message.as_ref() {
             if !teacher_message_available(
                 session.established.negotiated.version,
@@ -535,6 +500,60 @@ Optional:\n\
                 TeacherAckStatus::Completed => println!("teacher_message_worker=completed"),
             }
         }
+
+        if config.message_only {
+            session.connection.close(0_u32.into(), b"teacher message ACK qualification complete");
+            endpoint.wait_idle().await;
+            println!("qualification=message_ack_only (no media or display proof)");
+            return Ok(());
+        }
+
+        let stream_id = 6_001_u32;
+        let port = udp_address.port();
+        let parameters = {
+            let [high, low] = port.to_be_bytes();
+            vec![1, high, low]
+        };
+        let offer_request_id = 2_u64;
+        let offer = StreamOffer {
+            stream_id: u64::from(stream_id),
+            kind: WireStreamKind::Interactive as i32,
+            transport: MediaTransport::UdpUnicast as i32,
+            profile: Some(VideoProfile {
+                width: config.width,
+                height: config.height,
+                fps: config.fps,
+                bitrate_kbps: config.bitrate_kbps,
+                codec: VideoCodec::H264 as i32,
+            }),
+            transport_parameters: parameters,
+        };
+        session
+            .channel
+            .send(&envelope(
+                session_id,
+                sequence,
+                offer_request_id,
+                control_envelope::Payload::StreamOffer(offer),
+            ))
+            .await?;
+        let answer_envelope = session.channel.receive().await?;
+        let Some(control_envelope::Payload::StreamAnswer(answer)) = answer_envelope.payload else {
+            return Err("expected StreamAnswer".into());
+        };
+        if answer.stream_id != u64::from(stream_id)
+            || answer_envelope.request_id != offer_request_id
+        {
+            return Err("StreamAnswer correlation mismatch".into());
+        }
+        if !answer.accepted {
+            return Err(format!("interactive stream rejected: {}", answer.rejection_reason).into());
+        }
+        println!(
+            "stream=accepted stream_id={} udp_port={} profile={}x{}@{} bitrate_kbps={}",
+            stream_id, port, config.width, config.height, config.fps, config.bitrate_kbps
+        );
+
 
         let media_task = tokio::spawn(receive_media(
             udp,
