@@ -957,18 +957,20 @@ mod windows_service_app {
             send_control(pipe, IpcControlCommand::ReleaseInput)
         }
 
+        // Treat an unreadable process state as loss of Worker ownership.
+        fn worker_liveness_lost(result: &std::io::Result<bool>) -> bool {
+            !matches!(result, Ok(true))
+        }
+
         fn poll(&mut self) -> WorkerManagerEvent {
-            let exited = self
-                .process
-                .as_ref()
-                .and_then(|process| match process.is_running() {
-                    Ok(true) => None,
-                    Ok(false) => Some((SessionId(process.session_id()), process.process_id())),
-                    Err(error) => {
-                        eprintln!("Worker liveness probe failed: {error}");
-                        None
-                    }
-                });
+            let exited = self.process.as_ref().and_then(|process| {
+                let liveness = process.is_running();
+                if let Err(error) = &liveness {
+                    eprintln!("Worker liveness probe failed closed: {error}");
+                }
+                Self::worker_liveness_lost(&liveness)
+                    .then(|| (SessionId(process.session_id()), process.process_id()))
+            });
 
             if let Some((session, process_id)) = exited {
                 eprintln!(
@@ -3527,6 +3529,19 @@ mod windows_service_app {
             assert!(!pending.matches(PrincipalId([7; 32]), 78, 44, &[9; 16]));
             assert!(!pending.matches(PrincipalId([7; 32]), 77, 45, &[9; 16]));
             assert!(!pending.matches(PrincipalId([7; 32]), 77, 44, &[8; 16]));
+        }
+
+        #[test]
+        fn worker_liveness_probe_error_revokes_worker_ownership() {
+            use super::WorkerManager;
+            assert!(!WorkerManager::worker_liveness_lost(&Ok(true)));
+            assert!(WorkerManager::worker_liveness_lost(&Ok(false)));
+            assert!(WorkerManager::worker_liveness_lost(&Err(
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "process token inaccessible",
+                )
+            )));
         }
 
         #[test]
