@@ -227,3 +227,24 @@ mod qualification_capability_tests {
         assert!(media.contains(&Capability::H264HardwareDecode));
     }
 }
+
+/// Strict delivery qualification: Worker acceptance alone does not prove completion.
+/// A caller may report Accepted for diagnostics, but must not pass strict mode.
+pub fn require_worker_completion(status: TeacherAckStatus) -> Result<(), &'static str> {
+    match status {
+        TeacherAckStatus::Completed => Ok(()),
+        TeacherAckStatus::Accepted => {
+            Err("Worker only accepted the message; completion not observed")
+        }
+    }
+}
+
+#[cfg(test)]
+mod acceptance_policy_tests {
+    use super::*;
+    #[test]
+    fn strict_completion_policy_rejects_accepted_only() {
+        assert!(require_worker_completion(TeacherAckStatus::Completed).is_ok());
+        assert!(require_worker_completion(TeacherAckStatus::Accepted).is_err());
+    }
+}

@@ -17,7 +17,8 @@ mod windows_app {
     };
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity, cng_client_cert_resolver};
     use classmesh_lab::teacher_ack_probe::{
-        TeacherAckStatus, qualification_capabilities, verify_teacher_message_ack,
+        TeacherAckStatus, qualification_capabilities, require_worker_completion,
+        verify_teacher_message_ack,
     };
     use classmesh_protocol::control_wire::{
         ControlEnvelope, Heartbeat, InputEvent, KeyEvent, KeyframeRequest,
@@ -52,6 +53,7 @@ mod windows_app {
         input_pulse: bool,
         teacher_message: Option<String>,
         message_only: bool,
+        require_completed: bool,
         degraded_feedback: bool,
         drop_media_after: Option<u64>,
         hold_key_vk: Option<u32>,
@@ -87,6 +89,7 @@ mod windows_app {
             let mut input_pulse = false;
             let mut teacher_message = None;
             let mut message_only = false;
+            let mut require_completed = false;
             let mut degraded_feedback = false;
             let mut drop_media_after = None;
             let mut hold_key_vk = None;
@@ -144,6 +147,7 @@ mod windows_app {
                         teacher_message = Some(text);
                     }
                     "--message-only" => message_only = true,
+                    "--require-completed" => require_completed = true,
                     "--degraded-feedback" => degraded_feedback = true,
                     "--drop-media-after" => {
                         drop_media_after = Some(
@@ -170,6 +174,9 @@ mod windows_app {
                 .ok_or_else(|| format!("--server-name is required\n\n{}", Self::usage()))?;
             let identity_path = identity_path
                 .ok_or_else(|| format!("--identity is required\n\n{}", Self::usage()))?;
+            if require_completed && teacher_message.is_none() {
+                return Err("--require-completed requires --teacher-message".to_owned());
+            }
             if message_only && teacher_message.is_none() {
                 return Err("--message-only requires --teacher-message".to_owned());
             }
@@ -211,6 +218,7 @@ mod windows_app {
                 input_pulse,
                 teacher_message,
                 message_only,
+                require_completed,
                 degraded_feedback,
                 drop_media_after,
                 hold_key_vk,
@@ -233,6 +241,7 @@ Optional:\n\
   --input-pulse                move pointer +12/-12 and ReleaseAll\n\
   --teacher-message <text>     send real enrolled Teacher→Service→Worker message and require correlated response; never claim GUI display\n\
   --message-only               qualify authenticated Teacher→Worker ACK without requiring video/StreamOffer\n\
+  --require-completed          fail unless Worker explicitly reports Completed (Accepted is insufficient)\n\
   --degraded-feedback          send two bounded degraded feedback samples\n\
   --drop-media-after <seconds> close UDP receiver while control heartbeats continue\n\
   --hold-key-vk <vk>           press a key then disconnect without key-up to test cleanup"
@@ -506,6 +515,9 @@ Optional:\n\
                     message_request_id,
                     (u32::from(version.major), u32::from(version.minor)),
                 )?;
+                if config.require_completed {
+                    require_worker_completion(status)?;
+                }
                 match status {
                     TeacherAckStatus::Accepted => {
                         println!("teacher_message_worker=accepted (not a displayed-frame proof)")
