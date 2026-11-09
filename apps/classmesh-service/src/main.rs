@@ -1,6 +1,10 @@
 #[cfg(windows)]
 mod control_runtime;
 #[cfg(windows)]
+mod file_transfer_acl;
+#[cfg(any(windows, test))]
+mod file_transfer_readiness;
+#[cfg(any(windows, test))]
 pub mod file_transfer_storage;
 #[cfg(windows)]
 pub mod monitoring;
@@ -14,7 +18,6 @@ mod telemetry_native;
 #[cfg(windows)]
 mod windows_service_app {
     use std::ffi::OsString;
-    use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
     use std::sync::{Arc, mpsc};
@@ -131,6 +134,7 @@ mod windows_service_app {
         TeacherInteractionDispatchChannels, TeacherInteractionDispatchOutcome,
         WorkerCapabilityState,
     };
+    use crate::file_transfer_readiness::FileTransferReadiness;
     use crate::file_transfer_storage::{
         WindowsFileTransferInboxSink, WindowsFileTransferOutboxSource,
     };
@@ -222,6 +226,30 @@ mod windows_service_app {
                 && self.request_id == request_id
                 && self.transfer_id.as_slice() == transfer_id
         }
+    }
+
+    /// Reclaim an exact pending source when the listener revokes optional
+    /// FileTransfer. This is called on *every Service loop tick*, including
+    /// ticks where the FileTransfer queue is empty.
+    fn reclaim_revoked_file_pull(
+        readiness: &FileTransferReadiness,
+        pending: &mut Option<PendingFilePull>,
+        owner: &FileTransferPullOwner,
+        source: &mut FileTransferSourceSession<WindowsFileTransferOutboxSource>,
+    ) -> bool {
+        if readiness.is_ready() {
+            return false;
+        }
+        let Some(active) = pending.take() else {
+            return false;
+        };
+        let peer = FileTransferPeer {
+            principal: active.principal_id,
+            control_session_id: active.control_session_id,
+        };
+        let _ = source.cancel(peer, &active.transfer_id);
+        let _ = owner.release(active.control_session_id);
+        true
     }
 
     #[derive(Debug)]
@@ -2081,17 +2109,32 @@ mod windows_service_app {
         };
         let inbox_root = state_root.join(FILE_INBOX_DIRECTORY);
         let outbox_root = state_root.join(FILE_OUTBOX_DIRECTORY);
-        if let Err(error) =
-            fs::create_dir_all(&inbox_root).and_then(|()| fs::create_dir_all(&outbox_root))
-        {
-            eprintln!("ClassMesh file transfer storage preparation failed: {error}");
-            set_stopped_with_exit(&status_handle, 4)?;
-            return Ok(());
-        }
+        // Optional FileTransfer is disabled when legacy/unsafe ProgramData ACLs
+        // are found. Keep core Service control, Worker and media operational.
+        // The dispatch gate below also prevents any local queued source read.
+        let hello_inbox_root = inbox_root.clone();
+        let hello_outbox_root = outbox_root.clone();
+        let file_transfer_ready = FileTransferReadiness::with_operator_gate(
+            crate::file_transfer_readiness::FILE_TRANSFER_OPERATOR_OPT_IN,
+            || {
+                crate::file_transfer_acl::prepare_optional_file_transfer_storage(
+                    &inbox_root,
+                    &outbox_root,
+                )
+            },
+            move || {
+                crate::file_transfer_acl::verify_private_file_transfer_storage(
+                    &hello_inbox_root,
+                    &hello_outbox_root,
+                )
+                .is_ok()
+            },
+        );
         let mut file_receiver =
-            FileTransferReceiver::new(WindowsFileTransferInboxSink::new(inbox_root));
-        let mut file_source =
-            FileTransferSourceSession::new(WindowsFileTransferOutboxSource::new(outbox_root));
+            FileTransferReceiver::new(WindowsFileTransferInboxSink::new(inbox_root.clone()));
+        let mut file_source = FileTransferSourceSession::new(WindowsFileTransferOutboxSource::new(
+            outbox_root.clone(),
+        ));
 
         let worker_capabilities = Arc::new(WorkerCapabilityState::default());
         let presentation_feedback = PresentationFeedbackBus::default();
@@ -2102,7 +2145,7 @@ mod windows_service_app {
             presentation_channels,
             presentation_feedback.clone(),
             Arc::clone(&worker_capabilities),
-            true,
+            file_transfer_ready.clone(),
         );
         let mut control_runtime =
             match ControlRuntime::start(control_state, control_config, control_dispatch) {
@@ -2161,6 +2204,14 @@ mod windows_service_app {
         let mut receiver_telemetry_runtime = ReceiverTelemetryServiceRuntime::default();
         let mut native_receiver_telemetry = ServiceTelemetryReader::new();
         loop {
+            // Hello-time ACL revocation can arrive with no queued transfer.
+            // Reclaim the pinned source and owner lease independently of RX.
+            reclaim_revoked_file_pull(
+                &file_transfer_ready,
+                &mut pending_file_pull,
+                &file_pull_owner,
+                &mut file_source,
+            );
             if let Some(pending) = pending_file_pull
                 && !file_pull_owner.is_owner(pending.control_session_id)
             {
@@ -2202,6 +2253,38 @@ mod windows_service_app {
                     Ok(dispatch) => dispatch,
                     Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
                 };
+                // A previously trusted ProgramData tree can become unsafe
+                // after startup. Revalidate before each queued transfer and
+                // permanently disable this runtime's transfer dispatch if the
+                // protected Inbox or Outbox changes. Never serve or accept a
+                // queued transfer afterward.
+                if file_transfer_ready.is_ready()
+                    && crate::file_transfer_acl::verify_private_file_transfer_storage(
+                        &inbox_root,
+                        &outbox_root,
+                    )
+                    .is_err()
+                {
+                    file_transfer_ready.disable();
+                    eprintln!(
+                        "ClassMesh FileTransfer disabled: Inbox/Outbox ACL changed after startup"
+                    );
+                }
+                if !file_transfer_ready.is_ready() {
+                    // The listener can independently revoke readiness on a
+                    // new Hello before another transfer reaches this queue.
+                    // Reclaim that existing source owner on *either* path.
+                    reclaim_revoked_file_pull(
+                        &file_transfer_ready,
+                        &mut pending_file_pull,
+                        &file_pull_owner,
+                        &mut file_source,
+                    );
+                    let _ = dispatch
+                        .reply_tx
+                        .send(FileTransferDispatchOutcome::SourceUnavailable);
+                    continue;
+                }
                 if dispatch.control_session_id == 0
                     || dispatch.request_id == 0
                     || !dispatch.commit.try_commit()
@@ -3509,6 +3592,66 @@ mod windows_service_app {
             assert!(!pending.matches(PrincipalId([7; 32]), 78, 44, &[9; 16]));
             assert!(!pending.matches(PrincipalId([7; 32]), 77, 45, &[9; 16]));
             assert!(!pending.matches(PrincipalId([7; 32]), 77, 44, &[8; 16]));
+        }
+
+        #[test]
+        fn revoked_hello_reclaims_pending_source_without_any_queued_dispatch() {
+            let root = std::env::temp_dir().join(format!(
+                "classmesh-revoked-file-source-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&root).expect("test outbox");
+            let source_id = FileSourceId::new([0x5a; 16]).expect("source id");
+            let staged = root.join(format!("{}.bin", "5a".repeat(16)));
+            std::fs::write(&staged, b"trusted").expect("stage source");
+            // Only the trusted Service staging producer may register a source.
+            // The source session must not discover arbitrary staged pathnames.
+            let mut outbox = WindowsFileTransferOutboxSource::new(&root);
+            outbox
+                .register_staged_file(source_id, "lesson.pdf")
+                .expect("explicit trusted source registration");
+            let mut source = FileTransferSourceSession::new(outbox);
+            let pending = PendingFilePull {
+                principal_id: PrincipalId([7; 32]),
+                control_session_id: 77,
+                request_id: 44,
+                transfer_id: [9; 16],
+            };
+            let peer = FileTransferPeer {
+                principal: pending.principal_id,
+                control_session_id: pending.control_session_id,
+            };
+            source
+                .offer(peer, &pending.transfer_id, source_id)
+                .expect("active source");
+            let owner = FileTransferPullOwner::default();
+            assert!(owner.try_acquire(pending.control_session_id));
+            let readiness = FileTransferReadiness::new(true);
+            let mut pending = Some(pending);
+            assert!(!reclaim_revoked_file_pull(
+                &readiness,
+                &mut pending,
+                &owner,
+                &mut source,
+            ));
+            assert!(pending.is_some());
+            readiness.disable(); // same shared flag changed by QUIC Hello
+            assert!(reclaim_revoked_file_pull(
+                &readiness,
+                &mut pending,
+                &owner,
+                &mut source,
+            ));
+            assert!(pending.is_none());
+            assert!(!owner.is_owner(77));
+            assert!(source.chunk(peer, &[9; 16], 0).is_err());
+            assert!(!reclaim_revoked_file_pull(
+                &readiness,
+                &mut pending,
+                &owner,
+                &mut source,
+            ));
+            let _ = std::fs::remove_dir_all(root);
         }
 
         #[test]

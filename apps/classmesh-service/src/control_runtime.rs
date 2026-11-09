@@ -1,3 +1,4 @@
+use crate::file_transfer_readiness::FileTransferReadiness;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
@@ -1434,7 +1435,7 @@ pub(crate) struct ControlRuntimeDispatch {
     presentation_dispatch: PresentationDispatchChannels,
     presentation_feedback: PresentationFeedbackBus,
     worker_capabilities: Arc<WorkerCapabilityState>,
-    file_transfer_ready: bool,
+    file_transfer_ready: FileTransferReadiness,
 }
 
 impl ControlRuntimeDispatch {
@@ -1445,7 +1446,7 @@ impl ControlRuntimeDispatch {
         presentation_dispatch: PresentationDispatchChannels,
         presentation_feedback: PresentationFeedbackBus,
         worker_capabilities: Arc<WorkerCapabilityState>,
-        file_transfer_ready: bool,
+        file_transfer_ready: FileTransferReadiness,
     ) -> Self {
         Self {
             input,
@@ -1620,6 +1621,7 @@ async fn run_listener(
                 let presentation_feedback = presentation_feedback.clone();
                 let presentation = presentation.clone();
                 let worker_capabilities = Arc::clone(&worker_capabilities);
+                let file_transfer_ready = file_transfer_ready.clone();
                 tokio::spawn(async move {
                     let connection = match incoming.await {
                         Ok(connection) => connection,
@@ -1639,7 +1641,7 @@ async fn run_listener(
                         local_capabilities: service_hello_capabilities(
                             &worker_capabilities,
                             udp_multicast_available,
-                            file_transfer_ready,
+                            file_transfer_ready.revalidate_for_hello(),
                         ),
                         control_session_id: session_id,
                     };
@@ -4132,6 +4134,42 @@ mod tests {
         assert!(with_worker.contains(&Capability::FileTransfer));
         assert!(with_worker.contains(&Capability::TeacherMessage));
         assert!(with_worker.contains(&Capability::OpenTarget));
+    }
+
+    #[test]
+    fn new_hello_revokes_unsafe_file_transfer_but_preserves_core_control() {
+        let readiness = FileTransferReadiness::with_storage_verifier(true, || false);
+        let worker = WorkerCapabilityState::default();
+        assert!(readiness.is_ready());
+        let capabilities =
+            service_hello_capabilities(&worker, false, readiness.revalidate_for_hello());
+        assert!(!capabilities.contains(&Capability::FileTransfer));
+        assert!(capabilities.contains(&Capability::SystemActions));
+        assert!(capabilities.contains(&Capability::TeacherPresentation));
+        assert!(!readiness.is_ready(), "storage revocation is permanent");
+    }
+
+    #[test]
+    fn secure_storage_without_operator_opt_in_keeps_core_hello_but_never_file_transfer() {
+        use crate::file_transfer_readiness::FILE_TRANSFER_OPERATOR_OPT_IN;
+
+        const {
+            assert!(!FILE_TRANSFER_OPERATOR_OPT_IN);
+        }
+        // Even a perfectly private storage tree is not an operator authorization.
+        let readiness = FileTransferReadiness::with_operator_gate(
+            FILE_TRANSFER_OPERATOR_OPT_IN,
+            || true,
+            || true,
+        );
+        let worker = WorkerCapabilityState::default();
+        let capabilities =
+            service_hello_capabilities(&worker, false, readiness.revalidate_for_hello());
+        assert!(!capabilities.contains(&Capability::FileTransfer));
+        assert!(!file_transfer_available(PROTOCOL_VERSION, &capabilities));
+        assert!(capabilities.contains(&Capability::SystemActions));
+        assert!(capabilities.contains(&Capability::TeacherPresentation));
+        assert!(!readiness.is_ready());
     }
 
     #[test]
