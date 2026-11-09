@@ -453,9 +453,16 @@ mod windows_service_app {
                             );
                         }
                         Err(error) => {
+                            // The capability reader carries the actual Worker results.
+                            // Without it, reporting this Worker as Running would leave
+                            // Teacher commands accepted with no completion path.
                             eprintln!(
-                                "Worker capability IPC reader unavailable; control remains active: {error}"
+                                "Worker capability IPC reader unavailable; rejecting launch: {error}"
                             );
+                            self.capabilities.clear();
+                            let _ = process.terminate(1);
+                            let decision = self.watchdog.launch_failed(session);
+                            return self.apply_restart_decision(decision);
                         }
                     }
 
@@ -495,6 +502,12 @@ mod windows_service_app {
                 .as_ref()
                 .is_some_and(|process| process.session_id() == session.0)
             {
+                // A stale pipe without an owned process must never remain
+                // authorized when the session supervisor stops its Worker.
+                if self.process.is_none() {
+                    self.capabilities.clear();
+                    self.pipe = None;
+                }
                 return;
             }
 
@@ -539,6 +552,11 @@ mod windows_service_app {
                 .map(|process| SessionId(process.session_id()));
             if let Some(session) = session {
                 self.stop(session);
+            } else {
+                // A lost process handle must not leave an authorized IPC channel
+                // or cached Worker capabilities available to subsequent sessions.
+                self.capabilities.clear();
+                self.pipe = None;
             }
         }
 
