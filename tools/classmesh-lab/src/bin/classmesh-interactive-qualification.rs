@@ -17,8 +17,7 @@ mod windows_app {
     };
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity, cng_client_cert_resolver};
     use classmesh_lab::teacher_ack_probe::{
-        TeacherAckStatus, qualification_capabilities, require_worker_completion,
-        verify_teacher_message_ack,
+        MessageAckProgress, TeacherAckStatus, qualification_capabilities, require_worker_completion,
     };
     use classmesh_protocol::control_wire::{
         ControlEnvelope, Heartbeat, InputEvent, KeyEvent, KeyframeRequest,
@@ -378,6 +377,32 @@ Optional:\n\
         stats
     }
 
+    // A single bounded read window handles Service's Accepted followed by
+    // Worker Completed. The entire exchange has one deadline, not 3s per event.
+    async fn receive_worker_message_result(
+        channel: &mut classmesh_control::quic::ControlChannel,
+        session_id: u64,
+        request_id: u64,
+        version: (u32, u32),
+        require_completed: bool,
+    ) -> AppResult<TeacherAckStatus> {
+        let exchange = async {
+            let mut progress = MessageAckProgress::default();
+            let first = channel.receive().await?;
+            let status = progress.observe(&first, session_id, request_id, version)?;
+            if status == TeacherAckStatus::Completed || !require_completed {
+                return Ok(status);
+            }
+            let second = channel.receive().await?;
+            let status = progress.observe(&second, session_id, request_id, version)?;
+            require_worker_completion(status)?;
+            Ok::<TeacherAckStatus, Box<dyn Error + Send + Sync>>(status)
+        };
+        timeout(Duration::from_secs(3), exchange)
+            .await
+            .map_err(|_| "timed out awaiting actual Worker completion".into())?
+    }
+
     pub async fn run() -> AppResult {
         let config = match Config::parse() {
             Ok(config) => config,
@@ -505,19 +530,14 @@ Optional:\n\
                     .await?;
                 // Only an actually received, source-authenticated response counts.
                 // The Service waits up to 1 second for the real Worker IPC reply.
-                let reply = timeout(Duration::from_secs(3), session.channel.receive())
-                    .await
-                    .map_err(|_| "timed out awaiting actual Worker message result")??;
                 let version = session.established.negotiated.version;
-                let status = verify_teacher_message_ack(
-                    &reply,
+                let status = receive_worker_message_result(
+                    &mut session.channel,
                     session_id,
                     message_request_id,
                     (u32::from(version.major), u32::from(version.minor)),
-                )?;
-                if config.require_completed {
-                    require_worker_completion(status)?;
-                }
+                    config.require_completed,
+                ).await?;
                 match status {
                     TeacherAckStatus::Accepted => {
                         println!("teacher_message_worker=accepted (not a displayed-frame proof)")
@@ -613,16 +633,14 @@ Optional:\n\
                 .await?;
             // Only an actually received, source-authenticated response counts.
             // The Service waits up to 1 second for the real Worker IPC reply.
-            let reply = timeout(Duration::from_secs(3), session.channel.receive())
-                .await
-                .map_err(|_| "timed out awaiting actual Worker message result")??;
             let version = session.established.negotiated.version;
-            let status = verify_teacher_message_ack(
-                &reply,
+            let status = receive_worker_message_result(
+                &mut session.channel,
                 session_id,
                 message_request_id,
                 (u32::from(version.major), u32::from(version.minor)),
-            )?;
+                config.require_completed,
+            ).await?;
             match status {
                 TeacherAckStatus::Accepted => {
                     println!("teacher_message_worker=accepted (not a displayed-frame proof)")
