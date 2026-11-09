@@ -1,6 +1,11 @@
 //! Enrolled Service-side Teacher QUIC command ingress. No SCM or Worker activation.
 //! Only an enrolled mTLS connection and authenticated Hello may construct this receiver.
-use classmesh_protocol::control_wire::{ControlEnvelope, control_envelope};
+use crate::peer_identity::AuthenticatedPeerIdentity;
+use classmesh_protocol::control_wire::{
+    ControlEnvelope, TeacherInteractionKind, TeacherInteractionResult, TeacherInteractionState,
+    control_envelope,
+};
+use classmesh_protocol::teacher_interaction::validate_request;
 use classmesh_protocol::{ControlRole, ProtocolVersion};
 use classmesh_security::PrincipalKind;
 use quinn::Connection;
@@ -29,6 +34,8 @@ pub enum ServiceTeacherCommandError {
     Dispatch(PrivilegedDispatchError),
     FileTransferDisabled,
     SessionRetired,
+    NotTeacherInteraction,
+    InvalidWorkerOutcome,
 }
 
 #[derive(Default)]
@@ -57,6 +64,7 @@ pub struct ServiceTeacherCommandReceiver {
     channel: ControlChannel,
     guard: AuthenticatedControlGuard,
     execution_state: ExecutionState,
+    next_reply_sequence: u64,
 }
 
 impl ServiceTeacherCommandReceiver {
@@ -142,7 +150,101 @@ impl ServiceTeacherCommandReceiver {
             channel,
             guard,
             execution_state: ExecutionState::default(),
+            next_reply_sequence: 2, // Server HelloAck owns sequence 1.
         })
+    }
+
+    /// A Worker-owned dispatcher must return a real terminal outcome; never mint
+    /// an Accepted result merely because the QUIC message was received.
+    /// The authenticated identity is bound to the incoming QUIC peer, not
+    /// supplied by the Teacher's request payload.
+    pub async fn receive_dispatch_and_reply<F, Fut, E>(
+        &mut self,
+        authorization: &LiveAuthorizationStore,
+        now_unix_ms: impl Fn() -> u64,
+        dispatch: F,
+    ) -> Result<Result<TeacherInteractionState, E>, ServiceTeacherCommandError>
+    where
+        F: FnOnce(
+            AuthenticatedPeerIdentity,
+            u64,
+            u64,
+            classmesh_protocol::control_wire::TeacherInteractionRequest,
+        ) -> Fut,
+        Fut: std::future::Future<Output = Result<TeacherInteractionState, E>>,
+    {
+        self.ensure_active()?;
+        self.verify(authorization, now_unix_ms())?;
+        let envelope = self
+            .channel
+            .receive()
+            .await
+            .map_err(ServiceTeacherCommandError::Transport)?;
+        self.verify(authorization, now_unix_ms())?;
+        let snapshot = authorization
+            .snapshot()
+            .map_err(ServiceTeacherCommandError::Authorization)?;
+        let command = dispatch_privileged_command(
+            &mut self.guard,
+            snapshot.store(),
+            &envelope,
+            now_unix_ms(),
+        )
+        .map_err(ServiceTeacherCommandError::Dispatch)?;
+        let PrivilegedControlCommand::TeacherInteraction(request) = command else {
+            return Err(ServiceTeacherCommandError::NotTeacherInteraction);
+        };
+        let kind = validate_request(&request).map_err(|e| {
+            ServiceTeacherCommandError::Dispatch(
+                PrivilegedDispatchError::InvalidTeacherInteraction(e),
+            )
+        })?;
+        let peer = self.guard.peer();
+        let result = dispatch(peer, envelope.request_id, envelope.sequence, request).await;
+        // A dispatcher failure cannot be interpreted as acceptance. Retire the
+        // session and do not send a fabricated Worker completion response.
+        let state = match result {
+            Ok(
+                state @ (TeacherInteractionState::Completed
+                | TeacherInteractionState::Rejected
+                | TeacherInteractionState::Failed),
+            ) => state,
+            Ok(_) => {
+                self.retire_connection(b"invalid worker outcome");
+                return Err(ServiceTeacherCommandError::InvalidWorkerOutcome);
+            }
+            Err(error) => {
+                self.retire_connection(b"worker dispatch failed");
+                return Ok(Err(error));
+            }
+        };
+        self.verify(authorization, now_unix_ms())?;
+        let response = correlated_teacher_result(
+            self.guard.control_session_id(),
+            self.guard.protocol_version(),
+            self.next_reply_sequence,
+            envelope.request_id,
+            kind,
+            state,
+        );
+        if let Err(error) = self.channel.send(&response).await {
+            self.retire_connection(b"worker result send failed");
+            return Err(ServiceTeacherCommandError::Transport(error));
+        }
+        self.next_reply_sequence = self
+            .next_reply_sequence
+            .checked_add(1)
+            .ok_or(ServiceTeacherCommandError::SessionRetired)?;
+        if let Err(error) = self.verify(authorization, now_unix_ms()) {
+            self.retire_connection(b"teacher authorization changed");
+            return Err(error);
+        }
+        Ok(Ok(state))
+    }
+
+    fn retire_connection(&mut self, reason: &'static [u8]) {
+        self.execution_state.retire();
+        self.connection.close(0u32.into(), reason);
     }
 
     /// Revalidate mTLS identity and current policy both before and after IO.
@@ -230,6 +332,32 @@ impl ServiceTeacherCommandReceiver {
     }
 }
 
+fn correlated_teacher_result(
+    session_id: u64,
+    version: ProtocolVersion,
+    sequence: u64,
+    request_id: u64,
+    kind: TeacherInteractionKind,
+    state: TeacherInteractionState,
+) -> ControlEnvelope {
+    ControlEnvelope {
+        control_session_id: session_id,
+        protocol_version: Some(classmesh_protocol::control_wire::ProtocolVersion {
+            major: u32::from(version.major),
+            minor: u32::from(version.minor),
+        }),
+        sequence,
+        request_id,
+        payload: Some(control_envelope::Payload::TeacherInteractionResult(
+            TeacherInteractionResult {
+                kind: kind as i32,
+                state: state as i32,
+                diagnostic: String::new(),
+            },
+        )),
+    }
+}
+
 fn is_file_transfer(envelope: &ControlEnvelope) -> bool {
     matches!(
         envelope.payload,
@@ -247,6 +375,33 @@ fn is_file_transfer(envelope: &ControlEnvelope) -> bool {
 mod tests {
     use super::*;
     use classmesh_protocol::control_wire::{FileTransferCancel, Heartbeat};
+
+    #[test]
+    fn correlated_worker_result_preserves_session_request_and_sequence() {
+        let envelope = correlated_teacher_result(
+            91,
+            ProtocolVersion { major: 0, minor: 6 },
+            2,
+            784,
+            TeacherInteractionKind::Message,
+            TeacherInteractionState::Completed,
+        );
+        assert_eq!(
+            (
+                envelope.control_session_id,
+                envelope.sequence,
+                envelope.request_id
+            ),
+            (91, 2, 784)
+        );
+        let Some(control_envelope::Payload::TeacherInteractionResult(result)) = envelope.payload
+        else {
+            panic!("wrong payload")
+        };
+        assert_eq!(result.kind, TeacherInteractionKind::Message as i32);
+        assert_eq!(result.state, TeacherInteractionState::Completed as i32);
+        assert!(result.diagnostic.is_empty());
+    }
 
     #[test]
     fn failed_execution_retires_receiver_without_replay() {
