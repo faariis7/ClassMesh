@@ -4,14 +4,32 @@ $ErrorActionPreference = 'Stop'
 $script = Join-Path $PSScriptRoot '../mvp-service-scm-guarded.ps1'
 $plan = & $script -Mode Plan
 if ($plan -notmatch 'SCM_PLAN_ONLY') { throw 'Missing nonmutating plan marker' }
+# Windows Server and supported ARM64 test VMs may ship only Windows PowerShell
+# 5.1. Use its native interpreter on Windows; pwsh remains the cross-platform
+# interpreter. A missing optional PowerShell 7 must not block M2 fail-closed
+# SCM rehearsals or encourage installing/changing VM policy.
+if ($env:OS -eq 'Windows_NT') {
+    $shell = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $hostFlags = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass')
+} else {
+    $shell = (Get-Command pwsh -ErrorAction Stop).Source
+    $hostFlags = @('-NoProfile', '-NonInteractive')
+}
 $cases = @(
     @{ Args = @('-Mode','Run'); Match = 'independent security review' },
     @{ Args = @('-Mode','Run','-SecurityReviewApproved','-DisposableVmApproved'); Match = 'native Windows required' }
 )
 foreach ($case in $cases) {
     if ($env:OS -eq 'Windows_NT' -and $case.Match -eq 'native Windows required') { continue }
-    $output = & pwsh -NoProfile -File $script @($case.Args) 2>&1 | Out-String
-    if ($output -notmatch [regex]::Escape($case.Match)) { throw "Expected fail-closed marker missing: $($case.Match)" }
+    # Test the guard in an isolated child process. Negative `throw` output is
+    # expected; PowerShell 5.1 surfaces redirected native stderr as an error
+    # record under Stop, so preserve that message without suppressing the gate.
+    try {
+        $output = & $shell @hostFlags -File $script @($case.Args) 2>&1 | Out-String
+    } catch {
+        $output = $_ | Out-String
+    }
+    if ($output -notmatch [regex]::Escape($case.Match)) { throw "Expected fail-closed marker missing: $($case.Match): $output" }
 }
 'PASS: Plan nonmutating; unapproved invocation rejects; non-Windows invocation rejects'
 
