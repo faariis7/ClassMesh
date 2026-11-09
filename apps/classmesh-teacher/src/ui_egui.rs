@@ -1,4 +1,5 @@
 use eframe::egui;
+use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::Instant;
 
@@ -217,7 +218,7 @@ pub struct TeacherEguiShell {
     teacher_interaction_draft: TeacherInteractionDraft,
     pending_action: Option<TeacherUiAction>,
     control_bridge: Option<TeacherUiControlBridge>,
-    command_status: Option<(u64, u64, Option<TeacherInteractionState>)>,
+    command_status: BTreeMap<u64, (u64, Option<TeacherInteractionState>)>,
 }
 
 impl Default for TeacherEguiShell {
@@ -244,7 +245,7 @@ impl Default for TeacherEguiShell {
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
             control_bridge: None,
-            command_status: None,
+            command_status: BTreeMap::new(),
         }
     }
 }
@@ -275,7 +276,7 @@ impl TeacherEguiShell {
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
             control_bridge: None,
-            command_status: None,
+            command_status: BTreeMap::new(),
         }
     }
 
@@ -358,7 +359,14 @@ impl TeacherEguiShell {
                         .as_ref()
                         .is_some_and(|c| c.control_session_id == control_session_id)
                     {
-                        self.command_status = Some((control_session_id, request_id, None));
+                        // Bound UI history to the same 64 outstanding requests as the network owner.
+                        // Never turn a write into an acknowledgement.
+                        if !self.command_status.contains_key(&request_id) && self.command_status.len() >= 64 {
+                            if let Some(oldest) = self.command_status.keys().next().copied() {
+                                self.command_status.remove(&oldest);
+                            }
+                        }
+                        self.command_status.insert(request_id, (control_session_id, None));
                     }
                 }
                 Ok(TeacherUiControlEvent::CommandResult {
@@ -366,14 +374,10 @@ impl TeacherEguiShell {
                     request_id,
                     state,
                 }) => {
-                    if self
-                        .command_status
-                        .as_ref()
-                        .is_some_and(|(session, id, _)| {
-                            *session == control_session_id && *id == request_id
-                        })
-                    {
-                        self.command_status = Some((control_session_id, request_id, Some(state)));
+                    if let Some((session, status)) = self.command_status.get_mut(&request_id) {
+                        if *session == control_session_id {
+                            *status = Some(state);
+                        }
                     }
                 }
                 Ok(TeacherUiControlEvent::Disconnected) => {
@@ -426,7 +430,7 @@ impl TeacherEguiShell {
             != Some((context.source_id, context.control_session_id))
         {
             reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
-            self.command_status = None;
+            self.command_status.clear();
             // Every queued action belongs to the old session, including
             // SelectDevice and presentation intents with no session epoch.
             // Never forward them into a newly authenticated QUIC session.
@@ -463,7 +467,7 @@ impl TeacherEguiShell {
             self.pending_action = None;
         }
         self.teacher_interaction_context = None;
-        self.command_status = None;
+        self.command_status.clear();
         // Retire the authenticated playback ledger and diagnostics intents together.
         self.retire_pending_diagnostics_override();
         self.playback = None;
@@ -1006,7 +1010,7 @@ impl eframe::App for TeacherEguiShell {
             ui.small(control_connection_label(
                 self.teacher_interaction_context.as_ref(),
             ));
-            if let Some((_, request_id, state)) = self.command_status {
+            for (&request_id, &(_, state)) in self.command_status.iter().rev().take(3) {
                 let label = match state {
                     None => "Sent over QUIC — no Service ACK",
                     Some(TeacherInteractionState::Accepted) => {
