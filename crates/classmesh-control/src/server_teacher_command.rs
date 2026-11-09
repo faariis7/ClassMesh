@@ -7,7 +7,7 @@ use classmesh_protocol::control_wire::{
 };
 use classmesh_protocol::teacher_interaction::validate_request;
 use classmesh_protocol::{ControlRole, ProtocolVersion};
-use classmesh_security::PrincipalKind;
+use classmesh_security::{PrincipalId, PrincipalKind};
 use quinn::Connection;
 
 use crate::authorization::AuthenticatedControlGuard;
@@ -36,6 +36,38 @@ pub enum ServiceTeacherCommandError {
     SessionRetired,
     NotTeacherInteraction,
     InvalidWorkerOutcome,
+    MismatchedWorkerOutcome,
+}
+
+/// Service-owned proof returned only after the Worker dispatcher completes.
+/// Correlation is checked against the authenticated ingress, never against
+/// identifiers supplied by an untrusted Teacher payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorrelatedWorkerOutcome {
+    pub request_id: u64,
+    pub request_sequence: u64,
+    pub source_principal_id: PrincipalId,
+    pub state: TeacherInteractionState,
+}
+
+fn validate_worker_outcome(
+    outcome: CorrelatedWorkerOutcome,
+    request_id: u64,
+    request_sequence: u64,
+    source_principal_id: PrincipalId,
+) -> Result<TeacherInteractionState, ServiceTeacherCommandError> {
+    if outcome.request_id != request_id
+        || outcome.request_sequence != request_sequence
+        || outcome.source_principal_id != source_principal_id
+    {
+        return Err(ServiceTeacherCommandError::MismatchedWorkerOutcome);
+    }
+    match outcome.state {
+        TeacherInteractionState::Completed
+        | TeacherInteractionState::Rejected
+        | TeacherInteractionState::Failed => Ok(outcome.state),
+        _ => Err(ServiceTeacherCommandError::InvalidWorkerOutcome),
+    }
 }
 
 #[derive(Default)]
@@ -170,7 +202,7 @@ impl ServiceTeacherCommandReceiver {
             u64,
             classmesh_protocol::control_wire::TeacherInteractionRequest,
         ) -> Fut,
-        Fut: std::future::Future<Output = Result<TeacherInteractionState, E>>,
+        Fut: std::future::Future<Output = Result<CorrelatedWorkerOutcome, E>>,
     {
         let result = self
             .receive_dispatch_and_reply_inner(authorization, now_unix_ms, dispatch)
@@ -198,7 +230,7 @@ impl ServiceTeacherCommandReceiver {
             u64,
             classmesh_protocol::control_wire::TeacherInteractionRequest,
         ) -> Fut,
-        Fut: std::future::Future<Output = Result<TeacherInteractionState, E>>,
+        Fut: std::future::Future<Output = Result<CorrelatedWorkerOutcome, E>>,
     {
         self.ensure_active()?;
         self.verify(authorization, now_unix_ms())?;
@@ -231,15 +263,18 @@ impl ServiceTeacherCommandReceiver {
         // A dispatcher failure cannot be interpreted as acceptance. Retire the
         // session and do not send a fabricated Worker completion response.
         let state = match result {
-            Ok(
-                state @ (TeacherInteractionState::Completed
-                | TeacherInteractionState::Rejected
-                | TeacherInteractionState::Failed),
-            ) => state,
-            Ok(_) => {
-                self.retire_connection(b"invalid worker outcome");
-                return Err(ServiceTeacherCommandError::InvalidWorkerOutcome);
-            }
+            Ok(outcome) => match validate_worker_outcome(
+                outcome,
+                envelope.request_id,
+                envelope.sequence,
+                peer.principal_id(),
+            ) {
+                Ok(state) => state,
+                Err(error) => {
+                    self.retire_connection(b"uncorrelated worker outcome");
+                    return Err(error);
+                }
+            },
             Err(error) => {
                 self.retire_connection(b"worker dispatch failed");
                 return Ok(Err(error));
@@ -434,6 +469,43 @@ mod tests {
         assert_eq!(result.kind, TeacherInteractionKind::Message as i32);
         assert_eq!(result.state, TeacherInteractionState::Completed as i32);
         assert!(result.diagnostic.is_empty());
+    }
+
+    #[test]
+    fn worker_result_must_match_authenticated_source_and_request() {
+        let outcome = CorrelatedWorkerOutcome {
+            request_id: 784,
+            request_sequence: 7,
+            source_principal_id: PrincipalId([42; 32]),
+            state: TeacherInteractionState::Completed,
+        };
+        assert!(matches!(
+            validate_worker_outcome(outcome, 784, 7, PrincipalId([42; 32])),
+            Ok(TeacherInteractionState::Completed)
+        ));
+        for (request_id, sequence, principal) in [(785, 7, 42), (784, 8, 42), (784, 7, 43)] {
+            assert!(matches!(
+                validate_worker_outcome(
+                    outcome,
+                    request_id,
+                    sequence,
+                    PrincipalId([principal; 32])
+                ),
+                Err(ServiceTeacherCommandError::MismatchedWorkerOutcome)
+            ));
+        }
+        assert!(matches!(
+            validate_worker_outcome(
+                CorrelatedWorkerOutcome {
+                    state: TeacherInteractionState::Accepted,
+                    ..outcome
+                },
+                784,
+                7,
+                PrincipalId([42; 32])
+            ),
+            Err(ServiceTeacherCommandError::InvalidWorkerOutcome)
+        ));
     }
 
     #[test]
