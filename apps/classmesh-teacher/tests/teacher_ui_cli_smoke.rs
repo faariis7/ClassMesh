@@ -16,15 +16,24 @@ fn run_bounded(args: &[&OsStr]) -> (ExitStatus, String, String) {
         .spawn()
         .expect("Teacher UI executable should start");
 
-    let deadline = Instant::now() + Duration::from_secs(4);
+    // Native Windows startup can be delayed by antivirus/loader contention
+    // when GitHub Actions builds and tests all workspace binaries in parallel.
+    // Preserve a hard bounded failure for an accidental GUI launch; 4s was
+    // observed failing for --version on hosted CI while the exact same binary
+    // exits correctly on the dedicated Windows VM1 lab.
+    let deadline = Instant::now() + Duration::from_secs(15);
     let status = loop {
         if let Some(status) = child.try_wait().expect("check Teacher UI process") {
             break status;
         }
         if Instant::now() >= deadline {
             child.kill().expect("terminate unexpected interactive UI");
-            let _ = child.wait();
-            panic!("Teacher UI did not exit promptly for diagnostic CLI arguments");
+            let output = child.wait_with_output().expect("reap Teacher UI process");
+            panic!(
+                "Teacher UI did not exit within the hard 15s CLI bound for {args:?}; stdout={:?} stderr={:?}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
         }
         thread::sleep(Duration::from_millis(50));
     };

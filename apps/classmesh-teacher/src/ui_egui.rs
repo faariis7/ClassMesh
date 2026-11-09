@@ -1,4 +1,5 @@
 use eframe::egui;
+use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::Instant;
 
@@ -6,7 +7,7 @@ use classmesh_control::client_session::ClientControlSession;
 use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::teacher_playback_receive::AuthenticatedTeacherControlMessage;
 use classmesh_protocol::Capability;
-use classmesh_protocol::control_wire::ControlEnvelope;
+use classmesh_protocol::control_wire::{ControlEnvelope, TeacherInteractionState};
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::classroom_grid::{MonitoringGridViewConfig, TeacherMonitoringGridViewModel};
@@ -42,6 +43,44 @@ use crate::ui_shell::{
     TeacherUiSection, TeacherUiShellState, prepare_teacher_interaction_ui_action,
     validate_teacher_interaction_ui_action,
 };
+
+// A delayed duplicate write or an out-of-order Accepted must not erase a
+// verified terminal Worker outcome. Only the matching session may update it.
+fn advance_command_status(
+    current: Option<TeacherInteractionState>,
+    incoming: TeacherInteractionState,
+) -> Option<TeacherInteractionState> {
+    match current {
+        Some(
+            TeacherInteractionState::Completed
+            | TeacherInteractionState::Rejected
+            | TeacherInteractionState::Failed,
+        ) => current,
+        Some(TeacherInteractionState::Accepted)
+            if incoming == TeacherInteractionState::Accepted =>
+        {
+            current
+        }
+        Some(TeacherInteractionState::Accepted)
+            if incoming == TeacherInteractionState::Completed
+                || incoming == TeacherInteractionState::Rejected
+                || incoming == TeacherInteractionState::Failed =>
+        {
+            Some(incoming)
+        }
+        None if matches!(
+            incoming,
+            TeacherInteractionState::Accepted
+                | TeacherInteractionState::Completed
+                | TeacherInteractionState::Rejected
+                | TeacherInteractionState::Failed
+        ) =>
+        {
+            Some(incoming)
+        }
+        _ => current,
+    }
+}
 
 const APP_TITLE: &str = "ClassMesh Teacher";
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [800.0, 600.0];
@@ -95,6 +134,15 @@ pub enum TeacherUiControlEvent {
     PlaybackRetired {
         source_id: MonitoringSourceId,
         binding: TeacherPlaybackBinding,
+    },
+    CommandWritten {
+        control_session_id: u64,
+        request_id: u64,
+    },
+    CommandResult {
+        control_session_id: u64,
+        request_id: u64,
+        state: TeacherInteractionState,
     },
     Disconnected,
 }
@@ -208,6 +256,7 @@ pub struct TeacherEguiShell {
     teacher_interaction_draft: TeacherInteractionDraft,
     pending_action: Option<TeacherUiAction>,
     control_bridge: Option<TeacherUiControlBridge>,
+    command_status: BTreeMap<u64, (u64, Option<TeacherInteractionState>)>,
 }
 
 impl Default for TeacherEguiShell {
@@ -234,6 +283,7 @@ impl Default for TeacherEguiShell {
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
             control_bridge: None,
+            command_status: BTreeMap::new(),
         }
     }
 }
@@ -264,6 +314,7 @@ impl TeacherEguiShell {
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
             control_bridge: None,
+            command_status: BTreeMap::new(),
         }
     }
 
@@ -337,6 +388,40 @@ impl TeacherEguiShell {
                 Ok(TeacherUiControlEvent::PlaybackRetired { source_id, binding }) => {
                     let _ = self.revoke_receiver_playback_context(source_id, binding);
                 }
+                Ok(TeacherUiControlEvent::CommandWritten {
+                    control_session_id,
+                    request_id,
+                }) => {
+                    if self
+                        .teacher_interaction_context
+                        .as_ref()
+                        .is_some_and(|c| c.control_session_id == control_session_id)
+                    {
+                        // Bound UI history to the same 64 outstanding requests as the network owner.
+                        // Never turn a write into an acknowledgement.
+                        if !self.command_status.contains_key(&request_id)
+                            && self.command_status.len() >= 64
+                        {
+                            if let Some(oldest) = self.command_status.keys().next().copied() {
+                                self.command_status.remove(&oldest);
+                            }
+                        }
+                        self.command_status
+                            .entry(request_id)
+                            .or_insert((control_session_id, None));
+                    }
+                }
+                Ok(TeacherUiControlEvent::CommandResult {
+                    control_session_id,
+                    request_id,
+                    state,
+                }) => {
+                    if let Some((session, status)) = self.command_status.get_mut(&request_id) {
+                        if *session == control_session_id {
+                            *status = advance_command_status(*status, state);
+                        }
+                    }
+                }
                 Ok(TeacherUiControlEvent::Disconnected) => {
                     self.pending_action = None;
                     self.clear_teacher_interaction_context();
@@ -387,6 +472,7 @@ impl TeacherEguiShell {
             != Some((context.source_id, context.control_session_id))
         {
             reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
+            self.command_status.clear();
             // Every queued action belongs to the old session, including
             // SelectDevice and presentation intents with no session epoch.
             // Never forward them into a newly authenticated QUIC session.
@@ -423,6 +509,7 @@ impl TeacherEguiShell {
             self.pending_action = None;
         }
         self.teacher_interaction_context = None;
+        self.command_status.clear();
         // Retire the authenticated playback ledger and diagnostics intents together.
         self.retire_pending_diagnostics_override();
         self.playback = None;
@@ -965,6 +1052,19 @@ impl eframe::App for TeacherEguiShell {
             ui.small(control_connection_label(
                 self.teacher_interaction_context.as_ref(),
             ));
+            for (&request_id, &(_, state)) in self.command_status.iter().rev().take(3) {
+                let label = match state {
+                    None => "Sent over QUIC — no Service ACK",
+                    Some(TeacherInteractionState::Accepted) => {
+                        "Worker accepted — completion unconfirmed"
+                    }
+                    Some(TeacherInteractionState::Completed) => "Worker reported completed",
+                    Some(TeacherInteractionState::Rejected) => "Worker rejected command",
+                    Some(TeacherInteractionState::Failed) => "Worker reported failure",
+                    _ => "Invalid command state",
+                };
+                ui.small(format!("Request {request_id}: {label}"));
+            }
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -1031,6 +1131,26 @@ mod tests {
     use crate::ui_shell::{TeacherFocusUiAction, TeacherPresentationUiAction};
 
     use super::*;
+
+    #[test]
+    fn worker_result_state_never_regresses_on_delayed_or_duplicate_events() {
+        use TeacherInteractionState::*;
+        assert_eq!(advance_command_status(None, Accepted), Some(Accepted));
+        assert_eq!(
+            advance_command_status(Some(Accepted), Completed),
+            Some(Completed)
+        );
+        assert_eq!(
+            advance_command_status(Some(Completed), Accepted),
+            Some(Completed)
+        );
+        assert_eq!(
+            advance_command_status(Some(Rejected), Completed),
+            Some(Rejected)
+        );
+        assert_eq!(advance_command_status(Some(Failed), Accepted), Some(Failed));
+        assert_eq!(advance_command_status(None, Completed), Some(Completed));
+    }
 
     #[test]
     fn authenticated_bridge_disconnect_retires_context_without_fake_liveness() {

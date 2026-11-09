@@ -4,7 +4,9 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::System::RemoteDesktop::{WTS_CURRENT_SERVER_HANDLE, WTSSendMessageW};
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, SW_SHOWNORMAL};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    MB_ICONINFORMATION, MB_OK, MB_OKCANCEL, SW_SHOWNORMAL,
+};
 
 const CLASSMESH_MESSAGE_TITLE: &str = "ClassMesh";
 const SHELL_SUCCESS_THRESHOLD: isize = 32;
@@ -57,6 +59,68 @@ pub trait OpenTargetLauncher {
 
 #[derive(Debug, Default)]
 pub struct Win32TeacherMessagePresenter;
+
+/// Only the user's explicit OK response is completion. Unlike asynchronous
+/// WTSSendMessageW, this API waits (with a strict positive deadline) and MUST
+/// be run off the interactive Worker's IPC/capture thread.
+///
+/// This uses MB_OKCANCEL to distinguish an explicit dismiss from a timeout;
+/// the standard asynchronous presenter remains available to older callers.
+pub fn confirm_teacher_message(
+    session_id: u32,
+    text: &str,
+    timeout_seconds: u32,
+) -> Result<(), TeacherInteractionExecutionError> {
+    if session_id == 0 {
+        return Err(TeacherInteractionExecutionError::InvalidSession);
+    }
+    validate_confirmation_timeout(timeout_seconds)?;
+    let mut title = utf16_with_nul(CLASSMESH_MESSAGE_TITLE)?;
+    let mut message = utf16_with_nul(text)?;
+    let title_bytes = utf16_payload_bytes(&title)?;
+    let message_bytes = utf16_payload_bytes(&message)?;
+    let mut response = 0_i32;
+    // SAFETY: Owned, writable, NUL-terminated UTF-16 buffers remain alive
+    // through the bounded Win32 call. Only the dedicated confirmation thread
+    // is permitted to invoke this blocking form of WTSSendMessageW.
+    let delivered = unsafe {
+        WTSSendMessageW(
+            WTS_CURRENT_SERVER_HANDLE,
+            session_id,
+            title.as_mut_ptr(),
+            title_bytes,
+            message.as_mut_ptr(),
+            message_bytes,
+            MB_OKCANCEL | MB_ICONINFORMATION,
+            timeout_seconds,
+            &mut response,
+            1,
+        )
+    };
+    if delivered == 0 {
+        return Err(TeacherInteractionExecutionError::MessageRejected);
+    }
+    classify_message_confirmation(response)
+}
+
+fn validate_confirmation_timeout(seconds: u32) -> Result<(), TeacherInteractionExecutionError> {
+    if !(1..=15).contains(&seconds) {
+        return Err(TeacherInteractionExecutionError::InvalidTimeout);
+    }
+    Ok(())
+}
+
+fn classify_message_confirmation(response: i32) -> Result<(), TeacherInteractionExecutionError> {
+    // Win32 WTSSendMessageW: IDOK=1, IDCANCEL=2, IDTIMEOUT=32000,
+    // IDASYNC=32001. Neither queued delivery nor timeout means the user saw
+    // and acknowledged a message.
+    match response {
+        1 => Ok(()),
+        2 => Err(TeacherInteractionExecutionError::MessageDismissed),
+        32_000 => Err(TeacherInteractionExecutionError::MessageTimedOut),
+        _ => Err(TeacherInteractionExecutionError::MessageUnexpectedResponse),
+    }
+}
 
 impl TeacherMessagePresenter for Win32TeacherMessagePresenter {
     fn present_message(
@@ -127,6 +191,10 @@ pub enum TeacherInteractionExecutionError {
     EmbeddedNul,
     ValueTooLong,
     MessageRejected,
+    MessageDismissed,
+    MessageTimedOut,
+    MessageUnexpectedResponse,
+    InvalidTimeout,
     TargetRejected,
 }
 
@@ -139,6 +207,10 @@ impl TeacherInteractionExecutionError {
             Self::EmbeddedNul => "teacher_interaction.embedded_nul",
             Self::ValueTooLong => "teacher_interaction.value_too_long",
             Self::MessageRejected => "teacher_interaction.message_rejected",
+            Self::MessageDismissed => "teacher_interaction.message_dismissed",
+            Self::MessageTimedOut => "teacher_interaction.message_confirmation_timeout",
+            Self::MessageUnexpectedResponse => "teacher_interaction.message_unknown_response",
+            Self::InvalidTimeout => "teacher_interaction.message_invalid_timeout",
             Self::TargetRejected => "teacher_interaction.target_rejected",
         }
     }
@@ -225,6 +297,30 @@ mod tests {
         );
         assert_eq!(WindowsAppIdentity::Calculator.shell_target(), "calc.exe");
         assert_eq!(WindowsAppIdentity::TextEditor.shell_target(), "notepad.exe");
+    }
+
+    #[test]
+    fn blocking_windows_confirmation_only_completes_after_explicit_ok() {
+        assert_eq!(classify_message_confirmation(1), Ok(()));
+        for (response, failure) in [
+            (2, TeacherInteractionExecutionError::MessageDismissed),
+            (32_000, TeacherInteractionExecutionError::MessageTimedOut),
+            (
+                32_001,
+                TeacherInteractionExecutionError::MessageUnexpectedResponse,
+            ),
+            (
+                0,
+                TeacherInteractionExecutionError::MessageUnexpectedResponse,
+            ),
+        ] {
+            assert_eq!(classify_message_confirmation(response), Err(failure));
+        }
+        // Zero would wait indefinitely and a huge deadline could orphan a
+        // Worker dialog beyond its authenticated Service owner.
+        assert!(validate_confirmation_timeout(0).is_err());
+        assert!(validate_confirmation_timeout(16).is_err());
+        assert!(validate_confirmation_timeout(15).is_ok());
     }
 
     #[test]

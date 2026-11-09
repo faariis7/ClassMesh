@@ -5,7 +5,6 @@ fn main() {
 
 #[cfg(windows)]
 mod windows_app {
-    use std::collections::BTreeSet;
     use std::error::Error;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::PathBuf;
@@ -17,13 +16,18 @@ mod windows_app {
         DEFAULT_IO_TIMEOUT, DEFAULT_RECONNECT_POLICY, enrolled_client_config,
     };
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity, cng_client_cert_resolver};
+    use classmesh_lab::teacher_ack_probe::{
+        MessageAckProgress, TeacherAckStatus, qualification_capabilities, require_worker_completion,
+    };
     use classmesh_protocol::control_wire::{
         ControlEnvelope, Heartbeat, InputEvent, KeyEvent, KeyframeRequest,
         MediaHealth as WireMediaHealth, MediaTransport, MouseMove, ProtocolVersion as WireVersion,
-        ReceiverFeedback, ReleaseAllInput, StreamKind as WireStreamKind, StreamOffer, VideoCodec,
-        VideoProfile, control_envelope, input_event,
+        ReceiverFeedback, ReleaseAllInput, StreamKind as WireStreamKind, StreamOffer,
+        TeacherInteractionRequest, TeacherMessage, VideoCodec, VideoProfile, control_envelope,
+        input_event, teacher_interaction_request,
     };
     use classmesh_protocol::media::{MEDIA_HEADER_LEN, MediaFlags, MediaPacketHeader};
+    use classmesh_protocol::teacher_interaction::{teacher_message_available, validate_message};
     use classmesh_protocol::{Capability, ControlRole, PROTOCOL_VERSION};
     use classmesh_security::PrincipalId;
     use quinn::Endpoint;
@@ -46,6 +50,9 @@ mod windows_app {
         fps: u32,
         bitrate_kbps: u32,
         input_pulse: bool,
+        teacher_message: Option<String>,
+        message_only: bool,
+        require_completed: bool,
         degraded_feedback: bool,
         drop_media_after: Option<u64>,
         hold_key_vk: Option<u32>,
@@ -79,6 +86,9 @@ mod windows_app {
             let mut fps = 30_u32;
             let mut bitrate_kbps = 2_500_u32;
             let mut input_pulse = false;
+            let mut teacher_message = None;
+            let mut message_only = false;
+            let mut require_completed = false;
             let mut degraded_feedback = false;
             let mut drop_media_after = None;
             let mut hold_key_vk = None;
@@ -129,6 +139,14 @@ mod windows_app {
                             .map_err(|_| "--bitrate-kbps must be an integer".to_owned())?;
                     }
                     "--input-pulse" => input_pulse = true,
+                    "--teacher-message" => {
+                        let text = value()?;
+                        validate_message(&text)
+                            .map_err(|err| format!("--teacher-message is invalid: {err:?}"))?;
+                        teacher_message = Some(text);
+                    }
+                    "--message-only" => message_only = true,
+                    "--require-completed" => require_completed = true,
                     "--degraded-feedback" => degraded_feedback = true,
                     "--drop-media-after" => {
                         drop_media_after = Some(
@@ -155,6 +173,22 @@ mod windows_app {
                 .ok_or_else(|| format!("--server-name is required\n\n{}", Self::usage()))?;
             let identity_path = identity_path
                 .ok_or_else(|| format!("--identity is required\n\n{}", Self::usage()))?;
+            if require_completed && teacher_message.is_none() {
+                return Err("--require-completed requires --teacher-message".to_owned());
+            }
+            if message_only && teacher_message.is_none() {
+                return Err("--message-only requires --teacher-message".to_owned());
+            }
+            if message_only
+                && (input_pulse
+                    || degraded_feedback
+                    || drop_media_after.is_some()
+                    || hold_key_vk.is_some())
+            {
+                return Err(
+                    "--message-only cannot combine with media/input qualification flags".to_owned(),
+                );
+            }
             if seconds == 0 {
                 return Err("--seconds must be greater than zero".to_owned());
             }
@@ -181,6 +215,9 @@ mod windows_app {
                 fps,
                 bitrate_kbps,
                 input_pulse,
+                teacher_message,
+                message_only,
+                require_completed,
                 degraded_feedback,
                 drop_media_after,
                 hold_key_vk,
@@ -201,6 +238,9 @@ Optional:\n\
   --fps <n>                    default 30\n\
   --bitrate-kbps <n>           default 2500\n\
   --input-pulse                move pointer +12/-12 and ReleaseAll\n\
+  --teacher-message <text>     send real enrolled Teacher→Service→Worker message and require correlated response; never claim GUI display\n\
+  --message-only               qualify authenticated Teacher→Worker ACK without requiring video/StreamOffer\n\
+  --require-completed          fail unless Worker explicitly reports Completed (Accepted is insufficient)\n\
   --degraded-feedback          send two bounded degraded feedback samples\n\
   --drop-media-after <seconds> close UDP receiver while control heartbeats continue\n\
   --hold-key-vk <vk>           press a key then disconnect without key-up to test cleanup"
@@ -337,6 +377,43 @@ Optional:\n\
         stats
     }
 
+    // A genuine bounded Windows message acknowledgement can arrive after
+    // Service's 15-second terminal deadline, not within the old 3 seconds.
+    // Retain the short deadline for request-only Accepted qualification.
+    fn worker_message_reply_budget(require_completed: bool) -> Duration {
+        if require_completed {
+            Duration::from_secs(16)
+        } else {
+            Duration::from_secs(3)
+        }
+    }
+
+    // A single bounded read window handles Service's Accepted followed by
+    // Worker Completed, with one deadline for the entire exchange.
+    async fn receive_worker_message_result(
+        channel: &mut classmesh_control::quic::ControlChannel,
+        session_id: u64,
+        request_id: u64,
+        version: (u32, u32),
+        require_completed: bool,
+    ) -> AppResult<TeacherAckStatus> {
+        let exchange = async {
+            let mut progress = MessageAckProgress::default();
+            let first = channel.receive().await?;
+            let status = progress.observe(&first, session_id, request_id, version)?;
+            if status == TeacherAckStatus::Completed || !require_completed {
+                return Ok(status);
+            }
+            let second = channel.receive().await?;
+            let status = progress.observe(&second, session_id, request_id, version)?;
+            require_worker_completion(status)?;
+            Ok::<TeacherAckStatus, Box<dyn Error + Send + Sync>>(status)
+        };
+        timeout(worker_message_reply_budget(require_completed), exchange)
+            .await
+            .map_err(|_| String::from("timed out awaiting actual Worker completion"))?
+    }
+
     pub async fn run() -> AppResult {
         let config = match Config::parse() {
             Ok(config) => config,
@@ -381,14 +458,21 @@ Optional:\n\
         let mut endpoint = Endpoint::client(bind)?;
         endpoint.set_default_client_config(enrolled_client_config(roots, resolver)?);
 
-        let udp = UdpSocket::bind(config.udp_listen).await?;
-        let udp_address = udp.local_addr()?;
+        // Message-only qualification uses authenticated QUIC only. Do not
+        // bind a media socket or require a free UDP receive port.
+        let udp = if config.message_only {
+            None
+        } else {
+            Some(UdpSocket::bind(config.udp_listen).await?)
+        };
         let principal = PrincipalId(identity.principal_id);
+        let capabilities =
+            qualification_capabilities(config.message_only, config.teacher_message.is_some());
         let hello = ControlHello {
             principal_id: principal,
             role: ControlRole::Teacher,
             version: PROTOCOL_VERSION,
-            capabilities: BTreeSet::from([Capability::UdpUnicast, Capability::H264HardwareDecode]),
+            capabilities,
             hostname: std::env::var("COMPUTERNAME")
                 .unwrap_or_else(|_| "phase6f-teacher".to_owned()),
             app_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -409,11 +493,12 @@ Optional:\n\
             session_id, session.established.negotiated.capabilities
         );
 
-        if !session
-            .established
-            .negotiated
-            .capabilities
-            .contains(&Capability::UdpUnicast)
+        if !config.message_only
+            && !session
+                .established
+                .negotiated
+                .capabilities
+                .contains(&Capability::UdpUnicast)
         {
             return Err(
                 "student did not negotiate UDP unicast; Worker media capability is not ready"
@@ -421,13 +506,73 @@ Optional:\n\
             );
         }
 
+        let mut sequence = 2_u64;
+
+        if config.message_only {
+            if let Some(text) = config.teacher_message.as_ref() {
+                if !teacher_message_available(
+                    session.established.negotiated.version,
+                    &session.established.negotiated.capabilities,
+                ) {
+                    return Err(
+                        "TeacherMessage capability not negotiated with enrolled Service".into(),
+                    );
+                }
+                sequence = sequence
+                    .checked_add(1)
+                    .ok_or("control sequence exhausted")?;
+                let message_request_id = sequence;
+                session
+                    .channel
+                    .send(&envelope(
+                        session_id,
+                        sequence,
+                        message_request_id,
+                        control_envelope::Payload::TeacherInteractionRequest(
+                            TeacherInteractionRequest {
+                                action: Some(teacher_interaction_request::Action::Message(
+                                    TeacherMessage {
+                                        text_utf8: text.clone(),
+                                    },
+                                )),
+                            },
+                        ),
+                    ))
+                    .await?;
+                // Only an actually received, source-authenticated response counts.
+                // The Service waits up to 1 second for the real Worker IPC reply.
+                let version = session.established.negotiated.version;
+                let status = receive_worker_message_result(
+                    &mut session.channel,
+                    session_id,
+                    message_request_id,
+                    (u32::from(version.major), u32::from(version.minor)),
+                    config.require_completed,
+                )
+                .await?;
+                match status {
+                    TeacherAckStatus::Accepted => {
+                        println!("teacher_message_worker=accepted (not a displayed-frame proof)")
+                    }
+                    TeacherAckStatus::Completed => println!("teacher_message_worker=completed"),
+                }
+            }
+
+            session
+                .connection
+                .close(0_u32.into(), b"teacher message ACK qualification complete");
+            endpoint.wait_idle().await;
+            println!("qualification=message_ack_only (no media or display proof)");
+            return Ok(());
+        }
+
         let stream_id = 6_001_u32;
-        let port = udp_address.port();
+        let udp = udp.ok_or("media qualification requires UDP receiver")?;
+        let port = udp.local_addr()?.port();
         let parameters = {
             let [high, low] = port.to_be_bytes();
             vec![1, high, low]
         };
-        let mut sequence = 2_u64;
         let offer_request_id = 2_u64;
         let offer = StreamOffer {
             stream_id: u64::from(stream_id),
@@ -467,6 +612,55 @@ Optional:\n\
             "stream=accepted stream_id={} udp_port={} profile={}x{}@{} bitrate_kbps={}",
             stream_id, port, config.width, config.height, config.fps, config.bitrate_kbps
         );
+
+        if let Some(text) = config.teacher_message.as_ref() {
+            if !teacher_message_available(
+                session.established.negotiated.version,
+                &session.established.negotiated.capabilities,
+            ) {
+                return Err(
+                    "TeacherMessage capability not negotiated with enrolled Service".into(),
+                );
+            }
+            sequence = sequence
+                .checked_add(1)
+                .ok_or("control sequence exhausted")?;
+            let message_request_id = sequence;
+            session
+                .channel
+                .send(&envelope(
+                    session_id,
+                    sequence,
+                    message_request_id,
+                    control_envelope::Payload::TeacherInteractionRequest(
+                        TeacherInteractionRequest {
+                            action: Some(teacher_interaction_request::Action::Message(
+                                TeacherMessage {
+                                    text_utf8: text.clone(),
+                                },
+                            )),
+                        },
+                    ),
+                ))
+                .await?;
+            // Only an actually received, source-authenticated response counts.
+            // The Service waits up to 1 second for the real Worker IPC reply.
+            let version = session.established.negotiated.version;
+            let status = receive_worker_message_result(
+                &mut session.channel,
+                session_id,
+                message_request_id,
+                (u32::from(version.major), u32::from(version.minor)),
+                config.require_completed,
+            )
+            .await?;
+            match status {
+                TeacherAckStatus::Accepted => {
+                    println!("teacher_message_worker=accepted (not a displayed-frame proof)")
+                }
+                TeacherAckStatus::Completed => println!("teacher_message_worker=completed"),
+            }
+        }
 
         let media_task = tokio::spawn(receive_media(
             udp,
@@ -648,6 +842,16 @@ Optional:\n\
         endpoint.wait_idle().await;
         println!("qualification=complete control_heartbeats=responsive");
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod worker_message_reply_budget_tests {
+        use super::*;
+        #[test]
+        fn user_ack_qualification_waits_for_real_worker_confirmation_not_just_accepted() {
+            assert_eq!(worker_message_reply_budget(false), Duration::from_secs(3));
+            assert_eq!(worker_message_reply_budget(true), Duration::from_secs(16));
+        }
     }
 }
 

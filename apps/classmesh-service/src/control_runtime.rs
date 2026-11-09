@@ -90,6 +90,10 @@ const PRESENTATION_START_TIMEOUT: Duration = Duration::from_secs(1);
 const FOCUSED_FEEDBACK_MAX_SILENCE: Duration = Duration::from_secs(2);
 const SYSTEM_ACTION_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const TEACHER_INTERACTION_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
+// A Worker may first acknowledge receipt (Accepted) and later report a real
+// terminal result. Bound this wait; an absent terminal is NEVER fabricated.
+const TEACHER_INTERACTION_COMPLETION_WAIT: Duration = Duration::from_secs(15);
+const TEACHER_INTERACTION_PROGRESS_CAPACITY: usize = 2;
 const CLIPBOARD_READ_REPLY_TIMEOUT: Duration = Duration::from_secs(3);
 const FILE_TRANSFER_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const PRESENTATION_FEEDBACK_BUS_CAPACITY: usize = 64;
@@ -207,7 +211,7 @@ pub(crate) struct TeacherInteractionDispatch {
     pub(crate) request_id: u64,
     pub(crate) request: TeacherInteractionRequest,
     pub(crate) commit: SystemActionCommit,
-    pub(crate) reply_tx: oneshot::Sender<TeacherInteractionDispatchOutcome>,
+    pub(crate) reply_tx: tokio_mpsc::Sender<TeacherInteractionDispatchOutcome>,
 }
 
 #[derive(Debug, Clone)]
@@ -519,17 +523,54 @@ fn teacher_interaction_failure(
 
 async fn await_teacher_interaction_dispatch(
     commit: SystemActionCommit,
-    reply_rx: &mut oneshot::Receiver<TeacherInteractionDispatchOutcome>,
+    reply_rx: &mut tokio_mpsc::Receiver<TeacherInteractionDispatchOutcome>,
 ) -> TeacherInteractionDispatchOutcome {
-    match tokio::time::timeout(TEACHER_INTERACTION_REPLY_TIMEOUT, &mut *reply_rx).await {
-        Ok(Ok(outcome)) => outcome,
-        Ok(Err(_)) => TeacherInteractionDispatchOutcome::ReplyDropped,
+    match tokio::time::timeout(TEACHER_INTERACTION_REPLY_TIMEOUT, reply_rx.recv()).await {
+        Ok(Some(outcome)) => outcome,
+        Ok(None) => TeacherInteractionDispatchOutcome::ReplyDropped,
         Err(_) if commit.cancel() => TeacherInteractionDispatchOutcome::TimedOut,
+        // Preserve the pre-existing fail-closed behavior for an already
+        // committed command: an ambiguous timeout is not a definitive failure.
         Err(_) if commit.is_committed() => reply_rx
+            .recv()
             .await
             .unwrap_or(TeacherInteractionDispatchOutcome::ReplyDropped),
         Err(_) => TeacherInteractionDispatchOutcome::Cancelled,
     }
+}
+
+/// One in-flight authenticated Teacher command, bounded by its original
+/// deadline. Crucially, this is polled concurrently with other control and
+/// heartbeat frames, never awaited inline after returning Accepted.
+struct PendingTeacherTerminal {
+    request_id: u64,
+    kind: TeacherInteractionKind,
+    deadline: tokio::time::Instant,
+    reply_rx: tokio_mpsc::Receiver<TeacherInteractionDispatchOutcome>,
+}
+
+async fn wait_teacher_terminal_or_expiry(
+    pending: &mut Option<PendingTeacherTerminal>,
+) -> Option<TeacherInteractionDispatchOutcome> {
+    let Some(pending) = pending.as_mut() else {
+        return std::future::pending().await;
+    };
+    // Use an absolute deadline so unrelated heartbeat/media traffic cannot
+    // reset the clock and hold an old authenticated request forever.
+    tokio::time::timeout_at(pending.deadline, pending.reply_rx.recv())
+        .await
+        .ok()
+        .flatten()
+}
+
+#[cfg(test)]
+async fn await_teacher_interaction_completion(
+    reply_rx: &mut tokio_mpsc::Receiver<TeacherInteractionDispatchOutcome>,
+) -> Option<TeacherInteractionDispatchOutcome> {
+    tokio::time::timeout(TEACHER_INTERACTION_COMPLETION_WAIT, reply_rx.recv())
+        .await
+        .ok()
+        .flatten()
 }
 
 fn system_action_result(
@@ -1850,9 +1891,49 @@ async fn run_established_session(
         }
     });
     let _receive_pump = ReceivePumpGuard(receive_pump);
+    let mut pending_teacher_terminal: Option<PendingTeacherTerminal> = None;
 
     loop {
         let mut envelope = tokio::select! {
+            terminal = wait_teacher_terminal_or_expiry(&mut pending_teacher_terminal) => {
+                let Some(pending) = pending_teacher_terminal.take() else {
+                    continue;
+                };
+                let Some(outcome) = terminal else {
+                    // Absence of actual Worker confirmation is never reported
+                    // as Completed, and cannot block the authenticated peer.
+                    continue;
+                };
+                let result = teacher_interaction_failure(pending.kind, outcome);
+                // Worker routing already deduplicates Accepted. Do not let a
+                // duplicate or malformed interim result become terminal ACK.
+                if result.state == TeacherInteractionState::Accepted as i32 {
+                    pending_teacher_terminal = Some(pending);
+                    continue;
+                }
+                let Some(next_sequence) = outbound_sequence.checked_add(1) else {
+                    connection.close(0_u32.into(), b"control sequence exhausted");
+                    return;
+                };
+                let response = ControlEnvelope {
+                    control_session_id: session.control_session_id,
+                    sequence: next_sequence,
+                    protocol_version: Some(WireProtocolVersion {
+                        major: u32::from(session.negotiated.version.major),
+                        minor: u32::from(session.negotiated.version.minor),
+                    }),
+                    request_id: pending.request_id,
+                    payload: Some(control_envelope::Payload::TeacherInteractionResult(result)),
+                };
+                if let Err(error) = send.send(&response).await {
+                    eprintln!("ClassMesh Teacher terminal result transport failed: {}",
+                        transport_diagnostic_code(&error));
+                    connection.close(0_u32.into(), b"teacher result transport failed");
+                    return;
+                }
+                outbound_sequence = next_sequence;
+                continue;
+            }
             inbound = inbound_rx.recv() => {
                 match inbound {
                     Some(ControlInboundEvent::Envelope(envelope)) => envelope,
@@ -3083,7 +3164,8 @@ async fn run_established_session(
                 }
                 let request_id = envelope.request_id;
                 let commit = SystemActionCommit::pending();
-                let (reply_tx, mut reply_rx) = oneshot::channel();
+                let (reply_tx, mut reply_rx) =
+                    tokio_mpsc::channel(TEACHER_INTERACTION_PROGRESS_CAPACITY);
                 let dispatch = TeacherInteractionDispatch {
                     control_session_id: session.control_session_id,
                     request_id,
@@ -3091,24 +3173,31 @@ async fn run_established_session(
                     commit: commit.clone(),
                     reply_tx,
                 };
-                let outcome = match teacher_interactions.tx.try_send(dispatch) {
-                    Ok(()) => await_teacher_interaction_dispatch(commit, &mut reply_rx).await,
-                    Err(mpsc::TrySendError::Full(_)) => {
-                        TeacherInteractionDispatchOutcome::Backpressure
-                    }
-                    Err(mpsc::TrySendError::Disconnected(_)) => {
-                        TeacherInteractionDispatchOutcome::ServiceUnavailable
+                let outcome = if pending_teacher_terminal.is_some() {
+                    // Exactly one pending final Worker result may own this
+                    // enrolled control session. The uncommitted dispatch is
+                    // dropped without starting a second execution.
+                    TeacherInteractionDispatchOutcome::Backpressure
+                } else {
+                    match teacher_interactions.tx.try_send(dispatch) {
+                        Ok(()) => await_teacher_interaction_dispatch(commit, &mut reply_rx).await,
+                        Err(mpsc::TrySendError::Full(_)) => {
+                            TeacherInteractionDispatchOutcome::Backpressure
+                        }
+                        Err(mpsc::TrySendError::Disconnected(_)) => {
+                            TeacherInteractionDispatchOutcome::ServiceUnavailable
+                        }
                     }
                 };
                 let result = teacher_interaction_failure(kind, outcome);
+                let is_accepted = result.state == TeacherInteractionState::Accepted as i32;
                 let Some(next_sequence) = outbound_sequence.checked_add(1) else {
                     connection.close(0_u32.into(), b"control sequence exhausted");
                     return;
                 };
-                outbound_sequence = next_sequence;
                 let response = ControlEnvelope {
                     control_session_id: session.control_session_id,
-                    sequence: outbound_sequence,
+                    sequence: next_sequence,
                     protocol_version: Some(WireProtocolVersion {
                         major: u32::from(session.negotiated.version.major),
                         minor: u32::from(session.negotiated.version.minor),
@@ -3123,6 +3212,15 @@ async fn run_established_session(
                     );
                     connection.close(0_u32.into(), b"teacher interaction result failed");
                     return;
+                }
+                outbound_sequence = next_sequence;
+                if is_accepted {
+                    pending_teacher_terminal = Some(PendingTeacherTerminal {
+                        request_id,
+                        kind,
+                        deadline: tokio::time::Instant::now() + TEACHER_INTERACTION_COMPLETION_WAIT,
+                        reply_rx,
+                    });
                 }
             }
             Some(control_envelope::Payload::FileTransferOffer(_))
@@ -3769,6 +3867,84 @@ mod tests {
         if sub_tick_before < accepted_at {
             assert!(!service_diagnostic_fresh_at(accepted_at, sub_tick_before));
         }
+    }
+
+    #[test]
+    fn teacher_terminal_wait_does_not_block_other_control_events_and_expires_once() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test Tokio runtime");
+        runtime.block_on(async {
+            let (terminal_tx, terminal_rx) = tokio_mpsc::channel(2);
+            let mut pending = Some(PendingTeacherTerminal {
+                request_id: 51,
+                kind: TeacherInteractionKind::Message,
+                deadline: tokio::time::Instant::now() + Duration::from_millis(80),
+                reply_rx: terminal_rx,
+            });
+            let (inbound_tx, mut inbound_rx) = tokio_mpsc::channel::<ControlInboundEvent>(1);
+            inbound_tx.send(ControlInboundEvent::Timeout).await.unwrap();
+            let unrelated_won = tokio::select! {
+                input = inbound_rx.recv() => matches!(input, Some(ControlInboundEvent::Timeout)),
+                _ = wait_teacher_terminal_or_expiry(&mut pending) => false,
+            };
+            assert!(unrelated_won, "one accepted message must not stall live heartbeat/control processing");
+            terminal_tx.try_send(TeacherInteractionDispatchOutcome::Result(TeacherInteractionResult {
+                kind: TeacherInteractionKind::Message as i32,
+                state: TeacherInteractionState::Completed as i32,
+                diagnostic: String::new(),
+            })).unwrap();
+            assert!(matches!(wait_teacher_terminal_or_expiry(&mut pending).await, Some(TeacherInteractionDispatchOutcome::Result(result)) if result.state == TeacherInteractionState::Completed as i32));
+            // An accepted command with no subsequent Worker result must never
+            // turn the absence of evidence into a fabricated completion.
+            let (_unanswered, no_answer) = tokio_mpsc::channel(2);
+            let mut expired = Some(PendingTeacherTerminal {
+                request_id: 52,
+                kind: TeacherInteractionKind::Message,
+                deadline: tokio::time::Instant::now() + Duration::from_millis(1),
+                reply_rx: no_answer,
+            });
+            assert!(wait_teacher_terminal_or_expiry(&mut expired).await.is_none());
+        });
+    }
+
+    #[test]
+    fn teacher_progress_channel_preserves_real_terminal_and_never_fabricates_completion() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test Tokio runtime");
+        runtime.block_on(async {
+            let (tx, mut rx) = tokio_mpsc::channel(TEACHER_INTERACTION_PROGRESS_CAPACITY);
+            assert_eq!(TEACHER_INTERACTION_PROGRESS_CAPACITY, 2);
+            tx.try_send(TeacherInteractionDispatchOutcome::Result(TeacherInteractionResult {
+                kind: TeacherInteractionKind::Message as i32,
+                state: TeacherInteractionState::Accepted as i32,
+                diagnostic: String::new(),
+            })).unwrap();
+            tx.try_send(TeacherInteractionDispatchOutcome::Result(TeacherInteractionResult {
+                kind: TeacherInteractionKind::Message as i32,
+                state: TeacherInteractionState::Completed as i32,
+                diagnostic: String::new(),
+            })).unwrap();
+            assert!(matches!(rx.recv().await, Some(TeacherInteractionDispatchOutcome::Result(result)) if result.state == TeacherInteractionState::Accepted as i32));
+            assert!(matches!(await_teacher_interaction_completion(&mut rx).await, Some(TeacherInteractionDispatchOutcome::Result(result)) if result.state == TeacherInteractionState::Completed as i32));
+            drop(tx);
+            assert!(await_teacher_interaction_completion(&mut rx).await.is_none());
+
+            // A lone Accepted is not elevated to Completed when its sender
+            // disconnects without any Worker terminal evidence.
+            let (tx2, mut rx2) = tokio_mpsc::channel(TEACHER_INTERACTION_PROGRESS_CAPACITY);
+            tx2.try_send(TeacherInteractionDispatchOutcome::Result(TeacherInteractionResult {
+                kind: TeacherInteractionKind::Message as i32,
+                state: TeacherInteractionState::Accepted as i32,
+                diagnostic: String::new(),
+            })).unwrap();
+            drop(tx2);
+            assert!(matches!(rx2.recv().await, Some(TeacherInteractionDispatchOutcome::Result(result)) if result.state == TeacherInteractionState::Accepted as i32));
+            assert!(await_teacher_interaction_completion(&mut rx2).await.is_none());
+        });
     }
 
     #[test]
