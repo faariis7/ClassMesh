@@ -37,6 +37,7 @@ pub enum ServiceTeacherCommandError {
     NotTeacherInteraction,
     InvalidWorkerOutcome,
     MismatchedWorkerOutcome,
+    AuthorizationChangedDuringDispatch,
 }
 
 /// Service-owned proof returned only after the Worker dispatcher completes.
@@ -270,6 +271,7 @@ impl ServiceTeacherCommandReceiver {
                 PrivilegedDispatchError::InvalidTeacherInteraction(e),
             )
         })?;
+        let policy_generation = snapshot.version();
         let peer = self.guard.peer();
         let result = dispatch(peer, envelope.request_id, envelope.sequence, request).await;
         // A dispatcher failure cannot be interpreted as acceptance. Retire the
@@ -293,6 +295,7 @@ impl ServiceTeacherCommandReceiver {
             }
         };
         self.verify(authorization, now_unix_ms())?;
+        verify_policy_generation(authorization, policy_generation)?;
         // Reserve the next sequence before writing: never emit an ACK that
         // cannot be recorded as consumed by this session.
         let following_sequence = reserve_reply_sequence(self.next_reply_sequence)?;
@@ -309,7 +312,10 @@ impl ServiceTeacherCommandReceiver {
             return Err(ServiceTeacherCommandError::Transport(error));
         }
         self.next_reply_sequence = following_sequence;
-        if let Err(error) = self.verify(authorization, now_unix_ms()) {
+        if let Err(error) = self
+            .verify(authorization, now_unix_ms())
+            .and_then(|()| verify_policy_generation(authorization, policy_generation))
+        {
             self.retire_connection(b"teacher authorization changed");
             return Err(error);
         }
@@ -407,6 +413,23 @@ impl ServiceTeacherCommandReceiver {
     }
 }
 
+/// Any policy publication during an in-flight Worker command invalidates the
+/// reply, even if the principal remains enrolled or a later policy restores
+/// identical permissions. Never send a completion from a stale policy epoch.
+fn verify_policy_generation(
+    authorization: &LiveAuthorizationStore,
+    expected: u64,
+) -> Result<(), ServiceTeacherCommandError> {
+    let current = authorization
+        .snapshot()
+        .map_err(ServiceTeacherCommandError::Authorization)?
+        .version();
+    if current != expected {
+        return Err(ServiceTeacherCommandError::AuthorizationChangedDuringDispatch);
+    }
+    Ok(())
+}
+
 fn reserve_reply_sequence(current: u64) -> Result<u64, ServiceTeacherCommandError> {
     current
         .checked_add(1)
@@ -456,6 +479,21 @@ fn is_file_transfer(envelope: &ControlEnvelope) -> bool {
 mod tests {
     use super::*;
     use classmesh_protocol::control_wire::{FileTransferCancel, Heartbeat};
+
+    #[test]
+    fn policy_republication_during_worker_dispatch_invalidates_ack_even_if_restored() {
+        let authorization = LiveAuthorizationStore::new(Default::default());
+        let initial = authorization.snapshot().unwrap().version();
+        assert!(verify_policy_generation(&authorization, initial).is_ok());
+        let updated = authorization
+            .publish_if_version(initial, Default::default())
+            .unwrap();
+        assert!(matches!(
+            verify_policy_generation(&authorization, initial),
+            Err(ServiceTeacherCommandError::AuthorizationChangedDuringDispatch)
+        ));
+        assert!(verify_policy_generation(&authorization, updated).is_ok());
+    }
 
     #[test]
     fn correlated_worker_result_preserves_session_request_and_sequence() {
