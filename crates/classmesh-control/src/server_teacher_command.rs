@@ -261,15 +261,23 @@ impl ServiceTeacherCommandReceiver {
         // Dropping this future must not allow replay on the same session.
         self.execution_state.begin_inflight()?;
         self.verify(authorization, now_unix_ms())?;
+        // Capture the epoch before the cancellable QUIC read. A revoked and
+        // re-enrolled Teacher must not dispatch an already buffered request.
+        let ingress_generation = authorization
+            .snapshot()
+            .map_err(ServiceTeacherCommandError::Authorization)?
+            .version();
         let envelope = self
             .channel
             .receive()
             .await
             .map_err(ServiceTeacherCommandError::Transport)?;
+        verify_policy_generation(authorization, ingress_generation)?;
         self.verify(authorization, now_unix_ms())?;
         let snapshot = authorization
             .snapshot()
             .map_err(ServiceTeacherCommandError::Authorization)?;
+        verify_policy_generation(authorization, ingress_generation)?;
         let command = dispatch_privileged_command(
             &mut self.guard,
             snapshot.store(),
@@ -286,6 +294,7 @@ impl ServiceTeacherCommandReceiver {
             )
         })?;
         let policy_generation = snapshot.version();
+        verify_policy_generation(authorization, ingress_generation)?;
         let peer = self.guard.peer();
         let result = dispatch(peer, envelope.request_id, envelope.sequence, request).await;
         // A dispatcher failure cannot be interpreted as acceptance. Retire the
