@@ -71,6 +71,7 @@ $arguments = @('--connect', $Connect, '--server-name', $ServerName,
     '--identity', $Identity, '--teacher-message', $Message, '--message-only',
     '--require-completed', '--ack-receipt', $Receipt)
 $process = $null
+$qualificationPassed = $false
 try {
     $process = Start-Process -FilePath $TeacherExe -ArgumentList ($arguments | ForEach-Object { '"' + $_ + '"' }) -PassThru -NoNewWindow
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
@@ -91,8 +92,12 @@ try {
     if ($verifiedServicePid -ne $approvedServicePid) {
         throw 'Service process changed during ACK qualification; refusing evidence'
     }
+    $qualificationPassed = $true
     Write-Output "ACK completed via approved Service: $Receipt"
 } finally {
+    if (-not $qualificationPassed -and (Test-Path -LiteralPath $Receipt -PathType Leaf)) {
+        Remove-Item -LiteralPath $Receipt -Force -ErrorAction SilentlyContinue
+    }
     if ($null -ne $process) {
         $process.Refresh()
         if (-not $process.HasExited) {
