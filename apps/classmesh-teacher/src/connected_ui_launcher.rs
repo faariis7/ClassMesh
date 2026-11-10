@@ -111,16 +111,21 @@ pub fn start_enrolled_teacher_ui_runtime(
     authorization: LiveAuthorizationStore,
     dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()> + Send + 'static,
 ) -> std::io::Result<(TeacherUiControlBridge, EnrolledTeacherRuntimeThread)> {
+    // Reject invalid authority synchronously: callers must never receive a live
+    // GUI bridge/thread handle for a session that cannot be used.
+    preflight_enrolled_session(&owner, &session).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("Teacher enrolled startup rejected: {error:?}"),
+        )
+    })?;
     let (event_tx, event_rx) = sync_channel(UI_EVENT_CAPACITY);
     let (action_tx, action_rx) = sync_channel(UI_ACTION_CAPACITY);
     let runtime_thread = thread::Builder::new()
         .name("classmesh-teacher-enrolled-quic".to_owned())
         .spawn(move || {
-            // This public runtime entry point is also used without a native
-            // window. Reject stale/unnegotiated authority before constructing
-            // Tokio or touching the authenticated transport, not only in the
-            // higher-level window launcher.
-            preflight_enrolled_session(&owner, &session)?;
+            // The synchronous caller already rejected invalid authority; no
+            // Tokio runtime or transport exists before that check.
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
