@@ -49,7 +49,8 @@ mod telemetry_native;
 mod windows_service_app {
     // Reuse the same fail-closed policies covered by native/portable tests.
     use super::{
-        orphaned_ipc_requires_cleanup, stop_requires_orphan_cleanup, worker_launch_slot_available,
+        orphaned_ipc_requires_cleanup, stop_requires_orphan_cleanup,
+        worker_failed_launch_must_retain, worker_launch_slot_available,
         worker_probe_requires_recovery, worker_stop_may_release_handle,
     };
     use std::ffi::OsString;
@@ -489,7 +490,7 @@ mod windows_service_app {
 
             let extra_args = [OsString::from("--pipe"), OsString::from(&pipe_name)];
             match launch_worker_in_session(session.0, executable, &extra_args) {
-                Ok(mut process) => {
+                Ok(process) => {
                     let process_id = process.process_id();
                     if let Err(error) = pipe.accept_expected(process_id, session.0) {
                         eprintln!(
