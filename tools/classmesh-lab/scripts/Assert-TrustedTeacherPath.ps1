@@ -8,6 +8,14 @@ function Assert-NoReparsePath([string]$Path) {
         if (($cursor.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw 'Provisioned input path contains a reparse point'
         }
-        $cursor = $cursor.Parent
+        # FileInfo does NOT expose Parent in Windows PowerShell 5.1. Ascend
+        # from the file to its *lexical* containing DirectoryInfo, and then
+        # check every directory/volume ancestor. Otherwise a signed executable
+        # located beneath an attacker-redirectable junction may be accepted.
+        if ($cursor -is [System.IO.FileInfo]) {
+            $cursor = $cursor.Directory
+        } else {
+            $cursor = $cursor.Parent
+        }
     }
 }
