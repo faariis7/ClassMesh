@@ -649,15 +649,14 @@ mod windows_service_app {
         }
 
         fn send_input(&self, event: &InputEvent) -> Result<(), String> {
-            let process = self
-                .process
-                .as_ref()
-                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
-            if !process
-                .is_running()
-                .map_err(|error| format!("Worker input liveness probe failed: {error}"))?
-            {
-                return Err("interactive Worker exited before input dispatch".to_owned());
+            // Input shares the same authenticated process/session/generation
+            // admission as control messages. Process liveness alone is not
+            // sufficient after a capability revocation or reader teardown.
+            if self.current_authenticated_receiver_worker().is_none() {
+                return Err(
+                    "refusing Worker input: authenticated IPC peer binding is unavailable"
+                        .to_owned(),
+                );
             }
             let pipe = self
                 .pipe
