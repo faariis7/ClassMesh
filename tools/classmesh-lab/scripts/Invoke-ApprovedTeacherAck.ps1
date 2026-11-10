@@ -49,6 +49,11 @@ function Assert-ReadyService([string]$Name, [string]$ExpectedThumbprint) {
     # symlink/junction target does not approve a redirectable service path.
     Assert-NoReparsePath $binary
     Assert-ApprovedSignature $binary $ExpectedThumbprint
+    # A shared-process service cannot establish ownership of the interactive Worker.
+    # Require the approved Service to have its own SCM process, not svchost hosting peers.
+    if ([string]$service.ServiceType -ne 'Own Process') {
+        throw 'Approved Service must be an SCM own-process service'
+    }
     if ([int64]$service.ProcessId -le 0) { throw 'Service has no running process ID' }
     $serviceProcess = Get-CimInstance Win32_Process -Filter ("ProcessId=" + [string]$service.ProcessId)
     if ($null -eq $serviceProcess -or [int]$serviceProcess.SessionId -ne 0) {
