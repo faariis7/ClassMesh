@@ -9,6 +9,17 @@ use classmesh_protocol::teacher_interaction::validate_request;
 use classmesh_protocol::{ControlRole, ProtocolVersion};
 use classmesh_security::{PrincipalId, PrincipalKind};
 use quinn::Connection;
+use std::future::Future;
+use std::time::Duration;
+
+// Bound a stalled ACK write: never leave a Worker-completed command
+// indefinitely in-flight on a blocked QUIC stream.
+const WORKER_ACK_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+// A Worker that never returns a terminal outcome must not pin the authenticated
+// QUIC session indefinitely. Timeout is a failure, never a synthetic ACK.
+const WORKER_DISPATCH_TIMEOUT: Duration = Duration::from_secs(300);
+// An authenticated but idle peer cannot hold a command receiver forever.
+const TEACHER_COMMAND_RECEIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::authorization::AuthenticatedControlGuard;
 use crate::dispatch::{
@@ -37,6 +48,10 @@ pub enum ServiceTeacherCommandError {
     NotTeacherInteraction,
     InvalidWorkerOutcome,
     MismatchedWorkerOutcome,
+    AuthorizationChangedDuringDispatch,
+    AckWriteTimedOut,
+    WorkerDispatchTimedOut,
+    CommandReceiveTimedOut,
 }
 
 /// Service-owned proof returned only after the Worker dispatcher completes.
@@ -67,6 +82,32 @@ fn validate_worker_outcome(
         | TeacherInteractionState::Rejected
         | TeacherInteractionState::Failed => Ok(outcome.state),
         _ => Err(ServiceTeacherCommandError::InvalidWorkerOutcome),
+    }
+}
+
+/// A cancelled ingress future must close the QUIC transport immediately, not
+/// merely leave the receiver retired until somebody calls it again.
+struct CancellationFence<F: FnOnce()> {
+    on_cancel: Option<F>,
+}
+
+impl<F: FnOnce()> CancellationFence<F> {
+    fn new(on_cancel: F) -> Self {
+        Self {
+            on_cancel: Some(on_cancel),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.on_cancel = None;
+    }
+}
+
+impl<F: FnOnce()> Drop for CancellationFence<F> {
+    fn drop(&mut self) {
+        if let Some(close) = self.on_cancel.take() {
+            close();
+        }
     }
 }
 
@@ -123,6 +164,7 @@ impl ServiceTeacherCommandReceiver {
         let snapshot = authorization
             .snapshot()
             .map_err(ServiceTeacherCommandError::Authorization)?;
+        let hello_generation = snapshot.version();
         let (established, peer) = server_hello_enrolled(
             &connection,
             &mut channel,
@@ -131,15 +173,38 @@ impl ServiceTeacherCommandReceiver {
             now_unix_ms,
         )
         .await
-        .map_err(ServiceTeacherCommandError::Handshake)?;
-        Self::new(
-            connection,
+        .map_err(|error| {
+            // A failed enrolled Hello must not leave an authenticated-looking
+            // transport available for another command on this connection.
+            connection.close(0u32.into(), b"teacher enrolled hello failed");
+            ServiceTeacherCommandError::Handshake(error)
+        })?;
+        // A credential revoked and re-enrolled while Hello was in flight
+        // cannot reuse the previously negotiated authenticated session.
+        if let Err(error) = verify_policy_generation(authorization, hello_generation) {
+            connection.close(0u32.into(), b"teacher hello authorization changed");
+            return Err(error);
+        }
+        let receiver = Self::new(
+            connection.clone(),
             channel,
             &established,
             peer,
             authorization,
             now_unix_ms,
         )
+        .inspect_err(|_| {
+            // Post-Hello credential/identity rejection is terminal for this
+            // QUIC connection; no fresh Hello may reuse its transport.
+            connection.close(0u32.into(), b"teacher session admission failed");
+        })?;
+        if let Err(error) = verify_policy_generation(authorization, hello_generation) {
+            receiver
+                .connection
+                .close(0u32.into(), b"teacher hello authorization changed");
+            return Err(error);
+        }
+        Ok(receiver)
     }
 
     /// `established` and `peer` MUST come from `server_hello_enrolled` on this
@@ -214,12 +279,17 @@ impl ServiceTeacherCommandReceiver {
         ) -> Fut,
         Fut: std::future::Future<Output = Result<CorrelatedWorkerOutcome, E>>,
     {
+        let connection = self.connection.clone();
+        let mut cancellation = CancellationFence::new(move || {
+            connection.close(0u32.into(), b"teacher command future cancelled");
+        });
         let result = self
             .receive_dispatch_and_reply_inner(authorization, now_unix_ms, dispatch)
             .await;
         if result.is_err() {
             self.retire_connection(b"teacher command ingress rejected");
         }
+        cancellation.disarm();
         result
     }
 
@@ -246,15 +316,21 @@ impl ServiceTeacherCommandReceiver {
         // Dropping this future must not allow replay on the same session.
         self.execution_state.begin_inflight()?;
         self.verify(authorization, now_unix_ms())?;
-        let envelope = self
-            .channel
-            .receive()
-            .await
-            .map_err(ServiceTeacherCommandError::Transport)?;
+        // Capture the epoch before the cancellable QUIC read. A revoked and
+        // re-enrolled Teacher must not dispatch an already buffered request.
+        let ingress_generation = authorization
+            .snapshot()
+            .map_err(ServiceTeacherCommandError::Authorization)?
+            .version();
+        let envelope =
+            bounded_command_receive(self.channel.receive(), TEACHER_COMMAND_RECEIVE_TIMEOUT)
+                .await?;
+        verify_policy_generation(authorization, ingress_generation)?;
         self.verify(authorization, now_unix_ms())?;
         let snapshot = authorization
             .snapshot()
             .map_err(ServiceTeacherCommandError::Authorization)?;
+        verify_policy_generation(authorization, ingress_generation)?;
         let command = dispatch_privileged_command(
             &mut self.guard,
             snapshot.store(),
@@ -270,8 +346,14 @@ impl ServiceTeacherCommandReceiver {
                 PrivilegedDispatchError::InvalidTeacherInteraction(e),
             )
         })?;
+        let policy_generation = snapshot.version();
+        verify_policy_generation(authorization, ingress_generation)?;
         let peer = self.guard.peer();
-        let result = dispatch(peer, envelope.request_id, envelope.sequence, request).await;
+        let result = bounded_worker_dispatch(
+            dispatch(peer, envelope.request_id, envelope.sequence, request),
+            WORKER_DISPATCH_TIMEOUT,
+        )
+        .await?;
         // A dispatcher failure cannot be interpreted as acceptance. Retire the
         // session and do not send a fabricated Worker completion response.
         let state = match result {
@@ -293,6 +375,7 @@ impl ServiceTeacherCommandReceiver {
             }
         };
         self.verify(authorization, now_unix_ms())?;
+        verify_policy_generation(authorization, policy_generation)?;
         // Reserve the next sequence before writing: never emit an ACK that
         // cannot be recorded as consumed by this session.
         let following_sequence = reserve_reply_sequence(self.next_reply_sequence)?;
@@ -304,12 +387,18 @@ impl ServiceTeacherCommandReceiver {
             kind,
             state,
         );
-        if let Err(error) = self.channel.send(&response).await {
-            self.retire_connection(b"worker result send failed");
-            return Err(ServiceTeacherCommandError::Transport(error));
+        match bounded_ack_write(self.channel.send(&response), WORKER_ACK_WRITE_TIMEOUT).await {
+            Ok(()) => {}
+            Err(error) => {
+                self.retire_connection(b"worker result send failed or timed out");
+                return Err(error);
+            }
         }
         self.next_reply_sequence = following_sequence;
-        if let Err(error) = self.verify(authorization, now_unix_ms()) {
+        if let Err(error) = self
+            .verify(authorization, now_unix_ms())
+            .and_then(|()| verify_policy_generation(authorization, policy_generation))
+        {
             self.retire_connection(b"teacher authorization changed");
             return Err(error);
         }
@@ -330,13 +419,42 @@ impl ServiceTeacherCommandReceiver {
         authorization: &LiveAuthorizationStore,
         now_unix_ms: impl Fn() -> u64,
     ) -> Result<PrivilegedControlCommand, ServiceTeacherCommandError> {
-        self.ensure_active()?;
+        self.execution_state.begin_inflight()?;
+        let result = self
+            .receive_authorized_inner(authorization, now_unix_ms)
+            .await;
+        match result {
+            Ok(command) => {
+                self.execution_state.finish_inflight();
+                Ok(command)
+            }
+            Err(error) => {
+                self.retire_connection(b"teacher authorized ingress failed");
+                Err(error)
+            }
+        }
+    }
+
+    async fn receive_authorized_inner(
+        &mut self,
+        authorization: &LiveAuthorizationStore,
+        now_unix_ms: impl Fn() -> u64,
+    ) -> Result<PrivilegedControlCommand, ServiceTeacherCommandError> {
         self.verify(authorization, now_unix_ms())?;
-        let envelope = self
-            .channel
-            .receive()
-            .await
-            .map_err(ServiceTeacherCommandError::Transport)?;
+        // Pin the policy epoch before blocking on QUIC. A revoke/re-enroll
+        // during the read must not admit a buffered command under a newly
+        // restored credential, even when its principal ID is unchanged.
+        let ingress_generation = authorization
+            .snapshot()
+            .map_err(ServiceTeacherCommandError::Authorization)?
+            .version();
+        // The alternate authorized ingress must obey the same idle deadline as
+        // the correlated Worker path; otherwise a silent enrolled peer can pin
+        // a Service receiver indefinitely after Hello.
+        let envelope =
+            bounded_command_receive(self.channel.receive(), TEACHER_COMMAND_RECEIVE_TIMEOUT)
+                .await?;
+        verify_policy_generation(authorization, ingress_generation)?;
         self.verify(authorization, now_unix_ms())?;
         // File transfer remains explicitly disabled for the MVP. Never grant
         // it merely because a Teacher credential has other control permissions.
@@ -349,8 +467,16 @@ impl ServiceTeacherCommandReceiver {
         let snapshot = authorization
             .snapshot()
             .map_err(ServiceTeacherCommandError::Authorization)?;
-        dispatch_privileged_command(&mut self.guard, snapshot.store(), &envelope, now_unix_ms())
-            .map_err(ServiceTeacherCommandError::Dispatch)
+        verify_policy_generation(authorization, ingress_generation)?;
+        let command = dispatch_privileged_command(
+            &mut self.guard,
+            snapshot.store(),
+            &envelope,
+            now_unix_ms(),
+        )
+        .map_err(ServiceTeacherCommandError::Dispatch)?;
+        verify_policy_generation(authorization, ingress_generation)?;
+        Ok(command)
     }
 
     /// Run one authenticated command through a Service-owned async executor.
@@ -369,17 +495,29 @@ impl ServiceTeacherCommandReceiver {
         Fut: std::future::Future<Output = Result<(), E>>,
     {
         let command = self.receive_authorized(authorization, now_unix_ms).await?;
-        let result = execute(command).await;
-        if result.is_err() {
-            self.execution_state.retire();
-            self.connection
-                .close(0u32.into(), b"teacher command execution failed");
+        // Cancellation during Worker execution must retire the consumed session.
+        self.execution_state.begin_inflight()?;
+        let execution_generation = authorization
+            .snapshot()
+            .map_err(ServiceTeacherCommandError::Authorization)?
+            .version();
+        let result =
+            execute_with_policy_fence(authorization, execution_generation, || execute(command))
+                .await;
+        match result {
+            Ok(Ok(())) => {
+                self.execution_state.finish_inflight();
+                Ok(Ok(()))
+            }
+            Ok(Err(error)) => {
+                self.retire_connection(b"teacher command execution failed");
+                Ok(Err(error))
+            }
+            Err(error) => {
+                self.retire_connection(b"teacher authorization changed during execution");
+                Err(error)
+            }
         }
-        Ok(result)
-    }
-
-    fn ensure_active(&self) -> Result<(), ServiceTeacherCommandError> {
-        self.execution_state.ensure_active()
     }
 
     fn verify(
@@ -405,6 +543,71 @@ impl ServiceTeacherCommandReceiver {
         }
         Ok(())
     }
+}
+
+/// Bind Service execution to the authorization epoch. A policy change while
+/// Worker IO is in progress must never make the consumed command reusable.
+async fn execute_with_policy_fence<F, Fut, E>(
+    authorization: &LiveAuthorizationStore,
+    expected_generation: u64,
+    execute: F,
+) -> Result<Result<(), E>, ServiceTeacherCommandError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), E>>,
+{
+    verify_policy_generation(authorization, expected_generation)?;
+    let result = execute().await;
+    verify_policy_generation(authorization, expected_generation)?;
+    Ok(result)
+}
+
+/// Any policy publication during an in-flight Worker command invalidates the
+/// reply, even if the principal remains enrolled or a later policy restores
+/// identical permissions. Never send a completion from a stale policy epoch.
+fn verify_policy_generation(
+    authorization: &LiveAuthorizationStore,
+    expected: u64,
+) -> Result<(), ServiceTeacherCommandError> {
+    let current = authorization
+        .snapshot()
+        .map_err(ServiceTeacherCommandError::Authorization)?
+        .version();
+    if current != expected {
+        return Err(ServiceTeacherCommandError::AuthorizationChangedDuringDispatch);
+    }
+    Ok(())
+}
+
+async fn bounded_command_receive<
+    F: Future<Output = Result<ControlEnvelope, ControlTransportError>>,
+>(
+    receive: F,
+    timeout: Duration,
+) -> Result<ControlEnvelope, ServiceTeacherCommandError> {
+    tokio::time::timeout(timeout, receive)
+        .await
+        .map_err(|_| ServiceTeacherCommandError::CommandReceiveTimedOut)?
+        .map_err(ServiceTeacherCommandError::Transport)
+}
+
+async fn bounded_worker_dispatch<F: Future>(
+    dispatch: F,
+    timeout: Duration,
+) -> Result<F::Output, ServiceTeacherCommandError> {
+    tokio::time::timeout(timeout, dispatch)
+        .await
+        .map_err(|_| ServiceTeacherCommandError::WorkerDispatchTimedOut)
+}
+
+async fn bounded_ack_write<F>(send: F, timeout: Duration) -> Result<(), ServiceTeacherCommandError>
+where
+    F: Future<Output = Result<(), ControlTransportError>>,
+{
+    tokio::time::timeout(timeout, send)
+        .await
+        .map_err(|_| ServiceTeacherCommandError::AckWriteTimedOut)?
+        .map_err(ServiceTeacherCommandError::Transport)
 }
 
 fn reserve_reply_sequence(current: u64) -> Result<u64, ServiceTeacherCommandError> {
@@ -456,6 +659,115 @@ fn is_file_transfer(envelope: &ControlEnvelope) -> bool {
 mod tests {
     use super::*;
     use classmesh_protocol::control_wire::{FileTransferCancel, Heartbeat};
+
+    #[test]
+    fn cancelled_ingress_closes_transport_but_completed_ingress_does_not() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let closes = Arc::new(AtomicUsize::new(0));
+        {
+            let counter = Arc::clone(&closes);
+            let _cancelled = CancellationFence::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+        {
+            let counter = Arc::clone(&closes);
+            let mut completed = CancellationFence::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            });
+            completed.disarm();
+        }
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stalled_authenticated_command_receive_expires_without_dispatch() {
+        let result = bounded_command_receive(
+            std::future::pending::<Result<ControlEnvelope, ControlTransportError>>(),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(ServiceTeacherCommandError::CommandReceiveTimedOut)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stalled_worker_dispatch_must_not_mint_terminal_ack() {
+        let result = bounded_worker_dispatch(
+            std::future::pending::<CorrelatedWorkerOutcome>(),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(ServiceTeacherCommandError::WorkerDispatchTimedOut)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stalled_worker_ack_write_must_time_out_without_success() {
+        let result = bounded_ack_write(
+            std::future::pending::<Result<(), ControlTransportError>>(),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(ServiceTeacherCommandError::AckWriteTimedOut)
+        ));
+    }
+
+    #[tokio::test]
+    async fn executor_policy_republication_must_fail_closed() {
+        let authorization = LiveAuthorizationStore::new(Default::default());
+        let epoch = authorization.snapshot().unwrap().version();
+        let result = execute_with_policy_fence(&authorization, epoch, || async {
+            authorization
+                .publish_if_version(epoch, Default::default())
+                .unwrap();
+            Ok::<(), ()>(())
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Err(ServiceTeacherCommandError::AuthorizationChangedDuringDispatch)
+        ));
+    }
+
+    #[test]
+    fn policy_republication_during_worker_dispatch_invalidates_ack_even_if_restored() {
+        let authorization = LiveAuthorizationStore::new(Default::default());
+        let initial = authorization.snapshot().unwrap().version();
+        assert!(verify_policy_generation(&authorization, initial).is_ok());
+        let updated = authorization
+            .publish_if_version(initial, Default::default())
+            .unwrap();
+        assert!(matches!(
+            verify_policy_generation(&authorization, initial),
+            Err(ServiceTeacherCommandError::AuthorizationChangedDuringDispatch)
+        ));
+        assert!(verify_policy_generation(&authorization, updated).is_ok());
+    }
+
+    #[test]
+    fn buffered_ingress_must_reject_revocation_and_reenrollment_during_receive() {
+        let authorization = LiveAuthorizationStore::new(Default::default());
+        let ingress_generation = authorization.snapshot().unwrap().version();
+        let revoked_generation = authorization
+            .publish_if_version(ingress_generation, Default::default())
+            .unwrap();
+        authorization
+            .publish_if_version(revoked_generation, Default::default())
+            .unwrap();
+        assert!(matches!(
+            verify_policy_generation(&authorization, ingress_generation),
+            Err(ServiceTeacherCommandError::AuthorizationChangedDuringDispatch)
+        ));
+    }
 
     #[test]
     fn correlated_worker_result_preserves_session_request_and_sequence() {
@@ -519,6 +831,25 @@ mod tests {
             ),
             Err(ServiceTeacherCommandError::InvalidWorkerOutcome)
         ));
+    }
+
+    #[test]
+    fn cancelled_ingress_or_executor_cannot_reuse_consumed_session() {
+        let mut ingress = ExecutionState::default();
+        ingress.begin_inflight().unwrap();
+        // Dropping the async operation leaves the session retired.
+        assert!(matches!(
+            ingress.begin_inflight(),
+            Err(ServiceTeacherCommandError::SessionRetired)
+        ));
+        let mut executor = ExecutionState::default();
+        executor.begin_inflight().unwrap();
+        assert!(matches!(
+            executor.ensure_active(),
+            Err(ServiceTeacherCommandError::SessionRetired)
+        ));
+        executor.finish_inflight();
+        assert!(executor.ensure_active().is_ok());
     }
 
     #[test]
