@@ -124,6 +124,7 @@ impl ServiceTeacherCommandReceiver {
         let snapshot = authorization
             .snapshot()
             .map_err(ServiceTeacherCommandError::Authorization)?;
+        let hello_generation = snapshot.version();
         let (established, peer) = server_hello_enrolled(
             &connection,
             &mut channel,
@@ -133,14 +134,27 @@ impl ServiceTeacherCommandReceiver {
         )
         .await
         .map_err(ServiceTeacherCommandError::Handshake)?;
-        Self::new(
+        // A credential revoked and re-enrolled while Hello was in flight
+        // cannot reuse the previously negotiated authenticated session.
+        if let Err(error) = verify_policy_generation(authorization, hello_generation) {
+            connection.close(0u32.into(), b"teacher hello authorization changed");
+            return Err(error);
+        }
+        let receiver = Self::new(
             connection,
             channel,
             &established,
             peer,
             authorization,
             now_unix_ms,
-        )
+        )?;
+        if let Err(error) = verify_policy_generation(authorization, hello_generation) {
+            receiver
+                .connection
+                .close(0u32.into(), b"teacher hello authorization changed");
+            return Err(error);
+        }
+        Ok(receiver)
     }
 
     /// `established` and `peer` MUST come from `server_hello_enrolled` on this
