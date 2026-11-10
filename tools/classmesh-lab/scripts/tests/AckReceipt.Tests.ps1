@@ -13,9 +13,17 @@ try {
     $valid = "classmesh_teacher_message_ack_v1`ncontrol_session_id=12`nrequest_id=9`nworker_state=Completed`n"
     [IO.File]::WriteAllText($receipt, $valid)
     Assert-AckReceipt $receipt
+    $start = [datetime]::UtcNow
+    $item = Get-Item -LiteralPath $receipt
+    $item.LastWriteTimeUtc = $start.AddSeconds(-10)
+    $rejected = $false
+    try { Assert-AckReceipt $receipt $start } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Stale ACK receipt accepted' }
+    [IO.File]::WriteAllText($receipt, $valid)
+    Assert-AckReceipt $receipt ([datetime]::UtcNow.AddSeconds(-2))
     MustReject ($valid + ('X' * 300))
     MustReject ($valid -replace 'Completed','Accepted')
     MustReject ($valid -replace 'request_id=9','request_id=0')
     MustReject ($valid -replace 'request_id=9','request_id=9`nrequest_id=10')
-    'PASS: real receipt verifier accepts Completed and rejects oversized, Accepted, zero ID, duplicate'
+    'PASS: real receipt verifier accepts Completed and rejects stale, oversized, Accepted, zero ID, duplicate'
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }
