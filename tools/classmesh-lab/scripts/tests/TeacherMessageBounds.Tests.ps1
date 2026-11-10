@@ -23,7 +23,7 @@ if ($env:OS -eq 'Windows_NT') {
     $real = Join-Path $fixture 'real'
     $junction = Join-Path $fixture 'junction'
     try {
-        New-Item -ItemType Directory -LiteralPath $real -Force | Out-Null
+        New-Item -ItemType Directory -Path $real -Force | Out-Null
         $file = Join-Path $real 'teacher.exe'
         Set-Content -LiteralPath $file -Value 'disposable-test-bytes' -Encoding ASCII
         Assert-NoReparsePath $file  # ordinary owned file is allowed
