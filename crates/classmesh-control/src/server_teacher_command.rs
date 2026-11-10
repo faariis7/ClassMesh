@@ -140,7 +140,12 @@ impl ServiceTeacherCommandReceiver {
             now_unix_ms,
         )
         .await
-        .map_err(ServiceTeacherCommandError::Handshake)?;
+        .map_err(|error| {
+            // A failed enrolled Hello must not leave an authenticated-looking
+            // transport available for another command on this connection.
+            connection.close(0u32.into(), b"teacher enrolled hello failed");
+            ServiceTeacherCommandError::Handshake(error)
+        })?;
         // A credential revoked and re-enrolled while Hello was in flight
         // cannot reuse the previously negotiated authenticated session.
         if let Err(error) = verify_policy_generation(authorization, hello_generation) {
@@ -148,13 +153,19 @@ impl ServiceTeacherCommandReceiver {
             return Err(error);
         }
         let receiver = Self::new(
-            connection,
+            connection.clone(),
             channel,
             &established,
             peer,
             authorization,
             now_unix_ms,
-        )?;
+        )
+        .map_err(|error| {
+            // Post-Hello credential/identity rejection is terminal for this
+            // QUIC connection; no fresh Hello may reuse its transport.
+            connection.close(0u32.into(), b"teacher session admission failed");
+            error
+        })?;
         if let Err(error) = verify_policy_generation(authorization, hello_generation) {
             receiver
                 .connection
