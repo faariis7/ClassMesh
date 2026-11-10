@@ -9,6 +9,12 @@ use classmesh_protocol::teacher_interaction::validate_request;
 use classmesh_protocol::{ControlRole, ProtocolVersion};
 use classmesh_security::{PrincipalId, PrincipalKind};
 use quinn::Connection;
+use std::future::Future;
+use std::time::Duration;
+
+// Bound a stalled ACK write: never leave a Worker-completed command
+// indefinitely in-flight on a blocked QUIC stream.
+const WORKER_ACK_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 use crate::authorization::AuthenticatedControlGuard;
 use crate::dispatch::{
@@ -38,6 +44,7 @@ pub enum ServiceTeacherCommandError {
     InvalidWorkerOutcome,
     MismatchedWorkerOutcome,
     AuthorizationChangedDuringDispatch,
+    AckWriteTimedOut,
 }
 
 /// Service-owned proof returned only after the Worker dispatcher completes.
@@ -330,9 +337,12 @@ impl ServiceTeacherCommandReceiver {
             kind,
             state,
         );
-        if let Err(error) = self.channel.send(&response).await {
-            self.retire_connection(b"worker result send failed");
-            return Err(ServiceTeacherCommandError::Transport(error));
+        match bounded_ack_write(self.channel.send(&response), WORKER_ACK_WRITE_TIMEOUT).await {
+            Ok(()) => {}
+            Err(error) => {
+                self.retire_connection(b"worker result send failed or timed out");
+                return Err(error);
+            }
         }
         self.next_reply_sequence = following_sequence;
         if let Err(error) = self
@@ -518,6 +528,16 @@ fn verify_policy_generation(
     Ok(())
 }
 
+async fn bounded_ack_write<F>(send: F, timeout: Duration) -> Result<(), ServiceTeacherCommandError>
+where
+    F: Future<Output = Result<(), ControlTransportError>>,
+{
+    tokio::time::timeout(timeout, send)
+        .await
+        .map_err(|_| ServiceTeacherCommandError::AckWriteTimedOut)?
+        .map_err(ServiceTeacherCommandError::Transport)
+}
+
 fn reserve_reply_sequence(current: u64) -> Result<u64, ServiceTeacherCommandError> {
     current
         .checked_add(1)
@@ -567,6 +587,19 @@ fn is_file_transfer(envelope: &ControlEnvelope) -> bool {
 mod tests {
     use super::*;
     use classmesh_protocol::control_wire::{FileTransferCancel, Heartbeat};
+
+    #[tokio::test]
+    async fn stalled_worker_ack_write_must_time_out_without_success() {
+        let result = bounded_ack_write(
+            std::future::pending::<Result<(), ControlTransportError>>(),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(ServiceTeacherCommandError::AckWriteTimedOut)
+        ));
+    }
 
     #[tokio::test]
     async fn executor_policy_republication_must_fail_closed() {
