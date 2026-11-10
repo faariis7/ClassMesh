@@ -12,6 +12,12 @@ fn worker_stop_may_release_handle<E>(probe: Result<bool, E>) -> bool {
     matches!(probe, Ok(false))
 }
 
+// A failed launch retains ownership until the OS confirms exit.
+#[cfg(any(windows, test))]
+fn worker_failed_launch_must_retain<E>(probe: Result<bool, E>) -> bool {
+    !worker_stop_may_release_handle(probe)
+}
+
 // Service shutdown must revoke orphaned IPC even when the Worker handle
 // has already been cleared by a previous recovery path.
 #[cfg(any(windows, test))]
@@ -490,7 +496,7 @@ mod windows_service_app {
                             "Worker IPC peer validation failed for pid {process_id}, session {}: {error}",
                             session.0
                         );
-                        let _ = process.terminate(1);
+                        self.quarantine_failed_launch(process);
                         let decision = self.watchdog.launch_failed(session);
                         return self.apply_restart_decision(decision);
                     }
@@ -500,7 +506,7 @@ mod windows_service_app {
                             "Worker IPC handshake failed for pid {process_id}, session {}: {error}",
                             session.0
                         );
-                        let _ = process.terminate(1);
+                        self.quarantine_failed_launch(process);
                         let decision = self.watchdog.launch_failed(session);
                         return self.apply_restart_decision(decision);
                     }
@@ -541,7 +547,7 @@ mod windows_service_app {
                                 eprintln!(
                                     "Worker capability reader thread could not start for pid {process_id}: {error}"
                                 );
-                                let _ = process.terminate(1);
+                                self.quarantine_failed_launch(process);
                                 let decision = self.watchdog.launch_failed(session);
                                 return self.apply_restart_decision(decision);
                             }
@@ -558,7 +564,7 @@ mod windows_service_app {
                                     process_id,
                                     session.0,
                                 );
-                                let _ = process.terminate(1);
+                                self.quarantine_failed_launch(process);
                                 let decision = self.watchdog.launch_failed(session);
                                 return self.apply_restart_decision(decision);
                             }
@@ -568,7 +574,7 @@ mod windows_service_app {
                                 "Worker capability IPC reader unavailable for pid {process_id}, session {}; refusing unaudited Worker activation: {error}",
                                 session.0
                             );
-                            let _ = process.terminate(1);
+                            self.quarantine_failed_launch(process);
                             let decision = self.watchdog.launch_failed(session);
                             return self.apply_restart_decision(decision);
                         }
@@ -593,6 +599,21 @@ mod windows_service_app {
                     let decision = self.watchdog.launch_failed(session);
                     self.apply_restart_decision(decision)
                 }
+            }
+        }
+
+        fn quarantine_failed_launch(&mut self, mut process: SessionProcess) {
+            let pid = process.process_id();
+            if let Err(error) = process.terminate(1) {
+                eprintln!("failed to terminate rejected Worker {pid}: {error}");
+            }
+            self.capabilities.clear();
+            self.pipe = None;
+            if worker_failed_launch_must_retain(process.is_running()) {
+                eprintln!(
+                    "rejected Worker {pid} exit unconfirmed; retaining handle and blocking relaunch"
+                );
+                self.process = Some(process);
             }
         }
 
@@ -4238,6 +4259,19 @@ mod worker_probe_tests {
             "access denied"
         )));
         assert!(super::worker_stop_may_release_handle(Ok::<bool, &str>(
+            false
+        )));
+    }
+
+    #[test]
+    fn failed_launch_retains_process_when_exit_is_unconfirmed() {
+        assert!(super::worker_failed_launch_must_retain(Ok::<bool, &str>(
+            true
+        )));
+        assert!(super::worker_failed_launch_must_retain(Err::<bool, &str>(
+            "denied"
+        )));
+        assert!(!super::worker_failed_launch_must_retain(Ok::<bool, &str>(
             false
         )));
     }
