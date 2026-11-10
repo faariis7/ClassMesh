@@ -116,6 +116,11 @@ pub fn start_enrolled_teacher_ui_runtime(
     let runtime_thread = thread::Builder::new()
         .name("classmesh-teacher-enrolled-quic".to_owned())
         .spawn(move || {
+            // This public runtime entry point is also used without a native
+            // window. Reject stale/unnegotiated authority before constructing
+            // Tokio or touching the authenticated transport, not only in the
+            // higher-level window launcher.
+            preflight_enrolled_session(&owner, &session)?;
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
