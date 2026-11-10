@@ -60,6 +60,19 @@ foreach ($value in @($Connect, $ServerName, $Identity, $Message, $Receipt)) {
     if ($value -match '[`"\r\n]') { throw 'Unsafe command argument (quote, newline or backtick)' }
 }
 if (-not (Test-Path -LiteralPath $Identity -PathType Leaf)) { throw 'Provisioned Teacher identity missing' }
+# A receipt is evidence, not an arbitrary output path. Refuse junctions/symlinks
+# and directories that could redirect creation or cleanup outside the lab.
+$receiptParent = Split-Path -Parent ([System.IO.Path]::GetFullPath($Receipt))
+if (-not (Test-Path -LiteralPath $receiptParent -PathType Container)) {
+    throw 'Receipt parent directory must already exist'
+}
+$cursor = Get-Item -LiteralPath $receiptParent -Force
+while ($null -ne $cursor) {
+    if (($cursor.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Receipt path contains a reparse point'
+    }
+    $cursor = $cursor.Parent
+}
 if (Test-Path -LiteralPath $Receipt) { throw 'Receipt already exists; refusing overwrite' }
 Assert-ApprovedSignature $TeacherExe $TrustedSignerThumbprint
 $approvedServicePid = Assert-ReadyService $ServiceName $TrustedSignerThumbprint
@@ -81,6 +94,11 @@ try {
     if (-not (Test-Path -LiteralPath $Receipt -PathType Leaf)) {
         throw 'No correlated Completed receipt was produced'
     }
+    $receiptItem = Get-Item -LiteralPath $Receipt -Force
+    if ($receiptItem.PSIsContainer -or
+        ($receiptItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Receipt is not a regular file'
+    }
     $lines = @(Get-Content -LiteralPath $Receipt)
     if ($lines.Count -ne 4 -or $lines[0] -ne 'classmesh_teacher_message_ack_v1' -or
         $lines[1] -notmatch '^control_session_id=[1-9][0-9]*$' -or
@@ -96,7 +114,12 @@ try {
     Write-Output "ACK completed via approved Service: $Receipt"
 } finally {
     if (-not $qualificationPassed -and (Test-Path -LiteralPath $Receipt -PathType Leaf)) {
-        Remove-Item -LiteralPath $Receipt -Force -ErrorAction SilentlyContinue
+        # Never follow or delete a redirected receipt during failure cleanup.
+        $failedReceipt = Get-Item -LiteralPath $Receipt -Force -ErrorAction SilentlyContinue
+        if ($null -ne $failedReceipt -and -not $failedReceipt.PSIsContainer -and
+            ($failedReceipt.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+            Remove-Item -LiteralPath $Receipt -Force -ErrorAction SilentlyContinue
+        }
     }
     if ($null -ne $process) {
         $process.Refresh()
