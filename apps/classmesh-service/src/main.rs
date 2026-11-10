@@ -11,12 +11,25 @@ fn orphaned_ipc_requires_cleanup(process_present: bool) -> bool {
     !process_present
 }
 
+// A stop for a stale session must not tear down a different live Worker.
+// When the process handle is gone, however, its IPC generation is orphaned.
+fn stop_requires_orphan_cleanup(current_session: Option<u32>) -> bool {
+    current_session.is_none()
+}
+
 #[cfg(test)]
 mod worker_probe_tests {
     #[test]
     fn orphaned_ipc_is_revoked_without_a_worker_handle() {
         assert!(super::orphaned_ipc_requires_cleanup(false));
         assert!(!super::orphaned_ipc_requires_cleanup(true));
+    }
+
+    #[test]
+    fn stopping_without_process_revokes_orphan_but_preserves_other_session() {
+        assert!(super::stop_requires_orphan_cleanup(None));
+        assert!(!super::stop_requires_orphan_cleanup(Some(2)));
+        assert!(!super::stop_requires_orphan_cleanup(Some(1)));
     }
 
     #[test]
@@ -604,6 +617,12 @@ mod windows_service_app {
                 .as_ref()
                 .is_some_and(|process| process.session_id() == session.0)
             {
+                if stop_requires_orphan_cleanup(
+                    self.process.as_ref().map(SessionProcess::session_id),
+                ) {
+                    self.capabilities.clear();
+                    self.pipe = None;
+                }
                 return;
             }
 
