@@ -2638,7 +2638,12 @@ mod focused_profile_tests {
             assert!(replay.has_replay_capacity());
             replay.record(7, request, teacher_message_request("other"), failed.clone());
         }
-        assert_eq!(replay.lookup(7, 1, &pending).unwrap(), Some(accepted));
+        // Keep the Accepted proof available for subsequent replay-capacity
+        // checks: consuming it here made the Windows test fail to compile.
+        assert_eq!(
+            replay.lookup(7, 1, &pending).unwrap(),
+            Some(accepted.clone())
+        );
         assert!(replay.finalize(7, 1, failed.clone()));
         assert_eq!(replay.lookup(7, 1, &pending).unwrap(), Some(failed));
         let mut full = TeacherInteractionReplay::new();
