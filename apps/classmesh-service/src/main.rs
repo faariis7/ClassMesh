@@ -623,13 +623,15 @@ mod windows_service_app {
             session: SessionId,
             command: IpcControlCommand,
         ) -> Result<(), WorkerControlSendError> {
+            // A session match alone does not authorize a command: the process
+            // may have exited or its capability-reader generation may have
+            // been revoked while the pipe handle remains open.
             if !self
-                .process
-                .as_ref()
-                .is_some_and(|process| process.session_id() == session.0)
+                .current_authenticated_receiver_worker()
+                .is_some_and(|peer| peer.session_id == session.0)
             {
                 eprintln!(
-                    "ignoring IPC command for session {}; no matching Worker is running",
+                    "refusing Worker IPC command for session {}; live authenticated peer binding is unavailable",
                     session.0
                 );
                 return Err(WorkerControlSendError::Unavailable);
