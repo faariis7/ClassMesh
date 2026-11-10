@@ -66,6 +66,28 @@ jobs:
         shell: pwsh
         run: .\scripts\phase4-two-pc.ps1 -Mode Help
 
+      # The SCM installer here is NEVER invoked in Run mode. Exercise only
+      # read-only negative/identity/ACK guards under native Windows PowerShell
+      # 5.1, catching .NET Framework incompatibilities before expensive builds.
+      - name: Validate M2 protected Service and real ACK preflight (nonmutating)
+        shell: pwsh
+        run: |
+          $tests = @(
+            '.\scripts\tests\mvp_local_absolute_path.ps1',
+            '.\scripts\tests\mvp_scm_qualification_window.ps1',
+            '.\scripts\tests\mvp_service_scm_guarded.ps1',
+            '.\tools\classmesh-lab\scripts\tests\ApprovedServiceIdentity.Tests.ps1',
+            '.\tools\classmesh-lab\scripts\tests\AckReceipt.Tests.ps1',
+            '.\tools\classmesh-lab\scripts\tests\TeacherMessageBounds.Tests.ps1'
+          )
+          foreach ($test in $tests) {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $test
+            if ($LASTEXITCODE -ne 0) {
+              throw "M2 nonmutating native PowerShell 5.1 gate failed: $test"
+            }
+          }
+
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
