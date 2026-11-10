@@ -51,7 +51,19 @@ function Assert-ReadyService([string]$Name, [string]$ExpectedThumbprint) {
     if ($null -eq $serviceProcess -or [int]$serviceProcess.SessionId -ne 0) {
         throw 'Approved LocalSystem Service must execute in Session 0'
     }
-    return [int64]$service.ProcessId
+    # The SCM configuration is not evidence of the image actually executing.
+    # Reject a replaced process or inaccessible image metadata (fail closed).
+    if ([string]::IsNullOrWhiteSpace([string]$serviceProcess.ExecutablePath) -or
+        -not [string]::Equals(
+            [System.IO.Path]::GetFullPath($binary),
+            [System.IO.Path]::GetFullPath([string]$serviceProcess.ExecutablePath),
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Running Service image differs from signed SCM image'
+    }
+    if ($null -eq $serviceProcess.CreationDate) {
+        throw 'Running Service creation time unavailable'
+    }
+    return ([string]$service.ProcessId + '|' + [string]$serviceProcess.CreationDate)
 }
 
 if ($TimeoutSeconds -lt 5 -or $TimeoutSeconds -gt 120) { throw 'TimeoutSeconds must be 5..120' }
@@ -107,7 +119,7 @@ try {
         throw 'Invalid completion receipt format'
     }
     $verifiedServicePid = Assert-ReadyService $ServiceName $TrustedSignerThumbprint
-    if ($verifiedServicePid -ne $approvedServicePid) {
+    if ($verifiedServicePid -cne $approvedServicePid) {
         throw 'Service process changed during ACK qualification; refusing evidence'
     }
     $qualificationPassed = $true
