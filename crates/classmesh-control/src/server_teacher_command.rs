@@ -18,6 +18,8 @@ const WORKER_ACK_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 // A Worker that never returns a terminal outcome must not pin the authenticated
 // QUIC session indefinitely. Timeout is a failure, never a synthetic ACK.
 const WORKER_DISPATCH_TIMEOUT: Duration = Duration::from_secs(300);
+// An authenticated but idle peer cannot hold a command receiver forever.
+const TEACHER_COMMAND_RECEIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::authorization::AuthenticatedControlGuard;
 use crate::dispatch::{
@@ -49,6 +51,7 @@ pub enum ServiceTeacherCommandError {
     AuthorizationChangedDuringDispatch,
     AckWriteTimedOut,
     WorkerDispatchTimedOut,
+    CommandReceiveTimedOut,
 }
 
 /// Service-owned proof returned only after the Worker dispatcher completes.
@@ -288,11 +291,9 @@ impl ServiceTeacherCommandReceiver {
             .snapshot()
             .map_err(ServiceTeacherCommandError::Authorization)?
             .version();
-        let envelope = self
-            .channel
-            .receive()
-            .await
-            .map_err(ServiceTeacherCommandError::Transport)?;
+        let envelope =
+            bounded_command_receive(self.channel.receive(), TEACHER_COMMAND_RECEIVE_TIMEOUT)
+                .await?;
         verify_policy_generation(authorization, ingress_generation)?;
         self.verify(authorization, now_unix_ms())?;
         let snapshot = authorization
@@ -546,6 +547,18 @@ fn verify_policy_generation(
     Ok(())
 }
 
+async fn bounded_command_receive<
+    F: Future<Output = Result<ControlEnvelope, ControlTransportError>>,
+>(
+    receive: F,
+    timeout: Duration,
+) -> Result<ControlEnvelope, ServiceTeacherCommandError> {
+    tokio::time::timeout(timeout, receive)
+        .await
+        .map_err(|_| ServiceTeacherCommandError::CommandReceiveTimedOut)?
+        .map_err(ServiceTeacherCommandError::Transport)
+}
+
 async fn bounded_worker_dispatch<F: Future>(
     dispatch: F,
     timeout: Duration,
@@ -614,6 +627,19 @@ fn is_file_transfer(envelope: &ControlEnvelope) -> bool {
 mod tests {
     use super::*;
     use classmesh_protocol::control_wire::{FileTransferCancel, Heartbeat};
+
+    #[tokio::test]
+    async fn stalled_authenticated_command_receive_expires_without_dispatch() {
+        let result = bounded_command_receive(
+            std::future::pending::<Result<ControlEnvelope, ControlTransportError>>(),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(ServiceTeacherCommandError::CommandReceiveTimedOut)
+        ));
+    }
 
     #[tokio::test]
     async fn stalled_worker_dispatch_must_not_mint_terminal_ack() {
