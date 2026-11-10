@@ -6,6 +6,20 @@ fn worker_probe_requires_recovery<E>(probe: Result<bool, E>) -> bool {
     !matches!(probe, Ok(true))
 }
 
+// The polling path may release the only process handle only when the OS
+// confirms exit. A failed initial liveness probe is NOT proof of exit, even
+// after TerminateProcess was attempted: terminate can fail or race with exit.
+// Retaining the handle blocks a second Worker launch until exit is observable.
+#[cfg(any(windows, test))]
+fn worker_poll_exit_confirmed<E>(
+    initial_probe: Result<bool, E>,
+    post_termination_probe: Option<Result<bool, E>>,
+) -> bool {
+    let initial_failed = initial_probe.is_err();
+    worker_probe_requires_recovery(initial_probe)
+        && (!initial_failed || post_termination_probe.is_some_and(worker_stop_may_release_handle))
+}
+
 // A failed post-termination probe must retain ownership of the process handle.
 #[cfg(any(windows, test))]
 fn worker_stop_may_release_handle<E>(probe: Result<bool, E>) -> bool {
@@ -50,8 +64,8 @@ mod windows_service_app {
     // Reuse the same fail-closed policies covered by native/portable tests.
     use super::{
         orphaned_ipc_requires_cleanup, stop_requires_orphan_cleanup,
-        worker_failed_launch_must_retain, worker_launch_slot_available,
-        worker_probe_requires_recovery, worker_stop_may_release_handle,
+        worker_failed_launch_must_retain, worker_launch_slot_available, worker_poll_exit_confirmed,
+        worker_stop_may_release_handle,
     };
     use std::ffi::OsString;
     use std::fs;
@@ -1106,21 +1120,45 @@ mod windows_service_app {
         }
 
         fn poll(&mut self) -> WorkerManagerEvent {
+            let mut unconfirmed_worker = None;
             let exited = self.process.as_mut().and_then(|process| {
                 let probe = process.is_running();
-                if let Err(error) = &probe {
+                let probe_failed = probe.is_err();
+                let post_termination_probe = if let Err(error) = &probe {
                     eprintln!(
-                        "Worker liveness probe failed: {error}; revoking IPC and recovering Worker"
+                        "Worker liveness probe failed: {error}; revoking IPC and attempting termination"
                     );
                     if let Err(terminate_error) = process.terminate(1) {
                         eprintln!(
                             "Worker termination after failed liveness probe: {terminate_error}"
                         );
                     }
+                    // A failed termination or liveness query may leave the
+                    // process alive. Re-probe before releasing its only handle.
+                    Some(process.is_running())
+                } else {
+                    None
+                };
+                let exit_confirmed = worker_poll_exit_confirmed(probe, post_termination_probe);
+                if probe_failed && !exit_confirmed {
+                    unconfirmed_worker = Some(SessionId(process.session_id()));
                 }
-                worker_probe_requires_recovery(probe)
-                    .then_some((SessionId(process.session_id()), process.process_id()))
+                exit_confirmed.then_some((SessionId(process.session_id()), process.process_id()))
             });
+
+            if let Some(session) = unconfirmed_worker {
+                // Never schedule a replacement for a Worker we still own but
+                // cannot prove has exited. Unconditionally revoke authority,
+                // preserve the process handle, and fail pending Teacher ACKs.
+                self.capabilities.clear();
+                self.pipe = None;
+                self.pending_restart = None;
+                eprintln!(
+                    "Worker exit unconfirmed in session {}; retaining handle and blocking relaunch",
+                    session.0
+                );
+                return WorkerManagerEvent::GiveUp(session);
+            }
 
             if let Some((session, process_id)) = exited {
                 eprintln!(
@@ -4288,6 +4326,36 @@ mod worker_probe_tests {
         assert!(super::stop_requires_orphan_cleanup(None));
         assert!(!super::stop_requires_orphan_cleanup(Some(2)));
         assert!(!super::stop_requires_orphan_cleanup(Some(1)));
+    }
+
+    #[test]
+    fn worker_poll_keeps_handle_until_os_confirms_exit_after_probe_failure() {
+        // A failed liveness query does not prove the child terminated.
+        // Releasing its handle would make a second Worker launch possible.
+        assert!(!super::worker_poll_exit_confirmed(
+            Err::<bool, &str>("access denied"),
+            None,
+        ));
+        assert!(!super::worker_poll_exit_confirmed(
+            Err::<bool, &str>("access denied"),
+            Some(Ok(true)),
+        ));
+        assert!(!super::worker_poll_exit_confirmed(
+            Err::<bool, &str>("access denied"),
+            Some(Err("recheck denied")),
+        ));
+        assert!(super::worker_poll_exit_confirmed(
+            Err::<bool, &str>("access denied"),
+            Some(Ok(false)),
+        ));
+        assert!(super::worker_poll_exit_confirmed(
+            Ok::<bool, &str>(false),
+            None,
+        ));
+        assert!(!super::worker_poll_exit_confirmed(
+            Ok::<bool, &str>(true),
+            None,
+        ));
     }
 
     #[test]
