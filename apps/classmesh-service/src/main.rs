@@ -1,3 +1,24 @@
+// A failed OS liveness query cannot authorize retaining an IPC binding.
+// Keep this policy platform-neutral so its fail-close behavior is testable
+// without installing a privileged Windows Service.
+fn worker_probe_requires_recovery<E>(probe: Result<bool, E>) -> bool {
+    !matches!(probe, Ok(true))
+}
+
+#[cfg(test)]
+mod worker_probe_tests {
+    #[test]
+    fn liveness_probe_failure_is_fail_closed() {
+        assert!(super::worker_probe_requires_recovery(Err("access denied")));
+        assert!(super::worker_probe_requires_recovery(Ok::<bool, &str>(
+            false
+        )));
+        assert!(!super::worker_probe_requires_recovery(Ok::<bool, &str>(
+            true
+        )));
+    }
+}
+
 #[cfg(windows)]
 mod control_runtime;
 #[cfg(windows)]
@@ -574,7 +595,10 @@ mod windows_service_app {
                 return;
             }
 
-            if let Some(pipe) = self.pipe.as_ref()
+            // A revoked or unobservable Worker must never receive even a
+            // graceful shutdown frame through an untrusted/stale pipe.
+            if self.current_authenticated_receiver_worker().is_some()
+                && let Some(pipe) = self.pipe.as_ref()
                 && let Err(error) = send_control(pipe, IpcControlCommand::Shutdown)
             {
                 eprintln!("failed to request graceful Worker shutdown: {error}");
@@ -1017,17 +1041,21 @@ mod windows_service_app {
         }
 
         fn poll(&mut self) -> WorkerManagerEvent {
-            let exited = self
-                .process
-                .as_ref()
-                .and_then(|process| match process.is_running() {
-                    Ok(true) => None,
-                    Ok(false) => Some((SessionId(process.session_id()), process.process_id())),
-                    Err(error) => {
-                        eprintln!("Worker liveness probe failed: {error}");
-                        None
+            let exited = self.process.as_mut().and_then(|process| {
+                let probe = process.is_running();
+                if let Err(error) = &probe {
+                    eprintln!(
+                        "Worker liveness probe failed: {error}; revoking IPC and recovering Worker"
+                    );
+                    if let Err(terminate_error) = process.terminate(1) {
+                        eprintln!(
+                            "Worker termination after failed liveness probe: {terminate_error}"
+                        );
                     }
-                });
+                }
+                worker_probe_requires_recovery(probe)
+                    .then_some((SessionId(process.session_id()), process.process_id()))
+            });
 
             if let Some((session, process_id)) = exited {
                 eprintln!(
