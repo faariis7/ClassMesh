@@ -1,18 +1,21 @@
 // A failed OS liveness query cannot authorize retaining an IPC binding.
 // Keep this policy platform-neutral so its fail-close behavior is testable
 // without installing a privileged Windows Service.
+#[cfg(any(windows, test))]
 fn worker_probe_requires_recovery<E>(probe: Result<bool, E>) -> bool {
     !matches!(probe, Ok(true))
 }
 
 // Service shutdown must revoke orphaned IPC even when the Worker handle
 // has already been cleared by a previous recovery path.
+#[cfg(any(windows, test))]
 fn orphaned_ipc_requires_cleanup(process_present: bool) -> bool {
     !process_present
 }
 
 // A stop for a stale session must not tear down a different live Worker.
 // When the process handle is gone, however, its IPC generation is orphaned.
+#[cfg(any(windows, test))]
 fn stop_requires_orphan_cleanup(current_session: Option<u32>) -> bool {
     current_session.is_none()
 }
@@ -59,6 +62,10 @@ mod telemetry_native;
 
 #[cfg(windows)]
 mod windows_service_app {
+    // Reuse the same fail-closed policies covered by native/portable tests.
+    use super::{
+        orphaned_ipc_requires_cleanup, stop_requires_orphan_cleanup, worker_probe_requires_recovery,
+    };
     use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
