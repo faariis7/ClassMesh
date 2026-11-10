@@ -85,6 +85,32 @@ fn validate_worker_outcome(
     }
 }
 
+/// A cancelled ingress future must close the QUIC transport immediately, not
+/// merely leave the receiver retired until somebody calls it again.
+struct CancellationFence<F: FnOnce()> {
+    on_cancel: Option<F>,
+}
+
+impl<F: FnOnce()> CancellationFence<F> {
+    fn new(on_cancel: F) -> Self {
+        Self {
+            on_cancel: Some(on_cancel),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.on_cancel = None;
+    }
+}
+
+impl<F: FnOnce()> Drop for CancellationFence<F> {
+    fn drop(&mut self) {
+        if let Some(close) = self.on_cancel.take() {
+            close();
+        }
+    }
+}
+
 #[derive(Default)]
 struct ExecutionState {
     retired: bool,
@@ -253,12 +279,17 @@ impl ServiceTeacherCommandReceiver {
         ) -> Fut,
         Fut: std::future::Future<Output = Result<CorrelatedWorkerOutcome, E>>,
     {
+        let connection = self.connection.clone();
+        let mut cancellation = CancellationFence::new(move || {
+            connection.close(0u32.into(), b"teacher command future cancelled");
+        });
         let result = self
             .receive_dispatch_and_reply_inner(authorization, now_unix_ms, dispatch)
             .await;
         if result.is_err() {
             self.retire_connection(b"teacher command ingress rejected");
         }
+        cancellation.disarm();
         result
     }
 
@@ -628,6 +659,28 @@ fn is_file_transfer(envelope: &ControlEnvelope) -> bool {
 mod tests {
     use super::*;
     use classmesh_protocol::control_wire::{FileTransferCancel, Heartbeat};
+
+    #[test]
+    fn cancelled_ingress_closes_transport_but_completed_ingress_does_not() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let closes = Arc::new(AtomicUsize::new(0));
+        {
+            let counter = Arc::clone(&closes);
+            let _cancelled = CancellationFence::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+        {
+            let counter = Arc::clone(&closes);
+            let mut completed = CancellationFence::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            });
+            completed.disarm();
+        }
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test]
     async fn stalled_authenticated_command_receive_expires_without_dispatch() {
