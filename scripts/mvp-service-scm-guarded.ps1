@@ -6,6 +6,7 @@ param(
     [string]$TrustedProvisionExe,
     [string]$ExpectedServiceSha256,
     [string]$ExpectedProvisionSha256,
+    [string]$ExpectedWorkerSha256,
     [string]$TrustedSignerThumbprint,
     [switch]$SecurityReviewApproved,
     [switch]$DisposableVmApproved,
@@ -17,7 +18,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Assert-ApprovedReleaseSigner.ps1')
 $serviceName = 'ClassMeshService'
 if ($Mode -eq 'Plan') {
-    'SCM_PLAN_ONLY: requires independently approved enrollment, protected install, elevated interactive admin, exact binary SHA256 and approved Authenticode signer, successful --verify-startup, protected path/ACL, and exclusive disposable VM. No mutation.'
+    'SCM_PLAN_ONLY: requires independently approved enrollment, protected install, elevated interactive admin, exact Service/Worker/provision binary SHA256 and approved Authenticode signer, successful --verify-startup, protected path/ACL, and exclusive disposable VM. No mutation.'
     return
 }
 if (-not $SecurityReviewApproved -or -not $DisposableVmApproved) {
@@ -31,7 +32,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     throw 'FAIL_CLOSED: elevated interactive non-SYSTEM administrator required'
 }
 if ($ExpectedServiceSha256 -cnotmatch '^[a-fA-F0-9]{64}$' -or
-    $ExpectedProvisionSha256 -cnotmatch '^[a-fA-F0-9]{64}$') {
+    $ExpectedProvisionSha256 -cnotmatch '^[a-fA-F0-9]{64}$' -or
+    $ExpectedWorkerSha256 -cnotmatch '^[a-fA-F0-9]{64}$') {
     throw 'FAIL_CLOSED: exact SHA256 pins required'
 }
 if ($TrustedSignerThumbprint -cnotmatch '^[a-fA-F0-9]{40}$') {
@@ -94,8 +96,14 @@ function Assert-ProtectedFile([string]$Path, [string]$ExpectedHash) {
     }
 }
 if (-not $ServiceExe -or -not $TrustedProvisionExe) { throw 'FAIL_CLOSED: both executable paths required' }
+# WorkerManager::new resolves its child image as classmesh-worker.exe NEXT to
+# the Service executable. A signed Service with an unsigned/replaced Worker
+# must never pass approval and spawn arbitrary code in a user session.
+Assert-LocalAbsolutePath $ServiceExe
+$workerPath = Join-Path (Get-Item -LiteralPath $ServiceExe -ErrorAction Stop).DirectoryName 'classmesh-worker.exe'
 Assert-ProtectedFile $ServiceExe $ExpectedServiceSha256
 Assert-ProtectedFile $TrustedProvisionExe $ExpectedProvisionSha256
+Assert-ProtectedFile $workerPath $ExpectedWorkerSha256
 if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
     throw 'FAIL_CLOSED: ClassMeshService already exists; never replace or delete it'
 }
@@ -108,6 +116,7 @@ try {
     # an extended period. This narrows, but cannot eliminate, the SCM path TOCTOU window.
     Assert-ProtectedFile $ServiceExe $ExpectedServiceSha256
     Assert-ProtectedFile $TrustedProvisionExe $ExpectedProvisionSha256
+    Assert-ProtectedFile $workerPath $ExpectedWorkerSha256
     $bin = '"' + (Get-Item -LiteralPath $ServiceExe).FullName + '"'
     $expectedCommand = $bin
     $output = & sc.exe create $serviceName 'binPath=' $bin 'start=' 'demand' 'type=' 'own' 'obj=' 'LocalSystem' 2>&1
@@ -126,6 +135,7 @@ try {
         throw 'FAIL_CLOSED: SCM registered binary command mismatch'
     }
     Assert-ProtectedFile $ServiceExe $ExpectedServiceSha256
+    Assert-ProtectedFile $workerPath $ExpectedWorkerSha256
     Start-Service -Name $serviceName -ErrorAction Stop
     # SCM may report StartPending briefly after Start-Service returns. Bound the
     # wait and require a real Running process rather than treating a transition
@@ -154,6 +164,7 @@ try {
         throw 'FAIL_CLOSED: running Service image path differs from pinned executable'
     }
     Assert-ProtectedFile $process.ExecutablePath $ExpectedServiceSha256
+    Assert-ProtectedFile $workerPath $ExpectedWorkerSha256
     # Windows services run in isolated Session 0; a Session 1 process is not
     # evidence of a genuine SCM-hosted service, even with a matching image.
     if ($process.SessionId -ne 0) {
@@ -195,6 +206,7 @@ try {
         # A timed window is not Worker or Teacher completion evidence. Return
         # to the pre-existing bounded stop/delete `finally` without marking M2.
         Assert-ProtectedFile $ServiceExe $ExpectedServiceSha256
+        Assert-ProtectedFile $workerPath $ExpectedWorkerSha256
     }
 } finally {
     if ($created) {
