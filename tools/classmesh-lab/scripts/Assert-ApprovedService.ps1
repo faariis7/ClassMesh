@@ -49,6 +49,18 @@ function Assert-ReadyService([string]$Name, [string]$ExpectedThumbprint) {
             [System.StringComparison]::OrdinalIgnoreCase)) {
         throw 'Running Service image differs from signed SCM image'
     }
+    # SCM StartName is registration metadata, not proof of the Windows token
+    # actually carried by the live process. Require authoritative GetOwnerSid
+    # for this SAME bound PID (Session 0 / image / creation time), and reject
+    # access-denied or malformed responses rather than trusting config alone.
+    try {
+        $owner = Invoke-CimMethod -InputObject $serviceProcess -MethodName GetOwnerSid -ErrorAction Stop
+    } catch {
+        throw 'Running Service process owner SID unavailable'
+    }
+    if ($null -eq $owner -or $owner.ReturnValue -ne 0 -or $owner.Sid -cne 'S-1-5-18') {
+        throw 'Running Service process is not LocalSystem (S-1-5-18)'
+    }
     if ($null -eq $serviceProcess.CreationDate) {
         throw 'Running Service creation time unavailable'
     }
