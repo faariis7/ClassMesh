@@ -17,6 +17,7 @@ if ($env:OS -eq 'Windows_NT') {
 }
 $cases = @(
     @{ Args = @('-Mode','Run'); Match = 'independent security review' },
+    @{ Args = @('-Mode','Run','-QualificationWindowSeconds','120'); Match = 'independent security review' },
     @{ Args = @('-Mode','Run','-SecurityReviewApproved','-DisposableVmApproved'); Match = 'native Windows required' }
 )
 foreach ($case in $cases) {
@@ -194,3 +195,18 @@ if (-not $source.Contains('SCM Service process is not isolated in Session 0')) {
     throw 'Missing Session 0 fail-closed diagnostic'
 }
 'PASS: SCM process Session 0 isolation contract'
+
+# The positive, separately approved LocalSystem SCM lifetime must retain a
+# bounded window for a non-admin Teacher qualification *after* token/image
+# proof and *before* the unchanged cleanup finally. It may not weaken approval.
+$readyAt = $source.IndexOf('SCM_LOCALSYSTEM_RUNNING_PID=')
+$holdAt = $source.IndexOf('Wait-ApprovedM2QualificationWindow @qualification')
+$cleanupAt = $source.LastIndexOf('} finally {')
+if ($readyAt -lt 0 -or $holdAt -le $readyAt -or $cleanupAt -le $holdAt) {
+    throw 'Approved M2 qualification window not bounded between SCM proof and owned cleanup'
+}
+if (-not $source.Contains('QualificationWindowSeconds') -or
+    -not $source.Contains('Assert-ProtectedFile $ServiceExe $ExpectedServiceSha256')) {
+    throw 'Approved qualification window or source image re-verification missing'
+}
+'PASS: approved qualification hold follows live attestation and precedes owned cleanup'
