@@ -19,6 +19,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Assert-TeacherMessageInput.ps1')
+. (Join-Path $PSScriptRoot 'Assert-TrustedTeacherPath.ps1')
 
 function Assert-ApprovedSignature([string]$Path, [string]$ExpectedThumbprint) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Missing signed executable: $Path" }
@@ -75,17 +76,6 @@ function Assert-ReadyService([string]$Name, [string]$ExpectedThumbprint) {
     return ([string]$service.ProcessId + '|' + [string]$serviceProcess.CreationDate)
 }
 
-function Assert-NoReparsePath([string]$Path) {
-    # Reject linked identity and executable inputs, including linked ancestors.
-    # A provisioned identity must not be silently redirected after approval.
-    $cursor = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    while ($null -ne $cursor) {
-        if (($cursor.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw 'Provisioned input path contains a reparse point'
-        }
-        $cursor = $cursor.Parent
-    }
-}
 
 if ($TimeoutSeconds -lt 5 -or $TimeoutSeconds -gt 120) { throw 'TimeoutSeconds must be 5..120' }
 Assert-TeacherMessageInput $Message
