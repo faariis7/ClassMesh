@@ -6,6 +6,12 @@ fn worker_probe_requires_recovery<E>(probe: Result<bool, E>) -> bool {
     !matches!(probe, Ok(true))
 }
 
+// A failed post-termination probe must retain ownership of the process handle.
+#[cfg(any(windows, test))]
+fn worker_stop_may_release_handle<E>(probe: Result<bool, E>) -> bool {
+    matches!(probe, Ok(false))
+}
+
 // Service shutdown must revoke orphaned IPC even when the Worker handle
 // has already been cleared by a previous recovery path.
 #[cfg(any(windows, test))]
@@ -38,7 +44,7 @@ mod windows_service_app {
     // Reuse the same fail-closed policies covered by native/portable tests.
     use super::{
         orphaned_ipc_requires_cleanup, stop_requires_orphan_cleanup, worker_launch_slot_available,
-        worker_probe_requires_recovery,
+        worker_probe_requires_recovery, worker_stop_may_release_handle,
     };
     use std::ffi::OsString;
     use std::fs;
@@ -644,9 +650,22 @@ mod windows_service_app {
                 }
             }
 
+            // Revocation is unconditional, but do not lose the owned process
+            // handle if termination failed or the OS cannot confirm exit.
+            // Keeping it blocks relaunch rather than orphaning a live Worker.
+            let exited = self
+                .process
+                .as_mut()
+                .is_some_and(|process| worker_stop_may_release_handle(process.is_running()));
             self.capabilities.clear();
             self.pipe = None;
-            self.process = None;
+            if exited {
+                self.process = None;
+            } else {
+                eprintln!(
+                    "Worker exit unconfirmed; retaining process ownership and refusing relaunch"
+                );
+            }
         }
 
         fn stop_any(&mut self) {
@@ -4208,6 +4227,19 @@ mod worker_probe_tests {
         assert!(!super::worker_launch_slot_available(true, false));
         assert!(!super::worker_launch_slot_available(false, true));
         assert!(!super::worker_launch_slot_available(true, true));
+    }
+
+    #[test]
+    fn stop_retains_process_handle_until_exit_is_observed() {
+        assert!(!super::worker_stop_may_release_handle(Ok::<bool, &str>(
+            true
+        )));
+        assert!(!super::worker_stop_may_release_handle(Err::<bool, &str>(
+            "access denied"
+        )));
+        assert!(super::worker_stop_may_release_handle(Ok::<bool, &str>(
+            false
+        )));
     }
 
     #[test]
