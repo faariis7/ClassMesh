@@ -3,6 +3,7 @@ use std::ffi::OsString;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LaunchAction {
     Ui,
+    Offline,
     Help,
     Version,
 }
@@ -13,6 +14,7 @@ fn parse_launch_action(args: &[OsString]) -> Result<LaunchAction, &'static str> 
     match args {
         [] => Ok(LaunchAction::Ui),
         [flag] => match flag.to_str() {
+            Some("--offline") => Ok(LaunchAction::Offline),
             Some("--help" | "-h") => Ok(LaunchAction::Help),
             Some("--version" | "-V") => Ok(LaunchAction::Version),
             _ => Err("unsupported Teacher UI argument"),
@@ -30,8 +32,9 @@ fn requested_action() -> LaunchAction {
 }
 
 fn print_help() {
-    println!("Usage: classmesh-teacher-ui [--help | --version]");
-    println!("Without arguments, starts the Windows Teacher Console.");
+    println!("Usage: classmesh-teacher-ui [--offline | --help | --version]");
+    println!("Without provisioned Teacher identity, startup fails closed.");
+    println!("--offline explicitly starts the disconnected diagnostic console.");
 }
 
 fn print_version() {
@@ -41,7 +44,13 @@ fn print_version() {
 #[cfg(windows)]
 fn main() -> eframe::Result<()> {
     match requested_action() {
-        LaunchAction::Ui => classmesh_teacher::ui_egui::run_teacher_ui(),
+        LaunchAction::Ui => {
+            eprintln!(
+                "Teacher identity not provisioned; refusing live startup (use --offline for diagnostics)"
+            );
+            std::process::exit(3);
+        }
+        LaunchAction::Offline => classmesh_teacher::ui_egui::run_teacher_ui(),
         LaunchAction::Help => {
             print_help();
             Ok(())
@@ -56,7 +65,7 @@ fn main() -> eframe::Result<()> {
 #[cfg(not(windows))]
 fn main() {
     match requested_action() {
-        LaunchAction::Ui => {
+        LaunchAction::Ui | LaunchAction::Offline => {
             eprintln!("classmesh-teacher-ui is available on Windows only");
             std::process::exit(1);
         }
@@ -76,6 +85,15 @@ mod tests {
 
     #[test]
     fn no_arguments_launches_ui() {
+        assert_eq!(parse_launch_action(&args(&[])), Ok(LaunchAction::Ui));
+    }
+
+    #[test]
+    fn offline_diagnostics_require_explicit_opt_in() {
+        assert_eq!(
+            parse_launch_action(&args(&["--offline"])),
+            Ok(LaunchAction::Offline)
+        );
         assert_eq!(parse_launch_action(&args(&[])), Ok(LaunchAction::Ui));
     }
 

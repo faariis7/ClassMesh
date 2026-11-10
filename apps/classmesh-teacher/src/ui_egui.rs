@@ -82,6 +82,37 @@ fn advance_command_status(
     }
 }
 
+// Never evict an unresolved request to make room for a newer write:
+// doing so would lose the only key for its eventual authenticated Worker ACK.
+fn record_command_write(
+    history: &mut BTreeMap<u64, (u64, Option<TeacherInteractionState>)>,
+    session_id: u64,
+    request_id: u64,
+) {
+    if history.contains_key(&request_id) {
+        return;
+    }
+    if history.len() >= 64 {
+        let terminal = history.iter().find_map(|(&id, &(_, state))| {
+            matches!(
+                state,
+                Some(
+                    TeacherInteractionState::Completed
+                        | TeacherInteractionState::Rejected
+                        | TeacherInteractionState::Failed
+                )
+            )
+            .then_some(id)
+        });
+        if let Some(id) = terminal {
+            history.remove(&id);
+        } else {
+            return;
+        }
+    }
+    history.insert(request_id, (session_id, None));
+}
+
 const APP_TITLE: &str = "ClassMesh Teacher";
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [800.0, 600.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [600.0, 420.0];
@@ -326,6 +357,31 @@ impl TeacherEguiShell {
         self.control_bridge = Some(bridge);
     }
 
+    /// A result received after revocation or disconnect is not an authenticated
+    /// observation of the current connection. Keep the last verified state,
+    /// but never upgrade it from an obsolete or unbound session.
+    fn apply_command_result(
+        &mut self,
+        control_session_id: u64,
+        request_id: u64,
+        state: TeacherInteractionState,
+    ) {
+        if !self
+            .teacher_interaction_context
+            .as_ref()
+            .is_some_and(|context| {
+                context.control_session_id != 0 && context.control_session_id == control_session_id
+            })
+        {
+            return;
+        }
+        if let Some((session, status)) = self.command_status.get_mut(&request_id) {
+            if *session == control_session_id {
+                *status = advance_command_status(*status, state);
+            }
+        }
+    }
+
     fn poll_control_bridge(&mut self) {
         // Drain bounded transport observations before considering any UI action.
         // A dropped producer means disconnect, never persistent liveness.
@@ -399,16 +455,11 @@ impl TeacherEguiShell {
                     {
                         // Bound UI history to the same 64 outstanding requests as the network owner.
                         // Never turn a write into an acknowledgement.
-                        if !self.command_status.contains_key(&request_id)
-                            && self.command_status.len() >= 64
-                        {
-                            if let Some(oldest) = self.command_status.keys().next().copied() {
-                                self.command_status.remove(&oldest);
-                            }
-                        }
-                        self.command_status
-                            .entry(request_id)
-                            .or_insert((control_session_id, None));
+                        record_command_write(
+                            &mut self.command_status,
+                            control_session_id,
+                            request_id,
+                        );
                     }
                 }
                 Ok(TeacherUiControlEvent::CommandResult {
@@ -416,15 +467,11 @@ impl TeacherEguiShell {
                     request_id,
                     state,
                 }) => {
-                    if let Some((session, status)) = self.command_status.get_mut(&request_id) {
-                        if *session == control_session_id {
-                            *status = advance_command_status(*status, state);
-                        }
-                    }
+                    self.apply_command_result(control_session_id, request_id, state);
                 }
                 Ok(TeacherUiControlEvent::Disconnected) => {
                     self.pending_action = None;
-                    self.clear_teacher_interaction_context();
+                    self.disconnect_preserving_command_history();
                 }
                 Err(TryRecvError::Empty) => {
                     event_batch_exhausted = false;
@@ -432,7 +479,7 @@ impl TeacherEguiShell {
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.pending_action = None;
-                    self.clear_teacher_interaction_context();
+                    self.disconnect_preserving_command_history();
                     self.control_bridge = None;
                     return;
                 }
@@ -456,7 +503,7 @@ impl TeacherEguiShell {
                 }
                 Some(Err(TrySendError::Disconnected(_))) => {
                     self.pending_action = None;
-                    self.clear_teacher_interaction_context();
+                    self.disconnect_preserving_command_history();
                     self.control_bridge = None;
                 }
                 _ => {}
@@ -495,6 +542,14 @@ impl TeacherEguiShell {
             self.playback = None;
         }
         self.teacher_interaction_context = Some(context);
+    }
+
+    // A lost QUIC connection is not a Worker failure or completion. Preserve
+    // the last observed results for diagnosis, while revoking all live authority.
+    fn disconnect_preserving_command_history(&mut self) {
+        let history = std::mem::take(&mut self.command_status);
+        self.clear_teacher_interaction_context();
+        self.command_status = history;
     }
 
     pub fn clear_teacher_interaction_context(&mut self) {
@@ -1054,7 +1109,15 @@ impl eframe::App for TeacherEguiShell {
             ));
             for (&request_id, &(_, state)) in self.command_status.iter().rev().take(3) {
                 let label = match state {
+                    None if self.teacher_interaction_context.is_none() => {
+                        "Connection lost — delivery unconfirmed"
+                    }
                     None => "Sent over QUIC — no Service ACK",
+                    Some(TeacherInteractionState::Accepted)
+                        if self.teacher_interaction_context.is_none() =>
+                    {
+                        "Connection lost after acceptance — completion unconfirmed"
+                    }
                     Some(TeacherInteractionState::Accepted) => {
                         "Worker accepted — completion unconfirmed"
                     }
@@ -1131,6 +1194,65 @@ mod tests {
     use crate::ui_shell::{TeacherFocusUiAction, TeacherPresentationUiAction};
 
     use super::*;
+
+    #[test]
+    fn disconnect_retains_worker_truth_but_revokes_session_authority() {
+        let mut app = TeacherEguiShell::default();
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
+        app.command_status
+            .insert(7, (77, Some(TeacherInteractionState::Completed)));
+        app.command_status
+            .insert(8, (77, Some(TeacherInteractionState::Accepted)));
+        app.command_status.insert(9, (77, None));
+        app.disconnect_preserving_command_history();
+        assert!(app.teacher_interaction_context.is_none());
+        assert_eq!(app.command_status.len(), 3);
+        assert_eq!(
+            app.command_status.get(&7).unwrap().1,
+            Some(TeacherInteractionState::Completed)
+        );
+        assert_eq!(
+            app.command_status.get(&8).unwrap().1,
+            Some(TeacherInteractionState::Accepted)
+        );
+        assert_eq!(app.command_status.get(&9).unwrap().1, None);
+        app.set_teacher_interaction_context({
+            let mut next = interaction_context(BTreeSet::new());
+            next.control_session_id = 78;
+            next
+        });
+        assert!(
+            app.command_status.is_empty(),
+            "new session cannot inherit old ACKs"
+        );
+    }
+
+    #[test]
+    fn stale_worker_result_after_disconnect_cannot_upgrade_retained_history() {
+        let mut app = TeacherEguiShell::default();
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
+        app.command_status.insert(42, (77, None));
+        app.disconnect_preserving_command_history();
+        app.apply_command_result(77, 42, TeacherInteractionState::Completed);
+        assert_eq!(app.command_status.get(&42), Some(&(77, None)));
+    }
+
+    #[test]
+    fn command_history_retains_unresolved_ack_keys_when_full() {
+        let mut history = BTreeMap::new();
+        for id in 1..=64 {
+            record_command_write(&mut history, 77, id);
+        }
+        record_command_write(&mut history, 77, 65);
+        assert_eq!(history.len(), 64);
+        assert!(!history.contains_key(&65));
+        assert!(history.contains_key(&1));
+        history.get_mut(&1).unwrap().1 = Some(TeacherInteractionState::Completed);
+        record_command_write(&mut history, 77, 65);
+        assert!(!history.contains_key(&1));
+        assert_eq!(history.get(&65), Some(&(77, None)));
+        assert!(history.contains_key(&2));
+    }
 
     #[test]
     fn worker_result_state_never_regresses_on_delayed_or_duplicate_events() {
