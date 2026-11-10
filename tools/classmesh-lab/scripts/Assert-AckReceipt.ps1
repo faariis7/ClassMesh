@@ -1,6 +1,16 @@
 #Requires -Version 5.1
 # Validate bounded evidence emitted by the real enrolled Teacher CLI.
 function Assert-AckReceipt([string]$Path, [datetime]$NotBeforeUtc = [datetime]::MinValue) {
+    # The parent may have been swapped for a junction after the launcher
+    # validated its output directory. Check again at evidence consumption.
+    $parent = Split-Path -Parent ([IO.Path]::GetFullPath($Path))
+    $cursor = Get-Item -LiteralPath $parent -Force -ErrorAction Stop
+    while ($null -ne $cursor) {
+        if (($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'ACK receipt parent is a reparse point'
+        }
+        $cursor = $cursor.Parent
+    }
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw 'Receipt is not a regular file'

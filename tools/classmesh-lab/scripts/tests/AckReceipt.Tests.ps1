@@ -1,6 +1,8 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '../Assert-AckReceipt.ps1')
-$root = Join-Path ([IO.Path]::GetTempPath()) ('classmesh-ack-'+[guid]::NewGuid().ToString('N'))
+$tempBase = [IO.Path]::GetTempPath()
+if ($IsMacOS) { $tempBase = '/private/tmp' }
+$root = Join-Path $tempBase ('classmesh-ack-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root | Out-Null
 $receipt = Join-Path $root 'ack.txt'
 function MustReject([string]$value) {
@@ -13,6 +15,12 @@ try {
     $valid = "classmesh_teacher_message_ack_v1`ncontrol_session_id=12`nrequest_id=9`nworker_state=Completed`n"
     [IO.File]::WriteAllText($receipt, $valid)
     Assert-AckReceipt $receipt
+    # A redirected parent introduced after launch must not be accepted as evidence.
+    $redirect = Join-Path $root 'redirect'
+    New-Item -ItemType SymbolicLink -Path $redirect -Target $root | Out-Null
+    $redirectRejected = $false
+    try { Assert-AckReceipt (Join-Path $redirect 'ack.txt') } catch { $redirectRejected = $true }
+    if (-not $redirectRejected) { throw 'ACK through redirected parent accepted' }
     $start = [datetime]::UtcNow
     $item = Get-Item -LiteralPath $receipt
     $item.LastWriteTimeUtc = $start.AddSeconds(-10)
