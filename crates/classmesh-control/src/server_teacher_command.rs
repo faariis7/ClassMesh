@@ -436,16 +436,27 @@ impl ServiceTeacherCommandReceiver {
         let command = self.receive_authorized(authorization, now_unix_ms).await?;
         // Cancellation during Worker execution must retire the consumed session.
         self.execution_state.begin_inflight()?;
-        let result = execute(command).await;
-        if result.is_ok() {
-            self.execution_state.finish_inflight();
+        let execution_generation = authorization
+            .snapshot()
+            .map_err(ServiceTeacherCommandError::Authorization)?
+            .version();
+        let result =
+            execute_with_policy_fence(authorization, execution_generation, || execute(command))
+                .await;
+        match result {
+            Ok(Ok(())) => {
+                self.execution_state.finish_inflight();
+                Ok(Ok(()))
+            }
+            Ok(Err(error)) => {
+                self.retire_connection(b"teacher command execution failed");
+                Ok(Err(error))
+            }
+            Err(error) => {
+                self.retire_connection(b"teacher authorization changed during execution");
+                Err(error)
+            }
         }
-        if result.is_err() {
-            self.execution_state.retire();
-            self.connection
-                .close(0u32.into(), b"teacher command execution failed");
-        }
-        Ok(result)
     }
 
     fn verify(
@@ -471,6 +482,23 @@ impl ServiceTeacherCommandReceiver {
         }
         Ok(())
     }
+}
+
+/// Bind Service execution to the authorization epoch. A policy change while
+/// Worker IO is in progress must never make the consumed command reusable.
+async fn execute_with_policy_fence<F, Fut, E>(
+    authorization: &LiveAuthorizationStore,
+    expected_generation: u64,
+    execute: F,
+) -> Result<Result<(), E>, ServiceTeacherCommandError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), E>>,
+{
+    verify_policy_generation(authorization, expected_generation)?;
+    let result = execute().await;
+    verify_policy_generation(authorization, expected_generation)?;
+    Ok(result)
 }
 
 /// Any policy publication during an in-flight Worker command invalidates the
@@ -539,6 +567,23 @@ fn is_file_transfer(envelope: &ControlEnvelope) -> bool {
 mod tests {
     use super::*;
     use classmesh_protocol::control_wire::{FileTransferCancel, Heartbeat};
+
+    #[tokio::test]
+    async fn executor_policy_republication_must_fail_closed() {
+        let authorization = LiveAuthorizationStore::new(Default::default());
+        let epoch = authorization.snapshot().unwrap().version();
+        let result = execute_with_policy_fence(&authorization, epoch, || async {
+            authorization
+                .publish_if_version(epoch, Default::default())
+                .unwrap();
+            Ok::<(), ()>(())
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Err(ServiceTeacherCommandError::AuthorizationChangedDuringDispatch)
+        ));
+    }
 
     #[test]
     fn policy_republication_during_worker_dispatch_invalidates_ack_even_if_restored() {
