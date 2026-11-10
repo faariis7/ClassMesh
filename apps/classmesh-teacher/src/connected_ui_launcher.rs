@@ -14,7 +14,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use classmesh_control::client_session::ClientControlSession;
 use classmesh_control::live_authorization::LiveAuthorizationStore;
-use classmesh_protocol::Capability;
+use classmesh_protocol::{Capability, ControlRole};
 
 use crate::connected_runtime::{
     TeacherConnectedPlaybackError, TeacherDuplexDispatch, drive_authenticated_teacher_duplex,
@@ -39,11 +39,12 @@ fn validate_enrolled_startup(
     major: u32,
     minor: u32,
     playback_capability: bool,
+    teacher_role: bool,
 ) -> Result<(), TeacherConnectedPlaybackError> {
     if !active || expected_session_id == 0 || expected_session_id != actual_session_id {
         return Err(TeacherConnectedPlaybackError::SessionMismatch);
     }
-    if major != 0 || minor < 8 || !playback_capability {
+    if !teacher_role || major != 0 || minor < 8 || !playback_capability {
         return Err(TeacherConnectedPlaybackError::NotNegotiated);
     }
     Ok(())
@@ -63,6 +64,7 @@ fn preflight_enrolled_session(
         negotiated
             .capabilities
             .contains(&Capability::ReceiverPlaybackDiagnostics),
+        negotiated.role == ControlRole::Teacher,
     )
 }
 
@@ -72,20 +74,29 @@ mod startup_preflight_tests {
 
     #[test]
     fn refuses_stale_or_unnegotiated_session_before_native_window() {
-        for (active, expected, actual, major, minor, capability) in [
-            (false, 11, 11, 0, 8, true),
-            (true, 0, 0, 0, 8, true),
-            (true, 11, 12, 0, 8, true),
-            (true, 11, 11, 1, 8, true),
-            (true, 11, 11, 0, 7, true),
-            (true, 11, 11, 0, 8, false),
+        for (active, expected, actual, major, minor, capability, teacher_role) in [
+            (false, 11, 11, 0, 8, true, true),
+            (true, 0, 0, 0, 8, true, true),
+            (true, 11, 12, 0, 8, true, true),
+            (true, 11, 11, 1, 8, true, true),
+            (true, 11, 11, 0, 7, true, true),
+            (true, 11, 11, 0, 8, false, true),
+            (true, 11, 11, 0, 8, true, false),
         ] {
             assert!(
-                validate_enrolled_startup(active, expected, actual, major, minor, capability)
-                    .is_err()
+                validate_enrolled_startup(
+                    active,
+                    expected,
+                    actual,
+                    major,
+                    minor,
+                    capability,
+                    teacher_role
+                )
+                .is_err()
             );
         }
-        assert!(validate_enrolled_startup(true, 11, 11, 0, 8, true).is_ok());
+        assert!(validate_enrolled_startup(true, 11, 11, 0, 8, true, true).is_ok());
     }
 }
 
