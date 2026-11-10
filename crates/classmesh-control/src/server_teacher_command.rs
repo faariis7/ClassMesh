@@ -417,11 +417,12 @@ impl ServiceTeacherCommandReceiver {
             .snapshot()
             .map_err(ServiceTeacherCommandError::Authorization)?
             .version();
-        let envelope = self
-            .channel
-            .receive()
-            .await
-            .map_err(ServiceTeacherCommandError::Transport)?;
+        // The alternate authorized ingress must obey the same idle deadline as
+        // the correlated Worker path; otherwise a silent enrolled peer can pin
+        // a Service receiver indefinitely after Hello.
+        let envelope =
+            bounded_command_receive(self.channel.receive(), TEACHER_COMMAND_RECEIVE_TIMEOUT)
+                .await?;
         verify_policy_generation(authorization, ingress_generation)?;
         self.verify(authorization, now_unix_ms())?;
         // File transfer remains explicitly disabled for the MVP. Never grant
