@@ -21,6 +21,12 @@ try {
     if (-not $rejected) { throw 'Stale ACK receipt accepted' }
     [IO.File]::WriteAllText($receipt, $valid)
     Assert-AckReceipt $receipt ([datetime]::UtcNow.AddSeconds(-2))
+    [IO.File]::WriteAllBytes($receipt, [byte[]](0xC3,0x28))
+    $badUtf8Rejected = $false
+    try { Assert-AckReceipt $receipt } catch { $badUtf8Rejected = $true }
+    if (-not $badUtf8Rejected) { throw 'Malformed UTF-8 receipt accepted' }
+    MustReject ($valid + [char]0)
+    MustReject ($valid.Replace("worker_state", "worker_state" + [char]13))
     MustReject ($valid + ('X' * 300))
     MustReject ($valid -replace 'Completed','Accepted')
     MustReject ($valid -replace 'request_id=9','request_id=0')

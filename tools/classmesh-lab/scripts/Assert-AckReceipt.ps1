@@ -15,7 +15,18 @@ function Assert-AckReceipt([string]$Path, [datetime]$NotBeforeUtc = [datetime]::
     if ($item.Length -gt 256 -or $item.Length -le 0) {
         throw 'Receipt size outside bounded ACK evidence'
     }
-    $lines = @(Get-Content -LiteralPath $Path -ErrorAction Stop)
+    # Decode strictly: Windows PowerShell 5.1 Get-Content may silently replace
+    # malformed UTF-8, making different bytes appear to be the same evidence.
+    $bytes = [IO.File]::ReadAllBytes($item.FullName)
+    $decoder = New-Object System.Text.UTF8Encoding($false, $true)
+    $decoded = $decoder.GetString($bytes)
+    if ($decoded.IndexOf([char]0) -ge 0 -or $decoded.Contains([char]13)) {
+        throw 'ACK evidence contains NUL or CR'
+    }
+    $lines = @($decoded.Split([char]10))
+    if ($lines.Count -eq 5 -and $lines[4] -ceq '') {
+        $lines = @($lines[0..3])
+    }
     if ($lines.Count -ne 4 -or $lines[0] -cne 'classmesh_teacher_message_ack_v1' -or
         $lines[1] -cnotmatch '^control_session_id=[1-9][0-9]*$' -or
         $lines[2] -cnotmatch '^request_id=[1-9][0-9]*$' -or
