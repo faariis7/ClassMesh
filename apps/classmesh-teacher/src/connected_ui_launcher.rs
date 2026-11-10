@@ -81,6 +81,34 @@ mod startup_preflight_tests {
     use super::*;
 
     #[test]
+    fn closed_window_race_is_normal_only_after_gui_exit() {
+        // A native window may close before authentication is published:
+        // both channel-close outcomes mean the sole control owner retired.
+        assert!(super::classify_runtime_after_clean_window_exit(Ok(())).is_ok());
+        assert!(
+            super::classify_runtime_after_clean_window_exit(Err(
+                TeacherConnectedPlaybackError::ActionChannelClosed
+            ))
+            .is_ok()
+        );
+        assert!(
+            super::classify_runtime_after_clean_window_exit(Err(
+                TeacherConnectedPlaybackError::WindowDisconnected
+            ))
+            .is_ok()
+        );
+        // Never suppress authorization failures just because the GUI exited.
+        assert!(matches!(
+            super::classify_runtime_after_clean_window_exit(Err(
+                TeacherConnectedPlaybackError::NotNegotiated
+            )),
+            Err(super::EnrolledTeacherUiLaunchError::ControlRuntime(
+                TeacherConnectedPlaybackError::NotNegotiated
+            ))
+        ));
+    }
+
+    #[test]
     fn refuses_stale_or_unnegotiated_session_before_native_window() {
         for (active, expected, actual, major, minor, capability, teacher_role) in [
             (false, 11, 11, 0, 8, true, true),
@@ -205,6 +233,22 @@ impl std::error::Error for EnrolledTeacherUiLaunchError {
     }
 }
 
+/// A normally closed native window drops both its GUI action sender and
+/// control-event receiver. The Tokio owner can observe either closure first;
+/// both outcomes retire its authenticated QUIC connection. This normalization
+/// is used ONLY after run_native has returned successfully and the owner was
+/// joined; live authorization, transport and backpressure errors still fail.
+fn classify_runtime_after_clean_window_exit(
+    control: Result<(), TeacherConnectedPlaybackError>,
+) -> Result<(), EnrolledTeacherUiLaunchError> {
+    match control {
+        Ok(())
+        | Err(TeacherConnectedPlaybackError::ActionChannelClosed)
+        | Err(TeacherConnectedPlaybackError::WindowDisconnected) => Ok(()),
+        Err(error) => Err(EnrolledTeacherUiLaunchError::ControlRuntime(error)),
+    }
+}
+
 /// Run the actual Windows GUI on the caller's native event-loop thread, with
 /// the one authenticated QUIC session on the joined Tokio owner thread.
 ///
@@ -230,8 +274,5 @@ pub fn run_teacher_ui_with_enrolled_session(
         .join()
         .map_err(|_| EnrolledTeacherUiLaunchError::ControlThreadPanicked)?;
     window.map_err(EnrolledTeacherUiLaunchError::NativeWindow)?;
-    match control {
-        Ok(()) | Err(TeacherConnectedPlaybackError::ActionChannelClosed) => Ok(()),
-        Err(error) => Err(EnrolledTeacherUiLaunchError::ControlRuntime(error)),
-    }
+    classify_runtime_after_clean_window_exit(control)
 }

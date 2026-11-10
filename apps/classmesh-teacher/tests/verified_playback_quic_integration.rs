@@ -516,10 +516,18 @@ async fn native_enrolled_ui_owner_closes_without_a_gui_and_denies_replaced_sessi
             ControlFlow::Continue(())
         })?;
     drop(bridge);
-    assert!(matches!(
-        thread.join().expect("control thread must not panic"),
-        Err(TeacherConnectedPlaybackError::ActionChannelClosed)
-    ));
+    let exit = thread.join().expect("control thread must not panic");
+    // A closed native window can retire its own action sender before the
+    // runtime publishes auth, or drop the event receiver during that publish.
+    // Both are fail-closed disconnections: no orphan QUIC owner survives.
+    assert!(
+        matches!(
+            exit,
+            Err(TeacherConnectedPlaybackError::ActionChannelClosed)
+                | Err(TeacherConnectedPlaybackError::WindowDisconnected)
+        ),
+        "native window disappearance must stop the authenticated owner: {exit:?}"
+    );
 
     // An old trusted roster binding must not bootstrap the UI through a
     // different Hello session or reuse another connection's authority.
