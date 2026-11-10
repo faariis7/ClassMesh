@@ -6,6 +6,7 @@ param(
     [string]$TrustedProvisionExe,
     [string]$ExpectedServiceSha256,
     [string]$ExpectedProvisionSha256,
+    [string]$TrustedSignerThumbprint,
     [switch]$SecurityReviewApproved,
     [switch]$DisposableVmApproved,
     [ValidateRange(0,120)][int]$QualificationWindowSeconds = 0
@@ -13,9 +14,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Assert-LocalAbsolutePath.ps1')
+. (Join-Path $PSScriptRoot 'Assert-ApprovedReleaseSigner.ps1')
 $serviceName = 'ClassMeshService'
 if ($Mode -eq 'Plan') {
-    'SCM_PLAN_ONLY: requires independently approved enrollment, protected install, elevated interactive admin, exact binary SHA256, successful --verify-startup, protected path/ACL, and exclusive disposable VM. No mutation.'
+    'SCM_PLAN_ONLY: requires independently approved enrollment, protected install, elevated interactive admin, exact binary SHA256 and approved Authenticode signer, successful --verify-startup, protected path/ACL, and exclusive disposable VM. No mutation.'
     return
 }
 if (-not $SecurityReviewApproved -or -not $DisposableVmApproved) {
@@ -32,6 +34,9 @@ if ($ExpectedServiceSha256 -cnotmatch '^[a-fA-F0-9]{64}$' -or
     $ExpectedProvisionSha256 -cnotmatch '^[a-fA-F0-9]{64}$') {
     throw 'FAIL_CLOSED: exact SHA256 pins required'
 }
+if ($TrustedSignerThumbprint -cnotmatch '^[a-fA-F0-9]{40}$') {
+    throw 'FAIL_CLOSED: independently approved Authenticode signer thumbprint required'
+}
 function Assert-ProtectedFile([string]$Path, [string]$ExpectedHash) {
     Assert-LocalAbsolutePath $Path
     $item = Get-Item -LiteralPath $Path -ErrorAction Stop
@@ -39,6 +44,10 @@ function Assert-ProtectedFile([string]$Path, [string]$ExpectedHash) {
     if ((Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash -ne $ExpectedHash) {
         throw 'FAIL_CLOSED: executable SHA256 mismatch'
     }
+    # Release SHA-256 pin alone cannot prove the binary was signed by the
+    # independently approved publisher. Apply this to BOTH Service and trusted
+    # provisioning tools at every existing integrity recheck, before SCM.
+    Assert-ApprovedReleaseSigner $item.FullName $TrustedSignerThumbprint
     $cursor = $item
     while ($null -ne $cursor) {
         if (($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
