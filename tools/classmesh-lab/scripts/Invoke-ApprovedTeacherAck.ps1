@@ -20,6 +20,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Assert-TeacherMessageInput.ps1')
 . (Join-Path $PSScriptRoot 'Assert-TrustedTeacherPath.ps1')
+. (Join-Path $PSScriptRoot 'Assert-AckReceipt.ps1')
 
 function Assert-ApprovedSignature([string]$Path, [string]$ExpectedThumbprint) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Missing signed executable: $Path" }
@@ -111,6 +112,7 @@ $arguments = @('--connect', $Connect, '--server-name', $ServerName,
 $process = $null
 $qualificationPassed = $false
 try {
+    $teacherStartUtc = [datetime]::UtcNow
     $process = Start-Process -FilePath $TeacherExe -ArgumentList ($arguments | ForEach-Object { '"' + $_ + '"' }) -PassThru -NoNewWindow
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         throw 'Teacher qualification timed out before Worker Completed'
@@ -119,18 +121,7 @@ try {
     if (-not (Test-Path -LiteralPath $Receipt -PathType Leaf)) {
         throw 'No correlated Completed receipt was produced'
     }
-    $receiptItem = Get-Item -LiteralPath $Receipt -Force
-    if ($receiptItem.PSIsContainer -or
-        ($receiptItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'Receipt is not a regular file'
-    }
-    $lines = @(Get-Content -LiteralPath $Receipt)
-    if ($lines.Count -ne 4 -or $lines[0] -ne 'classmesh_teacher_message_ack_v1' -or
-        $lines[1] -notmatch '^control_session_id=[1-9][0-9]*$' -or
-        $lines[2] -notmatch '^request_id=[1-9][0-9]*$' -or
-        $lines[3] -ne 'worker_state=Completed') {
-        throw 'Invalid completion receipt format'
-    }
+    Assert-AckReceipt $Receipt $teacherStartUtc
     $verifiedServicePid = Assert-ReadyService $ServiceName $TrustedSignerThumbprint
     if ($verifiedServicePid -cne $approvedServicePid) {
         throw 'Service process changed during ACK qualification; refusing evidence'
