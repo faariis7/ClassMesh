@@ -430,12 +430,18 @@ mod receipt_tests {
     use super::*;
     #[test]
     fn receipt_requires_completed_and_never_overwrites_evidence() {
+        // Rust test thread names contain `::`, which Windows rejects in
+        // filenames (OS error 123). Generate a fresh unpredictable filename
+        // instead. Never delete a pre-existing path: a receipt is create-new
+        // evidence, and a collision must be a test failure, not overwrite.
+        let mut nonce = [0_u8; 16];
+        getrandom::fill(&mut nonce).expect("system randomness for isolated test receipt");
+        let nonce_hex: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
         let path = std::env::temp_dir().join(format!(
-            "classmesh-ack-receipt-{}-{}",
+            "classmesh-ack-receipt-{}-{nonce_hex}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
         ));
-        let _ = std::fs::remove_file(&path);
+        assert!(!path.exists(), "fresh receipt path must not already exist");
         assert!(write_completed_receipt(&path, 7, 19, TeacherAckStatus::Accepted).is_err());
         assert!(!path.exists());
         write_completed_receipt(&path, 7, 19, TeacherAckStatus::Completed).unwrap();

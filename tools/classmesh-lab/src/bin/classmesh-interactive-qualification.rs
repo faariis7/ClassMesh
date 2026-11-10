@@ -17,8 +17,8 @@ mod windows_app {
     };
     use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity, cng_client_cert_resolver};
     use classmesh_lab::teacher_ack_probe::{
-        MessageAckProgress, TeacherAckStatus, qualification_capabilities, require_worker_completion,
-        write_completed_receipt,
+        MessageAckProgress, TeacherAckStatus, qualification_capabilities,
+        require_worker_completion, write_completed_receipt,
     };
     use classmesh_protocol::control_wire::{
         ControlEnvelope, Heartbeat, InputEvent, KeyEvent, KeyframeRequest,
@@ -178,7 +178,9 @@ mod windows_app {
             let identity_path = identity_path
                 .ok_or_else(|| format!("--identity is required\n\n{}", Self::usage()))?;
             if ack_receipt.is_some() && (!message_only || !require_completed) {
-                return Err("--ack-receipt requires --message-only and --require-completed".to_owned());
+                return Err(
+                    "--ack-receipt requires --message-only and --require-completed".to_owned(),
+                );
             }
             if require_completed && teacher_message.is_none() {
                 return Err("--require-completed requires --teacher-message".to_owned());
