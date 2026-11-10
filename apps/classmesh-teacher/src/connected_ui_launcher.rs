@@ -14,7 +14,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use classmesh_control::client_session::ClientControlSession;
 use classmesh_control::live_authorization::LiveAuthorizationStore;
-use classmesh_protocol::{Capability, ControlRole};
+use classmesh_protocol::{Capability, ControlRole, teacher_interaction};
 
 use crate::connected_runtime::{
     TeacherConnectedPlaybackError, TeacherDuplexDispatch, drive_authenticated_teacher_duplex,
@@ -38,13 +38,13 @@ fn validate_enrolled_startup(
     actual_session_id: u64,
     major: u32,
     minor: u32,
-    playback_capability: bool,
+    usable_capability: bool,
     teacher_role: bool,
 ) -> Result<(), TeacherConnectedPlaybackError> {
     if !active || expected_session_id == 0 || expected_session_id != actual_session_id {
         return Err(TeacherConnectedPlaybackError::SessionMismatch);
     }
-    if !teacher_role || major != 0 || minor < 8 || !playback_capability {
+    if !teacher_role || major != 0 || minor < 8 || !usable_capability {
         return Err(TeacherConnectedPlaybackError::NotNegotiated);
     }
     Ok(())
@@ -63,7 +63,15 @@ fn preflight_enrolled_session(
         u32::from(negotiated.version.minor),
         negotiated
             .capabilities
-            .contains(&Capability::ReceiverPlaybackDiagnostics),
+            .contains(&Capability::ReceiverPlaybackDiagnostics)
+            || teacher_interaction::teacher_message_available(
+                negotiated.version,
+                &negotiated.capabilities,
+            )
+            || teacher_interaction::open_target_available(
+                negotiated.version,
+                &negotiated.capabilities,
+            ),
         negotiated.role == ControlRole::Teacher,
     )
 }

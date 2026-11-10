@@ -17,7 +17,7 @@ use classmesh_control::teacher_playback_receive::{
     TeacherControlSequenceGuard, receive_guarded_authenticated_teacher_control_on_split,
 };
 use classmesh_protocol::{
-    Capability,
+    Capability, ControlRole,
     control_wire::{
         ControlEnvelope, TeacherInteractionKind, TeacherInteractionState, control_envelope,
     },
@@ -26,7 +26,7 @@ use classmesh_protocol::{
 
 use crate::connected_command::{
     QueuedTeacherUiAction, TeacherCommandSendError, TeacherCommandSender,
-    next_queued_teacher_ui_action,
+    next_queued_teacher_ui_action, verify_current_student,
 };
 use crate::receiver_playback_session::{
     TeacherPlaybackSessionError, TeacherPlaybackSessionEvent, TeacherPlaybackSessionOwner,
@@ -248,11 +248,20 @@ pub async fn drive_authenticated_teacher_duplex(
         return Err(TeacherConnectedPlaybackError::SessionMismatch);
     }
     let negotiated = &session.established.negotiated;
-    if negotiated.version.major != 0
+    let can_playback = negotiated
+        .capabilities
+        .contains(&Capability::ReceiverPlaybackDiagnostics);
+    let can_command = teacher_interaction::teacher_message_available(
+        negotiated.version,
+        &negotiated.capabilities,
+    ) || teacher_interaction::open_target_available(
+        negotiated.version,
+        &negotiated.capabilities,
+    );
+    if negotiated.role != ControlRole::Teacher
+        || negotiated.version.major != 0
         || negotiated.version.minor < 8
-        || !negotiated
-            .capabilities
-            .contains(&Capability::ReceiverPlaybackDiagnostics)
+        || (!can_playback && !can_command)
     {
         return Err(TeacherConnectedPlaybackError::NotNegotiated);
     }
@@ -262,13 +271,39 @@ pub async fn drive_authenticated_teacher_duplex(
         version: negotiated.version,
         capabilities: negotiated.capabilities.clone(),
     };
+    // M2 command control is independent of M3 video. Do not require a
+    // ReceiverPlaybackDiagnostic before admitting an authenticated Teacher.
+    // Verify the actual TLS peer against the current enrolled StudentDevice
+    // roster *before* publishing any interactive GUI authority. Every later
+    // command revalidates that authority in TeacherCommandSender.
+    if can_command {
+        if let Err(error) =
+            verify_current_student(owner, &session.connection, authorization, (clocks.0)())
+        {
+            owner.retire_exact(owner.source_id(), binding);
+            session
+                .connection
+                .close(0u32.into(), b"Teacher control peer untrusted");
+            return Err(TeacherConnectedPlaybackError::Command(error));
+        }
+        if let Err(error) = send_window_event(
+            &events,
+            TeacherUiControlEvent::Authenticated(context.clone()),
+        ) {
+            owner.retire_exact(owner.source_id(), binding);
+            session
+                .connection
+                .close(0u32.into(), b"Teacher UI backpressure");
+            return Err(error);
+        }
+    }
     let mut split = session.into_split();
     let mut reader_guard = TeacherControlSequenceGuard::default();
     let mut command_sender = TeacherCommandSender::default();
     let mut pending_results = PendingTeacherResults::default();
     let mut tick = tokio::time::interval(Duration::from_millis(15));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut bootstrapped = false;
+    let mut playback_bootstrapped = false;
 
     loop {
         // Keep this SAME in-flight read future alive across the whole inner
@@ -303,7 +338,7 @@ pub async fn drive_authenticated_teacher_duplex(
                             }
                         }
                         QueuedTeacherUiAction::Interaction(action) => {
-                            if !bootstrapped {
+                            if !can_command {
                                 owner.retire_exact(owner.source_id(), binding);
                                 split.connection.close(0u32.into(), b"Teacher unverified UI command");
                                 return Err(TeacherConnectedPlaybackError::NotBootstrapped);
@@ -396,7 +431,7 @@ pub async fn drive_authenticated_teacher_duplex(
                 received_at,
                 ..
             } => {
-                let ui_event = if bootstrapped {
+                let ui_event = if playback_bootstrapped {
                     TeacherUiControlEvent::VerifiedPlayback {
                         source_id: owner.source_id(),
                         verified,
@@ -418,7 +453,7 @@ pub async fn drive_authenticated_teacher_duplex(
                         .close(0u32.into(), b"Teacher UI backpressure");
                     return Err(error);
                 }
-                bootstrapped = true;
+                playback_bootstrapped = true;
             }
         }
     }
