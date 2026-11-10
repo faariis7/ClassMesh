@@ -82,6 +82,37 @@ fn advance_command_status(
     }
 }
 
+// Never evict an unresolved request to make room for a newer write:
+// doing so would lose the only key for its eventual authenticated Worker ACK.
+fn record_command_write(
+    history: &mut BTreeMap<u64, (u64, Option<TeacherInteractionState>)>,
+    session_id: u64,
+    request_id: u64,
+) {
+    if history.contains_key(&request_id) {
+        return;
+    }
+    if history.len() >= 64 {
+        let terminal = history.iter().find_map(|(&id, &(_, state))| {
+            matches!(
+                state,
+                Some(
+                    TeacherInteractionState::Completed
+                        | TeacherInteractionState::Rejected
+                        | TeacherInteractionState::Failed
+                )
+            )
+            .then_some(id)
+        });
+        if let Some(id) = terminal {
+            history.remove(&id);
+        } else {
+            return;
+        }
+    }
+    history.insert(request_id, (session_id, None));
+}
+
 const APP_TITLE: &str = "ClassMesh Teacher";
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [800.0, 600.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [600.0, 420.0];
@@ -424,16 +455,11 @@ impl TeacherEguiShell {
                     {
                         // Bound UI history to the same 64 outstanding requests as the network owner.
                         // Never turn a write into an acknowledgement.
-                        if !self.command_status.contains_key(&request_id)
-                            && self.command_status.len() >= 64
-                        {
-                            if let Some(oldest) = self.command_status.keys().next().copied() {
-                                self.command_status.remove(&oldest);
-                            }
-                        }
-                        self.command_status
-                            .entry(request_id)
-                            .or_insert((control_session_id, None));
+                        record_command_write(
+                            &mut self.command_status,
+                            control_session_id,
+                            request_id,
+                        );
                     }
                 }
                 Ok(TeacherUiControlEvent::CommandResult {
@@ -1209,6 +1235,23 @@ mod tests {
         app.disconnect_preserving_command_history();
         app.apply_command_result(77, 42, TeacherInteractionState::Completed);
         assert_eq!(app.command_status.get(&42), Some(&(77, None)));
+    }
+
+    #[test]
+    fn command_history_retains_unresolved_ack_keys_when_full() {
+        let mut history = BTreeMap::new();
+        for id in 1..=64 {
+            record_command_write(&mut history, 77, id);
+        }
+        record_command_write(&mut history, 77, 65);
+        assert_eq!(history.len(), 64);
+        assert!(!history.contains_key(&65));
+        assert!(history.contains_key(&1));
+        history.get_mut(&1).unwrap().1 = Some(TeacherInteractionState::Completed);
+        record_command_write(&mut history, 77, 65);
+        assert!(!history.contains_key(&1));
+        assert_eq!(history.get(&65), Some(&(77, None)));
+        assert!(history.contains_key(&2));
     }
 
     #[test]
