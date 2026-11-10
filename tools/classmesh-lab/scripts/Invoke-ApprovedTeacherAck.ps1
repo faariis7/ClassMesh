@@ -148,6 +148,21 @@ try {
     $qualificationPassed = $true
     Write-Output "ACK completed via approved Service: $Receipt"
 } finally {
+    # Stop the producer before removing failed evidence: otherwise a timed-out
+    # Teacher can race cleanup and recreate the receipt after it was deleted.
+    if ($null -ne $process) {
+        try {
+            $process.Refresh()
+            if (-not $process.HasExited) {
+                Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                if (-not $process.WaitForExit(5000)) {
+                    throw 'Teacher did not terminate; failed evidence cannot be safely cleaned'
+                }
+            }
+        } finally {
+            $process.Dispose()
+        }
+    }
     if (-not $qualificationPassed -and (Test-Path -LiteralPath $Receipt -PathType Leaf)) {
         # Never follow or delete a redirected receipt during failure cleanup.
         $failedReceipt = Get-Item -LiteralPath $Receipt -Force -ErrorAction SilentlyContinue
@@ -155,13 +170,5 @@ try {
             ($failedReceipt.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
             Remove-Item -LiteralPath $Receipt -Force -ErrorAction SilentlyContinue
         }
-    }
-    if ($null -ne $process) {
-        $process.Refresh()
-        if (-not $process.HasExited) {
-            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            $process.WaitForExit(5000) | Out-Null
-        }
-        $process.Dispose()
     }
 }
