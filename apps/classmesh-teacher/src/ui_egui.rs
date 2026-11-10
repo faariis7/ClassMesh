@@ -1090,6 +1090,31 @@ fn control_connection_label(context: Option<&TeacherInteractionUiContext>) -> &'
     }
 }
 
+// Preserve the authenticated session/request pair in operator-visible evidence.
+// A QUIC write and an Accepted receipt are not proof of Worker completion.
+fn command_evidence_label(
+    session_id: u64,
+    request_id: u64,
+    state: Option<TeacherInteractionState>,
+    connected: bool,
+) -> String {
+    let outcome = match (state, connected) {
+        (None, false) => "Connection lost — delivery unconfirmed",
+        (None, true) => "Written to QUIC — no authenticated ACK",
+        (Some(TeacherInteractionState::Accepted), false) => {
+            "Connection lost after Accepted — Worker outcome unconfirmed"
+        }
+        (Some(TeacherInteractionState::Accepted), true) => {
+            "Accepted receipt — Worker outcome unconfirmed"
+        }
+        (Some(TeacherInteractionState::Completed), _) => "Worker reported Completed",
+        (Some(TeacherInteractionState::Rejected), _) => "Command Rejected",
+        (Some(TeacherInteractionState::Failed), _) => "Worker reported Failed",
+        (Some(TeacherInteractionState::Unspecified), _) => "Invalid receipt — outcome unconfirmed",
+    };
+    format!("Session {session_id} / Request {request_id}: {outcome}")
+}
+
 impl eframe::App for TeacherEguiShell {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_control_bridge();
@@ -1107,26 +1132,13 @@ impl eframe::App for TeacherEguiShell {
             ui.small(control_connection_label(
                 self.teacher_interaction_context.as_ref(),
             ));
-            for (&request_id, &(_, state)) in self.command_status.iter().rev().take(3) {
-                let label = match state {
-                    None if self.teacher_interaction_context.is_none() => {
-                        "Connection lost — delivery unconfirmed"
-                    }
-                    None => "Sent over QUIC — no Service ACK",
-                    Some(TeacherInteractionState::Accepted)
-                        if self.teacher_interaction_context.is_none() =>
-                    {
-                        "Connection lost after acceptance — completion unconfirmed"
-                    }
-                    Some(TeacherInteractionState::Accepted) => {
-                        "Worker accepted — completion unconfirmed"
-                    }
-                    Some(TeacherInteractionState::Completed) => "Worker reported completed",
-                    Some(TeacherInteractionState::Rejected) => "Worker rejected command",
-                    Some(TeacherInteractionState::Failed) => "Worker reported failure",
-                    _ => "Invalid command state",
-                };
-                ui.small(format!("Request {request_id}: {label}"));
+            for (&request_id, &(session_id, state)) in self.command_status.iter().rev().take(3) {
+                ui.small(command_evidence_label(
+                    session_id,
+                    request_id,
+                    state,
+                    self.teacher_interaction_context.is_some(),
+                ));
             }
         });
 
@@ -1194,6 +1206,22 @@ mod tests {
     use crate::ui_shell::{TeacherFocusUiAction, TeacherPresentationUiAction};
 
     use super::*;
+
+    #[test]
+    fn command_evidence_preserves_session_request_and_distinguishes_receipts() {
+        let written = command_evidence_label(77, 42, None, true);
+        assert!(written.contains("Session 77 / Request 42"));
+        assert!(written.contains("no authenticated ACK"));
+        assert!(!written.contains("Completed"));
+        let accepted =
+            command_evidence_label(77, 42, Some(TeacherInteractionState::Accepted), true);
+        assert!(accepted.contains("Worker outcome unconfirmed"));
+        assert!(!accepted.contains("Completed"));
+        let completed =
+            command_evidence_label(77, 42, Some(TeacherInteractionState::Completed), false);
+        assert!(completed.contains("Worker reported Completed"));
+        assert!(completed.contains("Session 77 / Request 42"));
+    }
 
     #[test]
     fn disconnect_retains_worker_truth_but_revokes_session_authority() {
