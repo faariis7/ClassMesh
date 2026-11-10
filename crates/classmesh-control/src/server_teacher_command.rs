@@ -358,11 +358,19 @@ impl ServiceTeacherCommandReceiver {
         now_unix_ms: impl Fn() -> u64,
     ) -> Result<PrivilegedControlCommand, ServiceTeacherCommandError> {
         self.verify(authorization, now_unix_ms())?;
+        // Pin the policy epoch before blocking on QUIC. A revoke/re-enroll
+        // during the read must not admit a buffered command under a newly
+        // restored credential, even when its principal ID is unchanged.
+        let ingress_generation = authorization
+            .snapshot()
+            .map_err(ServiceTeacherCommandError::Authorization)?
+            .version();
         let envelope = self
             .channel
             .receive()
             .await
             .map_err(ServiceTeacherCommandError::Transport)?;
+        verify_policy_generation(authorization, ingress_generation)?;
         self.verify(authorization, now_unix_ms())?;
         // File transfer remains explicitly disabled for the MVP. Never grant
         // it merely because a Teacher credential has other control permissions.
@@ -375,8 +383,16 @@ impl ServiceTeacherCommandReceiver {
         let snapshot = authorization
             .snapshot()
             .map_err(ServiceTeacherCommandError::Authorization)?;
-        dispatch_privileged_command(&mut self.guard, snapshot.store(), &envelope, now_unix_ms())
-            .map_err(ServiceTeacherCommandError::Dispatch)
+        verify_policy_generation(authorization, ingress_generation)?;
+        let command = dispatch_privileged_command(
+            &mut self.guard,
+            snapshot.store(),
+            &envelope,
+            now_unix_ms(),
+        )
+        .map_err(ServiceTeacherCommandError::Dispatch)?;
+        verify_policy_generation(authorization, ingress_generation)?;
+        Ok(command)
     }
 
     /// Run one authenticated command through a Service-owned async executor.
@@ -514,6 +530,22 @@ mod tests {
             Err(ServiceTeacherCommandError::AuthorizationChangedDuringDispatch)
         ));
         assert!(verify_policy_generation(&authorization, updated).is_ok());
+    }
+
+    #[test]
+    fn buffered_ingress_must_reject_revocation_and_reenrollment_during_receive() {
+        let authorization = LiveAuthorizationStore::new(Default::default());
+        let ingress_generation = authorization.snapshot().unwrap().version();
+        let revoked_generation = authorization
+            .publish_if_version(ingress_generation, Default::default())
+            .unwrap();
+        authorization
+            .publish_if_version(revoked_generation, Default::default())
+            .unwrap();
+        assert!(matches!(
+            verify_policy_generation(&authorization, ingress_generation),
+            Err(ServiceTeacherCommandError::AuthorizationChangedDuringDispatch)
+        ));
     }
 
     #[test]
