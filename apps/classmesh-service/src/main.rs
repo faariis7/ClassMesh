@@ -20,33 +20,6 @@ fn stop_requires_orphan_cleanup(current_session: Option<u32>) -> bool {
     current_session.is_none()
 }
 
-#[cfg(test)]
-mod worker_probe_tests {
-    #[test]
-    fn orphaned_ipc_is_revoked_without_a_worker_handle() {
-        assert!(super::orphaned_ipc_requires_cleanup(false));
-        assert!(!super::orphaned_ipc_requires_cleanup(true));
-    }
-
-    #[test]
-    fn stopping_without_process_revokes_orphan_but_preserves_other_session() {
-        assert!(super::stop_requires_orphan_cleanup(None));
-        assert!(!super::stop_requires_orphan_cleanup(Some(2)));
-        assert!(!super::stop_requires_orphan_cleanup(Some(1)));
-    }
-
-    #[test]
-    fn liveness_probe_failure_is_fail_closed() {
-        assert!(super::worker_probe_requires_recovery(Err("access denied")));
-        assert!(super::worker_probe_requires_recovery(Ok::<bool, &str>(
-            false
-        )));
-        assert!(!super::worker_probe_requires_recovery(Ok::<bool, &str>(
-            true
-        )));
-    }
-}
-
 #[cfg(windows)]
 mod control_runtime;
 #[cfg(windows)]
@@ -4212,4 +4185,31 @@ fn main() -> windows_service::Result<()> {
 #[cfg(not(windows))]
 fn main() {
     eprintln!("classmesh-service is supported only on Windows");
+}
+
+#[cfg(test)]
+mod worker_probe_tests {
+    #[test]
+    fn orphaned_ipc_is_revoked_without_a_worker_handle() {
+        assert!(super::orphaned_ipc_requires_cleanup(false));
+        assert!(!super::orphaned_ipc_requires_cleanup(true));
+    }
+
+    #[test]
+    fn stopping_without_process_revokes_orphan_but_preserves_other_session() {
+        assert!(super::stop_requires_orphan_cleanup(None));
+        assert!(!super::stop_requires_orphan_cleanup(Some(2)));
+        assert!(!super::stop_requires_orphan_cleanup(Some(1)));
+    }
+
+    #[test]
+    fn liveness_probe_failure_is_fail_closed() {
+        assert!(super::worker_probe_requires_recovery(Err("access denied")));
+        assert!(super::worker_probe_requires_recovery(Ok::<bool, &str>(
+            false
+        )));
+        assert!(!super::worker_probe_requires_recovery(Ok::<bool, &str>(
+            true
+        )));
+    }
 }
