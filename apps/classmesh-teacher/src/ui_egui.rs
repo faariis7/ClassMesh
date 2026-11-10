@@ -326,6 +326,31 @@ impl TeacherEguiShell {
         self.control_bridge = Some(bridge);
     }
 
+    /// A result received after revocation or disconnect is not an authenticated
+    /// observation of the current connection. Keep the last verified state,
+    /// but never upgrade it from an obsolete or unbound session.
+    fn apply_command_result(
+        &mut self,
+        control_session_id: u64,
+        request_id: u64,
+        state: TeacherInteractionState,
+    ) {
+        if !self
+            .teacher_interaction_context
+            .as_ref()
+            .is_some_and(|context| {
+                context.control_session_id != 0 && context.control_session_id == control_session_id
+            })
+        {
+            return;
+        }
+        if let Some((session, status)) = self.command_status.get_mut(&request_id) {
+            if *session == control_session_id {
+                *status = advance_command_status(*status, state);
+            }
+        }
+    }
+
     fn poll_control_bridge(&mut self) {
         // Drain bounded transport observations before considering any UI action.
         // A dropped producer means disconnect, never persistent liveness.
@@ -416,11 +441,7 @@ impl TeacherEguiShell {
                     request_id,
                     state,
                 }) => {
-                    if let Some((session, status)) = self.command_status.get_mut(&request_id) {
-                        if *session == control_session_id {
-                            *status = advance_command_status(*status, state);
-                        }
-                    }
+                    self.apply_command_result(control_session_id, request_id, state);
                 }
                 Ok(TeacherUiControlEvent::Disconnected) => {
                     self.pending_action = None;
@@ -1178,6 +1199,16 @@ mod tests {
             app.command_status.is_empty(),
             "new session cannot inherit old ACKs"
         );
+    }
+
+    #[test]
+    fn stale_worker_result_after_disconnect_cannot_upgrade_retained_history() {
+        let mut app = TeacherEguiShell::default();
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
+        app.command_status.insert(42, (77, None));
+        app.disconnect_preserving_command_history();
+        app.apply_command_result(77, 42, TeacherInteractionState::Completed);
+        assert_eq!(app.command_status.get(&42), Some(&(77, None)));
     }
 
     #[test]
