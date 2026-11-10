@@ -7,7 +7,8 @@ param(
     [string]$ExpectedServiceSha256,
     [string]$ExpectedProvisionSha256,
     [switch]$SecurityReviewApproved,
-    [switch]$DisposableVmApproved
+    [switch]$DisposableVmApproved,
+    [ValidateRange(0,120)][int]$QualificationWindowSeconds = 0
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -167,6 +168,17 @@ try {
         throw 'FAIL_CLOSED: SCM process or registration changed during runtime attestation'
     }
     "SCM_LOCALSYSTEM_RUNNING_PID=$($svc.ProcessId); IMAGE_PIN_VERIFIED; WORKER_IPC_NOT_YET_PROVEN"
+    if ($QualificationWindowSeconds -gt 0) {
+        # The only authorized hold is *after* both independent approval gates,
+        # exact signed image/ACL/Session0/token attestation, and SCM readiness.
+        # The separate Teacher process must be run from a NON-elevated session:
+        # invoking it here would inherit administrator privileges.
+        . (Join-Path $PSScriptRoot 'Wait-ApprovedM2QualificationWindow.ps1')
+        Wait-ApprovedM2QualificationWindow -ServiceName $serviceName             -ServicePid ([int]$svc.ProcessId)             -ExpectedImage $expectedImage             -ExpectedCreationDate ([string]$process.CreationDate)             -Seconds $QualificationWindowSeconds
+        # A timed window is not Worker or Teacher completion evidence. Return
+        # to the pre-existing bounded stop/delete `finally` without marking M2.
+        Assert-ProtectedFile $ServiceExe $ExpectedServiceSha256
+    }
 } finally {
     if ($created) {
         # Never stop/delete a service whose SCM identity changed after our create.

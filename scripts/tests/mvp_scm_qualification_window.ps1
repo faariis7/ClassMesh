@@ -5,7 +5,7 @@ if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) {
     throw 'RED: actual bounded SCM Teacher qualification window helper missing'
 }
 . $helper
-$script:pid = 4242
+$script:reportedServicePid = 4242
 $script:ownerSid = 'S-1-5-18'
 $script:ownerCode = 0
 $script:creationDate = '20261110120000.000000+180'
@@ -16,7 +16,7 @@ function Get-CimInstance {
         return [pscustomobject]@{
             State='Running'; StartName='LocalSystem'; StartMode='Manual'
             PathName='"C:\ClassMesh\classmesh-service.exe"'; ServiceType='Own Process'
-            ProcessId=$script:pid
+            ProcessId=$script:reportedServicePid
         }
     }
     if ($ClassName -eq 'Win32_Process') {
@@ -44,9 +44,9 @@ function MustReject([string]$scenario) {
 $script:ownerSid = 'S-1-5-21-1234-1000'
 MustReject 'OS owner SID switched away from LocalSystem'
 $script:ownerSid = 'S-1-5-18'
-$script:pid = 9999
+$script:reportedServicePid = 9999
 MustReject 'SCM process replaced during approval window'
-$script:pid = 4242
+$script:reportedServicePid = 4242
 $script:image = 'C:\ClassMesh\other.exe'
 MustReject 'process image changed during approval window'
 $script:image = 'C:\ClassMesh\classmesh-service.exe'
