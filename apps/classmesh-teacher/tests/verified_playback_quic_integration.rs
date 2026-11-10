@@ -522,17 +522,22 @@ async fn native_enrolled_ui_owner_closes_without_a_gui_and_denies_replaced_sessi
     stale.control_session_id += 1;
     let owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, stale)
         .map_err(|error| format!("{error:?}"))?;
-    let (bridge, thread) = start_enrolled_teacher_ui_runtime(
-        owner,
-        second_pair.client,
-        second_pair.live_auth,
-        |_| ControlFlow::Continue(()),
-    )?;
-    assert!(matches!(
-        thread.join().expect("control thread must not panic"),
-        Err(TeacherConnectedPlaybackError::SessionMismatch)
-    ));
-    drop(bridge);
+    // Runtime admission now rejects an invalid session synchronously, before
+    // spawning a network thread or exposing a GUI bridge. The previous test
+    // incorrectly expected that reject to arrive only when joining a thread.
+    let refused =
+        start_enrolled_teacher_ui_runtime(owner, second_pair.client, second_pair.live_auth, |_| {
+            ControlFlow::Continue(())
+        });
+    assert!(
+        matches!(
+            refused,
+            Err(ref error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && error.to_string().contains("SessionMismatch")
+        ),
+        "mismatched authenticated Hello must fail *before* native GUI admission"
+    );
     Ok(())
 }
 
