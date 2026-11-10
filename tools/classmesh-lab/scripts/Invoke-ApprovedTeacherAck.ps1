@@ -18,6 +18,7 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Assert-TeacherMessageInput.ps1')
 
 function Assert-ApprovedSignature([string]$Path, [string]$ExpectedThumbprint) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Missing signed executable: $Path" }
@@ -87,7 +88,7 @@ function Assert-NoReparsePath([string]$Path) {
 }
 
 if ($TimeoutSeconds -lt 5 -or $TimeoutSeconds -gt 120) { throw 'TimeoutSeconds must be 5..120' }
-if ([string]::IsNullOrWhiteSpace($Message)) { throw 'Message is required' }
+Assert-TeacherMessageInput $Message
 foreach ($value in @($Connect, $ServerName, $Identity, $Message, $Receipt)) {
     if ($value -match '[`"\r\n]') { throw 'Unsafe command argument (quote, newline or backtick)' }
 }
