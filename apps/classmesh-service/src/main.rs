@@ -37,7 +37,8 @@ mod telemetry_native;
 mod windows_service_app {
     // Reuse the same fail-closed policies covered by native/portable tests.
     use super::{
-        orphaned_ipc_requires_cleanup, stop_requires_orphan_cleanup, worker_probe_requires_recovery,
+        orphaned_ipc_requires_cleanup, stop_requires_orphan_cleanup, worker_launch_slot_available,
+        worker_probe_requires_recovery,
     };
     use std::ffi::OsString;
     use std::fs;
@@ -435,6 +436,12 @@ mod windows_service_app {
         }
 
         fn launch(&mut self, session: SessionId) -> WorkerManagerEvent {
+            if !worker_launch_slot_available(self.process.is_some(), self.pipe.is_some()) {
+                eprintln!(
+                    "refusing Worker launch: previous process or IPC pipe remains owned; stop and revoke it first"
+                );
+                return WorkerManagerEvent::GiveUp(session);
+            }
             let now_us = self.now_us();
             let Some(executable) = self.executable.as_deref() else {
                 eprintln!("cannot resolve classmesh-worker.exe next to the service binary");
@@ -4187,8 +4194,22 @@ fn main() {
     eprintln!("classmesh-service is supported only on Windows");
 }
 
+// Never replace an owned Worker handle: doing so would orphan its process and IPC.
+#[cfg(any(windows, test))]
+fn worker_launch_slot_available(process_present: bool, pipe_present: bool) -> bool {
+    !process_present && !pipe_present
+}
+
 #[cfg(test)]
 mod worker_probe_tests {
+    #[test]
+    fn launch_refuses_live_or_orphaned_worker_resources() {
+        assert!(super::worker_launch_slot_available(false, false));
+        assert!(!super::worker_launch_slot_available(true, false));
+        assert!(!super::worker_launch_slot_available(false, true));
+        assert!(!super::worker_launch_slot_available(true, true));
+    }
+
     #[test]
     fn orphaned_ipc_is_revoked_without_a_worker_handle() {
         assert!(super::orphaned_ipc_requires_cleanup(false));
