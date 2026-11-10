@@ -12,6 +12,7 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Assert-LocalAbsolutePath.ps1')
 $serviceName = 'ClassMeshService'
 if ($Mode -eq 'Plan') {
     'SCM_PLAN_ONLY: requires independently approved enrollment, protected install, elevated interactive admin, exact binary SHA256, successful --verify-startup, protected path/ACL, and exclusive disposable VM. No mutation.'
@@ -32,7 +33,7 @@ if ($ExpectedServiceSha256 -cnotmatch '^[a-fA-F0-9]{64}$' -or
     throw 'FAIL_CLOSED: exact SHA256 pins required'
 }
 function Assert-ProtectedFile([string]$Path, [string]$ExpectedHash) {
-    if (-not [IO.Path]::IsPathFullyQualified($Path)) { throw 'FAIL_CLOSED: absolute path required' }
+    Assert-LocalAbsolutePath $Path
     $item = Get-Item -LiteralPath $Path -ErrorAction Stop
     if ($item.PSIsContainer -or $item.Extension -ne '.exe') { throw 'FAIL_CLOSED: executable file required' }
     if ((Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash -ne $ExpectedHash) {
@@ -174,7 +175,14 @@ try {
         # The separate Teacher process must be run from a NON-elevated session:
         # invoking it here would inherit administrator privileges.
         . (Join-Path $PSScriptRoot 'Wait-ApprovedM2QualificationWindow.ps1')
-        Wait-ApprovedM2QualificationWindow -ServiceName $serviceName             -ServicePid ([int]$svc.ProcessId)             -ExpectedImage $expectedImage             -ExpectedCreationDate ([string]$process.CreationDate)             -Seconds $QualificationWindowSeconds
+        $qualification = @{
+            ServiceName = $serviceName
+            ServicePid = [int]$svc.ProcessId
+            ExpectedImage = $expectedImage
+            ExpectedCreationDate = [string]$process.CreationDate
+            Seconds = $QualificationWindowSeconds
+        }
+        Wait-ApprovedM2QualificationWindow @qualification
         # A timed window is not Worker or Teacher completion evidence. Return
         # to the pre-existing bounded stop/delete `finally` without marking M2.
         Assert-ProtectedFile $ServiceExe $ExpectedServiceSha256

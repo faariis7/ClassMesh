@@ -4,6 +4,8 @@
 # Keep the Service running while a DIFFERENT non-elevated interactive account
 # runs the signed Teacher ACK harness, then return control to SCM cleanup.
 # A window closing is NEVER proof of a Worker ACK or an M2 acceptance.
+# Use native PowerShell 5.1-compatible volume/path verification.
+. (Join-Path $PSScriptRoot 'Assert-LocalAbsolutePath.ps1')
 function Wait-ApprovedM2QualificationWindow {
     [CmdletBinding()]
     param(
@@ -13,10 +15,10 @@ function Wait-ApprovedM2QualificationWindow {
         [Parameter(Mandatory=$true)][string]$ExpectedCreationDate,
         [Parameter(Mandatory=$true)][ValidateRange(1,120)][int]$Seconds
     )
-    if ($ServicePid -le 0 -or [string]::IsNullOrWhiteSpace($ExpectedCreationDate) -or
-        -not [IO.Path]::IsPathFullyQualified($ExpectedImage)) {
+    if ($ServicePid -le 0 -or [string]::IsNullOrWhiteSpace($ExpectedCreationDate)) {
         throw 'FAIL_CLOSED: no complete SCM process identity to qualify'
     }
+    Assert-LocalAbsolutePath $ExpectedImage
     $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
     "SCM_APPROVED_M2_WINDOW_OPEN_PID=$ServicePid; SECONDS=$Seconds; RUN_SIGNED_NONADMIN_TEACHER_ACK_SEPARATELY"
     do {
