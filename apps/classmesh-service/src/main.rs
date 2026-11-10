@@ -1,3 +1,37 @@
+// A failed OS liveness query cannot authorize retaining an IPC binding.
+// Keep this policy platform-neutral so its fail-close behavior is testable
+// without installing a privileged Windows Service.
+#[cfg(any(windows, test))]
+fn worker_probe_requires_recovery<E>(probe: Result<bool, E>) -> bool {
+    !matches!(probe, Ok(true))
+}
+
+// A failed post-termination probe must retain ownership of the process handle.
+#[cfg(any(windows, test))]
+fn worker_stop_may_release_handle<E>(probe: Result<bool, E>) -> bool {
+    matches!(probe, Ok(false))
+}
+
+// A failed launch retains ownership until the OS confirms exit.
+#[cfg(any(windows, test))]
+fn worker_failed_launch_must_retain<E>(probe: Result<bool, E>) -> bool {
+    !worker_stop_may_release_handle(probe)
+}
+
+// Service shutdown must revoke orphaned IPC even when the Worker handle
+// has already been cleared by a previous recovery path.
+#[cfg(any(windows, test))]
+fn orphaned_ipc_requires_cleanup(process_present: bool) -> bool {
+    !process_present
+}
+
+// A stop for a stale session must not tear down a different live Worker.
+// When the process handle is gone, however, its IPC generation is orphaned.
+#[cfg(any(windows, test))]
+fn stop_requires_orphan_cleanup(current_session: Option<u32>) -> bool {
+    current_session.is_none()
+}
+
 #[cfg(windows)]
 mod control_runtime;
 #[cfg(windows)]
@@ -13,6 +47,12 @@ mod telemetry_native;
 
 #[cfg(windows)]
 mod windows_service_app {
+    // Reuse the same fail-closed policies covered by native/portable tests.
+    use super::{
+        orphaned_ipc_requires_cleanup, stop_requires_orphan_cleanup,
+        worker_failed_launch_must_retain, worker_launch_slot_available,
+        worker_probe_requires_recovery, worker_stop_may_release_handle,
+    };
     use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
@@ -409,6 +449,12 @@ mod windows_service_app {
         }
 
         fn launch(&mut self, session: SessionId) -> WorkerManagerEvent {
+            if !worker_launch_slot_available(self.process.is_some(), self.pipe.is_some()) {
+                eprintln!(
+                    "refusing Worker launch: previous process or IPC pipe remains owned; stop and revoke it first"
+                );
+                return WorkerManagerEvent::GiveUp(session);
+            }
             let now_us = self.now_us();
             let Some(executable) = self.executable.as_deref() else {
                 eprintln!("cannot resolve classmesh-worker.exe next to the service binary");
@@ -444,14 +490,14 @@ mod windows_service_app {
 
             let extra_args = [OsString::from("--pipe"), OsString::from(&pipe_name)];
             match launch_worker_in_session(session.0, executable, &extra_args) {
-                Ok(mut process) => {
+                Ok(process) => {
                     let process_id = process.process_id();
                     if let Err(error) = pipe.accept_expected(process_id, session.0) {
                         eprintln!(
                             "Worker IPC peer validation failed for pid {process_id}, session {}: {error}",
                             session.0
                         );
-                        let _ = process.terminate(1);
+                        self.quarantine_failed_launch(process);
                         let decision = self.watchdog.launch_failed(session);
                         return self.apply_restart_decision(decision);
                     }
@@ -461,7 +507,7 @@ mod windows_service_app {
                             "Worker IPC handshake failed for pid {process_id}, session {}: {error}",
                             session.0
                         );
-                        let _ = process.terminate(1);
+                        self.quarantine_failed_launch(process);
                         let decision = self.watchdog.launch_failed(session);
                         return self.apply_restart_decision(decision);
                     }
@@ -502,7 +548,7 @@ mod windows_service_app {
                                 eprintln!(
                                     "Worker capability reader thread could not start for pid {process_id}: {error}"
                                 );
-                                let _ = process.terminate(1);
+                                self.quarantine_failed_launch(process);
                                 let decision = self.watchdog.launch_failed(session);
                                 return self.apply_restart_decision(decision);
                             }
@@ -519,7 +565,7 @@ mod windows_service_app {
                                     process_id,
                                     session.0,
                                 );
-                                let _ = process.terminate(1);
+                                self.quarantine_failed_launch(process);
                                 let decision = self.watchdog.launch_failed(session);
                                 return self.apply_restart_decision(decision);
                             }
@@ -529,7 +575,7 @@ mod windows_service_app {
                                 "Worker capability IPC reader unavailable for pid {process_id}, session {}; refusing unaudited Worker activation: {error}",
                                 session.0
                             );
-                            let _ = process.terminate(1);
+                            self.quarantine_failed_launch(process);
                             let decision = self.watchdog.launch_failed(session);
                             return self.apply_restart_decision(decision);
                         }
@@ -557,6 +603,21 @@ mod windows_service_app {
             }
         }
 
+        fn quarantine_failed_launch(&mut self, mut process: SessionProcess) {
+            let pid = process.process_id();
+            if let Err(error) = process.terminate(1) {
+                eprintln!("failed to terminate rejected Worker {pid}: {error}");
+            }
+            self.capabilities.clear();
+            self.pipe = None;
+            if worker_failed_launch_must_retain(process.is_running()) {
+                eprintln!(
+                    "rejected Worker {pid} exit unconfirmed; retaining handle and blocking relaunch"
+                );
+                self.process = Some(process);
+            }
+        }
+
         fn stop(&mut self, session: SessionId) {
             if self
                 .pending_restart
@@ -571,10 +632,19 @@ mod windows_service_app {
                 .as_ref()
                 .is_some_and(|process| process.session_id() == session.0)
             {
+                if stop_requires_orphan_cleanup(
+                    self.process.as_ref().map(SessionProcess::session_id),
+                ) {
+                    self.capabilities.clear();
+                    self.pipe = None;
+                }
                 return;
             }
 
-            if let Some(pipe) = self.pipe.as_ref()
+            // A revoked or unobservable Worker must never receive even a
+            // graceful shutdown frame through an untrusted/stale pipe.
+            if self.current_authenticated_receiver_worker().is_some()
+                && let Some(pipe) = self.pipe.as_ref()
                 && let Err(error) = send_control(pipe, IpcControlCommand::Shutdown)
             {
                 eprintln!("failed to request graceful Worker shutdown: {error}");
@@ -602,9 +672,22 @@ mod windows_service_app {
                 }
             }
 
+            // Revocation is unconditional, but do not lose the owned process
+            // handle if termination failed or the OS cannot confirm exit.
+            // Keeping it blocks relaunch rather than orphaning a live Worker.
+            let exited = self
+                .process
+                .as_mut()
+                .is_some_and(|process| worker_stop_may_release_handle(process.is_running()));
             self.capabilities.clear();
             self.pipe = None;
-            self.process = None;
+            if exited {
+                self.process = None;
+            } else {
+                eprintln!(
+                    "Worker exit unconfirmed; retaining process ownership and refusing relaunch"
+                );
+            }
         }
 
         fn stop_any(&mut self) {
@@ -615,6 +698,12 @@ mod windows_service_app {
                 .map(|process| SessionId(process.session_id()));
             if let Some(session) = session {
                 self.stop(session);
+            } else if orphaned_ipc_requires_cleanup(self.process.is_some()) {
+                // An absent process must not leave an authenticated reader
+                // generation or a live pipe behind during Service shutdown.
+                // Do not send Shutdown: there is no owned Worker to receive it.
+                self.capabilities.clear();
+                self.pipe = None;
             }
         }
 
@@ -623,13 +712,15 @@ mod windows_service_app {
             session: SessionId,
             command: IpcControlCommand,
         ) -> Result<(), WorkerControlSendError> {
+            // A session match alone does not authorize a command: the process
+            // may have exited or its capability-reader generation may have
+            // been revoked while the pipe handle remains open.
             if !self
-                .process
-                .as_ref()
-                .is_some_and(|process| process.session_id() == session.0)
+                .current_authenticated_receiver_worker()
+                .is_some_and(|peer| peer.session_id == session.0)
             {
                 eprintln!(
-                    "ignoring IPC command for session {}; no matching Worker is running",
+                    "refusing Worker IPC command for session {}; live authenticated peer binding is unavailable",
                     session.0
                 );
                 return Err(WorkerControlSendError::Unavailable);
@@ -647,15 +738,14 @@ mod windows_service_app {
         }
 
         fn send_input(&self, event: &InputEvent) -> Result<(), String> {
-            let process = self
-                .process
-                .as_ref()
-                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
-            if !process
-                .is_running()
-                .map_err(|error| format!("Worker input liveness probe failed: {error}"))?
-            {
-                return Err("interactive Worker exited before input dispatch".to_owned());
+            // Input shares the same authenticated process/session/generation
+            // admission as control messages. Process liveness alone is not
+            // sufficient after a capability revocation or reader teardown.
+            if self.current_authenticated_receiver_worker().is_none() {
+                return Err(
+                    "refusing Worker input: authenticated IPC peer binding is unavailable"
+                        .to_owned(),
+                );
             }
             let pipe = self
                 .pipe
@@ -1016,17 +1106,21 @@ mod windows_service_app {
         }
 
         fn poll(&mut self) -> WorkerManagerEvent {
-            let exited = self
-                .process
-                .as_ref()
-                .and_then(|process| match process.is_running() {
-                    Ok(true) => None,
-                    Ok(false) => Some((SessionId(process.session_id()), process.process_id())),
-                    Err(error) => {
-                        eprintln!("Worker liveness probe failed: {error}");
-                        None
+            let exited = self.process.as_mut().and_then(|process| {
+                let probe = process.is_running();
+                if let Err(error) = &probe {
+                    eprintln!(
+                        "Worker liveness probe failed: {error}; revoking IPC and recovering Worker"
+                    );
+                    if let Err(terminate_error) = process.terminate(1) {
+                        eprintln!(
+                            "Worker termination after failed liveness probe: {terminate_error}"
+                        );
                     }
-                });
+                }
+                worker_probe_requires_recovery(probe)
+                    .then_some((SessionId(process.session_id()), process.process_id()))
+            });
 
             if let Some((session, process_id)) = exited {
                 eprintln!(
@@ -4139,4 +4233,71 @@ fn main() -> windows_service::Result<()> {
 #[cfg(not(windows))]
 fn main() {
     eprintln!("classmesh-service is supported only on Windows");
+}
+
+// Never replace an owned Worker handle: doing so would orphan its process and IPC.
+#[cfg(any(windows, test))]
+fn worker_launch_slot_available(process_present: bool, pipe_present: bool) -> bool {
+    !process_present && !pipe_present
+}
+
+#[cfg(test)]
+mod worker_probe_tests {
+    #[test]
+    fn launch_refuses_live_or_orphaned_worker_resources() {
+        assert!(super::worker_launch_slot_available(false, false));
+        assert!(!super::worker_launch_slot_available(true, false));
+        assert!(!super::worker_launch_slot_available(false, true));
+        assert!(!super::worker_launch_slot_available(true, true));
+    }
+
+    #[test]
+    fn stop_retains_process_handle_until_exit_is_observed() {
+        assert!(!super::worker_stop_may_release_handle(Ok::<bool, &str>(
+            true
+        )));
+        assert!(!super::worker_stop_may_release_handle(Err::<bool, &str>(
+            "access denied"
+        )));
+        assert!(super::worker_stop_may_release_handle(Ok::<bool, &str>(
+            false
+        )));
+    }
+
+    #[test]
+    fn failed_launch_retains_process_when_exit_is_unconfirmed() {
+        assert!(super::worker_failed_launch_must_retain(Ok::<bool, &str>(
+            true
+        )));
+        assert!(super::worker_failed_launch_must_retain(Err::<bool, &str>(
+            "denied"
+        )));
+        assert!(!super::worker_failed_launch_must_retain(Ok::<bool, &str>(
+            false
+        )));
+    }
+
+    #[test]
+    fn orphaned_ipc_is_revoked_without_a_worker_handle() {
+        assert!(super::orphaned_ipc_requires_cleanup(false));
+        assert!(!super::orphaned_ipc_requires_cleanup(true));
+    }
+
+    #[test]
+    fn stopping_without_process_revokes_orphan_but_preserves_other_session() {
+        assert!(super::stop_requires_orphan_cleanup(None));
+        assert!(!super::stop_requires_orphan_cleanup(Some(2)));
+        assert!(!super::stop_requires_orphan_cleanup(Some(1)));
+    }
+
+    #[test]
+    fn liveness_probe_failure_is_fail_closed() {
+        assert!(super::worker_probe_requires_recovery(Err("access denied")));
+        assert!(super::worker_probe_requires_recovery(Ok::<bool, &str>(
+            false
+        )));
+        assert!(!super::worker_probe_requires_recovery(Ok::<bool, &str>(
+            true
+        )));
+    }
 }
