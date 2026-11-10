@@ -164,11 +164,10 @@ impl ServiceTeacherCommandReceiver {
             authorization,
             now_unix_ms,
         )
-        .map_err(|error| {
+        .inspect_err(|_| {
             // Post-Hello credential/identity rejection is terminal for this
             // QUIC connection; no fresh Hello may reuse its transport.
             connection.close(0u32.into(), b"teacher session admission failed");
-            error
         })?;
         if let Err(error) = verify_policy_generation(authorization, hello_generation) {
             receiver
