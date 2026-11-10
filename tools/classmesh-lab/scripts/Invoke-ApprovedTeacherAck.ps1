@@ -46,6 +46,12 @@ function Assert-ReadyService([string]$Name, [string]$ExpectedThumbprint) {
         throw "Cannot safely identify installed Service executable"
     }
     Assert-ApprovedSignature $binary $ExpectedThumbprint
+    if ([int64]$service.ProcessId -le 0) { throw 'Service has no running process ID' }
+    $serviceProcess = Get-CimInstance Win32_Process -Filter ("ProcessId=" + [string]$service.ProcessId)
+    if ($null -eq $serviceProcess -or [int]$serviceProcess.SessionId -ne 0) {
+        throw 'Approved LocalSystem Service must execute in Session 0'
+    }
+    return [int64]$service.ProcessId
 }
 
 if ($TimeoutSeconds -lt 5 -or $TimeoutSeconds -gt 120) { throw 'TimeoutSeconds must be 5..120' }
@@ -56,7 +62,7 @@ foreach ($value in @($Connect, $ServerName, $Identity, $Message, $Receipt)) {
 if (-not (Test-Path -LiteralPath $Identity -PathType Leaf)) { throw 'Provisioned Teacher identity missing' }
 if (Test-Path -LiteralPath $Receipt) { throw 'Receipt already exists; refusing overwrite' }
 Assert-ApprovedSignature $TeacherExe $TrustedSignerThumbprint
-Assert-ReadyService $ServiceName $TrustedSignerThumbprint
+$approvedServicePid = Assert-ReadyService $ServiceName $TrustedSignerThumbprint
 
 # Service owns the interactive Worker. Never launch a Worker under this account.
 # ArgumentList is an array to avoid PowerShell expression evaluation; inputs
@@ -80,6 +86,10 @@ try {
         $lines[2] -notmatch '^request_id=[1-9][0-9]*$' -or
         $lines[3] -ne 'worker_state=Completed') {
         throw 'Invalid completion receipt format'
+    }
+    $verifiedServicePid = Assert-ReadyService $ServiceName $TrustedSignerThumbprint
+    if ($verifiedServicePid -ne $approvedServicePid) {
+        throw 'Service process changed during ACK qualification; refusing evidence'
     }
     Write-Output "ACK completed via approved Service: $Receipt"
 } finally {
