@@ -97,6 +97,8 @@ impl TeacherInteractionReplay {
 #[cfg(windows)]
 struct TeacherMessageConfirmationRuntime {
     pending: Option<PendingTeacherMessage>,
+    // Retain ownership after a deadline: the Win32 dialog may still be alive.
+    confirmation_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 #[cfg(windows)]
@@ -116,7 +118,10 @@ impl TeacherMessageConfirmationRuntime {
     const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(13);
 
     fn new() -> Self {
-        Self { pending: None }
+        Self {
+            pending: None,
+            confirmation_thread: None,
+        }
     }
 
     fn start<F>(
@@ -135,11 +140,23 @@ impl TeacherMessageConfirmationRuntime {
         if self.pending.is_some() {
             return Err("teacher_interaction.message_busy");
         }
+        // A timed-out WTS call is not necessarily terminated. Never open a
+        // second dialog until the previous native call has actually returned.
+        if self
+            .confirmation_thread
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
+            return Err("teacher_interaction.message_busy");
+        }
+        if let Some(task) = self.confirmation_thread.take() {
+            let _ = task.join();
+        }
         if session_id == 0 || control_session_id == 0 || request_id == 0 {
             return Err("teacher_interaction.invalid_binding");
         }
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        std::thread::Builder::new()
+        let task = std::thread::Builder::new()
             .name("classmesh-message-confirm".to_owned())
             .spawn(move || {
                 use classmesh_protocol::control_wire::{
@@ -170,6 +187,7 @@ impl TeacherMessageConfirmationRuntime {
                 );
             })
             .map_err(|_| "teacher_interaction.confirmation_thread_unavailable")?;
+        self.confirmation_thread = Some(task);
         self.pending = Some(PendingTeacherMessage {
             process_id,
             session_id,
@@ -2678,8 +2696,20 @@ mod focused_profile_tests {
         );
         assert_eq!(timed_out.request_id, 1);
 
-        confirmations.start(100, 7, 80, 2, || Ok(())).unwrap();
+        assert_eq!(
+            confirmations.start(100, 7, 80, 2, || Ok(())),
+            Err("teacher_interaction.message_busy")
+        );
         release.send(()).unwrap(); // stale old result must go to dropped receiver
+        while !confirmations
+            .confirmation_thread
+            .as_ref()
+            .unwrap()
+            .is_finished()
+        {
+            std::thread::yield_now();
+        }
+        confirmations.start(100, 7, 80, 2, || Ok(())).unwrap();
         let next = loop {
             if let Some(reply) = confirmations.poll() {
                 break reply;
@@ -2695,6 +2725,7 @@ mod focused_profile_tests {
         use classmesh_protocol::control_wire::TeacherInteractionState;
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let mut confirmations = TeacherMessageConfirmationRuntime {
+            confirmation_thread: None,
             pending: Some(PendingTeacherMessage {
                 process_id: 100,
                 session_id: 7,
