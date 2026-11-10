@@ -33,4 +33,13 @@ function Assert-AckReceipt([string]$Path, [datetime]$NotBeforeUtc = [datetime]::
         $lines[3] -cne 'worker_state=Completed') {
         throw 'Invalid completion receipt format'
     }
+    # Rust emits u64 IDs. Reject numeric strings outside that domain instead
+    # of treating arbitrary-length decimal text as correlated evidence.
+    $parsed = [uint64]0
+    foreach ($line in @($lines[1], $lines[2])) {
+        $decimal = $line.Substring($line.IndexOf('=') + 1)
+        if (-not [uint64]::TryParse($decimal, [ref]$parsed) -or $parsed -eq 0) {
+            throw 'ACK identifier is outside the valid u64 domain'
+        }
+    }
 }
