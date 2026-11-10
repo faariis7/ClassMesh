@@ -19,6 +19,7 @@ function Wait-ApprovedM2QualificationWindow {
         throw 'FAIL_CLOSED: no complete SCM process identity to qualify'
     }
     Assert-LocalAbsolutePath $ExpectedImage
+    $expectedCommand = '"' + $ExpectedImage + '"'
     $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
     "SCM_APPROVED_M2_WINDOW_OPEN_PID=$ServicePid; SECONDS=$Seconds; RUN_SIGNED_NONADMIN_TEACHER_ACK_SEPARATELY"
     do {
@@ -26,12 +27,14 @@ function Wait-ApprovedM2QualificationWindow {
         if ($null -eq $svc -or $svc.State -ne 'Running' -or
             $svc.StartName -notin @('LocalSystem','NT AUTHORITY\SYSTEM') -or
             $svc.ServiceType -ne 'Own Process' -or $svc.StartMode -ne 'Manual' -or
-            $svc.ProcessId -ne $ServicePid) {
+            $svc.ProcessId -ne $ServicePid -or
+            -not [string]::Equals(([string]$svc.PathName).Trim(), $expectedCommand,
+                [StringComparison]::OrdinalIgnoreCase)) {
             throw 'FAIL_CLOSED: SCM PID, account or registration changed during M2 qualification'
         }
         $process = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $ServicePid)
         if ($null -eq $process -or $process.SessionId -ne 0 -or
-            $process.CreationDate -ne $ExpectedCreationDate -or
+            [string]$process.CreationDate -cne $ExpectedCreationDate -or
             [string]::IsNullOrWhiteSpace([string]$process.ExecutablePath) -or
             -not [string]::Equals([IO.Path]::GetFullPath([string]$process.ExecutablePath),
                 [IO.Path]::GetFullPath($ExpectedImage),[StringComparison]::OrdinalIgnoreCase)) {
