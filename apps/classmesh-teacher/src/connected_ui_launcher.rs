@@ -14,7 +14,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use classmesh_control::client_session::ClientControlSession;
 use classmesh_control::live_authorization::LiveAuthorizationStore;
-use classmesh_protocol::{Capability, ControlRole};
+use classmesh_protocol::{Capability, ControlRole, teacher_interaction};
 
 use crate::connected_runtime::{
     TeacherConnectedPlaybackError, TeacherDuplexDispatch, drive_authenticated_teacher_duplex,
@@ -38,13 +38,13 @@ fn validate_enrolled_startup(
     actual_session_id: u64,
     major: u32,
     minor: u32,
-    playback_capability: bool,
+    usable_capability: bool,
     teacher_role: bool,
 ) -> Result<(), TeacherConnectedPlaybackError> {
     if !active || expected_session_id == 0 || expected_session_id != actual_session_id {
         return Err(TeacherConnectedPlaybackError::SessionMismatch);
     }
-    if !teacher_role || major != 0 || minor < 8 || !playback_capability {
+    if !teacher_role || major != 0 || minor < 8 || !usable_capability {
         return Err(TeacherConnectedPlaybackError::NotNegotiated);
     }
     Ok(())
@@ -63,7 +63,15 @@ fn preflight_enrolled_session(
         u32::from(negotiated.version.minor),
         negotiated
             .capabilities
-            .contains(&Capability::ReceiverPlaybackDiagnostics),
+            .contains(&Capability::ReceiverPlaybackDiagnostics)
+            || teacher_interaction::teacher_message_available(
+                negotiated.version,
+                &negotiated.capabilities,
+            )
+            || teacher_interaction::open_target_available(
+                negotiated.version,
+                &negotiated.capabilities,
+            ),
         negotiated.role == ControlRole::Teacher,
     )
 }
@@ -71,6 +79,34 @@ fn preflight_enrolled_session(
 #[cfg(test)]
 mod startup_preflight_tests {
     use super::*;
+
+    #[test]
+    fn closed_window_race_is_normal_only_after_gui_exit() {
+        // A native window may close before authentication is published:
+        // both channel-close outcomes mean the sole control owner retired.
+        assert!(super::classify_runtime_after_clean_window_exit(Ok(())).is_ok());
+        assert!(
+            super::classify_runtime_after_clean_window_exit(Err(
+                TeacherConnectedPlaybackError::ActionChannelClosed
+            ))
+            .is_ok()
+        );
+        assert!(
+            super::classify_runtime_after_clean_window_exit(Err(
+                TeacherConnectedPlaybackError::WindowDisconnected
+            ))
+            .is_ok()
+        );
+        // Never suppress authorization failures just because the GUI exited.
+        assert!(matches!(
+            super::classify_runtime_after_clean_window_exit(Err(
+                TeacherConnectedPlaybackError::NotNegotiated
+            )),
+            Err(super::EnrolledTeacherUiLaunchError::ControlRuntime(
+                TeacherConnectedPlaybackError::NotNegotiated
+            ))
+        ));
+    }
 
     #[test]
     fn refuses_stale_or_unnegotiated_session_before_native_window() {
@@ -197,6 +233,22 @@ impl std::error::Error for EnrolledTeacherUiLaunchError {
     }
 }
 
+/// A normally closed native window drops both its GUI action sender and
+/// control-event receiver. The Tokio owner can observe either closure first;
+/// both outcomes retire its authenticated QUIC connection. This normalization
+/// is used ONLY after run_native has returned successfully and the owner was
+/// joined; live authorization, transport and backpressure errors still fail.
+fn classify_runtime_after_clean_window_exit(
+    control: Result<(), TeacherConnectedPlaybackError>,
+) -> Result<(), EnrolledTeacherUiLaunchError> {
+    match control {
+        Ok(())
+        | Err(TeacherConnectedPlaybackError::ActionChannelClosed)
+        | Err(TeacherConnectedPlaybackError::WindowDisconnected) => Ok(()),
+        Err(error) => Err(EnrolledTeacherUiLaunchError::ControlRuntime(error)),
+    }
+}
+
 /// Run the actual Windows GUI on the caller's native event-loop thread, with
 /// the one authenticated QUIC session on the joined Tokio owner thread.
 ///
@@ -222,8 +274,5 @@ pub fn run_teacher_ui_with_enrolled_session(
         .join()
         .map_err(|_| EnrolledTeacherUiLaunchError::ControlThreadPanicked)?;
     window.map_err(EnrolledTeacherUiLaunchError::NativeWindow)?;
-    match control {
-        Ok(()) | Err(TeacherConnectedPlaybackError::ActionChannelClosed) => Ok(()),
-        Err(error) => Err(EnrolledTeacherUiLaunchError::ControlRuntime(error)),
-    }
+    classify_runtime_after_clean_window_exit(control)
 }

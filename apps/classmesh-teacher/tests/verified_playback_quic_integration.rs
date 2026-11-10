@@ -51,6 +51,16 @@ struct Pair {
 }
 
 async fn pair() -> Result<Pair, Box<dyn Error + Send + Sync>> {
+    pair_with_capabilities(BTreeSet::from([
+        Capability::ReceiverPlaybackDiagnostics,
+        Capability::TeacherMessage,
+    ]))
+    .await
+}
+
+async fn pair_with_capabilities(
+    capabilities: BTreeSet<Capability>,
+) -> Result<Pair, Box<dyn Error + Send + Sync>> {
     let certified = generate_simple_self_signed(vec!["classmesh.local".to_owned()])?;
     let cert = CertificateDer::from(certified.cert);
     let key = PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der());
@@ -64,10 +74,6 @@ async fn pair() -> Result<Pair, Box<dyn Error + Send + Sync>> {
     let mut client_endpoint =
         Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
     client_endpoint.set_default_client_config(client_config_with_roots(roots)?);
-    let capabilities = BTreeSet::from([
-        Capability::ReceiverPlaybackDiagnostics,
-        Capability::TeacherMessage,
-    ]);
     let negotiated = capabilities.clone();
     let server_task = tokio::spawn(async move {
         let conn = accept(&server).await.map_err(|e| e.to_string())?;
@@ -510,10 +516,18 @@ async fn native_enrolled_ui_owner_closes_without_a_gui_and_denies_replaced_sessi
             ControlFlow::Continue(())
         })?;
     drop(bridge);
-    assert!(matches!(
-        thread.join().expect("control thread must not panic"),
-        Err(TeacherConnectedPlaybackError::ActionChannelClosed)
-    ));
+    let exit = thread.join().expect("control thread must not panic");
+    // A closed native window can retire its own action sender before the
+    // runtime publishes auth, or drop the event receiver during that publish.
+    // Both are fail-closed disconnections: no orphan QUIC owner survives.
+    assert!(
+        matches!(
+            exit,
+            Err(TeacherConnectedPlaybackError::ActionChannelClosed)
+                | Err(TeacherConnectedPlaybackError::WindowDisconnected)
+        ),
+        "native window disappearance must stop the authenticated owner: {exit:?}"
+    );
 
     // An old trusted roster binding must not bootstrap the UI through a
     // different Hello session or reuse another connection's authority.
@@ -630,6 +644,169 @@ async fn continuous_teacher_runtime_requires_verified_report_before_window_authe
 
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authenticated_m2_command_can_start_without_m3_playback_diagnostics() -> TestResult {
+    use classmesh_protocol::control_wire::{
+        Heartbeat, TeacherInteractionRequest, TeacherMessage, teacher_interaction_request,
+    };
+    use classmesh_teacher::connected_runtime::{
+        TeacherDuplexDispatch, drive_authenticated_teacher_duplex,
+    };
+    use classmesh_teacher::receiver_playback_session::TeacherPlaybackSessionOwner;
+    use classmesh_teacher::ui_egui::TeacherUiControlEvent;
+    use classmesh_teacher::ui_shell::{TeacherInteractionUiAction, TeacherUiAction};
+    use std::ops::ControlFlow;
+    use std::sync::mpsc::sync_channel;
+    use tokio::time::timeout;
+
+    // M2 authenticates command control BEFORE M3 ever produces a video report.
+    let pair = pair_with_capabilities(BTreeSet::from([Capability::TeacherMessage])).await?;
+    let Pair {
+        _client_endpoint,
+        _server_endpoint,
+        _server_connection,
+        mut server_channel,
+        client,
+        live_auth,
+    } = pair;
+    let owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, binding())
+        .map_err(|error| format!("{error:?}"))?;
+    let (event_tx, event_rx) = sync_channel(8);
+    let (action_tx, action_rx) = sync_channel(4);
+    let runtime = tokio::spawn(async move {
+        let mut owner = owner;
+        drive_authenticated_teacher_duplex(
+            &mut owner,
+            client,
+            &live_auth,
+            event_tx,
+            action_rx,
+            |event| match event {
+                TeacherDuplexDispatch::OtherControl(envelope)
+                    if matches!(
+                        envelope.payload,
+                        Some(control_envelope::Payload::Heartbeat(_))
+                    ) =>
+                {
+                    ControlFlow::Break(())
+                }
+                _ => ControlFlow::Continue(()),
+            },
+            (|| 150, Instant::now),
+        )
+        .await
+    });
+    let (first, event_rx) = tokio::task::spawn_blocking(move || {
+        (event_rx.recv_timeout(Duration::from_secs(3)), event_rx)
+    })
+    .await?;
+    let first = first?;
+    assert!(
+        matches!(first, TeacherUiControlEvent::Authenticated(ref context)
+            if context.control_session_id == CONTROL_SESSION
+                && context.capabilities.contains(&Capability::TeacherMessage)
+                && !context.capabilities.contains(&Capability::ReceiverPlaybackDiagnostics)),
+        "trusted M2 control should bootstrap without a fake M3 frame"
+    );
+
+    action_tx.send(TeacherUiAction::TeacherInteraction(
+        TeacherInteractionUiAction {
+            source_id: SOURCE,
+            control_session_id: CONTROL_SESSION,
+            request: TeacherInteractionRequest {
+                action: Some(teacher_interaction_request::Action::Message(
+                    TeacherMessage {
+                        text_utf8: "M2 control before any frame".into(),
+                    },
+                )),
+            },
+        },
+    ))?;
+    let request = timeout(Duration::from_secs(3), server_channel.receive()).await??;
+    assert!(
+        matches!(
+            request.payload,
+            Some(control_envelope::Payload::TeacherInteractionRequest(_))
+        ),
+        "authorized Teacher must send a real QUIC request without M3 diagnostics"
+    );
+    let (second, event_rx) = tokio::task::spawn_blocking(move || {
+        (event_rx.recv_timeout(Duration::from_secs(3)), event_rx)
+    })
+    .await?;
+    assert!(
+        matches!(second?, TeacherUiControlEvent::CommandWritten {
+            control_session_id: CONTROL_SESSION, request_id
+        } if request_id != 0),
+        "writing QUIC is not Worker Completed"
+    );
+    assert!(
+        event_rx.try_recv().is_err(),
+        "never synthesize a Worker ACK"
+    );
+    server_channel
+        .send(&ControlEnvelope {
+            control_session_id: CONTROL_SESSION,
+            sequence: 3,
+            request_id: 0,
+            protocol_version: Some(WireVersion { major: 0, minor: 8 }),
+            payload: Some(control_envelope::Payload::Heartbeat(Heartbeat {
+                monotonic_time_us: 120,
+                control_session_id: CONTROL_SESSION,
+                media: 1,
+            })),
+        })
+        .await?;
+    timeout(Duration::from_secs(3), runtime)
+        .await??
+        .map_err(|error| format!("{error:?}"))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn m2_control_bootstrap_denies_unenrolled_student_before_ui_authority() -> TestResult {
+    use classmesh_teacher::connected_runtime::{
+        TeacherConnectedPlaybackError, drive_authenticated_teacher_duplex,
+    };
+    use classmesh_teacher::receiver_playback_session::TeacherPlaybackSessionOwner;
+    use std::ops::ControlFlow;
+    use std::sync::mpsc::sync_channel;
+    use tokio::time::timeout;
+
+    let pair = pair_with_capabilities(BTreeSet::from([Capability::TeacherMessage])).await?;
+    let owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, binding())
+        .map_err(|error| format!("{error:?}"))?;
+    let (event_tx, event_rx) = sync_channel(8);
+    let (_action_tx, action_rx) = sync_channel(4);
+    // The same TLS channel cannot authorize a server absent from the current roster.
+    let empty_roster = LiveAuthorizationStore::new(AuthorizationStore::default());
+    let runtime = tokio::spawn(async move {
+        let mut owner = owner;
+        drive_authenticated_teacher_duplex(
+            &mut owner,
+            pair.client,
+            &empty_roster,
+            event_tx,
+            action_rx,
+            |_| ControlFlow::Continue(()),
+            (|| 150, Instant::now),
+        )
+        .await
+    });
+    let result = timeout(Duration::from_secs(3), runtime).await??;
+    assert!(matches!(
+        result,
+        Err(TeacherConnectedPlaybackError::Command(_))
+    ));
+    assert!(
+        event_rx.try_recv().is_err(),
+        "no authenticated UI event may be published without authorized peer"
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authenticated_duplex_runtime_sends_ui_command_while_receiver_remains_waiting() -> TestResult
 {
     use classmesh_protocol::control_wire::{
@@ -695,8 +872,17 @@ async fn authenticated_duplex_runtime_sends_ui_command_while_receiver_remains_wa
     .await?;
     let first = first?;
     assert!(
-        matches!(first, TeacherUiControlEvent::VerifiedBootstrap { .. }),
-        "must not accept or send UI commands before the first verified playback report"
+        matches!(first, TeacherUiControlEvent::Authenticated(ref context)
+            if context.control_session_id == CONTROL_SESSION),
+        "verified TLS StudentDevice and current roster admit M2 controls before M3"
+    );
+    let (second, event_rx) = tokio::task::spawn_blocking(move || {
+        (event_rx.recv_timeout(Duration::from_secs(3)), event_rx)
+    })
+    .await?;
+    assert!(
+        matches!(second?, TeacherUiControlEvent::VerifiedBootstrap { .. }),
+        "the first M3 playback report must still bootstrap receiver counters separately"
     );
 
     action_tx.send(TeacherUiAction::TeacherInteraction(

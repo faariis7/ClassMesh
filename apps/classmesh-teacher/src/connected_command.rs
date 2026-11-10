@@ -99,7 +99,7 @@ fn prepare_teacher_interaction(
     })
 }
 
-fn verify_current_student(
+pub(crate) fn verify_current_student(
     owner: &TeacherPlaybackSessionOwner,
     connection: &Connection,
     authorization: &LiveAuthorizationStore,
