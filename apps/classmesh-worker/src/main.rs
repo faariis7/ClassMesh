@@ -43,6 +43,15 @@ impl TeacherInteractionReplay {
         }
     }
 
+    fn has_replay_capacity(&self) -> bool {
+        use classmesh_protocol::control_wire::TeacherInteractionState;
+        self.entries.len() < 128
+            || self
+                .entries
+                .iter()
+                .any(|(_, _, result)| result.state != TeacherInteractionState::Accepted as i32)
+    }
+
     fn record(
         &mut self,
         session_id: u64,
@@ -52,7 +61,19 @@ impl TeacherInteractionReplay {
     ) {
         const MAX_REPLAY_ENTRIES: usize = 128;
         if self.entries.len() == MAX_REPLAY_ENTRIES {
-            self.entries.pop_front();
+            // A pending WTS confirmation must remain addressable until its
+            // terminal result arrives. Evict a terminal entry instead.
+            use classmesh_protocol::control_wire::TeacherInteractionState;
+            let evict = self
+                .entries
+                .iter()
+                .position(|(_, _, prior)| prior.state != TeacherInteractionState::Accepted as i32);
+            if let Some(index) = evict {
+                self.entries.remove(index);
+            } else {
+                // Fail closed: never discard an in-flight replay binding.
+                return;
+            }
         }
         self.entries
             .push_back(((session_id, request_id), request, result));
@@ -676,6 +697,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(code) => {
                         // Same correlation ID with different payload must never execute.
                         eprintln!("ClassMesh Worker rejected Teacher replay: {code}");
+                        continue;
+                    }
+                    Ok(None) if !teacher_interaction_replay.has_replay_capacity() => {
+                        eprintln!(
+                            "ClassMesh Worker refused Teacher interaction: replay cache has only in-flight entries"
+                        );
                         continue;
                     }
                     Ok(None) => {
@@ -2587,6 +2614,38 @@ mod focused_profile_tests {
         );
         assert!(replay.lookup(78, 44, &first).unwrap().is_none());
         assert!(replay.lookup(77, 45, &first).unwrap().is_none());
+    }
+
+    #[test]
+    fn pending_message_binding_survives_replay_capacity_pressure() {
+        use classmesh_protocol::control_wire::{
+            TeacherInteractionKind, TeacherInteractionResult, TeacherInteractionState,
+        };
+        let mut replay = TeacherInteractionReplay::new();
+        let pending = teacher_message_request("Awaiting real WTS IDOK");
+        let accepted = TeacherInteractionResult {
+            kind: TeacherInteractionKind::Message as i32,
+            state: TeacherInteractionState::Accepted as i32,
+            diagnostic: String::new(),
+        };
+        let failed = TeacherInteractionResult {
+            kind: TeacherInteractionKind::Message as i32,
+            state: TeacherInteractionState::Failed as i32,
+            diagnostic: "failed".into(),
+        };
+        replay.record(7, 1, pending.clone(), accepted.clone());
+        for request in 2..=300 {
+            assert!(replay.has_replay_capacity());
+            replay.record(7, request, teacher_message_request("other"), failed.clone());
+        }
+        assert_eq!(replay.lookup(7, 1, &pending).unwrap(), Some(accepted));
+        assert!(replay.finalize(7, 1, failed.clone()));
+        assert_eq!(replay.lookup(7, 1, &pending).unwrap(), Some(failed));
+        let mut full = TeacherInteractionReplay::new();
+        for request in 1..=128 {
+            full.record(9, request, pending.clone(), accepted.clone());
+        }
+        assert!(!full.has_replay_capacity());
     }
 
     #[test]
