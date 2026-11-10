@@ -1,3 +1,52 @@
+// A failed OS liveness query cannot authorize retaining an IPC binding.
+// Keep this policy platform-neutral so its fail-close behavior is testable
+// without installing a privileged Windows Service.
+#[cfg(any(windows, test))]
+fn worker_probe_requires_recovery<E>(probe: Result<bool, E>) -> bool {
+    !matches!(probe, Ok(true))
+}
+
+// Service shutdown must revoke orphaned IPC even when the Worker handle
+// has already been cleared by a previous recovery path.
+#[cfg(any(windows, test))]
+fn orphaned_ipc_requires_cleanup(process_present: bool) -> bool {
+    !process_present
+}
+
+// A stop for a stale session must not tear down a different live Worker.
+// When the process handle is gone, however, its IPC generation is orphaned.
+#[cfg(any(windows, test))]
+fn stop_requires_orphan_cleanup(current_session: Option<u32>) -> bool {
+    current_session.is_none()
+}
+
+#[cfg(test)]
+mod worker_probe_tests {
+    #[test]
+    fn orphaned_ipc_is_revoked_without_a_worker_handle() {
+        assert!(super::orphaned_ipc_requires_cleanup(false));
+        assert!(!super::orphaned_ipc_requires_cleanup(true));
+    }
+
+    #[test]
+    fn stopping_without_process_revokes_orphan_but_preserves_other_session() {
+        assert!(super::stop_requires_orphan_cleanup(None));
+        assert!(!super::stop_requires_orphan_cleanup(Some(2)));
+        assert!(!super::stop_requires_orphan_cleanup(Some(1)));
+    }
+
+    #[test]
+    fn liveness_probe_failure_is_fail_closed() {
+        assert!(super::worker_probe_requires_recovery(Err("access denied")));
+        assert!(super::worker_probe_requires_recovery(Ok::<bool, &str>(
+            false
+        )));
+        assert!(!super::worker_probe_requires_recovery(Ok::<bool, &str>(
+            true
+        )));
+    }
+}
+
 #[cfg(windows)]
 mod control_runtime;
 #[cfg(windows)]
@@ -13,6 +62,10 @@ mod telemetry_native;
 
 #[cfg(windows)]
 mod windows_service_app {
+    // Reuse the same fail-closed policies covered by native/portable tests.
+    use super::{
+        orphaned_ipc_requires_cleanup, stop_requires_orphan_cleanup, worker_probe_requires_recovery,
+    };
     use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
@@ -571,10 +624,19 @@ mod windows_service_app {
                 .as_ref()
                 .is_some_and(|process| process.session_id() == session.0)
             {
+                if stop_requires_orphan_cleanup(
+                    self.process.as_ref().map(SessionProcess::session_id),
+                ) {
+                    self.capabilities.clear();
+                    self.pipe = None;
+                }
                 return;
             }
 
-            if let Some(pipe) = self.pipe.as_ref()
+            // A revoked or unobservable Worker must never receive even a
+            // graceful shutdown frame through an untrusted/stale pipe.
+            if self.current_authenticated_receiver_worker().is_some()
+                && let Some(pipe) = self.pipe.as_ref()
                 && let Err(error) = send_control(pipe, IpcControlCommand::Shutdown)
             {
                 eprintln!("failed to request graceful Worker shutdown: {error}");
@@ -615,6 +677,12 @@ mod windows_service_app {
                 .map(|process| SessionId(process.session_id()));
             if let Some(session) = session {
                 self.stop(session);
+            } else if orphaned_ipc_requires_cleanup(self.process.is_some()) {
+                // An absent process must not leave an authenticated reader
+                // generation or a live pipe behind during Service shutdown.
+                // Do not send Shutdown: there is no owned Worker to receive it.
+                self.capabilities.clear();
+                self.pipe = None;
             }
         }
 
@@ -623,13 +691,15 @@ mod windows_service_app {
             session: SessionId,
             command: IpcControlCommand,
         ) -> Result<(), WorkerControlSendError> {
+            // A session match alone does not authorize a command: the process
+            // may have exited or its capability-reader generation may have
+            // been revoked while the pipe handle remains open.
             if !self
-                .process
-                .as_ref()
-                .is_some_and(|process| process.session_id() == session.0)
+                .current_authenticated_receiver_worker()
+                .is_some_and(|peer| peer.session_id == session.0)
             {
                 eprintln!(
-                    "ignoring IPC command for session {}; no matching Worker is running",
+                    "refusing Worker IPC command for session {}; live authenticated peer binding is unavailable",
                     session.0
                 );
                 return Err(WorkerControlSendError::Unavailable);
@@ -647,15 +717,14 @@ mod windows_service_app {
         }
 
         fn send_input(&self, event: &InputEvent) -> Result<(), String> {
-            let process = self
-                .process
-                .as_ref()
-                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
-            if !process
-                .is_running()
-                .map_err(|error| format!("Worker input liveness probe failed: {error}"))?
-            {
-                return Err("interactive Worker exited before input dispatch".to_owned());
+            // Input shares the same authenticated process/session/generation
+            // admission as control messages. Process liveness alone is not
+            // sufficient after a capability revocation or reader teardown.
+            if self.current_authenticated_receiver_worker().is_none() {
+                return Err(
+                    "refusing Worker input: authenticated IPC peer binding is unavailable"
+                        .to_owned(),
+                );
             }
             let pipe = self
                 .pipe
@@ -1016,17 +1085,21 @@ mod windows_service_app {
         }
 
         fn poll(&mut self) -> WorkerManagerEvent {
-            let exited = self
-                .process
-                .as_ref()
-                .and_then(|process| match process.is_running() {
-                    Ok(true) => None,
-                    Ok(false) => Some((SessionId(process.session_id()), process.process_id())),
-                    Err(error) => {
-                        eprintln!("Worker liveness probe failed: {error}");
-                        None
+            let exited = self.process.as_mut().and_then(|process| {
+                let probe = process.is_running();
+                if let Err(error) = &probe {
+                    eprintln!(
+                        "Worker liveness probe failed: {error}; revoking IPC and recovering Worker"
+                    );
+                    if let Err(terminate_error) = process.terminate(1) {
+                        eprintln!(
+                            "Worker termination after failed liveness probe: {terminate_error}"
+                        );
                     }
-                });
+                }
+                worker_probe_requires_recovery(probe)
+                    .then_some((SessionId(process.session_id()), process.process_id()))
+            });
 
             if let Some((session, process_id)) = exited {
                 eprintln!(
