@@ -43,6 +43,15 @@ impl TeacherInteractionReplay {
         }
     }
 
+    fn has_replay_capacity(&self) -> bool {
+        use classmesh_protocol::control_wire::TeacherInteractionState;
+        self.entries.len() < 128
+            || self
+                .entries
+                .iter()
+                .any(|(_, _, result)| result.state != TeacherInteractionState::Accepted as i32)
+    }
+
     fn record(
         &mut self,
         session_id: u64,
@@ -52,10 +61,232 @@ impl TeacherInteractionReplay {
     ) {
         const MAX_REPLAY_ENTRIES: usize = 128;
         if self.entries.len() == MAX_REPLAY_ENTRIES {
-            self.entries.pop_front();
+            // A pending WTS confirmation must remain addressable until its
+            // terminal result arrives. Evict a terminal entry instead.
+            use classmesh_protocol::control_wire::TeacherInteractionState;
+            let evict = self
+                .entries
+                .iter()
+                .position(|(_, _, prior)| prior.state != TeacherInteractionState::Accepted as i32);
+            if let Some(index) = evict {
+                self.entries.remove(index);
+            } else {
+                // Fail closed: never discard an in-flight replay binding.
+                return;
+            }
         }
         self.entries
             .push_back(((session_id, request_id), request, result));
+    }
+
+    /// Update an existing accepted request only when a real terminal result
+    /// from the bound background confirmation operation is available.
+    fn finalize(
+        &mut self,
+        control_session_id: u64,
+        request_id: u64,
+        result: classmesh_protocol::control_wire::TeacherInteractionResult,
+    ) -> bool {
+        use classmesh_protocol::control_wire::TeacherInteractionState;
+        let Some((_, _, previous)) = self
+            .entries
+            .iter_mut()
+            .find(|(key, _, _)| *key == (control_session_id, request_id))
+        else {
+            return false;
+        };
+        if previous.state != TeacherInteractionState::Accepted as i32
+            || result.kind != previous.kind
+            || !matches!(
+                TeacherInteractionState::try_from(result.state),
+                Ok(TeacherInteractionState::Completed
+                    | TeacherInteractionState::Rejected
+                    | TeacherInteractionState::Failed)
+            )
+            || classmesh_protocol::teacher_interaction::validate_result(&result).is_err()
+        {
+            return false;
+        }
+        *previous = result;
+        true
+    }
+}
+
+/// One bounded, off-IPC-thread Windows message acknowledgement. The only
+/// completion source is the actual blocking WTS API response; the Worker main
+/// loop remains the sole writer to the privileged Service pipe.
+#[cfg(windows)]
+struct TeacherMessageConfirmationRuntime {
+    pending: Option<PendingTeacherMessage>,
+    // Retain ownership after a deadline: the Win32 dialog may still be alive.
+    confirmation_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(windows)]
+struct PendingTeacherMessage {
+    process_id: u32,
+    session_id: u32,
+    control_session_id: u64,
+    request_id: u64,
+    started: std::time::Instant,
+    // An isolated receiver per request prevents a late result from a timed-out
+    // dialog from occupying the next authenticated command's one-slot queue.
+    rx: std::sync::mpsc::Receiver<classmesh_windows_runtime::ipc::WorkerTeacherInteractionResult>,
+}
+
+#[cfg(windows)]
+impl TeacherMessageConfirmationRuntime {
+    const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(13);
+
+    fn new() -> Self {
+        Self {
+            pending: None,
+            confirmation_thread: None,
+        }
+    }
+
+    fn start<F>(
+        &mut self,
+        process_id: u32,
+        session_id: u32,
+        control_session_id: u64,
+        request_id: u64,
+        confirm: F,
+    ) -> Result<(), &'static str>
+    where
+        F: FnOnce() -> Result<(), classmesh_win32::TeacherInteractionExecutionError>
+            + Send
+            + 'static,
+    {
+        if self.pending.is_some() {
+            return Err("teacher_interaction.message_busy");
+        }
+        // A timed-out WTS call is not necessarily terminated. Never open a
+        // second dialog until the previous native call has actually returned.
+        if self
+            .confirmation_thread
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
+            return Err("teacher_interaction.message_busy");
+        }
+        if let Some(task) = self.confirmation_thread.take() {
+            let _ = task.join();
+        }
+        if session_id == 0 || control_session_id == 0 || request_id == 0 {
+            return Err("teacher_interaction.invalid_binding");
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let task = std::thread::Builder::new()
+            .name("classmesh-message-confirm".to_owned())
+            .spawn(move || {
+                use classmesh_protocol::control_wire::{
+                    TeacherInteractionKind, TeacherInteractionResult, TeacherInteractionState,
+                };
+                let (state, diagnostic) = match confirm() {
+                    Ok(()) => (TeacherInteractionState::Completed, String::new()),
+                    Err(error) => (
+                        TeacherInteractionState::Failed,
+                        error.diagnostic_code().to_owned(),
+                    ),
+                };
+                // Never write the privileged Service pipe from this thread.
+                // The receiver in the authenticated Worker IPC loop validates
+                // this correlation again before any resulting pipe write.
+                let _ = tx.try_send(
+                    classmesh_windows_runtime::ipc::WorkerTeacherInteractionResult {
+                        process_id,
+                        session_id,
+                        control_session_id,
+                        request_id,
+                        result: TeacherInteractionResult {
+                            kind: TeacherInteractionKind::Message as i32,
+                            state: state as i32,
+                            diagnostic,
+                        },
+                    },
+                );
+            })
+            .map_err(|_| "teacher_interaction.confirmation_thread_unavailable")?;
+        self.confirmation_thread = Some(task);
+        self.pending = Some(PendingTeacherMessage {
+            process_id,
+            session_id,
+            control_session_id,
+            request_id,
+            started: std::time::Instant::now(),
+            rx,
+        });
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Option<classmesh_windows_runtime::ipc::WorkerTeacherInteractionResult> {
+        use classmesh_protocol::control_wire::{
+            TeacherInteractionKind, TeacherInteractionResult, TeacherInteractionState,
+        };
+        let pending = self.pending.as_ref()?;
+        let (process_id, session_id, session, request) = (
+            pending.process_id,
+            pending.session_id,
+            pending.control_session_id,
+            pending.request_id,
+        );
+        // The absolute bound applies even when a success is already queued:
+        // a stalled IPC loop must never forward stale Completed after expiry.
+        if pending.started.elapsed() >= Self::MAX_WAIT {
+            self.pending = None;
+            return Some(
+                classmesh_windows_runtime::ipc::WorkerTeacherInteractionResult {
+                    process_id,
+                    session_id,
+                    control_session_id: session,
+                    request_id: request,
+                    result: TeacherInteractionResult {
+                        kind: TeacherInteractionKind::Message as i32,
+                        state: TeacherInteractionState::Failed as i32,
+                        diagnostic: "teacher_interaction.confirmation_unavailable".to_owned(),
+                    },
+                },
+            );
+        }
+        match pending.rx.try_recv() {
+            Ok(result)
+                if (
+                    result.process_id,
+                    result.session_id,
+                    result.control_session_id,
+                    result.request_id,
+                ) == (process_id, session_id, session, request) =>
+            {
+                self.pending = None;
+                Some(result)
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty)
+                if pending.started.elapsed() < Self::MAX_WAIT =>
+            {
+                None
+            }
+            Err(_) | Ok(_) => {
+                // A bounded timeout, disconnected/panicking task or impossible
+                // internal binding mismatch produces a *failed* result only.
+                // Its per-request channel is dropped; delayed responses cannot
+                // contaminate the next Teacher request.
+                self.pending = None;
+                Some(
+                    classmesh_windows_runtime::ipc::WorkerTeacherInteractionResult {
+                        process_id,
+                        session_id,
+                        control_session_id: session,
+                        request_id: request,
+                        result: TeacherInteractionResult {
+                            kind: TeacherInteractionKind::Message as i32,
+                            state: TeacherInteractionState::Failed as i32,
+                            diagnostic: "teacher_interaction.confirmation_unavailable".to_owned(),
+                        },
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -172,6 +403,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input_injector = InputInjector::default();
     let mut workstation_locker = Win32WorkstationLocker;
     let mut teacher_interaction_replay = TeacherInteractionReplay::new();
+    let mut teacher_message_confirmation = TeacherMessageConfirmationRuntime::new();
     let mut teacher_message_presenter = Win32TeacherMessagePresenter;
     let mut open_target_launcher = Win32OpenTargetLauncher;
     let mut group_media_keys =
@@ -214,6 +446,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into());
             }
         }
+        // The main Worker IPC thread alone forwards a REAL terminal result.
+        // The bounded Win32 confirmation task never writes the privileged
+        // Service pipe or blocks desktop capture and session continuity.
+        if let Some(terminal) = teacher_message_confirmation.poll() {
+            if terminal.process_id == std::process::id()
+                && terminal.session_id == actual_session
+                && teacher_interaction_replay.finalize(
+                    terminal.control_session_id,
+                    terminal.request_id,
+                    terminal.result.clone(),
+                )
+            {
+                let frame =
+                    classmesh_windows_runtime::ipc::IpcFrame::worker_teacher_interaction_result(
+                        &terminal,
+                    )
+                    .map_err(ipc_message_error)?;
+                pipe.write_all(&frame.encode().map_err(ipc_frame_error)?)?;
+            } else {
+                eprintln!("ClassMesh Worker ignored misbound message confirmation");
+            }
+        }
+
         // Reconcile the Service-visible readiness from actual capture ownership
         // after every event, including SuspendMedia and failed backend paths.
         // A stale true must not survive a dropped DXGI capture.
@@ -444,29 +699,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         eprintln!("ClassMesh Worker rejected Teacher replay: {code}");
                         continue;
                     }
+                    Ok(None) if !teacher_interaction_replay.has_replay_capacity() => {
+                        eprintln!(
+                            "ClassMesh Worker refused Teacher interaction: replay cache has only in-flight entries"
+                        );
+                        continue;
+                    }
                     Ok(None) => {
-                        let executed = match execute_teacher_interaction(
-                            actual_session,
+                        use classmesh_protocol::control_wire::{
+                            TeacherInteractionKind, TeacherInteractionResult,
+                            TeacherInteractionState, teacher_interaction_request,
+                        };
+                        let kind = match classmesh_protocol::teacher_interaction::validate_request(
                             &interaction.request,
-                            &mut teacher_message_presenter,
-                            &mut open_target_launcher,
                         ) {
-                            Ok(result) => result,
-                            Err(code) => {
+                            Ok(kind) => kind,
+                            Err(_) => {
                                 eprintln!(
-                                    "ClassMesh Worker rejected malformed Teacher interaction: {code}"
+                                    "ClassMesh Worker rejected invalid Teacher interaction before execution"
                                 );
                                 continue;
                             }
                         };
-                        // Record before writing: a broken reply pipe cannot cause
-                        // this process to execute the same command twice.
-                        teacher_interaction_replay.record(
-                            interaction.control_session_id,
-                            interaction.request_id,
-                            interaction.request.clone(),
-                            executed.clone(),
-                        );
+                        let mut should_cache = true;
+                        let executed = if teacher_message_confirmation.pending.is_some() {
+                            // Keep the first authenticated message binding in
+                            // the bounded replay cache throughout the dialog.
+                            should_cache = false;
+                            TeacherInteractionResult {
+                                kind: kind as i32,
+                                state: TeacherInteractionState::Rejected as i32,
+                                diagnostic: "teacher_interaction.message_busy".to_owned(),
+                            }
+                        } else if let Some(teacher_interaction_request::Action::Message(message)) =
+                            interaction.request.action.as_ref()
+                        {
+                            let text = message.text_utf8.clone();
+                            match teacher_message_confirmation.start(
+                                std::process::id(),
+                                actual_session,
+                                interaction.control_session_id,
+                                interaction.request_id,
+                                move || {
+                                    classmesh_win32::confirm_teacher_message(
+                                        actual_session,
+                                        &text,
+                                        10,
+                                    )
+                                },
+                            ) {
+                                Ok(()) => TeacherInteractionResult {
+                                    kind: TeacherInteractionKind::Message as i32,
+                                    state: TeacherInteractionState::Accepted as i32,
+                                    diagnostic: String::new(),
+                                },
+                                Err(code) => TeacherInteractionResult {
+                                    kind: TeacherInteractionKind::Message as i32,
+                                    state: TeacherInteractionState::Failed as i32,
+                                    diagnostic: code.to_owned(),
+                                },
+                            }
+                        } else {
+                            match execute_teacher_interaction(
+                                actual_session,
+                                &interaction.request,
+                                &mut teacher_message_presenter,
+                                &mut open_target_launcher,
+                            ) {
+                                Ok(result) => result,
+                                Err(code) => {
+                                    eprintln!(
+                                        "ClassMesh Worker rejected malformed Teacher interaction: {code}"
+                                    );
+                                    continue;
+                                }
+                            }
+                        };
+                        // A broken reply pipe cannot execute the same request
+                        // twice. The real user OK later upgrades this entry.
+                        if should_cache {
+                            teacher_interaction_replay.record(
+                                interaction.control_session_id,
+                                interaction.request_id,
+                                interaction.request.clone(),
+                                executed.clone(),
+                            );
+                        }
                         executed
                     }
                 };
@@ -2292,6 +2610,209 @@ mod focused_profile_tests {
         );
         assert!(replay.lookup(78, 44, &first).unwrap().is_none());
         assert!(replay.lookup(77, 45, &first).unwrap().is_none());
+    }
+
+    #[test]
+    fn pending_message_binding_survives_replay_capacity_pressure() {
+        use classmesh_protocol::control_wire::{
+            TeacherInteractionKind, TeacherInteractionResult, TeacherInteractionState,
+        };
+        let mut replay = TeacherInteractionReplay::new();
+        let pending = teacher_message_request("Awaiting real WTS IDOK");
+        let accepted = TeacherInteractionResult {
+            kind: TeacherInteractionKind::Message as i32,
+            state: TeacherInteractionState::Accepted as i32,
+            diagnostic: String::new(),
+        };
+        let failed = TeacherInteractionResult {
+            kind: TeacherInteractionKind::Message as i32,
+            state: TeacherInteractionState::Failed as i32,
+            diagnostic: "failed".into(),
+        };
+        replay.record(7, 1, pending.clone(), accepted.clone());
+        for request in 2..=300 {
+            assert!(replay.has_replay_capacity());
+            replay.record(7, request, teacher_message_request("other"), failed.clone());
+        }
+        // Keep the Accepted proof available for subsequent replay-capacity
+        // checks: consuming it here made the Windows test fail to compile.
+        assert_eq!(
+            replay.lookup(7, 1, &pending).unwrap(),
+            Some(accepted.clone())
+        );
+        assert!(replay.finalize(7, 1, failed.clone()));
+        assert_eq!(replay.lookup(7, 1, &pending).unwrap(), Some(failed));
+        let mut full = TeacherInteractionReplay::new();
+        for request in 1..=128 {
+            full.record(9, request, pending.clone(), accepted.clone());
+        }
+        assert!(!full.has_replay_capacity());
+    }
+
+    #[test]
+    fn worker_confirmed_message_survives_async_wait_without_duplicate_execution() {
+        use classmesh_protocol::control_wire::{
+            TeacherInteractionKind, TeacherInteractionResult, TeacherInteractionState,
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut cache = TeacherInteractionReplay::new();
+        let mut confirmations = TeacherMessageConfirmationRuntime::new();
+        let request = teacher_message_request("Respond once");
+        let counter = Arc::new(AtomicUsize::new(0));
+        let invoked = Arc::clone(&counter);
+        let expected = (70_u64, 99_u64);
+        confirmations
+            .start(100, 7, expected.0, expected.1, move || {
+                invoked.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .expect("one confirmation thread may start");
+        let acceptance = TeacherInteractionResult {
+            kind: TeacherInteractionKind::Message as i32,
+            state: TeacherInteractionState::Accepted as i32,
+            diagnostic: String::new(),
+        };
+        cache.record(expected.0, expected.1, request.clone(), acceptance.clone());
+        assert!(
+            confirmations.start(100, 7, 70, 100, || Ok(())).is_err(),
+            "no second popup while one is active"
+        );
+        assert_eq!(
+            cache.lookup(expected.0, expected.1, &request).unwrap(),
+            Some(acceptance)
+        );
+        // Poll until the real separate thread completes; no actual OS UI is
+        // invoked by this unit test.
+        let mut terminal = None;
+        for _ in 0..100 {
+            if let Some(reply) = confirmations.poll() {
+                terminal = Some(reply);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let terminal = terminal.expect("confirmed completion must return via dedicated channel");
+        assert_eq!(terminal.control_session_id, expected.0);
+        assert_eq!(terminal.request_id, expected.1);
+        assert_eq!(terminal.session_id, 7);
+        assert_eq!(terminal.process_id, 100);
+        assert_eq!(
+            terminal.result.state,
+            TeacherInteractionState::Completed as i32
+        );
+        assert!(cache.finalize(expected.0, expected.1, terminal.result.clone()));
+        assert_eq!(
+            cache.lookup(expected.0, expected.1, &request).unwrap(),
+            Some(terminal.result)
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "request must execute once only"
+        );
+    }
+
+    #[test]
+    fn worker_message_confirmation_failure_never_becomes_completed() {
+        use classmesh_protocol::control_wire::TeacherInteractionState;
+        use classmesh_win32::TeacherInteractionExecutionError;
+        let mut confirmations = TeacherMessageConfirmationRuntime::new();
+        confirmations
+            .start(200, 8, 71, 101, || {
+                Err(TeacherInteractionExecutionError::MessageTimedOut)
+            })
+            .unwrap();
+        let reply = loop {
+            if let Some(reply) = confirmations.poll() {
+                break reply;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
+        assert_eq!(reply.result.state, TeacherInteractionState::Failed as i32);
+        assert_eq!(
+            reply.result.diagnostic,
+            "teacher_interaction.message_confirmation_timeout"
+        );
+    }
+
+    #[test]
+    fn late_confirmation_from_timed_out_dialog_cannot_complete_next_request() {
+        use classmesh_protocol::control_wire::TeacherInteractionState;
+        let (release, wait) = std::sync::mpsc::sync_channel::<()>(1);
+        let mut confirmations = TeacherMessageConfirmationRuntime::new();
+        confirmations
+            .start(100, 7, 80, 1, move || {
+                let _ = wait.recv();
+                Ok(())
+            })
+            .unwrap();
+        // Force the monotonic timeout without sleeping for 13 seconds.
+        confirmations.pending.as_mut().unwrap().started -= std::time::Duration::from_secs(14);
+        let timed_out = confirmations.poll().expect("bound must expire");
+        assert_eq!(
+            timed_out.result.state,
+            TeacherInteractionState::Failed as i32
+        );
+        assert_eq!(timed_out.request_id, 1);
+
+        assert_eq!(
+            confirmations.start(100, 7, 80, 2, || Ok(())),
+            Err("teacher_interaction.message_busy")
+        );
+        release.send(()).unwrap(); // stale old result must go to dropped receiver
+        while !confirmations
+            .confirmation_thread
+            .as_ref()
+            .unwrap()
+            .is_finished()
+        {
+            std::thread::yield_now();
+        }
+        confirmations.start(100, 7, 80, 2, || Ok(())).unwrap();
+        let next = loop {
+            if let Some(reply) = confirmations.poll() {
+                break reply;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
+        assert_eq!(next.request_id, 2);
+        assert_eq!(next.result.state, TeacherInteractionState::Completed as i32);
+    }
+
+    #[test]
+    fn queued_success_after_absolute_deadline_must_fail_closed() {
+        use classmesh_protocol::control_wire::TeacherInteractionState;
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let mut confirmations = TeacherMessageConfirmationRuntime {
+            confirmation_thread: None,
+            pending: Some(PendingTeacherMessage {
+                process_id: 100,
+                session_id: 7,
+                control_session_id: 80,
+                request_id: 3,
+                started: std::time::Instant::now() - std::time::Duration::from_secs(14),
+                rx,
+            }),
+        };
+        tx.send(
+            classmesh_windows_runtime::ipc::WorkerTeacherInteractionResult {
+                process_id: 100,
+                session_id: 7,
+                control_session_id: 80,
+                request_id: 3,
+                result: classmesh_protocol::control_wire::TeacherInteractionResult {
+                    kind: classmesh_protocol::control_wire::TeacherInteractionKind::Message as i32,
+                    state: TeacherInteractionState::Completed as i32,
+                    diagnostic: String::new(),
+                },
+            },
+        )
+        .unwrap();
+        let reply = confirmations
+            .poll()
+            .expect("expired confirmation must terminate");
+        assert_eq!(reply.result.state, TeacherInteractionState::Failed as i32);
     }
 
     #[test]
