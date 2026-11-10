@@ -22,6 +22,8 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Assert-TrustedTeacherPath.ps1')
 . (Join-Path $PSScriptRoot 'Assert-AckReceipt.ps1')
 . (Join-Path $PSScriptRoot 'Assert-ApprovedService.ps1')
+. (Join-Path $PSScriptRoot 'Assert-NonElevatedTeacherSession.ps1')
+Assert-NonElevatedTeacherSession
 
 if ($TimeoutSeconds -lt 5 -or $TimeoutSeconds -gt 120) { throw 'TimeoutSeconds must be 5..120' }
 Assert-TeacherMessageInput $Message
