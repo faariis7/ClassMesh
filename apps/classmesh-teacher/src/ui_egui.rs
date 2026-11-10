@@ -1,4 +1,5 @@
 use eframe::egui;
+use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::Instant;
 
@@ -6,7 +7,7 @@ use classmesh_control::client_session::ClientControlSession;
 use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::teacher_playback_receive::AuthenticatedTeacherControlMessage;
 use classmesh_protocol::Capability;
-use classmesh_protocol::control_wire::ControlEnvelope;
+use classmesh_protocol::control_wire::{ControlEnvelope, TeacherInteractionState};
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::classroom_grid::{MonitoringGridViewConfig, TeacherMonitoringGridViewModel};
@@ -42,6 +43,75 @@ use crate::ui_shell::{
     TeacherUiSection, TeacherUiShellState, prepare_teacher_interaction_ui_action,
     validate_teacher_interaction_ui_action,
 };
+
+// A delayed duplicate write or an out-of-order Accepted must not erase a
+// verified terminal Worker outcome. Only the matching session may update it.
+fn advance_command_status(
+    current: Option<TeacherInteractionState>,
+    incoming: TeacherInteractionState,
+) -> Option<TeacherInteractionState> {
+    match current {
+        Some(
+            TeacherInteractionState::Completed
+            | TeacherInteractionState::Rejected
+            | TeacherInteractionState::Failed,
+        ) => current,
+        Some(TeacherInteractionState::Accepted)
+            if incoming == TeacherInteractionState::Accepted =>
+        {
+            current
+        }
+        Some(TeacherInteractionState::Accepted)
+            if incoming == TeacherInteractionState::Completed
+                || incoming == TeacherInteractionState::Rejected
+                || incoming == TeacherInteractionState::Failed =>
+        {
+            Some(incoming)
+        }
+        None if matches!(
+            incoming,
+            TeacherInteractionState::Accepted
+                | TeacherInteractionState::Completed
+                | TeacherInteractionState::Rejected
+                | TeacherInteractionState::Failed
+        ) =>
+        {
+            Some(incoming)
+        }
+        _ => current,
+    }
+}
+
+// Never evict an unresolved request to make room for a newer write:
+// doing so would lose the only key for its eventual authenticated Worker ACK.
+fn record_command_write(
+    history: &mut BTreeMap<u64, (u64, Option<TeacherInteractionState>)>,
+    session_id: u64,
+    request_id: u64,
+) {
+    if history.contains_key(&request_id) {
+        return;
+    }
+    if history.len() >= 64 {
+        let terminal = history.iter().find_map(|(&id, &(_, state))| {
+            matches!(
+                state,
+                Some(
+                    TeacherInteractionState::Completed
+                        | TeacherInteractionState::Rejected
+                        | TeacherInteractionState::Failed
+                )
+            )
+            .then_some(id)
+        });
+        if let Some(id) = terminal {
+            history.remove(&id);
+        } else {
+            return;
+        }
+    }
+    history.insert(request_id, (session_id, None));
+}
 
 const APP_TITLE: &str = "ClassMesh Teacher";
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [800.0, 600.0];
@@ -95,6 +165,15 @@ pub enum TeacherUiControlEvent {
     PlaybackRetired {
         source_id: MonitoringSourceId,
         binding: TeacherPlaybackBinding,
+    },
+    CommandWritten {
+        control_session_id: u64,
+        request_id: u64,
+    },
+    CommandResult {
+        control_session_id: u64,
+        request_id: u64,
+        state: TeacherInteractionState,
     },
     Disconnected,
 }
@@ -208,6 +287,7 @@ pub struct TeacherEguiShell {
     teacher_interaction_draft: TeacherInteractionDraft,
     pending_action: Option<TeacherUiAction>,
     control_bridge: Option<TeacherUiControlBridge>,
+    command_status: BTreeMap<u64, (u64, Option<TeacherInteractionState>)>,
 }
 
 impl Default for TeacherEguiShell {
@@ -234,6 +314,7 @@ impl Default for TeacherEguiShell {
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
             control_bridge: None,
+            command_status: BTreeMap::new(),
         }
     }
 }
@@ -264,6 +345,7 @@ impl TeacherEguiShell {
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
             control_bridge: None,
+            command_status: BTreeMap::new(),
         }
     }
 
@@ -273,6 +355,31 @@ impl TeacherEguiShell {
         self.pending_action = None;
         self.clear_teacher_interaction_context();
         self.control_bridge = Some(bridge);
+    }
+
+    /// A result received after revocation or disconnect is not an authenticated
+    /// observation of the current connection. Keep the last verified state,
+    /// but never upgrade it from an obsolete or unbound session.
+    fn apply_command_result(
+        &mut self,
+        control_session_id: u64,
+        request_id: u64,
+        state: TeacherInteractionState,
+    ) {
+        if !self
+            .teacher_interaction_context
+            .as_ref()
+            .is_some_and(|context| {
+                context.control_session_id != 0 && context.control_session_id == control_session_id
+            })
+        {
+            return;
+        }
+        if let Some((session, status)) = self.command_status.get_mut(&request_id) {
+            if *session == control_session_id {
+                *status = advance_command_status(*status, state);
+            }
+        }
     }
 
     fn poll_control_bridge(&mut self) {
@@ -337,9 +444,34 @@ impl TeacherEguiShell {
                 Ok(TeacherUiControlEvent::PlaybackRetired { source_id, binding }) => {
                     let _ = self.revoke_receiver_playback_context(source_id, binding);
                 }
+                Ok(TeacherUiControlEvent::CommandWritten {
+                    control_session_id,
+                    request_id,
+                }) => {
+                    if self
+                        .teacher_interaction_context
+                        .as_ref()
+                        .is_some_and(|c| c.control_session_id == control_session_id)
+                    {
+                        // Bound UI history to the same 64 outstanding requests as the network owner.
+                        // Never turn a write into an acknowledgement.
+                        record_command_write(
+                            &mut self.command_status,
+                            control_session_id,
+                            request_id,
+                        );
+                    }
+                }
+                Ok(TeacherUiControlEvent::CommandResult {
+                    control_session_id,
+                    request_id,
+                    state,
+                }) => {
+                    self.apply_command_result(control_session_id, request_id, state);
+                }
                 Ok(TeacherUiControlEvent::Disconnected) => {
                     self.pending_action = None;
-                    self.clear_teacher_interaction_context();
+                    self.disconnect_preserving_command_history();
                 }
                 Err(TryRecvError::Empty) => {
                     event_batch_exhausted = false;
@@ -347,7 +479,7 @@ impl TeacherEguiShell {
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.pending_action = None;
-                    self.clear_teacher_interaction_context();
+                    self.disconnect_preserving_command_history();
                     self.control_bridge = None;
                     return;
                 }
@@ -371,7 +503,7 @@ impl TeacherEguiShell {
                 }
                 Some(Err(TrySendError::Disconnected(_))) => {
                     self.pending_action = None;
-                    self.clear_teacher_interaction_context();
+                    self.disconnect_preserving_command_history();
                     self.control_bridge = None;
                 }
                 _ => {}
@@ -387,6 +519,7 @@ impl TeacherEguiShell {
             != Some((context.source_id, context.control_session_id))
         {
             reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
+            self.command_status.clear();
             // Every queued action belongs to the old session, including
             // SelectDevice and presentation intents with no session epoch.
             // Never forward them into a newly authenticated QUIC session.
@@ -411,6 +544,14 @@ impl TeacherEguiShell {
         self.teacher_interaction_context = Some(context);
     }
 
+    // A lost QUIC connection is not a Worker failure or completion. Preserve
+    // the last observed results for diagnosis, while revoking all live authority.
+    fn disconnect_preserving_command_history(&mut self) {
+        let history = std::mem::take(&mut self.command_status);
+        self.clear_teacher_interaction_context();
+        self.command_status = history;
+    }
+
     pub fn clear_teacher_interaction_context(&mut self) {
         // Retire any intent queued under the old authenticated session.
         // A new offline ResumeThumbnail click can still be queued afterward.
@@ -423,6 +564,7 @@ impl TeacherEguiShell {
             self.pending_action = None;
         }
         self.teacher_interaction_context = None;
+        self.command_status.clear();
         // Retire the authenticated playback ledger and diagnostics intents together.
         self.retire_pending_diagnostics_override();
         self.playback = None;
@@ -948,6 +1090,31 @@ fn control_connection_label(context: Option<&TeacherInteractionUiContext>) -> &'
     }
 }
 
+// Preserve the authenticated session/request pair in operator-visible evidence.
+// A QUIC write and an Accepted receipt are not proof of Worker completion.
+fn command_evidence_label(
+    session_id: u64,
+    request_id: u64,
+    state: Option<TeacherInteractionState>,
+    connected: bool,
+) -> String {
+    let outcome = match (state, connected) {
+        (None, false) => "Connection lost — delivery unconfirmed",
+        (None, true) => "Written to QUIC — no authenticated ACK",
+        (Some(TeacherInteractionState::Accepted), false) => {
+            "Connection lost after Accepted — Worker outcome unconfirmed"
+        }
+        (Some(TeacherInteractionState::Accepted), true) => {
+            "Accepted receipt — Worker outcome unconfirmed"
+        }
+        (Some(TeacherInteractionState::Completed), _) => "Worker reported Completed",
+        (Some(TeacherInteractionState::Rejected), _) => "Command Rejected",
+        (Some(TeacherInteractionState::Failed), _) => "Worker reported Failed",
+        (Some(TeacherInteractionState::Unspecified), _) => "Invalid receipt — outcome unconfirmed",
+    };
+    format!("Session {session_id} / Request {request_id}: {outcome}")
+}
+
 impl eframe::App for TeacherEguiShell {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_control_bridge();
@@ -965,6 +1132,14 @@ impl eframe::App for TeacherEguiShell {
             ui.small(control_connection_label(
                 self.teacher_interaction_context.as_ref(),
             ));
+            for (&request_id, &(session_id, state)) in self.command_status.iter().rev().take(3) {
+                ui.small(command_evidence_label(
+                    session_id,
+                    request_id,
+                    state,
+                    self.teacher_interaction_context.is_some(),
+                ));
+            }
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -1031,6 +1206,101 @@ mod tests {
     use crate::ui_shell::{TeacherFocusUiAction, TeacherPresentationUiAction};
 
     use super::*;
+
+    #[test]
+    fn command_evidence_preserves_session_request_and_distinguishes_receipts() {
+        let written = command_evidence_label(77, 42, None, true);
+        assert!(written.contains("Session 77 / Request 42"));
+        assert!(written.contains("no authenticated ACK"));
+        assert!(!written.contains("Completed"));
+        let accepted =
+            command_evidence_label(77, 42, Some(TeacherInteractionState::Accepted), true);
+        assert!(accepted.contains("Worker outcome unconfirmed"));
+        assert!(!accepted.contains("Completed"));
+        let completed =
+            command_evidence_label(77, 42, Some(TeacherInteractionState::Completed), false);
+        assert!(completed.contains("Worker reported Completed"));
+        assert!(completed.contains("Session 77 / Request 42"));
+    }
+
+    #[test]
+    fn disconnect_retains_worker_truth_but_revokes_session_authority() {
+        let mut app = TeacherEguiShell::default();
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
+        app.command_status
+            .insert(7, (77, Some(TeacherInteractionState::Completed)));
+        app.command_status
+            .insert(8, (77, Some(TeacherInteractionState::Accepted)));
+        app.command_status.insert(9, (77, None));
+        app.disconnect_preserving_command_history();
+        assert!(app.teacher_interaction_context.is_none());
+        assert_eq!(app.command_status.len(), 3);
+        assert_eq!(
+            app.command_status.get(&7).unwrap().1,
+            Some(TeacherInteractionState::Completed)
+        );
+        assert_eq!(
+            app.command_status.get(&8).unwrap().1,
+            Some(TeacherInteractionState::Accepted)
+        );
+        assert_eq!(app.command_status.get(&9).unwrap().1, None);
+        app.set_teacher_interaction_context({
+            let mut next = interaction_context(BTreeSet::new());
+            next.control_session_id = 78;
+            next
+        });
+        assert!(
+            app.command_status.is_empty(),
+            "new session cannot inherit old ACKs"
+        );
+    }
+
+    #[test]
+    fn stale_worker_result_after_disconnect_cannot_upgrade_retained_history() {
+        let mut app = TeacherEguiShell::default();
+        app.set_teacher_interaction_context(interaction_context(BTreeSet::new()));
+        app.command_status.insert(42, (77, None));
+        app.disconnect_preserving_command_history();
+        app.apply_command_result(77, 42, TeacherInteractionState::Completed);
+        assert_eq!(app.command_status.get(&42), Some(&(77, None)));
+    }
+
+    #[test]
+    fn command_history_retains_unresolved_ack_keys_when_full() {
+        let mut history = BTreeMap::new();
+        for id in 1..=64 {
+            record_command_write(&mut history, 77, id);
+        }
+        record_command_write(&mut history, 77, 65);
+        assert_eq!(history.len(), 64);
+        assert!(!history.contains_key(&65));
+        assert!(history.contains_key(&1));
+        history.get_mut(&1).unwrap().1 = Some(TeacherInteractionState::Completed);
+        record_command_write(&mut history, 77, 65);
+        assert!(!history.contains_key(&1));
+        assert_eq!(history.get(&65), Some(&(77, None)));
+        assert!(history.contains_key(&2));
+    }
+
+    #[test]
+    fn worker_result_state_never_regresses_on_delayed_or_duplicate_events() {
+        use TeacherInteractionState::*;
+        assert_eq!(advance_command_status(None, Accepted), Some(Accepted));
+        assert_eq!(
+            advance_command_status(Some(Accepted), Completed),
+            Some(Completed)
+        );
+        assert_eq!(
+            advance_command_status(Some(Completed), Accepted),
+            Some(Completed)
+        );
+        assert_eq!(
+            advance_command_status(Some(Rejected), Completed),
+            Some(Rejected)
+        );
+        assert_eq!(advance_command_status(Some(Failed), Accepted), Some(Failed));
+        assert_eq!(advance_command_status(None, Completed), Some(Completed));
+    }
 
     #[test]
     fn authenticated_bridge_disconnect_retires_context_without_fake_liveness() {

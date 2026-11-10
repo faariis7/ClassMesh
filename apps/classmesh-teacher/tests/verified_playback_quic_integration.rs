@@ -522,17 +522,22 @@ async fn native_enrolled_ui_owner_closes_without_a_gui_and_denies_replaced_sessi
     stale.control_session_id += 1;
     let owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, stale)
         .map_err(|error| format!("{error:?}"))?;
-    let (bridge, thread) = start_enrolled_teacher_ui_runtime(
-        owner,
-        second_pair.client,
-        second_pair.live_auth,
-        |_| ControlFlow::Continue(()),
-    )?;
-    assert!(matches!(
-        thread.join().expect("control thread must not panic"),
-        Err(TeacherConnectedPlaybackError::SessionMismatch)
-    ));
-    drop(bridge);
+    // Runtime admission now rejects an invalid session synchronously, before
+    // spawning a network thread or exposing a GUI bridge. The previous test
+    // incorrectly expected that reject to arrive only when joining a thread.
+    let refused =
+        start_enrolled_teacher_ui_runtime(owner, second_pair.client, second_pair.live_auth, |_| {
+            ControlFlow::Continue(())
+        });
+    assert!(
+        matches!(
+            refused,
+            Err(ref error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && error.to_string().contains("SessionMismatch")
+        ),
+        "mismatched authenticated Hello must fail *before* native GUI admission"
+    );
     Ok(())
 }
 
@@ -680,8 +685,15 @@ async fn authenticated_duplex_runtime_sends_ui_command_while_receiver_remains_wa
         )
         .await
     });
-    let first = tokio::task::spawn_blocking(move || event_rx.recv_timeout(Duration::from_secs(3)))
-        .await??;
+    // Keep the native GUI event receiver ALIVE for the entire duplex test.
+    // After the first bootstrap, the runtime now publishes a real
+    // CommandWritten status. Dropping the receiver here would correctly
+    // retire the control connection (and fail the test with connection lost).
+    let (first, event_rx) = tokio::task::spawn_blocking(move || {
+        (event_rx.recv_timeout(Duration::from_secs(3)), event_rx)
+    })
+    .await?;
+    let first = first?;
     assert!(
         matches!(first, TeacherUiControlEvent::VerifiedBootstrap { .. }),
         "must not accept or send UI commands before the first verified playback report"
@@ -708,6 +720,20 @@ async fn authenticated_duplex_runtime_sends_ui_command_while_receiver_remains_wa
         received.payload,
         Some(control_envelope::Payload::TeacherInteractionRequest(_))
     ));
+    let (written, event_rx) = tokio::task::spawn_blocking(move || {
+        (event_rx.recv_timeout(Duration::from_secs(3)), event_rx)
+    })
+    .await?;
+    assert!(
+        matches!(
+            written?,
+            TeacherUiControlEvent::CommandWritten {
+                control_session_id: CONTROL_SESSION,
+                request_id,
+            } if request_id != 0
+        ),
+        "the live GUI must receive the non-ACK write event without retiring QUIC"
+    );
     let mut finished = report();
     finished.sequence = 3;
     finished.payload = Some(control_envelope::Payload::Heartbeat(
@@ -721,6 +747,8 @@ async fn authenticated_duplex_runtime_sends_ui_command_while_receiver_remains_wa
     timeout(Duration::from_secs(3), runtime)
         .await??
         .map_err(|err| format!("{err:?}"))?;
+    // The GUI's receiver is intentionally only dropped after runtime exit.
+    drop(event_rx);
     Ok(())
 }
 

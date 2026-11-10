@@ -14,6 +14,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use classmesh_control::client_session::ClientControlSession;
 use classmesh_control::live_authorization::LiveAuthorizationStore;
+use classmesh_protocol::{Capability, ControlRole};
 
 use crate::connected_runtime::{
     TeacherConnectedPlaybackError, TeacherDuplexDispatch, drive_authenticated_teacher_duplex,
@@ -27,6 +28,77 @@ pub type EnrolledTeacherRuntimeThread = JoinHandle<Result<(), TeacherConnectedPl
 
 const UI_EVENT_CAPACITY: usize = 16;
 const UI_ACTION_CAPACITY: usize = 16;
+
+/// Fail closed before opening the native window or spawning a network thread.
+/// This is a consistency preflight, not a substitute for mTLS peer, roster or
+/// revocation checks inside the single authenticated QUIC owner.
+fn validate_enrolled_startup(
+    active: bool,
+    expected_session_id: u64,
+    actual_session_id: u64,
+    major: u32,
+    minor: u32,
+    playback_capability: bool,
+    teacher_role: bool,
+) -> Result<(), TeacherConnectedPlaybackError> {
+    if !active || expected_session_id == 0 || expected_session_id != actual_session_id {
+        return Err(TeacherConnectedPlaybackError::SessionMismatch);
+    }
+    if !teacher_role || major != 0 || minor < 8 || !playback_capability {
+        return Err(TeacherConnectedPlaybackError::NotNegotiated);
+    }
+    Ok(())
+}
+
+fn preflight_enrolled_session(
+    owner: &TeacherPlaybackSessionOwner,
+    session: &ClientControlSession,
+) -> Result<(), TeacherConnectedPlaybackError> {
+    let negotiated = &session.established.negotiated;
+    validate_enrolled_startup(
+        owner.is_active(),
+        owner.binding().control_session_id,
+        session.established.control_session_id,
+        u32::from(negotiated.version.major),
+        u32::from(negotiated.version.minor),
+        negotiated
+            .capabilities
+            .contains(&Capability::ReceiverPlaybackDiagnostics),
+        negotiated.role == ControlRole::Teacher,
+    )
+}
+
+#[cfg(test)]
+mod startup_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn refuses_stale_or_unnegotiated_session_before_native_window() {
+        for (active, expected, actual, major, minor, capability, teacher_role) in [
+            (false, 11, 11, 0, 8, true, true),
+            (true, 0, 0, 0, 8, true, true),
+            (true, 11, 12, 0, 8, true, true),
+            (true, 11, 11, 1, 8, true, true),
+            (true, 11, 11, 0, 7, true, true),
+            (true, 11, 11, 0, 8, false, true),
+            (true, 11, 11, 0, 8, true, false),
+        ] {
+            assert!(
+                validate_enrolled_startup(
+                    active,
+                    expected,
+                    actual,
+                    major,
+                    minor,
+                    capability,
+                    teacher_role
+                )
+                .is_err()
+            );
+        }
+        assert!(validate_enrolled_startup(true, 11, 11, 0, 8, true, true).is_ok());
+    }
+}
 
 fn unix_now_ms() -> u64 {
     SystemTime::now()
@@ -50,11 +122,21 @@ pub fn start_enrolled_teacher_ui_runtime(
     authorization: LiveAuthorizationStore,
     dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()> + Send + 'static,
 ) -> std::io::Result<(TeacherUiControlBridge, EnrolledTeacherRuntimeThread)> {
+    // Reject invalid authority synchronously: callers must never receive a live
+    // GUI bridge/thread handle for a session that cannot be used.
+    preflight_enrolled_session(&owner, &session).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("Teacher enrolled startup rejected: {error:?}"),
+        )
+    })?;
     let (event_tx, event_rx) = sync_channel(UI_EVENT_CAPACITY);
     let (action_tx, action_rx) = sync_channel(UI_ACTION_CAPACITY);
     let runtime_thread = thread::Builder::new()
         .name("classmesh-teacher-enrolled-quic".to_owned())
         .spawn(move || {
+            // The synchronous caller already rejected invalid authority; no
+            // Tokio runtime or transport exists before that check.
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -78,6 +160,7 @@ pub fn start_enrolled_teacher_ui_runtime(
 
 #[derive(Debug)]
 pub enum EnrolledTeacherUiLaunchError {
+    UntrustedStartup(TeacherConnectedPlaybackError),
     ThreadSpawn(std::io::Error),
     NativeWindow(eframe::Error),
     ControlRuntime(TeacherConnectedPlaybackError),
@@ -87,6 +170,7 @@ pub enum EnrolledTeacherUiLaunchError {
 impl std::fmt::Display for EnrolledTeacherUiLaunchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::UntrustedStartup(error) => write!(f, "Teacher startup rejected: {error:?}"),
             Self::ThreadSpawn(error) => {
                 write!(f, "Teacher control thread could not start: {error}")
             }
@@ -106,7 +190,9 @@ impl std::error::Error for EnrolledTeacherUiLaunchError {
         match self {
             Self::ThreadSpawn(error) => Some(error),
             Self::NativeWindow(error) => Some(error),
-            Self::ControlRuntime(_) | Self::ControlThreadPanicked => None,
+            Self::UntrustedStartup(_) | Self::ControlRuntime(_) | Self::ControlThreadPanicked => {
+                None
+            }
         }
     }
 }
@@ -124,6 +210,8 @@ pub fn run_teacher_ui_with_enrolled_session(
     authorization: LiveAuthorizationStore,
     dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()> + Send + 'static,
 ) -> Result<(), EnrolledTeacherUiLaunchError> {
+    preflight_enrolled_session(&owner, &session)
+        .map_err(EnrolledTeacherUiLaunchError::UntrustedStartup)?;
     let (bridge, runtime_thread) =
         start_enrolled_teacher_ui_runtime(owner, session, authorization, dispatch)
             .map_err(EnrolledTeacherUiLaunchError::ThreadSpawn)?;
