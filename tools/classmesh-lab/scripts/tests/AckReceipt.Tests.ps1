@@ -30,6 +30,8 @@ try {
     MustReject ($valid + ('X' * 300))
     MustReject ($valid -replace 'Completed','Accepted')
     MustReject ($valid -replace 'request_id=9','request_id=0')
+    MustReject ($valid -replace 'request_id=9','request_id=18446744073709551616')
+    MustReject ($valid -replace 'control_session_id=12','control_session_id=18446744073709551616')
     MustReject ($valid -replace 'request_id=9','request_id=9`nrequest_id=10')
     'PASS: real receipt verifier accepts Completed and rejects stale, oversized, Accepted, zero ID, duplicate'
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }
