@@ -112,6 +112,7 @@ $arguments = @('--connect', $Connect, '--server-name', $ServerName,
 $process = $null
 $qualificationPassed = $false
 try {
+    $teacherStartUtc = [datetime]::UtcNow
     $process = Start-Process -FilePath $TeacherExe -ArgumentList ($arguments | ForEach-Object { '"' + $_ + '"' }) -PassThru -NoNewWindow
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         throw 'Teacher qualification timed out before Worker Completed'
@@ -120,7 +121,7 @@ try {
     if (-not (Test-Path -LiteralPath $Receipt -PathType Leaf)) {
         throw 'No correlated Completed receipt was produced'
     }
-    Assert-AckReceipt $Receipt
+    Assert-AckReceipt $Receipt $teacherStartUtc
     $verifiedServicePid = Assert-ReadyService $ServiceName $TrustedSignerThumbprint
     if ($verifiedServicePid -cne $approvedServicePid) {
         throw 'Service process changed during ACK qualification; refusing evidence'
