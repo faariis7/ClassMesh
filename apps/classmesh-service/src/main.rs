@@ -5,8 +5,20 @@ fn worker_probe_requires_recovery<E>(probe: Result<bool, E>) -> bool {
     !matches!(probe, Ok(true))
 }
 
+// Service shutdown must revoke orphaned IPC even when the Worker handle
+// has already been cleared by a previous recovery path.
+fn orphaned_ipc_requires_cleanup(process_present: bool) -> bool {
+    !process_present
+}
+
 #[cfg(test)]
 mod worker_probe_tests {
+    #[test]
+    fn orphaned_ipc_is_revoked_without_a_worker_handle() {
+        assert!(super::orphaned_ipc_requires_cleanup(false));
+        assert!(!super::orphaned_ipc_requires_cleanup(true));
+    }
+
     #[test]
     fn liveness_probe_failure_is_fail_closed() {
         assert!(super::worker_probe_requires_recovery(Err("access denied")));
@@ -639,6 +651,12 @@ mod windows_service_app {
                 .map(|process| SessionId(process.session_id()));
             if let Some(session) = session {
                 self.stop(session);
+            } else if orphaned_ipc_requires_cleanup(self.process.is_some()) {
+                // An absent process must not leave an authenticated reader
+                // generation or a live pipe behind during Service shutdown.
+                // Do not send Shutdown: there is no owned Worker to receive it.
+                self.capabilities.clear();
+                self.pipe = None;
             }
         }
 
