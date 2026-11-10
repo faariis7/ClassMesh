@@ -45,6 +45,9 @@ function Assert-ReadyService([string]$Name, [string]$ExpectedThumbprint) {
     } else {
         throw "Cannot safely identify installed Service executable"
     }
+    # The SCM image is also provisioned input. A valid signature at a
+    # symlink/junction target does not approve a redirectable service path.
+    Assert-NoReparsePath $binary
     Assert-ApprovedSignature $binary $ExpectedThumbprint
     if ([int64]$service.ProcessId -le 0) { throw 'Service has no running process ID' }
     $serviceProcess = Get-CimInstance Win32_Process -Filter ("ProcessId=" + [string]$service.ProcessId)
