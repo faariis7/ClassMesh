@@ -50,6 +50,9 @@ function Assert-ReadyService([string]$Name, [string]$ExpectedThumbprint) {
 
 if ($TimeoutSeconds -lt 5 -or $TimeoutSeconds -gt 120) { throw 'TimeoutSeconds must be 5..120' }
 if ([string]::IsNullOrWhiteSpace($Message)) { throw 'Message is required' }
+foreach ($value in @($Connect, $ServerName, $Identity, $Message, $Receipt)) {
+    if ($value -match '[`"\r\n]') { throw 'Unsafe command argument (quote, newline or backtick)' }
+}
 if (-not (Test-Path -LiteralPath $Identity -PathType Leaf)) { throw 'Provisioned Teacher identity missing' }
 if (Test-Path -LiteralPath $Receipt) { throw 'Receipt already exists; refusing overwrite' }
 Assert-ApprovedSignature $TeacherExe $TrustedSignerThumbprint
@@ -63,7 +66,7 @@ $arguments = @('--connect', $Connect, '--server-name', $ServerName,
     '--require-completed', '--ack-receipt', $Receipt)
 $process = $null
 try {
-    $process = Start-Process -FilePath $TeacherExe -ArgumentList $arguments -PassThru -NoNewWindow
+    $process = Start-Process -FilePath $TeacherExe -ArgumentList ($arguments | ForEach-Object { '"' + $_ + '"' }) -PassThru -NoNewWindow
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         throw 'Teacher qualification timed out before Worker Completed'
     }
