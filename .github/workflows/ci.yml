@@ -74,6 +74,7 @@ jobs:
         run: |
           $tests = @(
             '.\scripts\tests\mvp_local_absolute_path.ps1',
+            '.\scripts\tests\mvp_release_signer.ps1',
             '.\scripts\tests\mvp_scm_qualification_window.ps1',
             '.\scripts\tests\mvp_service_scm_guarded.ps1',
             '.\tools\classmesh-lab\scripts\tests\ApprovedServiceIdentity.Tests.ps1',
