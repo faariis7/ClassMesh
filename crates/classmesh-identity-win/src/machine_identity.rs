@@ -424,6 +424,36 @@ mod tests {
     }
 
     #[test]
+    fn primary_only_reader_rejects_corrupt_primary_without_backup_fallback() {
+        let path = test_path();
+        let durable = DurableMachineIdentity::new(&path);
+        durable.save(&bundle()).expect("write primary");
+        let backup = sibling_with_suffix(&path, ".bak");
+        fs::copy(&path, &backup).expect("retain valid backup");
+        fs::write(&path, b"{not-valid-json").expect("corrupt primary");
+        assert!(matches!(
+            durable.load_primary_only(),
+            Err(MachineIdentityStateError::Json(_))
+        ));
+        let _ = fs::remove_dir_all(path.parent().expect("test parent"));
+    }
+
+    #[test]
+    fn primary_only_reader_rejects_oversized_primary_without_backup_fallback() {
+        let path = test_path();
+        let durable = DurableMachineIdentity::new(&path);
+        durable.save(&bundle()).expect("write primary");
+        let backup = sibling_with_suffix(&path, ".bak");
+        fs::copy(&path, &backup).expect("retain valid backup");
+        fs::write(&path, vec![b' '; MAX_STATE_BYTES + 1]).expect("oversized primary");
+        assert!(matches!(
+            durable.load_primary_only(),
+            Err(MachineIdentityStateError::StateTooLarge { .. })
+        ));
+        let _ = fs::remove_dir_all(path.parent().expect("test parent"));
+    }
+
+    #[test]
     fn retained_identity_reader_is_bounded_and_validates_the_same_bytes() {
         let expected = bundle();
         let bytes = serde_json::to_vec(&PersistedMachineIdentity::from_bundle(&expected)).unwrap();
