@@ -410,16 +410,23 @@ mod tests {
 
         let _ = fs::remove_dir_all(path.parent().expect("test parent"));
     }
+
     #[test]
     fn primary_only_reader_rejects_missing_primary_even_with_backup() {
         let path = test_path();
         let durable = DurableMachineIdentity::new(&path);
-        assert!(matches!(durable.load_primary_only(), Err(MachineIdentityStateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound));
+        assert!(matches!(
+            durable.load_primary_only(),
+            Err(MachineIdentityStateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ));
         durable.save(&bundle()).expect("write test fixture");
         assert_eq!(durable.load_primary_only().unwrap(), bundle());
         let backup = sibling_with_suffix(&path, ".bak");
         fs::rename(&path, &backup).expect("move primary to backup");
-        assert!(matches!(durable.load_primary_only(), Err(MachineIdentityStateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound));
+        assert!(matches!(
+            durable.load_primary_only(),
+            Err(MachineIdentityStateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ));
         let _ = fs::remove_dir_all(path.parent().expect("test parent"));
     }
 
