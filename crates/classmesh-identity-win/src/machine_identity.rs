@@ -146,6 +146,15 @@ impl DurableMachineIdentity {
         Self::parse_from_reader(file).map(Some)
     }
 
+    /// Reads only the primary identity file. Unlike `load`, this never uses
+    /// a backup as an implicit authority. This checks syntax and bounds only:
+    /// callers MUST independently attest the source and validate trust before
+    /// using this data for any protected Teacher operation.
+    pub fn load_primary_only(&self) -> Result<MachineIdentityBundle, MachineIdentityStateError> {
+        let file = File::open(&self.path)?;
+        Self::parse_from_reader(file)
+    }
+
     /// Parse from the caller's retained, independently attested reader. This
     /// establishes syntax/bounds only, not OS provenance or rollback authority.
     /// Never opens a pathname or falls back to a backup.
@@ -401,6 +410,56 @@ mod tests {
 
         let _ = fs::remove_dir_all(path.parent().expect("test parent"));
     }
+
+    #[test]
+    fn primary_only_reader_rejects_missing_primary_even_with_backup() {
+        let path = test_path();
+        let durable = DurableMachineIdentity::new(&path);
+        assert!(matches!(
+            durable.load_primary_only(),
+            Err(MachineIdentityStateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        durable.save(&bundle()).expect("write test fixture");
+        assert_eq!(durable.load_primary_only().unwrap(), bundle());
+        let backup = sibling_with_suffix(&path, ".bak");
+        fs::rename(&path, &backup).expect("move primary to backup");
+        assert!(matches!(
+            durable.load_primary_only(),
+            Err(MachineIdentityStateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        let _ = fs::remove_dir_all(path.parent().expect("test parent"));
+    }
+
+    #[test]
+    fn primary_only_reader_rejects_corrupt_primary_without_backup_fallback() {
+        let path = test_path();
+        let durable = DurableMachineIdentity::new(&path);
+        durable.save(&bundle()).expect("write primary");
+        let backup = sibling_with_suffix(&path, ".bak");
+        fs::copy(&path, &backup).expect("retain valid backup");
+        fs::write(&path, b"{not-valid-json").expect("corrupt primary");
+        assert!(matches!(
+            durable.load_primary_only(),
+            Err(MachineIdentityStateError::Json(_))
+        ));
+        let _ = fs::remove_dir_all(path.parent().expect("test parent"));
+    }
+
+    #[test]
+    fn primary_only_reader_rejects_oversized_primary_without_backup_fallback() {
+        let path = test_path();
+        let durable = DurableMachineIdentity::new(&path);
+        durable.save(&bundle()).expect("write primary");
+        let backup = sibling_with_suffix(&path, ".bak");
+        fs::copy(&path, &backup).expect("retain valid backup");
+        fs::write(&path, vec![b' '; MAX_STATE_BYTES + 1]).expect("oversized primary");
+        assert!(matches!(
+            durable.load_primary_only(),
+            Err(MachineIdentityStateError::StateTooLarge { .. })
+        ));
+        let _ = fs::remove_dir_all(path.parent().expect("test parent"));
+    }
+
     #[test]
     fn retained_identity_reader_is_bounded_and_validates_the_same_bytes() {
         let expected = bundle();

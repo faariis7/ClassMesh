@@ -34,6 +34,7 @@ pub enum CngKeyError {
         actual: u32,
     },
     InvalidPublicKeyBlob,
+    ExportableKey,
 }
 
 impl Display for CngKeyError {
@@ -61,6 +62,7 @@ impl Display for CngKeyError {
             Self::InvalidPublicKeyBlob => {
                 write!(formatter, "unexpected CNG ECDSA P-256 public key blob")
             }
+            Self::ExportableKey => write!(formatter, "persisted CNG key is exportable"),
         }
     }
 }
@@ -172,6 +174,22 @@ impl CngMachineKey {
         let provider = open_provider()?;
         let _key = open_key(&provider, &name)?;
         Ok(Self { name })
+    }
+
+    /// Opens an already-provisioned machine key and rejects exportable keys.
+    ///
+    /// Read-only qualification gate: does not create a key, import a CA,
+    /// validate certificate provenance, or grant Teacher authorization.
+    pub fn open_existing_non_exportable(
+        name: impl Into<String>,
+    ) -> Result<Self, CngKeyError> {
+        let key = Self::open(name)?;
+        if key.export_policy()? != 0 {
+            return Err(CngKeyError::ExportableKey);
+        }
+        // Ensure the existing key is an ECDSA P-256 public key.
+        let _ = key.public_key_sec1()?;
+        Ok(key)
     }
 
     #[must_use]
@@ -512,6 +530,24 @@ mod tests {
                 let _ = key.delete();
             }
         }
+    }
+
+    #[test]
+    fn read_only_existing_key_gate_rejects_missing_machine_key() {
+        // No test key is created: the qualification path must never provision one.
+        let absent = unique_key_name();
+        assert!(CngMachineKey::open_existing_non_exportable(absent).is_err());
+    }
+
+    #[test]
+    fn read_only_existing_key_gate_accepts_persisted_non_exportable_key() {
+        let name = unique_key_name();
+        let _cleanup = TestKeyCleanup::new(name.clone());
+        let created = CngMachineKey::create(name.clone()).expect("test-only key creation");
+        drop(created);
+        let reopened = CngMachineKey::open_existing_non_exportable(name)
+            .expect("existing non-exportable key should be readable");
+        assert_eq!(reopened.export_policy().unwrap(), 0);
     }
 
     #[test]
