@@ -14,6 +14,7 @@ pub enum RosterRejection {
     InvalidPrincipalOrRole,
     InvalidIssuedTimestamp,
     OversizedStudentDeviceRoster,
+    OversizedStudentDeviceIdentifier,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -85,6 +86,10 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
         return Err(RosterRejection::EmptyStudentDeviceRoster);
     }
     for (index, id) in roster.student_device_ids.iter().enumerate() {
+        // Bound individual untrusted strings as well as roster cardinality.
+        if id.len() > 256 {
+            return Err(RosterRejection::OversizedStudentDeviceIdentifier);
+        }
         if id.is_empty()
             || id.trim() != *id
             || id.chars().any(char::is_control)
@@ -220,6 +225,35 @@ mod roster_resource_bounds_tests {
         assert_eq!(
             qualify_teacher_roster(&request),
             Err(RosterRejection::OversizedStudentDeviceRoster)
+        );
+    }
+}
+
+#[cfg(test)]
+mod roster_identifier_length_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_identifier_is_denied_even_in_small_roster() {
+        let oversized = "d".repeat(257);
+        let ids = [oversized.as_str()];
+        let request = TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: &ids,
+            }),
+        };
+        assert_eq!(
+            qualify_teacher_roster(&request),
+            Err(RosterRejection::OversizedStudentDeviceIdentifier)
         );
     }
 }
