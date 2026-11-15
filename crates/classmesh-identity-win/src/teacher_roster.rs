@@ -98,7 +98,12 @@ mod identifier_hardening_tests {
 
     #[test]
     fn rejects_noncanonical_student_device_identifiers() {
-        for ids in [&[" device-1"][..], &["device-1 "][..], &["device-1\\n"][..]] {
+        for ids in [
+            &[" device-1"][..],
+            &["device-1 "][..],
+            &["device-1\n"][..],
+            &["device-1\t"][..],
+        ] {
             assert_eq!(
                 qualify_teacher_roster(&request_with_ids(ids)),
                 Err(RosterRejection::InvalidStudentDeviceRoster)
