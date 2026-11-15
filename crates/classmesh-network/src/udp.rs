@@ -159,14 +159,29 @@ impl UdpMediaSocket {
     }
 
     pub fn receive_packet(&self) -> Result<(MediaPacket, SocketAddr), DatagramError> {
-        let mut buffer = [0_u8; MAX_MEDIA_DATAGRAM];
-        let (read, source) = self.socket.recv_from(&mut buffer)?;
+        // A receive buffer at the protocol limit can make a truncated UDP
+        // datagram indistinguishable from a valid maximum-size datagram.
+        let mut buffer = [0_u8; MAX_MEDIA_DATAGRAM + 1];
+        let (read, source) = self.socket.recv_from(&mut buffer).map_err(receive_error)?;
         Ok((decode_datagram(&buffer[..read])?, source))
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr, DatagramError> {
         Ok(self.socket.local_addr()?)
     }
+}
+
+fn receive_error(error: io::Error) -> DatagramError {
+    #[cfg(windows)]
+    {
+        // Winsock consumes the oversized datagram and reports WSAEMSGSIZE
+        // instead of returning its truncated prefix from recvfrom.
+        const WSAEMSGSIZE: i32 = 10040;
+        if error.raw_os_error() == Some(WSAEMSGSIZE) {
+            return DatagramError::DatagramTooLarge;
+        }
+    }
+    DatagramError::Io(error)
 }
 
 #[must_use]
@@ -182,6 +197,8 @@ mod tests {
     use classmesh_protocol::media::MediaFlags;
 
     use super::*;
+    use crate::receiver::{ReceiverEvent, ReceiverPolicy};
+    use crate::transport::UdpFrameReceiver;
 
     fn packet() -> MediaPacket {
         MediaPacket {
@@ -208,6 +225,84 @@ mod tests {
         assert!(encoded.len() <= MAX_MEDIA_DATAGRAM);
         let decoded = decode_datagram(&encoded).expect("packet should decode");
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn oversized_datagrams_are_rejected_without_losing_the_next_valid_packet() {
+        let receiver = UdpMediaSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let destination = receiver.local_addr().unwrap();
+        let mut frame = packet();
+        frame.payload.resize(MAX_PACKET_PAYLOAD, 0x5a);
+        frame.header.payload_len = u16::try_from(frame.payload.len()).unwrap();
+        let valid = encode_datagram(&frame).unwrap();
+        assert_eq!(valid.len(), MAX_MEDIA_DATAGRAM);
+
+        let oversized = [1, 128].map(|extra| {
+            let mut datagram = valid.clone();
+            datagram.resize(valid.len() + extra, 0);
+            sender.send_to(&datagram, destination).unwrap();
+            receiver.receive_packet()
+        });
+        sender.send_to(&valid, destination).unwrap();
+        assert_eq!(receiver.receive_packet().unwrap().0, frame);
+        assert!(
+            oversized
+                .iter()
+                .all(|result| matches!(result, Err(DatagramError::DatagramTooLarge))),
+            "both datagrams must be classified as malformed: {:?}",
+            oversized.map(|result| result.map(|(packet, _)| packet.payload.len()))
+        );
+    }
+
+    #[test]
+    fn fresh_fragments_survive_a_receive_wait_longer_than_the_expiry() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let observer = socket.try_clone().unwrap();
+        let mut receiver =
+            UdpFrameReceiver::new(UdpMediaSocket { socket }, ReceiverPolicy::default());
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let destination = receiver.local_addr().unwrap();
+        let sender = UdpMediaSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let mut fragment = packet();
+        fragment.header.flags = MediaFlags::FRAME_START;
+        fragment.header.packet_count = 2;
+        sender.send_packet_to(&fragment, destination).unwrap();
+
+        // Use the real socket's queue to distinguish pre-read and post-read
+        // times without relying on thread scheduling or a wall-clock delay.
+        let mut buffer = [0_u8; MAX_MEDIA_DATAGRAM];
+        observer.peek_from(&mut buffer).unwrap();
+        let first = receiver
+            .receive_once_with_clock(|| {
+                observer.set_nonblocking(true).unwrap();
+                let pending = observer.peek_from(&mut buffer);
+                observer.set_nonblocking(false).unwrap();
+                match pending {
+                    Ok(_) => 0,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => 100_000,
+                    Err(error) => panic!("socket peek failed: {error}"),
+                }
+            })
+            .unwrap();
+        assert!(first.events.is_empty());
+        let events = receiver.tick(100_001);
+        assert!(events.is_empty(), "fresh pending frame expired: {events:?}");
+
+        fragment.header.flags = MediaFlags::FRAME_END;
+        fragment.header.packet_index = 1;
+        fragment.header.sequence += 1;
+        sender.send_packet_to(&fragment, destination).unwrap();
+        let completed = receiver.receive_once_with_clock(|| 100_002).unwrap();
+        assert!(matches!(
+            &completed.events[..],
+            [ReceiverEvent::FrameReady(frame)] if frame.data == [1, 2, 3, 4, 1, 2, 3, 4]
+        ));
     }
 
     #[test]

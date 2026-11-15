@@ -198,15 +198,29 @@ impl ProtectedUnicastFrameReceiver {
         })
     }
 
+    /// Caller-supplied timestamp for compatibility with existing pure probes.
+    /// Blocking production receive loops should use `receive_once_with_clock`
+    /// so their media expiry clock is sampled *after* the socket wait.
     pub fn receive_once(
         &mut self,
         now_us: u64,
     ) -> Result<ProtectedUnicastReceiveOutcome, ProtectedUnicastReceiveError> {
+        self.receive_once_with_clock(|| now_us)
+    }
+
+    /// Uses post-read monotonic time both for received ciphertext fragments
+    /// and for timeout-driven stale-frame ticks. A socket wait (or scheduling
+    /// suspension) must never silently consume the remaining 80ms frame age.
+    /// All source/stream/authorization checks remain inside `state.push_packet`.
+    pub fn receive_once_with_clock(
+        &mut self,
+        clock: impl FnOnce() -> u64,
+    ) -> Result<ProtectedUnicastReceiveOutcome, ProtectedUnicastReceiveError> {
         match self.socket.receive_packet() {
-            Ok((packet, source)) => Ok(self.state.push_packet(now_us, &packet, source)),
+            Ok((packet, source)) => Ok(self.state.push_packet(clock(), &packet, source)),
             Err(error) => match classify_datagram_failure(&error) {
                 DatagramFailureDisposition::Tick => Ok(ProtectedUnicastReceiveOutcome::Events(
-                    self.state.tick(now_us),
+                    self.state.tick(clock()),
                 )),
                 DatagramFailureDisposition::DropMalformed => {
                     Ok(ProtectedUnicastReceiveOutcome::Dropped(
@@ -377,6 +391,67 @@ mod tests {
         receiver.push_packet(100, &packets(2)[0], from_teacher);
         let _ = receiver.tick(100_000);
         assert_eq!(receiver.stats().stale_frames_dropped, 1);
+    }
+
+    #[test]
+    fn protected_unicast_socket_samples_clock_after_packet_or_timeout() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+
+        let socket =
+            UdpMediaSocket::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
+                .expect("test-only loopback socket");
+        let port = socket.local_addr().unwrap().port();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(400)))
+            .unwrap();
+        let mut receiver = ProtectedUnicastFrameReceiver {
+            socket,
+            state: ProtectedUnicastReceiveState::new(ipv4_config(port)).unwrap(),
+        };
+        let transmitted = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&transmitted);
+        let sender = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            let socket =
+                UdpMediaSocket::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
+                    .unwrap();
+            signal.store(true, Ordering::Release);
+            socket
+                .send_packet_to(
+                    &packets(1)[0],
+                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
+                )
+                .unwrap();
+        });
+        let _outcome = receiver
+            .receive_once_with_clock(|| {
+                assert!(
+                    transmitted.load(Ordering::Acquire),
+                    "must sample after actual socket receive"
+                );
+                100_000
+            })
+            .unwrap();
+        sender.join().unwrap();
+
+        receiver
+            .socket
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let mut sampled_on_timeout = false;
+        let result = receiver
+            .receive_once_with_clock(|| {
+                sampled_on_timeout = true;
+                200_000
+            })
+            .unwrap();
+        assert!(matches!(result, ProtectedUnicastReceiveOutcome::Events(_)));
+        assert!(
+            sampled_on_timeout,
+            "timeout tick must use current, not pre-wait, time"
+        );
     }
 
     #[test]
