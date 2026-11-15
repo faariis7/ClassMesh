@@ -9,6 +9,8 @@ pub enum RosterRejection {
     WrongRole,
     StaleAuthorization,
     MissingApprovedVerifier,
+    EmptyStudentDeviceRoster,
+    InvalidStudentDeviceRoster,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -56,6 +58,14 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
         || roster.issued_unix_ms > request.now_unix_ms
     {
         return Err(RosterRejection::StaleAuthorization);
+    }
+    if roster.student_device_ids.is_empty() {
+        return Err(RosterRejection::EmptyStudentDeviceRoster);
+    }
+    for (index, id) in roster.student_device_ids.iter().enumerate() {
+        if id.trim().is_empty() || roster.student_device_ids[..index].contains(id) {
+            return Err(RosterRejection::InvalidStudentDeviceRoster);
+        }
     }
     // Never interpret unverified signature bytes or embedded roster as authority.
     Err(RosterRejection::MissingApprovedVerifier)
