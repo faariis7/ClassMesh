@@ -9,6 +9,10 @@ pub use machine_identity::{
 #[cfg(windows)]
 mod cng;
 #[cfg(windows)]
+mod teacher_binding;
+#[cfg(windows)]
+pub use teacher_binding::{BindingQualificationError, qualify_existing_key_binding};
+#[cfg(windows)]
 mod tls;
 
 #[cfg(windows)]
