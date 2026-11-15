@@ -108,3 +108,37 @@ fn apparently_valid_unverified_signature_still_denied() {
         Err(RosterRejection::MissingApprovedVerifier)
     );
 }
+
+#[test]
+fn empty_student_device_roster_denied() {
+    let roster = RosterEvidence {
+        teacher_principal: "teacher-a",
+        role: "teacher",
+        issued_unix_ms: 95,
+        expires_unix_ms: 200,
+        signature: Some(&[1]),
+        student_device_ids: &[],
+    };
+    assert_eq!(
+        qualify_teacher_roster(&request(Some(roster))),
+        Err(RosterRejection::EmptyStudentDeviceRoster)
+    );
+}
+
+#[test]
+fn duplicate_or_blank_student_device_ids_denied() {
+    for ids in [&["device-a", "device-a"][..], &["device-a", ""][..]] {
+        let roster = RosterEvidence {
+            teacher_principal: "teacher-a",
+            role: "teacher",
+            issued_unix_ms: 95,
+            expires_unix_ms: 200,
+            signature: Some(&[1]),
+            student_device_ids: ids,
+        };
+        assert_eq!(
+            qualify_teacher_roster(&request(Some(roster))),
+            Err(RosterRejection::InvalidStudentDeviceRoster)
+        );
+    }
+}
