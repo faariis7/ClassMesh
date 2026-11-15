@@ -2,6 +2,7 @@
 //! playback reports. This is NEVER a QUIC authentication or quality sample.
 use std::time::{Duration, Instant};
 
+use classmesh_control::teacher_playback_receive::AuthenticatedTeacherControlMessage;
 use classmesh_protocol::control_wire::ControlEnvelope;
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
@@ -47,9 +48,28 @@ impl TeacherPlaybackUiProjection {
         self.binding
     }
 
-    /// The live QUIC client must already have authenticated the exact Service
-    /// and PrincipalId; the input boolean comes from negotiated capability 18.
-    pub fn accept_authenticated(
+    /// Only an already authenticated and enrolled QUIC receive result may
+    /// enter the public Teacher projection. The explicitly mapped source
+    /// must equal this projection's selected device before replay/freshness
+    /// state is mutated. Other control envelopes are never playback samples.
+    pub fn accept_verified_from_source(
+        &mut self,
+        source_id: MonitoringSourceId,
+        verified: &AuthenticatedTeacherControlMessage,
+        now: Instant,
+    ) -> Result<TeacherPlaybackCounters, TeacherPlaybackDiagnosticError> {
+        if source_id != self.source_id {
+            return Err(TeacherPlaybackDiagnosticError::BindingMismatch);
+        }
+        let envelope = verified
+            .receiver_playback()
+            .ok_or(TeacherPlaybackDiagnosticError::Malformed)?;
+        self.accept_authenticated(envelope, true, now)
+    }
+
+    /// Internal replay and payload gate, only called directly from tests or
+    /// an already verified boundary. NOT a public network authentication API.
+    pub(crate) fn accept_authenticated(
         &mut self,
         envelope: &ControlEnvelope,
         capability_negotiated: bool,
@@ -143,6 +163,19 @@ mod tests {
                 },
             )),
         }
+    }
+
+    #[test]
+    fn source_id_requires_verified_quic_message_not_bare_envelope() {
+        use classmesh_control::teacher_playback_receive::AuthenticatedTeacherControlMessage;
+        let _accept: fn(
+            &mut TeacherPlaybackUiProjection,
+            MonitoringSourceId,
+            &AuthenticatedTeacherControlMessage,
+            Instant,
+        )
+            -> Result<TeacherPlaybackCounters, TeacherPlaybackDiagnosticError> =
+            TeacherPlaybackUiProjection::accept_verified_from_source;
     }
 
     #[test]
