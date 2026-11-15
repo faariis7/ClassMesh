@@ -49,6 +49,7 @@ pub struct ReceiverWindow {
     policy: ReceiverPolicy,
     inflight: BTreeMap<u64, InflightFrame>,
     latest_complete_frame: Option<u64>,
+    order_by_completion: bool,
     recently_discarded: VecDeque<u64>,
     dropped_frames: u64,
 }
@@ -70,8 +71,18 @@ impl ReceiverWindow {
             policy,
             inflight: BTreeMap::new(),
             latest_complete_frame: None,
+            order_by_completion: true,
             recently_discarded: VecDeque::new(),
             dropped_frames: 0,
+        }
+    }
+
+    /// Protected transport only assembles candidates. The key owner decides
+    /// which completed frame IDs may advance presentation order.
+    pub(crate) fn for_unverified_frames(policy: ReceiverPolicy) -> Self {
+        Self {
+            order_by_completion: false,
+            ..Self::new(policy)
         }
     }
 
@@ -128,21 +139,27 @@ impl ReceiverWindow {
                 .assembler
                 .finish()
                 .expect("completed assembler must finish");
-            self.latest_complete_frame = Some(frame_id);
-            self.recently_discarded
-                .retain(|candidate| *candidate > frame_id);
-            while self
-                .inflight
-                .first_key_value()
-                .is_some_and(|(&id, _)| id < frame_id)
-            {
-                let (id, partial) = self.inflight.pop_first().expect("oldest frame is present");
-                self.report_drop(partial.assembler.stream_id_for_receiver(), id, &mut events);
+            if self.order_by_completion {
+                self.note_complete(frame_id, &mut events);
             }
             events.push(ReceiverEvent::FrameReady(frame));
         }
 
         Ok(events)
+    }
+
+    fn note_complete(&mut self, frame_id: u64, events: &mut Vec<ReceiverEvent>) {
+        self.latest_complete_frame = Some(frame_id);
+        self.recently_discarded
+            .retain(|candidate| *candidate > frame_id);
+        while self
+            .inflight
+            .first_key_value()
+            .is_some_and(|(&id, _)| id < frame_id)
+        {
+            let (id, partial) = self.inflight.pop_first().expect("oldest frame is present");
+            self.report_drop(partial.assembler.stream_id_for_receiver(), id, events);
+        }
     }
 
     pub(crate) fn has_pending_frames(&self) -> bool {
@@ -313,6 +330,43 @@ mod tests {
         window.tick(policy.drop_after_us);
         assert!(window.inflight.is_empty());
         assert_eq!(window.dropped_frames(), 4_096);
+    }
+
+    #[test]
+    fn unverified_completion_preserves_an_older_partial_and_its_deadline() {
+        let policy = ReceiverPolicy::default();
+        let mut window = ReceiverWindow::for_unverified_frames(policy);
+        let lower = packets(8);
+        assert!(window.push(0, &lower[0]).unwrap().is_empty());
+        assert!(window.push(1, &lower[0]).unwrap().is_empty());
+
+        let mut events = Vec::new();
+        for fragment in &packets(1_000_000) {
+            events.extend(window.push(2, fragment).unwrap());
+        }
+        assert!(matches!(
+            events.as_slice(),
+            [ReceiverEvent::FrameReady(frame)] if frame.frame_id == 1_000_000
+        ));
+        assert!(
+            window
+                .push(policy.drop_after_us - 1, &lower[2])
+                .unwrap()
+                .iter()
+                .any(|event| { matches!(event, ReceiverEvent::NeedNack { frame_id: 8, .. }) })
+        );
+        let events = window.push(policy.drop_after_us, &lower[1]).unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ReceiverEvent::DroppedStaleFrame { frame_id: 8, .. },
+                ReceiverEvent::NeedKeyframe {
+                    after_frame_id: 8,
+                    ..
+                }
+            ]
+        ));
+        assert_eq!(window.dropped_frames(), 1);
     }
 
     #[test]

@@ -18,6 +18,7 @@ use classmesh_network::protected_unicast_sender::{
 use classmesh_network::udp::UdpMediaSocket;
 use classmesh_network::{MediaPacket, PacketizeMeta, packetize_frame};
 use classmesh_protocol::control_wire::PresentationKeyGrant;
+use classmesh_protocol::feedback::FeedbackMessage;
 use classmesh_protocol::media::MEDIA_PROTOCOL_VERSION;
 use classmesh_security::group_media::{
     GROUP_MEDIA_KEY_BYTES, GroupMediaEpoch, GroupMediaFrameBinding, GroupMediaKeyMaterial,
@@ -429,6 +430,108 @@ fn read_fixture(path: PathBuf) -> Vec<u8> {
         .unwrap();
     assert!(data.len() <= MAX_INPUT_BYTES);
     data
+}
+
+#[test]
+fn completed_ciphertext_cannot_advance_the_worker_watermark_before_authentication() {
+    let multicast = std::env::var("CLASSMESH_M3_MULTICAST_INTERFACE")
+        .ok()
+        .map(|interface| Route::Multicast(interface.parse().unwrap()));
+    for route in std::iter::once(Route::Unicast).chain(multicast) {
+        let reservation = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let receiver = WorkerReceiver::start(route, port, 1, (320, 180));
+        let destination = route.endpoint(port);
+        let socket = route.socket();
+        let mut keys = WorkerGroupMediaKeyState::default();
+        let (binding, mut sender) = install_key(&mut keys, 1, 1);
+        assert!(receiver.matches(binding));
+
+        let high_id = 1_000_000;
+        let rejected = seal(&mut sender, binding, high_id, 10, true, &[0x11; 64]);
+        let mut rejected_packets = packets(&rejected);
+        let last_byte = rejected_packets
+            .last_mut()
+            .unwrap()
+            .payload
+            .last_mut()
+            .unwrap();
+        *last_byte ^= 1;
+        deliver(&socket, destination, &rejected_packets);
+        assert!(matches!(
+            keys.open_access_unit(next_frame(&receiver, high_id)),
+            Err(WorkerGroupMediaKeyError::Security(_))
+        ));
+
+        let payload = [0x35; 2_400];
+        let first = seal(&mut sender, binding, 8, 20, true, &payload);
+        let first_packets = packets(&first);
+        deliver(&socket, destination, &first_packets);
+        let admitted = keys.open_access_unit(next_frame(&receiver, 8)).unwrap();
+        assert_eq!(admitted.data, payload);
+
+        // SFrame may accept a fresh counter out of order. The presentation
+        // must still reject a frame ID older than its last authenticated ID.
+        let delayed = seal(&mut sender, binding, 9, 30, false, &[0x29; 64]);
+        let newer = seal(&mut sender, binding, 80, 40, true, &[0x80; 64]);
+        deliver(&socket, destination, &packets(&newer));
+        assert_eq!(
+            keys.open_access_unit(next_frame(&receiver, 80))
+                .unwrap()
+                .data,
+            [0x80; 64]
+        );
+        deliver(&socket, destination, &packets(&delayed));
+        assert!(matches!(
+            keys.open_access_unit(next_frame(&receiver, 9)),
+            Err(WorkerGroupMediaKeyError::StaleFrameId {
+                latest: 80,
+                received: 9
+            })
+        ));
+        assert!(
+            !keys.should_forward_assembly_feedback(&FeedbackMessage::RequestKeyframe {
+                stream_id: STREAM,
+                after_frame_id: 9,
+            })
+        );
+        deliver(&socket, destination, &first_packets);
+        assert!(keys.open_access_unit(next_frame(&receiver, 8)).is_err());
+
+        let subsequent = seal(&mut sender, binding, 81, 50, false, &[0x81; 64]);
+        deliver(&socket, destination, &packets(&subsequent));
+        assert_eq!(
+            keys.open_access_unit(next_frame(&receiver, 81))
+                .unwrap()
+                .data,
+            [0x81; 64]
+        );
+        let stats = keys.authentication_stats().unwrap();
+        assert_eq!(stats.opened_frames, 3);
+        assert_eq!(stats.rejected_frames, 3);
+
+        let (rotated, mut rotated_sender) = install_key(&mut keys, 1, 2);
+        assert!(keys.take_decoder_resync());
+        assert!(receiver.matches(rotated));
+        deliver(&socket, destination, &packets(&subsequent));
+        assert!(matches!(
+            keys.open_access_unit(next_frame(&receiver, 81)),
+            Err(WorkerGroupMediaKeyError::Security(_))
+        ));
+        let restarted = seal(&mut rotated_sender, rotated, 1, 60, true, &[0x01; 64]);
+        deliver(&socket, destination, &packets(&restarted));
+        assert_eq!(
+            keys.open_access_unit(next_frame(&receiver, 1))
+                .unwrap()
+                .data,
+            [0x01; 64]
+        );
+        assert_eq!(receiver.dropped_events(), 0);
+        eprintln!(
+            "{route:?}: authentication, frame ordering, replay and in-place key rotation passed"
+        );
+    }
 }
 
 #[test]

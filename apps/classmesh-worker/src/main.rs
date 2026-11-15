@@ -1192,6 +1192,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                             for feedback in batch.feedback {
+                                if !group_media_keys.should_forward_assembly_feedback(&feedback) {
+                                    continue;
+                                }
                                 publish_worker_presentation_feedback(
                                     &pipe,
                                     std::process::id(),
@@ -1269,6 +1272,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                     }
+                                    Err(classmesh_worker::group_media_receive::WorkerGroupMediaKeyError::StaleFrameId { .. }) => {}
                                     Err(error) => {
                                         eprintln!(
                                             "ClassMesh Worker dropped unauthenticated presentation ciphertext before decode on frame={frame_id}: {error}"
