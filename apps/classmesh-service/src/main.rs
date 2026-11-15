@@ -3386,6 +3386,33 @@ mod windows_service_app {
                             true,
                         );
                         receiver_telemetry_runtime.worker_changed();
+                        retire_presentation_on_worker_change(
+                            &mut pending_presentation_key_install,
+                            true,
+                            |pending| {
+                                let _ = pending
+                                    .reply_tx
+                                    .send(Err("control.presentation.worker_restarted".to_owned()));
+                            },
+                        );
+                        retire_presentation_on_worker_change(
+                            &mut pending_presentation_multicast_start,
+                            true,
+                            |pending| {
+                                let _ = pending
+                                    .reply_tx
+                                    .send(Err("control.presentation.worker_restarted".to_owned()));
+                            },
+                        );
+                        retire_presentation_on_worker_change(
+                            &mut pending_presentation_unicast_start,
+                            true,
+                            |pending| {
+                                let _ = pending
+                                    .reply_tx
+                                    .send(Err("control.presentation.worker_restarted".to_owned()));
+                            },
+                        );
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -3630,6 +3657,20 @@ mod windows_service_app {
                 workers.stop(old_session);
                 let event = workers.launch(new_session);
                 handle_worker_event(event, supervisor, input_availability);
+            }
+        }
+    }
+
+    // A synchronous session transition can revoke the Worker without a poll event.
+    // Retire presentation operations on that same transition, not 250ms later.
+    fn retire_presentation_on_worker_change<T>(
+        pending: &mut Option<T>,
+        worker_changed: bool,
+        cancel: impl FnOnce(T),
+    ) {
+        if worker_changed {
+            if let Some(operation) = pending.take() {
+                cancel(operation);
             }
         }
     }
@@ -3940,6 +3981,26 @@ mod windows_service_app {
                 reply_rx.try_recv(),
                 Ok(TeacherInteractionDispatchOutcome::WorkerUnavailable)
             );
+        }
+
+        #[test]
+        fn synchronous_session_revocation_retires_all_presentation_operations() {
+            let mut key_install = Some(1_u8);
+            let mut multicast = Some(2_u8);
+            let mut unicast = Some(3_u8);
+            let mut cancelled = Vec::new();
+            retire_presentation_on_worker_change(&mut key_install, true, |id| cancelled.push(id));
+            retire_presentation_on_worker_change(&mut multicast, true, |id| cancelled.push(id));
+            retire_presentation_on_worker_change(&mut unicast, true, |id| cancelled.push(id));
+            assert_eq!(cancelled, vec![1, 2, 3]);
+            assert!(key_install.is_none() && multicast.is_none() && unicast.is_none());
+        }
+
+        #[test]
+        fn unchanged_session_keeps_presentation_operations_pending() {
+            let mut pending = Some(7_u8);
+            retire_presentation_on_worker_change(&mut pending, false, |_| panic!("cancelled"));
+            assert_eq!(pending, Some(7));
         }
 
         #[test]
