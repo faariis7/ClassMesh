@@ -11,6 +11,8 @@ pub enum RosterRejection {
     MissingApprovedVerifier,
     EmptyStudentDeviceRoster,
     InvalidStudentDeviceRoster,
+    InvalidPrincipalOrRole,
+    InvalidIssuedTimestamp,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -40,6 +42,15 @@ pub struct TeacherRosterRequest<'a> {
 /// None is supplied by this API. Its return type intentionally has no Allow variant.
 pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), RosterRejection> {
     let roster = request.roster.ok_or(RosterRejection::MissingRoster)?;
+    // Reject ambiguous or noncanonical identities before comparing principals/roles.
+    for value in [request.teacher_principal, request.required_role, roster.teacher_principal, roster.role] {
+        if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+            return Err(RosterRejection::InvalidPrincipalOrRole);
+        }
+    }
+    if roster.issued_unix_ms == 0 {
+        return Err(RosterRejection::InvalidIssuedTimestamp);
+    }
     if roster.expires_unix_ms <= request.now_unix_ms
         || roster.expires_unix_ms <= roster.issued_unix_ms
     {
@@ -115,6 +126,60 @@ mod identifier_hardening_tests {
     fn valid_identifiers_still_require_approved_verifier() {
         assert_eq!(
             qualify_teacher_roster(&request_with_ids(&["device-1", "device-2"])),
+            Err(RosterRejection::MissingApprovedVerifier)
+        );
+    }
+}
+
+#[cfg(test)]
+mod malformed_roster_metadata_tests {
+    use super::*;
+
+    fn request<'a>(principal: &'a str, role: &'a str, issued: u64) -> TeacherRosterRequest<'a> {
+        TeacherRosterRequest {
+            teacher_principal: principal,
+            required_role: role,
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: principal,
+                role,
+                issued_unix_ms: issued,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: &["device-1"],
+            }),
+        }
+    }
+
+    #[test]
+    fn malformed_teacher_principal_and_role_are_denied() {
+        for (principal, role) in [
+            ("", "Teacher"),
+            (" teacher-1", "Teacher"),
+            ("teacher-1\\n", "Teacher"),
+            ("teacher-1", ""),
+            ("teacher-1", "Teacher\\t"),
+        ] {
+            assert_eq!(
+                qualify_teacher_roster(&request(principal, role, 150)),
+                Err(RosterRejection::InvalidPrincipalOrRole)
+            );
+        }
+    }
+
+    #[test]
+    fn zero_issued_timestamp_is_denied() {
+        assert_eq!(
+            qualify_teacher_roster(&request("teacher-1", "Teacher", 0)),
+            Err(RosterRejection::InvalidIssuedTimestamp)
+        );
+    }
+
+    #[test]
+    fn well_formed_metadata_still_never_authorizes() {
+        assert_eq!(
+            qualify_teacher_roster(&request("teacher-1", "Teacher", 150)),
             Err(RosterRejection::MissingApprovedVerifier)
         );
     }
