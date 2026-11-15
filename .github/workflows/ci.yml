@@ -108,9 +108,19 @@ jobs:
       - name: Freeze Phase 10 native Windows unit-test executable
         shell: pwsh
         run: |
-          $bins = @(Get-ChildItem -LiteralPath target/debug/deps -Filter 'classmesh_win32-*.exe' -File)
+          # Cargo may use a runner-level CARGO_TARGET_DIR outside the checkout.
+          # Resolve its actual target directory instead of assuming ./target.
+          $targetDir = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).target_directory
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($targetDir)) {
+            throw 'Unable to resolve Cargo target directory for native test image'
+          }
+          $depsDir = Join-Path $targetDir 'debug/deps'
+          if (-not (Test-Path -LiteralPath $depsDir -PathType Container)) {
+            throw "Native unit-test executable directory missing: $depsDir"
+          }
+          $bins = @(Get-ChildItem -LiteralPath $depsDir -Filter 'classmesh_win32-*.exe' -File)
           if ($bins.Count -ne 1) {
-            throw "Expected exactly one default-feature native test executable, found $($bins.Count)"
+            throw "Expected exactly one default-feature native test executable under $depsDir, found $($bins.Count)"
           }
           New-Item -ItemType Directory -Path phase10-native-telemetry-bundle -Force | Out-Null
           Copy-Item -LiteralPath $bins[0].FullName -Destination phase10-native-telemetry-bundle/classmesh-win32-native-tests.exe
