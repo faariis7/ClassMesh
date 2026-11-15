@@ -11,7 +11,7 @@ mod cng;
 #[cfg(windows)]
 mod teacher_binding;
 #[cfg(windows)]
-pub use teacher_binding::{qualify_existing_key_binding, BindingQualificationError};
+pub use teacher_binding::{BindingQualificationError, qualify_existing_key_binding};
 #[cfg(windows)]
 mod tls;
 
