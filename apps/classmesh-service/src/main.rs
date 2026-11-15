@@ -3390,27 +3390,27 @@ mod windows_service_app {
                             &mut pending_presentation_key_install,
                             true,
                             |pending| {
-                                let _ = pending.reply_tx.send(Err(
-                                    "control.presentation.worker_restarted".to_owned(),
-                                ));
+                                let _ = pending
+                                    .reply_tx
+                                    .send(Err("control.presentation.worker_restarted".to_owned()));
                             },
                         );
                         retire_presentation_on_worker_change(
                             &mut pending_presentation_multicast_start,
                             true,
                             |pending| {
-                                let _ = pending.reply_tx.send(Err(
-                                    "control.presentation.worker_restarted".to_owned(),
-                                ));
+                                let _ = pending
+                                    .reply_tx
+                                    .send(Err("control.presentation.worker_restarted".to_owned()));
                             },
                         );
                         retire_presentation_on_worker_change(
                             &mut pending_presentation_unicast_start,
                             true,
                             |pending| {
-                                let _ = pending.reply_tx.send(Err(
-                                    "control.presentation.worker_restarted".to_owned(),
-                                ));
+                                let _ = pending
+                                    .reply_tx
+                                    .send(Err("control.presentation.worker_restarted".to_owned()));
                             },
                         );
                     }
