@@ -108,9 +108,28 @@ jobs:
       - name: Freeze Phase 10 native Windows unit-test executable
         shell: pwsh
         run: |
-          $bins = @(Get-ChildItem -LiteralPath target/debug/deps -Filter 'classmesh_win32-*.exe' -File)
+          # Cargo may use a runner-level CARGO_TARGET_DIR outside the checkout.
+          # Resolve its actual target directory instead of assuming ./target.
+          $targetDir = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).target_directory
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($targetDir)) {
+            throw 'Unable to resolve Cargo target directory for native test image'
+          }
+          # Cargo's native Windows runner currently places test executables in
+          # debug/build/<package>/<hash>/out, not necessarily debug/deps.
+          # Inspect only these two known layouts; never pick an arbitrary exe.
+          $depsDir = Join-Path $targetDir 'debug/deps'
+          $buildDir = Join-Path $targetDir 'debug/build'
+          $bins = @()
+          if (Test-Path -LiteralPath $depsDir -PathType Container) {
+            $bins += @(Get-ChildItem -LiteralPath $depsDir -Filter 'classmesh_win32-*.exe' -File)
+          }
+          if (Test-Path -LiteralPath $buildDir -PathType Container) {
+            $bins += @(Get-ChildItem -LiteralPath $buildDir -Directory -Filter 'classmesh-win32' |
+              Get-ChildItem -Directory |
+              ForEach-Object { Get-ChildItem -LiteralPath (Join-Path $_.FullName 'out') -Filter 'classmesh_win32-*.exe' -File -ErrorAction SilentlyContinue })
+          }
           if ($bins.Count -ne 1) {
-            throw "Expected exactly one default-feature native test executable, found $($bins.Count)"
+            throw "Expected exactly one default-feature native test executable under $targetDir, found $($bins.Count)"
           }
           New-Item -ItemType Directory -Path phase10-native-telemetry-bundle -Force | Out-Null
           Copy-Item -LiteralPath $bins[0].FullName -Destination phase10-native-telemetry-bundle/classmesh-win32-native-tests.exe
