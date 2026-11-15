@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::{AssembleError, AssembledFrame, FrameAssembler, MediaPacket};
 
@@ -49,6 +49,7 @@ pub struct ReceiverWindow {
     policy: ReceiverPolicy,
     inflight: BTreeMap<u64, InflightFrame>,
     latest_complete_frame: Option<u64>,
+    recently_discarded: VecDeque<u64>,
     dropped_frames: u64,
 }
 
@@ -69,6 +70,7 @@ impl ReceiverWindow {
             policy,
             inflight: BTreeMap::new(),
             latest_complete_frame: None,
+            recently_discarded: VecDeque::new(),
             dropped_frames: 0,
         }
     }
@@ -84,27 +86,20 @@ impl ReceiverWindow {
         if self
             .latest_complete_frame
             .is_some_and(|latest| frame_id <= latest)
+            || self.recently_discarded.contains(&frame_id)
         {
             return Ok(events);
         }
 
         if !self.inflight.contains_key(&frame_id) {
-            while self.inflight.len() >= self.policy.max_inflight_frames {
-                if let Some((&oldest_id, _)) = self.inflight.first_key_value() {
-                    let stream_id = self
-                        .inflight
-                        .get(&oldest_id)
-                        .map(|frame| frame.assembler.stream_id_for_receiver())
-                        .unwrap_or(packet.header.stream_id);
-                    self.inflight.remove(&oldest_id);
-                    self.dropped_frames = self.dropped_frames.saturating_add(1);
-                    events.push(ReceiverEvent::DroppedStaleFrame {
-                        stream_id,
-                        frame_id: oldest_id,
-                    });
-                } else {
-                    break;
-                }
+            if self.inflight.len() == self.policy.max_inflight_frames {
+                let (oldest_id, oldest) = self.inflight.pop_first().expect("full receive window");
+                self.remember_discarded(oldest_id);
+                self.report_drop(
+                    oldest.assembler.stream_id_for_receiver(),
+                    oldest_id,
+                    &mut events,
+                );
             }
             self.inflight.insert(
                 frame_id,
@@ -134,7 +129,16 @@ impl ReceiverWindow {
                 .finish()
                 .expect("completed assembler must finish");
             self.latest_complete_frame = Some(frame_id);
-            self.inflight.retain(|candidate, _| *candidate > frame_id);
+            self.recently_discarded
+                .retain(|candidate| *candidate > frame_id);
+            while self
+                .inflight
+                .first_key_value()
+                .is_some_and(|(&id, _)| id < frame_id)
+            {
+                let (id, partial) = self.inflight.pop_first().expect("oldest frame is present");
+                self.report_drop(partial.assembler.stream_id_for_receiver(), id, &mut events);
+            }
             events.push(ReceiverEvent::FrameReady(frame));
         }
 
@@ -182,11 +186,12 @@ impl ReceiverWindow {
 
         for frame_id in remove {
             if let Some(frame) = self.inflight.remove(&frame_id) {
-                self.dropped_frames = self.dropped_frames.saturating_add(1);
-                events.push(ReceiverEvent::DroppedStaleFrame {
-                    stream_id: frame.assembler.stream_id_for_receiver(),
+                self.remember_discarded(frame_id);
+                self.report_drop(
+                    frame.assembler.stream_id_for_receiver(),
                     frame_id,
-                });
+                    &mut events,
+                );
             }
         }
 
@@ -198,6 +203,24 @@ impl ReceiverWindow {
         }
 
         events
+    }
+
+    fn remember_discarded(&mut self, frame_id: u64) {
+        // Discarded, unauthenticated IDs must not advance the stream watermark.
+        // Keep only one receive window of exact IDs until completed frames
+        // supersede them. An isolated high ID cannot suppress lower frames.
+        if self.recently_discarded.len() == self.policy.max_inflight_frames {
+            self.recently_discarded.pop_front();
+        }
+        self.recently_discarded.push_back(frame_id);
+    }
+
+    fn report_drop(&mut self, stream_id: u32, frame_id: u64, events: &mut Vec<ReceiverEvent>) {
+        self.dropped_frames = self.dropped_frames.saturating_add(1);
+        events.push(ReceiverEvent::DroppedStaleFrame {
+            stream_id,
+            frame_id,
+        });
     }
 
     #[must_use]
@@ -278,6 +301,7 @@ mod tests {
         for id in 1..=4_096 {
             let events = window.push(0, &packets(id)[0]).unwrap();
             assert!(window.inflight.len() <= policy.max_inflight_frames);
+            assert!(window.recently_discarded.len() <= policy.max_inflight_frames);
             assert!(
                 !events
                     .iter()
@@ -289,6 +313,57 @@ mod tests {
         window.tick(policy.drop_after_us);
         assert!(window.inflight.is_empty());
         assert_eq!(window.dropped_frames(), 4_096);
+    }
+
+    #[test]
+    fn duplicate_fragments_do_not_restart_a_recently_expired_frame() {
+        let policy = ReceiverPolicy::default();
+        let mut window = ReceiverWindow::new(policy);
+        let expired = packets(8);
+        assert!(window.push(0, &expired[0]).unwrap().is_empty());
+        assert!(window.tick(policy.drop_after_us).iter().any(|event| {
+            matches!(event, ReceiverEvent::DroppedStaleFrame { frame_id: 8, .. })
+        }));
+        for fragment in &expired {
+            assert!(
+                window
+                    .push(policy.drop_after_us + 1, fragment)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert!(window.inflight.is_empty());
+
+        // The expired ID alone must not advance the delivery watermark. A
+        // different frame can still finish in its own receive window.
+        assert!(packets(7).iter().any(|fragment| {
+            window.push(policy.drop_after_us + 2, fragment).unwrap().iter().any(|event| {
+                matches!(event, ReceiverEvent::FrameReady(frame) if frame.frame_id == 7)
+            })
+        }));
+    }
+
+    #[test]
+    fn completing_a_newer_frame_reports_discarded_partial_frames_once() {
+        let mut window = ReceiverWindow::new(ReceiverPolicy::default());
+        assert!(window.push(0, &packets(1)[0]).unwrap().is_empty());
+        let mut events = Vec::new();
+        for fragment in &packets(2) {
+            events.extend(window.push(1, fragment).unwrap());
+        }
+        assert!(matches!(
+            &events[..],
+            [
+                ReceiverEvent::DroppedStaleFrame { stream_id: 3, frame_id: 1 },
+                ReceiverEvent::FrameReady(frame)
+            ] if frame.frame_id == 2
+        ));
+        assert_eq!(window.dropped_frames(), 1);
+        assert!(
+            window
+                .tick(ReceiverPolicy::default().drop_after_us + 1)
+                .is_empty()
+        );
     }
 
     #[test]
