@@ -190,6 +190,36 @@ impl FlipPresenter {
         self.suspended
     }
 
+    /// Releases the flip-model swap chain before reusing its HWND.
+    pub fn release_swap_chain(self) {
+        let context = self.context.clone();
+        drop(self);
+        // D3D11 defers destruction of released objects. Force it before
+        // CreateSwapChainForHwnd can attach a replacement to the same HWND.
+        unsafe {
+            context.ClearState();
+            context.Flush();
+        }
+    }
+
+    /// Replaces the last displayed video with black while waiting for a fresh stream.
+    /// A reset present does not count as a displayed video frame.
+    ///
+    /// # Errors
+    /// Returns the underlying D3D11 or DXGI error.
+    pub fn clear_frame(&self) -> windows::core::Result<()> {
+        if self.suspended {
+            return Ok(());
+        }
+        let backbuffer = unsafe { self.swap_chain.GetBuffer::<ID3D11Texture2D>(0)? };
+        let render_target = create_render_target(&self.device, &backbuffer)?;
+        unsafe {
+            self.context
+                .ClearRenderTargetView(&render_target, &[0.0, 0.0, 0.0, 1.0]);
+            self.swap_chain.Present(0, DXGI_PRESENT(0)).ok()
+        }
+    }
+
     /// Updates the flip-model buffers to the current client size.
     ///
     /// A zero width or height means the HWND is minimized. In that state ClassMesh deliberately

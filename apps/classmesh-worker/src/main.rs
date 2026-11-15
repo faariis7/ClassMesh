@@ -1257,7 +1257,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     "ClassMesh Worker presentation decode failed on frame={}: {error}",
                                                     access_unit.frame_id
                                                 );
-                                                decoder.recover_after_loss();
                                                 if decoder.is_retired() {
                                                     break 'receive_media;
                                                 }

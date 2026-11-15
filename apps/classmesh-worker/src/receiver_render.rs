@@ -6,7 +6,7 @@ use classmesh_render_win::{
 };
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
+use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
@@ -14,7 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PeekMessageW, RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WM_QUIT, WNDCLASSW,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
-use windows::core::{Interface, w};
+use windows::core::w;
 
 const RESIZE_FAILURE_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_RESIZE_FAILURE_REPORTS_PER_INTERVAL: u8 = 4;
@@ -148,17 +148,29 @@ impl PresentationWindow {
         };
 
         self.device_lost = true;
-        let stale_presenter = self.presenter.take();
-        drop(stale_presenter);
+        if let Some(stale_presenter) = self.presenter.take() {
+            stale_presenter.release_swap_chain();
+        }
 
         let mut replacement = FlipPresenter::new(self.hwnd, device, initial_width, initial_height)?;
         if client_width == 0 || client_height == 0 {
             let _ = replacement.resize_output(0, 0)?;
         }
+        replacement.clear_frame()?;
         self.presenter = Some(replacement);
         self.device_lost = false;
         self.last_resize_failure_report = None;
         Ok(())
+    }
+
+    pub(crate) fn clear_frame(&self) -> windows::core::Result<()> {
+        let presenter = self.presenter.as_ref().ok_or_else(|| {
+            windows::core::Error::new(
+                windows::core::HRESULT(0x8000_4005_u32 as i32),
+                "presentation GPU resources are unavailable during reset",
+            )
+        })?;
+        presenter.clear_frame()
     }
 
     /// Presents one Media Foundation GPU frame and keeps it entirely on the D3D11 path.
@@ -168,27 +180,11 @@ impl PresentationWindow {
     /// metrics keep the skipped-frame count separate from successful swap-chain presents.
     ///
     /// # Errors
-    /// Returns an error when Media Foundation cannot expose the decoder surface as an
-    /// `ID3D11Texture2D`, when the subresource index cannot be queried, when recovery has left the
-    /// window temporarily without GPU presentation resources, or when D3D11/DXGI fails to present
-    /// the frame.
+    /// Returns an error if the presentation resources are unavailable or D3D11/DXGI fails.
     pub fn present(
         &mut self,
         frame: &DecodedGpuFrame,
     ) -> windows::core::Result<classmesh_render_win::PresentOutcome> {
-        let mut texture: Option<ID3D11Texture2D> = None;
-        unsafe {
-            frame
-                .dxgi_buffer()
-                .GetResource(&ID3D11Texture2D::IID, &mut texture as *mut _ as *mut _)?;
-        }
-        let texture = texture.ok_or_else(|| {
-            windows::core::Error::new(
-                windows::core::HRESULT(0x8000_4005_u32 as i32),
-                "Media Foundation returned a null D3D11 decode surface",
-            )
-        })?;
-        let subresource_index = unsafe { frame.dxgi_buffer().GetSubresourceIndex()? };
         let Some(presenter) = self.presenter.as_mut() else {
             self.device_lost = true;
             return Err(windows::core::Error::new(
@@ -196,7 +192,7 @@ impl PresentationWindow {
                 "presentation GPU resources are unavailable during recovery",
             ));
         };
-        match presenter.present_nv12(&texture, subresource_index) {
+        match presenter.present_nv12(frame.texture(), frame.subresource_index()) {
             Ok(outcome) => Ok(outcome),
             Err(error) => {
                 if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {

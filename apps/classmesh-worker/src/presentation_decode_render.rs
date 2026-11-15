@@ -5,6 +5,12 @@ use std::time::Instant;
 
 use classmesh_network::AssembledFrame;
 
+#[cfg(windows)]
+use classmesh_codec_win::mf_decoder::{DecoderOutput, MfH264Decoder};
+
+#[cfg(windows)]
+const MAX_OUTPUT_STEPS_PER_PUMP: usize = 32;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PresentationRecoveryTelemetry {
     pub recoveries: u64,
@@ -54,6 +60,7 @@ const fn keep_window_stream_alive(
 enum DecoderState {
     AwaitingKeyframe,
     Running,
+    ResetRequired,
     Retired,
 }
 
@@ -68,27 +75,28 @@ impl DecoderState {
     }
 
     fn complete_submission<E>(&mut self, submitted: Result<(), E>) -> Result<(), E> {
-        submitted?;
-        *self = Self::Running;
-        Ok(())
+        *self = if submitted.is_ok() {
+            Self::Running
+        } else {
+            Self::ResetRequired
+        };
+        submitted
     }
 
     fn can_submit(self, keyframe: bool) -> bool {
         match self {
             Self::AwaitingKeyframe => keyframe,
             Self::Running => true,
-            Self::Retired => false,
+            Self::ResetRequired | Self::Retired => false,
         }
     }
 }
 
 #[cfg(windows)]
 pub struct PresentationDecodeRuntime {
-    decoder: classmesh_codec_win::mf_decoder::MfH264Decoder,
+    decoder: Option<MfH264Decoder>,
     presentation: Option<crate::receiver_render::PresentationWindow>,
-    device: windows::Win32::Graphics::Direct3D11::ID3D11Device,
     _platform: classmesh_codec_win::mf::MfPlatform,
-    render_enabled: bool,
     state: DecoderState,
     gpu_recoveries: u64,
     forced_recoveries: u64,
@@ -116,11 +124,9 @@ impl PresentationDecodeRuntime {
         };
 
         Ok(Self {
-            decoder,
+            decoder: Some(decoder),
             presentation,
-            device,
             _platform: platform,
-            render_enabled,
             state: DecoderState::AwaitingKeyframe,
             gpu_recoveries: 0,
             forced_recoveries: 0,
@@ -134,12 +140,12 @@ impl PresentationDecodeRuntime {
     fn create_decoder_device() -> Result<
         (
             windows::Win32::Graphics::Direct3D11::ID3D11Device,
-            classmesh_codec_win::mf_decoder::MfH264Decoder,
+            MfH264Decoder,
         ),
         Box<dyn std::error::Error>,
     > {
         use classmesh_codec_win::d3d11::create_default_video_device;
-        use classmesh_codec_win::mf_decoder::{MfH264Decoder, enumerate_h264_decoders};
+        use classmesh_codec_win::mf_decoder::enumerate_h264_decoders;
         use windows::Win32::Graphics::Direct3D11::ID3D11VideoDevice;
         use windows::core::Interface;
 
@@ -155,17 +161,15 @@ impl PresentationDecodeRuntime {
         }
 
         let mut failures = Vec::new();
-        for candidate in &candidates {
+        for candidate in candidates {
+            let name = candidate.name().to_owned();
+            let clsid = candidate.clsid().to_owned();
             match MfH264Decoder::new(candidate, &device) {
                 Ok(decoder) => {
-                    eprintln!(
-                        "hardware decode candidate selected: {} ({})",
-                        candidate.name(),
-                        candidate.clsid()
-                    );
+                    eprintln!("D3D11 decode candidate selected: {name} ({clsid})");
                     return Ok((device, decoder));
                 }
-                Err(error) => failures.push(format!("{}: {error}", candidate.name())),
+                Err(error) => failures.push(format!("{name}: {error}")),
             }
         }
 
@@ -177,25 +181,19 @@ impl PresentationDecodeRuntime {
     }
 
     fn rebuild_gpu_pipeline(&mut self, reason: &str) -> Result<(), Box<dyn std::error::Error>> {
-        use crate::receiver_render::PresentationWindow;
-
         // Rebuild is transactional from the caller's perspective. A failed
         // decoder or presenter rebuild leaves this instance unusable.
         self.state = DecoderState::Retired;
+        drop(self.decoder.take());
         let started = Instant::now();
         eprintln!("rebuilding student D3D11 decoder/presenter pipeline: reason={reason}");
         let (new_device, new_decoder) = Self::create_decoder_device()?;
 
-        if self.render_enabled {
-            if let Some(presentation) = self.presentation.as_mut() {
-                presentation.recover_device(&new_device)?;
-            } else {
-                self.presentation = Some(PresentationWindow::new(&new_device, 1280, 720)?);
-            }
+        if let Some(presentation) = self.presentation.as_mut() {
+            presentation.recover_device(&new_device)?;
         }
 
-        self.decoder = new_decoder;
-        self.device = new_device;
+        self.decoder = Some(new_decoder);
         self.state.complete_reset(true);
         self.gpu_recoveries = self.gpu_recoveries.saturating_add(1);
         let elapsed = started.elapsed();
@@ -210,6 +208,17 @@ impl PresentationDecodeRuntime {
     }
 
     pub fn submit(
+        &mut self,
+        frame: &AssembledFrame,
+    ) -> Result<PresentationDecodeStep, Box<dyn std::error::Error>> {
+        let result = self.submit_frame(frame);
+        if result.is_err() {
+            self.recover_after_loss();
+        }
+        result
+    }
+
+    fn submit_frame(
         &mut self,
         frame: &AssembledFrame,
     ) -> Result<PresentationDecodeStep, Box<dyn std::error::Error>> {
@@ -244,51 +253,64 @@ impl PresentationDecodeRuntime {
         let mut batch = if self.waiting_for_keyframe() {
             PresentationDecodeBatch::default()
         } else {
-            self.drain_decoded()?
+            self.drain_decoded(true)?
         };
         if !self.state.can_submit(frame.keyframe) {
             return Ok(PresentationDecodeStep::Decoded(batch));
         }
 
-        let submitted = match self
-            .decoder
-            .submit_access_unit(&frame.data, frame.timestamp_us)
-        {
+        let submitted = match self.submit_access_unit(frame) {
             Err(error) if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost => {
                 self.rebuild_gpu_pipeline("decoder input device loss")?;
                 if !frame.keyframe {
                     return Ok(PresentationDecodeStep::Decoded(batch));
                 }
-                self.decoder
-                    .submit_access_unit(&frame.data, frame.timestamp_us)
+                self.submit_access_unit(frame)
             }
             result => result,
         };
 
         self.state.complete_submission(submitted)?;
-        batch.add(self.drain_decoded()?);
+        batch.add(self.drain_decoded(true)?);
         Ok(PresentationDecodeStep::Decoded(batch))
     }
 
-    fn drain_decoded(&mut self) -> Result<PresentationDecodeBatch, Box<dyn std::error::Error>> {
+    fn submit_access_unit(&mut self, frame: &AssembledFrame) -> windows::core::Result<()> {
+        self.decoder
+            .as_mut()
+            .expect("an active presentation has a decoder")
+            .submit_access_unit(&frame.data, frame.timestamp_us)
+    }
+
+    fn drain_decoded(
+        &mut self,
+        recover_device_loss: bool,
+    ) -> Result<PresentationDecodeBatch, Box<dyn std::error::Error>> {
         use classmesh_render_win::{DxgiFailureClass, classify_dxgi_error};
 
-        let frames = match self.decoder.poll_decoded() {
-            Ok(frames) => frames,
-            Err(error) if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost => {
-                self.rebuild_gpu_pipeline("decoder output device loss")?;
-                return Ok(PresentationDecodeBatch::default());
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let mut batch = PresentationDecodeBatch {
-            decoded: frames.len(),
-            ..PresentationDecodeBatch::default()
-        };
-        let mut device_lost = false;
-        for frame in &frames {
+        let mut batch = PresentationDecodeBatch::default();
+        for _ in 0..MAX_OUTPUT_STEPS_PER_PUMP {
+            let frame = match self
+                .decoder
+                .as_ref()
+                .expect("an active presentation has a decoder")
+                .poll_decoded()
+            {
+                Ok(DecoderOutput::Frame(frame)) => frame,
+                Ok(DecoderOutput::Progress) => continue,
+                Ok(DecoderOutput::NeedInput) => break,
+                Err(error)
+                    if recover_device_loss
+                        && classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost =>
+                {
+                    self.rebuild_gpu_pipeline("decoder output device loss")?;
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            batch.decoded = batch.decoded.saturating_add(1);
             if let Some(presentation) = self.presentation.as_mut() {
-                match presentation.present(frame) {
+                match presentation.present(&frame) {
                     Ok(classmesh_render_win::PresentOutcome::Presented) => {
                         batch.presented = count_presented_outcome(batch.presented, true);
                     }
@@ -298,10 +320,11 @@ impl PresentationDecodeRuntime {
                     Err(error) => {
                         batch.present_errors = batch.present_errors.saturating_add(1);
                         if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
-                            device_lost = true;
-                            eprintln!(
-                                "D3D11 presentation reported device loss; rebuilding shared GPU media pipeline"
-                            );
+                            if !recover_device_loss {
+                                return Err(error.into());
+                            }
+                            drop(frame);
+                            self.rebuild_gpu_pipeline("presentation device loss")?;
                             break;
                         }
                         eprintln!(
@@ -312,10 +335,6 @@ impl PresentationDecodeRuntime {
             }
         }
 
-        if device_lost {
-            drop(frames);
-            self.rebuild_gpu_pipeline("presentation device loss")?;
-        }
         Ok(batch)
     }
 
@@ -335,20 +354,29 @@ impl PresentationDecodeRuntime {
         if self.is_retired() {
             return;
         }
-        let flushed = self.decoder.flush();
+        let flushed = self
+            .decoder
+            .as_mut()
+            .expect("an active presentation has a decoder")
+            .flush()
+            .and_then(|()| {
+                self.presentation.as_ref().map_or(
+                    Ok(()),
+                    crate::receiver_render::PresentationWindow::clear_frame,
+                )
+            });
         self.state.complete_reset(flushed.is_ok());
         if let Err(error) = flushed {
             if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
-                if let Err(recovery_error) = self.rebuild_gpu_pipeline("decoder flush device loss")
+                if let Err(recovery_error) = self.rebuild_gpu_pipeline("playback reset device loss")
                 {
                     eprintln!(
                         "GPU pipeline rebuild failed during loss recovery; retiring receiver: {recovery_error}"
                     );
                 }
             } else {
-                eprintln!(
-                    "hardware decoder flush failed during loss recovery; retiring receiver: {error}"
-                );
+                drop(self.decoder.take());
+                eprintln!("playback reset failed; retiring receiver: {error}");
             }
         }
     }
@@ -386,13 +414,26 @@ impl PresentationDecodeRuntime {
         if self.is_retired() {
             return Err("presentation decoder retired before shutdown drain".into());
         }
-        let decoded = if self.waiting_for_keyframe() {
-            PresentationDecodeBatch::default()
+        let should_drain = self.state == DecoderState::Running;
+        self.state = DecoderState::Retired;
+        let decoded = if should_drain {
+            self.decoder
+                .as_mut()
+                .expect("an active presentation has a decoder")
+                .begin_drain()
+                .map_err(Into::into)
+                .and_then(|()| self.drain_decoded(false))
         } else {
-            self.drain_decoded()?
+            Ok(PresentationDecodeBatch::default())
         };
-        self.decoder.end_streaming()?;
-        Ok(decoded)
+        let stopped = self
+            .decoder
+            .take()
+            .expect("an active presentation has a decoder")
+            .end_streaming();
+        let batch = decoded?;
+        stopped?;
+        Ok(batch)
     }
 
     #[must_use]
@@ -496,8 +537,31 @@ mod window_recovery_tests {
             Err("input rejected")
         );
         assert!(!state.can_submit(false));
+        assert!(!state.can_submit(true));
+        state.complete_reset(true);
         assert_eq!(state.complete_submission(Ok::<_, &str>(())), Ok(()));
         assert!(state.can_submit(false));
+    }
+
+    #[test]
+    fn failed_running_submission_requires_reset_before_any_more_input() {
+        use super::DecoderState;
+        let mut state = DecoderState::Running;
+        assert_eq!(
+            state.complete_submission(Err("input rejected")),
+            Err("input rejected")
+        );
+        assert!(
+            !state.can_submit(false),
+            "delta cannot use a broken reference chain"
+        );
+        assert!(
+            !state.can_submit(true),
+            "even an IDR must wait for the flush"
+        );
+        state.complete_reset(true);
+        assert!(state.can_submit(true));
+        assert!(!state.can_submit(false));
     }
 
     #[test]

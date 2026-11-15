@@ -189,7 +189,7 @@ fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     if window_closed {
         eprintln!("student presentation window closed; stopping media receiver");
     }
-    if let Some(active) = decoder.as_mut() {
+    if !window_closed && let Some(active) = decoder.as_mut() {
         match active.finish() {
             Ok(batch) => apply_decode_batch(&mut counters, batch),
             Err(error) => {
@@ -263,7 +263,6 @@ fn handle_events<W: Write>(
                         }
                         Err(_) => {
                             counters.decode_errors = counters.decode_errors.saturating_add(1);
-                            active.recover_after_loss();
                         }
                     }
                 }
