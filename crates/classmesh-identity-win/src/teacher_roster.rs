@@ -13,6 +13,7 @@ pub enum RosterRejection {
     InvalidStudentDeviceRoster,
     InvalidPrincipalOrRole,
     InvalidIssuedTimestamp,
+    OversizedStudentDeviceRoster,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -74,6 +75,11 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
         || roster.issued_unix_ms > request.now_unix_ms
     {
         return Err(RosterRejection::StaleAuthorization);
+    }
+    // Bound work on attacker-controlled metadata before the quadratic duplicate scan.
+    // This is a deny-only resource guard, not an enrollment policy or trust decision.
+    if roster.student_device_ids.len() > 1024 {
+        return Err(RosterRejection::OversizedStudentDeviceRoster);
     }
     if roster.student_device_ids.is_empty() {
         return Err(RosterRejection::EmptyStudentDeviceRoster);
@@ -186,6 +192,34 @@ mod malformed_roster_metadata_tests {
         assert_eq!(
             qualify_teacher_roster(&request("teacher-1", "Teacher", 150)),
             Err(RosterRejection::MissingApprovedVerifier)
+        );
+    }
+}
+
+#[cfg(test)]
+mod roster_resource_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_untrusted_roster_is_denied_before_duplicate_scan() {
+        let ids = vec!["device-1"; 1025];
+        let request = TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: &ids,
+            }),
+        };
+        assert_eq!(
+            qualify_teacher_roster(&request),
+            Err(RosterRejection::OversizedStudentDeviceRoster)
         );
     }
 }
