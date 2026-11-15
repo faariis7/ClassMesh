@@ -180,9 +180,7 @@ impl CngMachineKey {
     ///
     /// Read-only qualification gate: does not create a key, import a CA,
     /// validate certificate provenance, or grant Teacher authorization.
-    pub fn open_existing_non_exportable(
-        name: impl Into<String>,
-    ) -> Result<Self, CngKeyError> {
+    pub fn open_existing_non_exportable(name: impl Into<String>) -> Result<Self, CngKeyError> {
         let key = Self::open(name)?;
         if key.export_policy()? != 0 {
             return Err(CngKeyError::ExportableKey);
