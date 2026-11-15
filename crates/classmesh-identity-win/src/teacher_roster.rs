@@ -63,7 +63,11 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
         return Err(RosterRejection::EmptyStudentDeviceRoster);
     }
     for (index, id) in roster.student_device_ids.iter().enumerate() {
-        if id.is_empty()\n            || id.trim() != *id\n            || id.chars().any(char::is_control)\n            || roster.student_device_ids[..index].contains(id)\n        {
+        if id.is_empty()
+            || id.trim() != *id
+            || id.chars().any(char::is_control)
+            || roster.student_device_ids[..index].contains(id)
+        {
             return Err(RosterRejection::InvalidStudentDeviceRoster);
         }
     }
