@@ -4021,7 +4021,9 @@ mod windows_service_app {
         #[test]
         fn clear_stale_grant_preserves_new_pending_install() {
             let mut pending = Some((12_u8, "new grant"));
-            retire_matching_pending(&mut pending, |p| p.0 == 11, |_| panic!("wrong grant revoked"));
+            retire_matching_pending(&mut pending, |p| p.0 == 11, |_| {
+                panic!("wrong grant revoked")
+            });
             assert_eq!(pending, Some((12, "new grant")));
         }
 
