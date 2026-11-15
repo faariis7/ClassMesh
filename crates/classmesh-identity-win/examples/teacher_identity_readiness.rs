@@ -73,7 +73,10 @@ mod tests {
 
     #[test]
     fn stale_identity_is_not_qualified() {
-        assert_eq!(inspect_loaded(&fixture(99, vec![vec![0x30]]), 100), Finding::Expired);
+        assert_eq!(
+            inspect_loaded(&fixture(99, vec![vec![0x30]]), 100),
+            Finding::Expired
+        );
     }
 
     #[test]
@@ -82,7 +85,10 @@ mod tests {
             inspect_loaded(&fixture(200, vec![vec![0x30]]), 100),
             Finding::UnverifiedProvenance
         );
-        assert_eq!(inspect_loaded(&fixture(200, vec![]), 100), Finding::MissingTrustRoots);
+        assert_eq!(
+            inspect_loaded(&fixture(200, vec![]), 100),
+            Finding::MissingTrustRoots
+        );
     }
 
     #[test]
@@ -94,7 +100,8 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         let primary = dir.join("machine-identity.json");
-        let bytes = DurableMachineIdentity::encode_canonical(&fixture(200, vec![vec![0x30]])).unwrap();
+        let bytes =
+            DurableMachineIdentity::encode_canonical(&fixture(200, vec![vec![0x30]])).unwrap();
         fs::write(dir.join("machine-identity.json.bak"), bytes).unwrap();
         assert_eq!(inspect_primary(&primary, 100), Finding::MissingPrimary);
         fs::remove_dir_all(dir).unwrap();
