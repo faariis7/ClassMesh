@@ -70,3 +70,43 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
     // Never interpret unverified signature bytes or embedded roster as authority.
     Err(RosterRejection::MissingApprovedVerifier)
 }
+
+#[cfg(test)]
+mod identifier_hardening_tests {
+    use super::*;
+
+    fn request_with_ids<'a>(ids: &'a [&'a str]) -> TeacherRosterRequest<'a> {
+        TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: ids,
+            }),
+        }
+    }
+
+    #[test]
+    fn rejects_noncanonical_student_device_identifiers() {
+        for ids in [&[" device-1"][..], &["device-1 "][..], &["device-1\\n"][..]] {
+            assert_eq!(
+                qualify_teacher_roster(&request_with_ids(ids)),
+                Err(RosterRejection::InvalidStudentDeviceRoster)
+            );
+        }
+    }
+
+    #[test]
+    fn valid_identifiers_still_require_approved_verifier() {
+        assert_eq!(
+            qualify_teacher_roster(&request_with_ids(&["device-1", "device-2"])),
+            Err(RosterRejection::MissingApprovedVerifier)
+        );
+    }
+}
