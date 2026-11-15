@@ -62,3 +62,35 @@ The high-payload failures are **real**. `ReceiverPolicy::default()` expires part
 
 
 This diagnostic uses the already-existing `UdpFrameSender` and `UdpFrameReceiver` on one OS's real UDP socket. **Do not** enable `--decode` / `--render` on a VM without qualified hardware; the caller should not fabricate successful GPU presentation counts. This is not encrypted or authorized media; it is confined to `127.0.0.0/8` and must never be repurposed for unauthenticated remote traffic. Remove input/output fixtures after retaining hash-only test evidence if needed.
+
+### Protected Worker replay
+
+Place the three bounded AUD-delimited H.264 recordings in a disposable fixture
+directory as `320x180.h264`, `64x64.h264`, and `32x32.h264`. Each recording
+contains 36 frames. In an isolated Windows VM, set
+`CLASSMESH_M3_MULTICAST_INTERFACE` to its local IPv4 interface address to add
+the same-host multicast leg. The test sends multicast data with TTL 0.
+Unicast always targets IPv4 loopback.
+
+```powershell
+$env:CLASSMESH_M3_FIXTURES = 'C:\Lab\m3-fixtures'
+$env:CLASSMESH_M3_MULTICAST_INTERFACE = '<isolated local IPv4 interface>'
+cargo test -p classmesh-lab --test protected_worker_video -- --nocapture
+```
+
+The test runs the real Worker receive threads and opens their delivered
+ciphertext using the Worker key state and ephemeral SFrame material. It checks
+all 36 authenticated access units against the input SHA-256, expires an
+incomplete frame, rejects previous-epoch ciphertext after reopening the
+socket, and checks the 64-outcome queue under backpressure. The default CI
+test exercises the same unicast lifecycle with an in-memory fixture.
+The native lab run provides evidence through the authenticated access-unit
+boundary. It does not start the Service, provision trust, decode video, or
+display a D3D11 window.
+
+For timing diagnosis, pass `--fragment-timing` to both plain UDP tools. The
+sender reports time spent in `send_frame`. The receiver separates time between
+reads from time in a later socket read and reports the cost of periodic
+status writes. Status reporting waits until the reassembly window has no
+pending frame. The receiver continues to apply the same 80 ms deadline to an
+incomplete frame.
