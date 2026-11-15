@@ -158,6 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if Instant::now() >= next_report {
+            let report_started = fragment_timings.as_ref().map(|_| elapsed_us(started));
             let stats = receiver.stats();
             if let Some(interval) = telemetry.observe(elapsed_us(started), stats) {
                 eprintln!(
@@ -199,6 +200,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 recovery.last.as_secs_f64() * 1_000.0,
                 recovery.longest.as_secs_f64() * 1_000.0
             );
+            if let (Some(timings), Some(report_started)) = (&mut fragment_timings, report_started) {
+                timings.observe_status_report(
+                    stats.datagrams_received,
+                    elapsed_us(started).saturating_sub(report_started),
+                );
+            }
             next_report = Instant::now()
                 .checked_add(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now);

@@ -13,8 +13,13 @@ use classmesh_video::{Codec, EncodedFrameMeta};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 7 || args[1] != "--input" || args[3] != "--udp-to" || args[5] != "--fps" {
-        return Err("usage: classmesh-recorded-media-udp --input <AUD-delimited.h264> --udp-to 127.0.0.1:<port> --fps <1..60>".into());
+    let fragment_timing = args.get(7).is_some_and(|flag| flag == "--fragment-timing");
+    if args.len() != 7 + usize::from(fragment_timing)
+        || args[1] != "--input"
+        || args[3] != "--udp-to"
+        || args[5] != "--fps"
+    {
+        return Err("usage: classmesh-recorded-media-udp --input <AUD-delimited.h264> --udp-to 127.0.0.1:<port> --fps <1..60> [--fragment-timing]".into());
     }
     let target: SocketAddr = args[4].parse()?;
     let fps: u8 = args[6].parse()?;
@@ -42,6 +47,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let started = Instant::now();
     let mut idr_count = 0;
+    let mut send_timings = Vec::new();
     for (index, au) in access_units.iter().enumerate() {
         let frame_id = u64::try_from(index + 1)?;
         let timestamp_us = u64::try_from(index)?.saturating_mul(1_000_000) / u64::from(fps);
@@ -59,9 +65,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             Codec::H264,
             au.data.to_vec(),
         );
-        sender
+        let send_started = fragment_timing.then(Instant::now);
+        let report = sender
             .send_frame(timestamp_us, &frame)
             .map_err(|err| format!("diagnostic UDP send failed: {err:?}"))?;
+        if let Some(at) = send_started {
+            send_timings.push((frame_id, report.packets, at.elapsed().as_micros()));
+        }
+    }
+    for (frame_id, packets, elapsed_us) in send_timings {
+        eprintln!(
+            "sender frame timing: frame_id={frame_id} packets={packets} elapsed_us={elapsed_us}"
+        );
     }
     let stats = sender.stats();
     eprintln!(

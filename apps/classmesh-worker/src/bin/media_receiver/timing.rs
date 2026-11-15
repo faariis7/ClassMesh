@@ -14,6 +14,8 @@ struct FrameSample {
     first_read_wait_us: u64,
     first_received_us: u64,
     last_received_us: u64,
+    max_between_reads_us: u64,
+    max_later_read_us: u64,
     ready_us: Option<u64>,
     stale_drops: u16,
 }
@@ -21,6 +23,7 @@ struct FrameSample {
 #[derive(Default)]
 pub(super) struct FragmentTimings {
     samples: BTreeMap<(u32, u64), FrameSample>,
+    reports: Vec<(u64, u64)>,
 }
 
 impl FragmentTimings {
@@ -40,10 +43,20 @@ impl FragmentTimings {
             first_read_wait_us: received_us.saturating_sub(read_started_us),
             first_received_us: received_us,
             last_received_us: received_us,
+            max_between_reads_us: 0,
+            max_later_read_us: 0,
             ready_us: None,
             stale_drops: 0,
         });
         if sample.ready_us.is_none() {
+            if sample.packets_observed > 0 {
+                sample.max_between_reads_us = sample
+                    .max_between_reads_us
+                    .max(read_started_us.saturating_sub(sample.last_received_us));
+                sample.max_later_read_us = sample
+                    .max_later_read_us
+                    .max(received_us.saturating_sub(read_started_us));
+            }
             sample.last_received_us = received_us;
             sample.packets_observed = sample.packets_observed.saturating_add(1);
         }
@@ -70,7 +83,16 @@ impl FragmentTimings {
         }
     }
 
+    pub(super) fn observe_status_report(&mut self, datagrams: u64, elapsed_us: u64) {
+        if self.reports.len() < MAX_FRAME_SAMPLES {
+            self.reports.push((datagrams, elapsed_us));
+        }
+    }
+
     pub(super) fn report(&self) {
+        for &(datagrams, elapsed_us) in &self.reports {
+            eprintln!("receiver status timing: datagrams={datagrams} elapsed_us={elapsed_us}");
+        }
         for (&(stream_id, frame_id), sample) in &self.samples {
             let first_to_last_us = sample
                 .last_received_us
@@ -82,7 +104,7 @@ impl FragmentTimings {
                 .ready_us
                 .map(|ready| ready.saturating_sub(sample.last_received_us));
             eprintln!(
-                "receiver fragment timing: stream_id={stream_id} frame_id={frame_id} packets_observed={} expected_packets={} first_read_wait_us={} first_to_last_us={first_to_last_us} first_to_ready_us={first_to_ready_us:?} last_to_ready_us={last_to_ready_us:?} stale_drops={}",
+                "receiver fragment timing: stream_id={stream_id} frame_id={frame_id} packets_observed={} expected_packets={} first_read_wait_us={} first_to_last_us={first_to_last_us} first_to_ready_us={first_to_ready_us:?} last_to_ready_us={last_to_ready_us:?} stale_drops={} max_between_reads_us={} max_later_read_us={}",
                 sample.packets_observed,
                 sample.expected_packets,
                 sample.first_read_wait_us,
@@ -138,5 +160,7 @@ mod tests {
         assert_eq!(sample.first_received_us, 10);
         assert_eq!(sample.last_received_us, 20);
         assert_eq!(sample.ready_us, Some(22));
+        assert_eq!(sample.max_between_reads_us, 1);
+        assert_eq!(sample.max_later_read_us, 9);
     }
 }
