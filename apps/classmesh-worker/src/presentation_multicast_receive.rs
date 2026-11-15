@@ -300,6 +300,24 @@ mod tests {
     }
 
     #[test]
+    fn an_occupied_port_cannot_report_multicast_startup_ready() {
+        use classmesh_network::udp::DatagramError;
+
+        let reservation = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let start = ServicePresentationMulticastStart {
+            port: reservation.local_addr().unwrap().port(),
+            ..start(44)
+        };
+        let result = WorkerPresentationMulticastRuntime::start(start);
+        assert!(matches!(
+            result,
+            Err(WorkerPresentationMulticastStartError::Receiver(
+                ProtectedMulticastReceiveError::Datagram(DatagramError::Io(error))
+            )) if error.kind() == std::io::ErrorKind::AddrInUse
+        ));
+    }
+
+    #[test]
     fn retry_request_id_does_not_change_media_configuration() {
         assert!(same_media_configuration(start(44), start(45)));
     }

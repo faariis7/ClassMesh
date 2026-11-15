@@ -23,7 +23,6 @@ struct FrameSample {
 #[derive(Default)]
 pub(super) struct FragmentTimings {
     samples: BTreeMap<(u32, u64), FrameSample>,
-    reports: Vec<(u64, u64)>,
 }
 
 impl FragmentTimings {
@@ -83,16 +82,7 @@ impl FragmentTimings {
         }
     }
 
-    pub(super) fn observe_status_report(&mut self, datagrams: u64, elapsed_us: u64) {
-        if self.reports.len() < MAX_FRAME_SAMPLES {
-            self.reports.push((datagrams, elapsed_us));
-        }
-    }
-
     pub(super) fn report(&self) {
-        for &(datagrams, elapsed_us) in &self.reports {
-            eprintln!("receiver status timing: datagrams={datagrams} elapsed_us={elapsed_us}");
-        }
         for (&(stream_id, frame_id), sample) in &self.samples {
             let first_to_last_us = sample
                 .last_received_us

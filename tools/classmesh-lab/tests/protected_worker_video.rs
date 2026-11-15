@@ -139,16 +139,32 @@ impl WorkerReceiver {
         }
     }
 
+    fn failed(&self) -> bool {
+        match self {
+            Self::Unicast(receiver) => receiver.failed(),
+            Self::Multicast(receiver) => receiver.failed(),
+        }
+    }
+
     #[track_caller]
     fn receive_event(&self) -> Outcome {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        self.receive_event_until(Instant::now() + Duration::from_secs(2), "a socket event")
+    }
+
+    #[track_caller]
+    fn receive_event_until(&self, deadline: Instant, expected: impl std::fmt::Display) -> Outcome {
         loop {
             if let Some(outcome) = self.try_receive() {
                 return outcome;
             }
             assert!(
+                !self.failed(),
+                "Worker receive thread stopped while waiting for {expected}"
+            );
+            assert!(
                 Instant::now() < deadline,
-                "Worker did not receive a socket event"
+                "Worker did not receive {expected} ({} queue drops)",
+                self.dropped_events()
             );
             sleep(Duration::from_millis(1));
         }
@@ -223,26 +239,37 @@ fn packets(frame: &SealedGroupMediaFrame) -> Vec<MediaPacket> {
 
 fn deliver(socket: &UdpMediaSocket, destination: SocketAddr, packets: &[MediaPacket]) {
     for packet in packets {
-        socket.send_packet_to(packet, destination).unwrap();
+        assert_eq!(
+            socket.send_packet_to(packet, destination).unwrap(),
+            packet.payload.len() + classmesh_protocol::media::MEDIA_HEADER_LEN
+        );
     }
 }
 
 #[track_caller]
 fn next_frame(
     receiver: &WorkerReceiver,
+    frame_id: u64,
 ) -> classmesh_network::multicast_receiver::ReceivedGroupMediaCiphertext {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
+        match receiver.receive_event_until(deadline, format_args!("frame {frame_id}")) {
+            Outcome::Events(mut batch) => {
+                assert_eq!(batch.dropped_stale_frames, 0);
+                if let Some(frame) = batch.frames.pop() {
+                    assert!(batch.frames.is_empty());
+                    assert_eq!(frame.frame_id(), frame_id);
+                    return frame;
+                }
+            }
+            Outcome::Dropped(reason) => {
+                panic!("unexpected socket rejection before frame {frame_id}: {reason:?}");
+            }
+        }
         assert!(
             Instant::now() < deadline,
-            "Worker did not assemble the frame"
+            "Worker did not assemble frame {frame_id}"
         );
-        let mut batch = receiver.batch();
-        assert_eq!(batch.dropped_stale_frames, 0);
-        if let Some(frame) = batch.frames.pop() {
-            assert!(batch.frames.is_empty());
-            return frame;
-        }
     }
 }
 
@@ -311,7 +338,7 @@ fn verify_route(route: Route, dimensions: (u16, u16), source: &[u8]) {
         } else {
             deliver(&socket, destination, &packets(&frame));
         }
-        let ciphertext = next_frame(&receiver);
+        let ciphertext = next_frame(&receiver, id);
         let unit = keys.open_access_unit(ciphertext).unwrap();
         assert_eq!(unit.frame_id, id);
         received_hash.update(&unit.data);
@@ -344,14 +371,18 @@ fn verify_route(route: Route, dimensions: (u16, u16), source: &[u8]) {
     let old = last_frame.unwrap();
     deliver(&socket, destination, &packets(&old));
     assert!(matches!(
-        keys.open_access_unit(next_frame(&receiver)),
+        keys.open_access_unit(next_frame(&receiver, old.binding().frame_id())),
         Err(WorkerGroupMediaKeyError::Security(_))
     ));
-    let id = old.binding().frame_id() + 1;
+    // Model a lost single-datagram frame after the reconnect. The next
+    // authenticated keyframe must still get through across the frame gap.
+    let id = old.binding().frame_id() + 2;
     let fresh = seal(&mut sender, new_binding, id, 0, true, units[0].data);
     deliver(&socket, destination, &packets(&fresh));
     assert_eq!(
-        keys.open_access_unit(next_frame(&receiver)).unwrap().data,
+        keys.open_access_unit(next_frame(&receiver, id))
+            .unwrap()
+            .data,
         units[0].data
     );
 
@@ -402,7 +433,12 @@ fn read_fixture(path: PathBuf) -> Vec<u8> {
 
 #[test]
 fn recorded_frames_reach_the_worker_authentication_boundary() {
+    let multicast_only = std::env::var_os("CLASSMESH_M3_MULTICAST_32_ONLY").is_some();
     let Some(fixtures) = std::env::var_os("CLASSMESH_M3_FIXTURES").map(PathBuf::from) else {
+        assert!(
+            !multicast_only,
+            "set CLASSMESH_M3_FIXTURES for the native replay"
+        );
         let mut data = vec![0, 0, 1, 9, 0xf0, 0, 0, 1, 0x65];
         data.extend_from_slice(&[0x5a; 2_400]);
         data.extend_from_slice(&[0, 0, 1, 9, 0xf0, 0, 0, 1, 0x41, 0x6a]);
@@ -412,6 +448,13 @@ fn recorded_frames_reach_the_worker_authentication_boundary() {
     let multicast = std::env::var("CLASSMESH_M3_MULTICAST_INTERFACE")
         .ok()
         .map(|interface| Route::Multicast(interface.parse().unwrap()));
+    if multicast_only {
+        let route = multicast.expect("set CLASSMESH_M3_MULTICAST_INTERFACE for the native replay");
+        let data = read_fixture(fixtures.join("32x32.h264"));
+        assert_eq!(parse_access_units(&data).unwrap().len(), 36);
+        verify_route(route, (32, 32), &data);
+        return;
+    }
     for route in std::iter::once(Route::Unicast).chain(multicast) {
         for dimensions in [(320, 180), (64, 64), (32, 32)] {
             let data =

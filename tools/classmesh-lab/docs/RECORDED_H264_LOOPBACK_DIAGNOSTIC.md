@@ -82,7 +82,11 @@ The test runs the real Worker receive threads and opens their delivered
 ciphertext using the Worker key state and ephemeral SFrame material. It checks
 all 36 authenticated access units against the input SHA-256, expires an
 incomplete frame, rejects previous-epoch ciphertext after reopening the
-socket, and checks the 64-outcome queue under backpressure. The default CI
+socket, verifies recovery with the next authenticated keyframe across a
+deliberately absent frame, and checks the 64-outcome queue under backpressure.
+Set `CLASSMESH_M3_MULTICAST_32_ONLY=1` with both variables above to repeat the
+32×32 leg without running the other fixtures. A timeout still fails that run
+and identifies the frame, receiver I/O failure, or queue drops. The default CI
 test exercises the same unicast lifecycle with an in-memory fixture.
 The native lab run provides evidence through the authenticated access-unit
 boundary. It does not start the Service, provision trust, decode video, or
@@ -91,6 +95,10 @@ display a D3D11 window.
 For timing diagnosis, pass `--fragment-timing` to both plain UDP tools. The
 sender reports time spent in `send_frame`. The receiver separates time between
 reads from time in a later socket read and reports the cost of periodic
-status writes. Status reporting waits until the reassembly window has no
-pending frame. The receiver continues to apply the same 80 ms deadline to an
-incomplete frame.
+status writes. A dedicated writer reports cumulative snapshots once per second
+while reassembly is active. It holds one pending snapshot plus the one being
+written. Under backpressure, periodic snapshots are dropped and the final
+summary includes `status_reports_dropped`. Rate windows span the actual
+elapsed time between snapshots that reach the writer. Shutdown waits up to
+two seconds for the writer to drain before returning a failure exit status
+if the sink remains stalled. Receiver expiry remains 80 ms.
