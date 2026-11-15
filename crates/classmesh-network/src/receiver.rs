@@ -266,4 +266,60 @@ mod tests {
             ReceiverEvent::FrameReady(frame) if frame.frame_id == 2
         )));
     }
+
+    #[test]
+    fn sustained_partial_frames_keep_the_receive_window_bounded() {
+        let policy = ReceiverPolicy::default();
+        let mut window = ReceiverWindow::new(policy);
+        for id in 1..=4_096 {
+            let events = window.push(0, &packets(id)[0]).unwrap();
+            assert!(window.inflight.len() <= policy.max_inflight_frames);
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, ReceiverEvent::FrameReady(_)))
+            );
+        }
+        assert_eq!(window.inflight.len(), policy.max_inflight_frames);
+        assert_eq!(window.dropped_frames(), 4_093);
+        window.tick(policy.drop_after_us);
+        assert!(window.inflight.is_empty());
+        assert_eq!(window.dropped_frames(), 4_096);
+    }
+
+    #[test]
+    fn late_fragments_cannot_complete_an_expired_assembly_or_replace_a_newer_frame() {
+        let policy = ReceiverPolicy::default();
+        let mut window = ReceiverWindow::new(policy);
+        let old = packets(1);
+        for fragment in &old[..2] {
+            assert!(window.push(0, fragment).unwrap().is_empty());
+        }
+        let events = window.push(policy.drop_after_us, &old[2]).unwrap();
+        assert!(matches!(
+            &events[..],
+            [
+                ReceiverEvent::DroppedStaleFrame { frame_id: 1, .. },
+                ReceiverEvent::NeedKeyframe { .. }
+            ]
+        ));
+        for fragment in &packets(2) {
+            let events = window.push(policy.drop_after_us + 1, fragment).unwrap();
+            assert_eq!(
+                events.iter().any(
+                    |event| matches!(event, ReceiverEvent::FrameReady(frame) if frame.frame_id == 2)
+                ),
+                fragment.header.packet_index == 2
+            );
+        }
+        for fragment in &old {
+            assert!(
+                window
+                    .push(policy.drop_after_us + 2, fragment)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert!(window.inflight.is_empty());
+    }
 }
