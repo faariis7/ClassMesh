@@ -2773,11 +2773,15 @@ mod windows_service_app {
                 receiver_telemetry_runtime.revoke_matching_key(key_from_confirmed_grant(binding));
                 // A clear may race an in-flight install ACK. Retire the exact
                 // pending grant before processing Worker results this tick.
-                retire_matching_pending(&mut pending_presentation_key_install, |pending| {
-                    pending.binding == binding
-                }, |pending| {
-                    let _ = pending.reply_tx.send(Err("control.presentation.key_cleared".to_owned()));
-                });
+                retire_matching_pending(
+                    &mut pending_presentation_key_install,
+                    |pending| pending.binding == binding,
+                    |pending| {
+                        let _ = pending
+                            .reply_tx
+                            .send(Err("control.presentation.key_cleared".to_owned()));
+                    },
+                );
                 if pending_presentation_multicast_start
                     .as_ref()
                     .is_some_and(|pending| pending.matches_key_binding(binding))
