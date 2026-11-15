@@ -51,7 +51,9 @@ fn main() {
     let finding = inspect_primary(&path, now_ms);
     println!("Teacher protected startup: BLOCKED (diagnostic only)");
     println!("Primary identity diagnostic: {finding:?}");
-    println!("Not verified: source provenance, approved CA, CNG key binding, signed StudentDevice roster, Teacher permission, trusted session/peer.");
+    println!(
+        "Not verified: source provenance, approved CA, CNG key binding, signed StudentDevice roster, Teacher permission, trusted session/peer."
+    );
     // Exit code intentionally non-zero even for syntactically valid identity.
     std::process::exit(3);
 }
