@@ -43,7 +43,12 @@ pub struct TeacherRosterRequest<'a> {
 pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), RosterRejection> {
     let roster = request.roster.ok_or(RosterRejection::MissingRoster)?;
     // Reject ambiguous or noncanonical identities before comparing principals/roles.
-    for value in [request.teacher_principal, request.required_role, roster.teacher_principal, roster.role] {
+    for value in [
+        request.teacher_principal,
+        request.required_role,
+        roster.teacher_principal,
+        roster.role,
+    ] {
         if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
             return Err(RosterRejection::InvalidPrincipalOrRole);
         }
@@ -157,9 +162,9 @@ mod malformed_roster_metadata_tests {
         for (principal, role) in [
             ("", "Teacher"),
             (" teacher-1", "Teacher"),
-            ("teacher-1\\n", "Teacher"),
+            ("teacher-1\n", "Teacher"),
             ("teacher-1", ""),
-            ("teacher-1", "Teacher\\t"),
+            ("teacher-1", "Teacher\t"),
         ] {
             assert_eq!(
                 qualify_teacher_roster(&request(principal, role, 150)),
