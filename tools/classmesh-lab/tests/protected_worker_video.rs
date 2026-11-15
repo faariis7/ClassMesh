@@ -139,6 +139,7 @@ impl WorkerReceiver {
         }
     }
 
+    #[track_caller]
     fn receive_event(&self) -> Outcome {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -153,6 +154,7 @@ impl WorkerReceiver {
         }
     }
 
+    #[track_caller]
     fn batch(&self) -> Batch {
         match self.receive_event() {
             Outcome::Events(batch) => batch,
@@ -225,6 +227,7 @@ fn deliver(socket: &UdpMediaSocket, destination: SocketAddr, packets: &[MediaPac
     }
 }
 
+#[track_caller]
 fn next_frame(
     receiver: &WorkerReceiver,
 ) -> classmesh_network::multicast_receiver::ReceivedGroupMediaCiphertext {

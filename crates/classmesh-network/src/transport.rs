@@ -391,6 +391,12 @@ impl UdpFrameReceiver {
         })
     }
 
+    /// Whether the receive window holds any incomplete frame.
+    #[must_use]
+    pub fn has_pending_frames(&self) -> bool {
+        self.window.has_pending_frames()
+    }
+
     #[must_use]
     pub fn tick(&mut self, now_us: u64) -> Vec<ReceiverEvent> {
         self.window.tick(now_us)

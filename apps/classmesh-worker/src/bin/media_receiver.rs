@@ -157,7 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
 
-        if Instant::now() >= next_report {
+        if status_report_due(Instant::now(), next_report, &receiver) {
             let report_started = fragment_timings.as_ref().map(|_| elapsed_us(started));
             let stats = receiver.stats();
             if let Some(interval) = telemetry.observe(elapsed_us(started), stats) {
@@ -441,6 +441,12 @@ fn has_flag(args: &[String], name: &str) -> bool {
     args.iter().any(|arg| arg == name)
 }
 
+fn status_report_due(now: Instant, next_report: Instant, receiver: &UdpFrameReceiver) -> bool {
+    // The synchronous status write can outlast the assembly deadline on
+    // Windows. Wait for the current assembly to complete or expire.
+    now >= next_report && !receiver.has_pending_frames()
+}
+
 fn elapsed_us(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
@@ -448,6 +454,50 @@ fn elapsed_us(started: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn due_status_report_waits_until_pending_fragments_are_read() {
+        use classmesh_network::udp::UdpMediaSocket;
+        use classmesh_network::{PacketizeMeta, packetize_frame};
+        use classmesh_protocol::media::MAX_PACKET_PAYLOAD;
+
+        let loopback = "127.0.0.1:0".parse().unwrap();
+        let socket = UdpMediaSocket::bind(loopback).unwrap();
+        let mut receiver = UdpFrameReceiver::bind(loopback, ReceiverPolicy::default()).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let destination = receiver.local_addr().unwrap();
+        let packets = packetize_frame(
+            &vec![0x55; MAX_PACKET_PAYLOAD + 1],
+            PacketizeMeta {
+                protocol_major: 0,
+                protocol_minor: 4,
+                stream_id: 1,
+                frame_id: 1,
+                first_sequence: 0,
+                timestamp_us: 0,
+                keyframe: true,
+            },
+        )
+        .unwrap();
+        for packet in &packets {
+            socket.send_packet_to(packet, destination).unwrap();
+        }
+
+        let due = Instant::now();
+        assert!(status_report_due(due, due, &receiver));
+        assert!(receiver.receive_once(1).unwrap().events.is_empty());
+        assert!(
+            !status_report_due(due, due, &receiver),
+            "a due report must not interrupt a partial frame"
+        );
+        assert!(matches!(
+            &receiver.receive_once(2).unwrap().events[..],
+            [ReceiverEvent::FrameReady(_)]
+        ));
+        assert!(status_report_due(due, due, &receiver));
+    }
 
     #[test]
     fn optional_u64_parser_accepts_absent_and_valid_values() {

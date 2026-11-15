@@ -141,6 +141,10 @@ impl ReceiverWindow {
         Ok(events)
     }
 
+    pub(crate) fn has_pending_frames(&self) -> bool {
+        !self.inflight.is_empty()
+    }
+
     pub fn tick(&mut self, now_us: u64) -> Vec<ReceiverEvent> {
         self.expire(now_us)
     }
