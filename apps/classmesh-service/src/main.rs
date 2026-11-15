@@ -3381,6 +3381,10 @@ mod windows_service_app {
                     if workers.current_authenticated_receiver_worker() != prior_worker {
                         // Session stop/replacement may run synchronously without
                         // producing a later WorkerManager::poll event.
+                        fail_pending_teacher_interaction_on_session_worker_change(
+                            &mut pending_teacher_interaction,
+                            true,
+                        );
                         receiver_telemetry_runtime.worker_changed();
                     }
                 }
@@ -3627,6 +3631,23 @@ mod windows_service_app {
                 let event = workers.launch(new_session);
                 handle_worker_event(event, supervisor, input_availability);
             }
+        }
+    }
+
+    // A synchronous Session stop/replacement can revoke the authenticated Worker
+    // without a subsequent WorkerManager poll event. Retire its outstanding ACK
+    // before any result from the former Worker can be routed.
+    fn fail_pending_teacher_interaction_on_session_worker_change(
+        pending: &mut Option<PendingTeacherInteraction>,
+        worker_changed: bool,
+    ) {
+        if !worker_changed {
+            return;
+        }
+        if let Some(pending) = pending.take() {
+            let _ = pending
+                .reply_tx
+                .try_send(TeacherInteractionDispatchOutcome::WorkerUnavailable);
         }
     }
 
@@ -3919,6 +3940,70 @@ mod windows_service_app {
                 reply_rx.try_recv(),
                 Ok(TeacherInteractionDispatchOutcome::WorkerUnavailable)
             );
+        }
+
+        #[test]
+        fn synchronous_session_worker_revocation_retires_ack_and_rejects_late_completion() {
+            use classmesh_protocol::control_wire::{
+                TeacherInteractionResult, TeacherInteractionState,
+            };
+            let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel(2);
+            let mut pending = Some(PendingTeacherInteraction {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                expected_kind: TeacherInteractionKind::Message,
+                reply_tx,
+                accepted_seen: false,
+            });
+            // Session supervisor synchronously stops/replaces the Worker. Poll
+            // may return None afterwards, so revocation must be immediate.
+            fail_pending_teacher_interaction_on_session_worker_change(&mut pending, true);
+            assert!(pending.is_none());
+            assert_eq!(
+                reply_rx.try_recv(),
+                Ok(TeacherInteractionDispatchOutcome::WorkerUnavailable)
+            );
+            route_worker_teacher_result(
+                &mut pending,
+                WorkerTeacherInteractionResult {
+                    process_id: 42,
+                    session_id: 7,
+                    control_session_id: 77,
+                    request_id: 44,
+                    result: TeacherInteractionResult {
+                        kind: TeacherInteractionKind::Message as i32,
+                        state: TeacherInteractionState::Completed as i32,
+                        diagnostic: String::new(),
+                    },
+                },
+            );
+            assert!(pending.is_none());
+            assert!(matches!(
+                reply_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+            ));
+        }
+
+        #[test]
+        fn unchanged_session_worker_preserves_outstanding_teacher_ack() {
+            let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel(2);
+            let mut pending = Some(PendingTeacherInteraction {
+                expected_process_id: 42,
+                expected_session_id: 7,
+                control_session_id: 77,
+                request_id: 44,
+                expected_kind: TeacherInteractionKind::Message,
+                reply_tx,
+                accepted_seen: false,
+            });
+            fail_pending_teacher_interaction_on_session_worker_change(&mut pending, false);
+            assert!(pending.is_some());
+            assert!(matches!(
+                reply_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
         }
 
         #[test]
