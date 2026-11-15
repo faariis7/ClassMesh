@@ -108,7 +108,9 @@ impl FragmentTimings {
                 sample.packets_observed,
                 sample.expected_packets,
                 sample.first_read_wait_us,
-                sample.stale_drops
+                sample.stale_drops,
+                sample.max_between_reads_us,
+                sample.max_later_read_us,
             );
         }
     }
