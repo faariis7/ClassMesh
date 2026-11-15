@@ -27,6 +27,24 @@ cargo build -p classmesh-lab --bin classmesh-recorded-media-udp
 
 Check—not assume—the exact result: sender reports `LAB_TRANSPORT_SENT frames=36` (for above fixture) and payload bytes. The receiver should report 36 reassembled frames, zero gaps and zero stale drops, and `Get-FileHash -Algorithm SHA256` on received and input files must match. Verify the source actually has multiple changing decoded-frame hashes with FFmpeg (`-f framemd5`) on a machine equipped to decode the recording. **Do not** call this live capture, GPU decode or a successful ClassMesh video window.
 
+### Fragment timing (issue #729)
+
+Add `--fragment-timing` to the loopback receiver command. After the run it reports
+up to 240 frame samples, with the expected and observed packet counts, initial
+socket read wait, time from first to last datagram read, time from first read
+to completed assembly, and stale-drop counts. The timestamps come from the
+receiver's monotonic clock after each socket read returns a valid datagram.
+They measure application reads, including socket and scheduling delays.
+`None` for a completion interval means assembly did not finish. The timing
+report contains no media bytes, sender timestamps, or addresses.
+
+The failure occurs when the receiver passes the pre-read timestamp to the
+reassembly window. The 100 ms socket wait can exhaust the window's 80 ms
+deadline before the first fragment is processed. The receiver now samples time
+after the read. Keep the same input files, 12 fps, and receiver policy when
+comparing the two builds. Compare frame counts, input/output SHA-256, observed
+sequence gaps, stale drops, and the timing reports.
+
 ### Native VM1 experimental evidence (2026-11-09; source PR #728)
 
 The following measurements used the real Windows VM1 `classmesh-media-receiver` program and the new sender on the exact lab branch, without `--render` / `--decode`:

@@ -12,6 +12,11 @@ use classmesh_worker::presentation_decode_render::{
     PresentationDecodeStep as DecodeStep, PresentationRecoveryTelemetry as RecoveryTelemetry,
 };
 
+#[path = "media_receiver/timing.rs"]
+mod timing;
+
+use timing::FragmentTimings;
+
 #[derive(Debug, Default)]
 struct ReceiverCounters {
     frames: u64,
@@ -37,6 +42,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let feedback_to = parse_optional_socket_arg(&args, "--feedback-to")?;
     let render_enabled = has_flag(&args, "--render");
     let decode_enabled = has_flag(&args, "--decode") || render_enabled;
+    let mut fragment_timings = if has_flag(&args, "--fragment-timing") {
+        if !listen.ip().is_loopback() {
+            return Err("--fragment-timing requires a loopback --listen address".into());
+        }
+        Some(FragmentTimings::default())
+    } else {
+        None
+    };
     let recover_after_frames =
         parse_optional_u64_arg(&args, "--recover-after-frames", 1, u64::MAX)?;
     if recover_after_frames.is_some() && !decode_enabled {
@@ -94,9 +107,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut counters = ReceiverCounters::default();
 
     while Instant::now() < deadline {
-        let now_us = elapsed_us(started);
-        match receiver.receive_once(now_us) {
+        // Keep the blocking socket wait outside the reassembly deadline.
+        let read_started_us = fragment_timings.as_ref().map(|_| elapsed_us(started));
+        let mut received_us = 0;
+        match receiver.receive_once_with_clock(|| {
+            received_us = elapsed_us(started);
+            received_us
+        }) {
             Ok(batch) => {
+                if let (Some(timings), Some(read_started_us)) =
+                    (fragment_timings.as_mut(), read_started_us)
+                {
+                    let assembled_us = elapsed_us(started);
+                    timings.observe_packet(batch.header, read_started_us, received_us);
+                    timings.observe_events(&batch.events, assembled_us);
+                }
                 handle_events(
                     &batch.events,
                     output.as_mut(),
@@ -114,6 +139,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let tick_events = receiver.tick(elapsed_us(started));
+        if let Some(timings) = fragment_timings.as_mut() {
+            timings.observe_events(&tick_events, elapsed_us(started));
+        }
         handle_events(
             &tick_events,
             output.as_mut(),
@@ -219,6 +247,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         recovery.longest.as_secs_f64() * 1_000.0,
         started.elapsed().as_secs_f32()
     );
+    if let Some(timings) = fragment_timings {
+        timings.report();
+    }
     Ok(())
 }
 
