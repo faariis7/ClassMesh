@@ -36,9 +36,7 @@ pub struct TeacherRosterRequest<'a> {
 /// A production allow decision requires independently verified issuer provenance,
 /// signature, Teacher authorization, identity-to-CNG binding, and trusted session/peer.
 /// None is supplied by this API. Its return type intentionally has no Allow variant.
-pub fn qualify_teacher_roster(
-    request: &TeacherRosterRequest<'_>,
-) -> Result<(), RosterRejection> {
+pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), RosterRejection> {
     let roster = request.roster.ok_or(RosterRejection::MissingRoster)?;
     if roster.expires_unix_ms <= request.now_unix_ms
         || roster.expires_unix_ms <= roster.issued_unix_ms
