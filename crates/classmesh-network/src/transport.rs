@@ -2,7 +2,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use classmesh_protocol::media::MEDIA_PROTOCOL_VERSION;
+use classmesh_protocol::media::{MEDIA_PROTOCOL_VERSION, MediaPacketHeader};
 use classmesh_video::Codec;
 use classmesh_video::distributor::SharedEncodedFrame;
 
@@ -310,6 +310,8 @@ impl UdpReceiverIntervalSampler {
 #[derive(Debug)]
 pub struct UdpReceiveBatch {
     pub source: SocketAddr,
+    /// Validated header of the datagram that produced this batch.
+    pub header: MediaPacketHeader,
     pub sequence: SequenceObservation,
     pub events: Vec<ReceiverEvent>,
 }
@@ -383,6 +385,7 @@ impl UdpFrameReceiver {
         );
         Ok(UdpReceiveBatch {
             source,
+            header: packet.header,
             sequence: observation,
             events,
         })

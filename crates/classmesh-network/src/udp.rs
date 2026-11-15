@@ -182,6 +182,8 @@ mod tests {
     use classmesh_protocol::media::MediaFlags;
 
     use super::*;
+    use crate::receiver::{ReceiverEvent, ReceiverPolicy};
+    use crate::transport::UdpFrameReceiver;
 
     fn packet() -> MediaPacket {
         MediaPacket {
@@ -208,6 +210,53 @@ mod tests {
         assert!(encoded.len() <= MAX_MEDIA_DATAGRAM);
         let decoded = decode_datagram(&encoded).expect("packet should decode");
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn fresh_fragments_survive_a_receive_wait_longer_than_the_expiry() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let observer = socket.try_clone().unwrap();
+        let mut receiver =
+            UdpFrameReceiver::new(UdpMediaSocket { socket }, ReceiverPolicy::default());
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let destination = receiver.local_addr().unwrap();
+        let sender = UdpMediaSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let mut fragment = packet();
+        fragment.header.flags = MediaFlags::FRAME_START;
+        fragment.header.packet_count = 2;
+        sender.send_packet_to(&fragment, destination).unwrap();
+
+        // Use the real socket's queue to distinguish pre-read and post-read
+        // times without relying on thread scheduling or a wall-clock delay.
+        let mut buffer = [0_u8; MAX_MEDIA_DATAGRAM];
+        observer.peek_from(&mut buffer).unwrap();
+        let first = receiver
+            .receive_once_with_clock(|| {
+                observer.set_nonblocking(true).unwrap();
+                let pending = observer.peek_from(&mut buffer);
+                observer.set_nonblocking(false).unwrap();
+                match pending {
+                    Ok(_) => 0,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => 100_000,
+                    Err(error) => panic!("socket peek failed: {error}"),
+                }
+            })
+            .unwrap();
+        assert!(first.events.is_empty());
+        let events = receiver.tick(100_001);
+        assert!(events.is_empty(), "fresh pending frame expired: {events:?}");
+
+        fragment.header.flags = MediaFlags::FRAME_END;
+        fragment.header.packet_index = 1;
+        fragment.header.sequence += 1;
+        sender.send_packet_to(&fragment, destination).unwrap();
+        let completed = receiver.receive_once_with_clock(|| 100_002).unwrap();
+        assert!(matches!(
+            &completed.events[..],
+            [ReceiverEvent::FrameReady(frame)] if frame.data == [1, 2, 3, 4, 1, 2, 3, 4]
+        ));
     }
 
     #[test]
