@@ -598,3 +598,97 @@ mod principal_role_bounds_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod fail_closed_provenance_regression_tests {
+    use super::*;
+
+    fn request<'a>(roster: Option<RosterEvidence<'a>>) -> TeacherRosterRequest<'a> {
+        TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster,
+        }
+    }
+
+    fn evidence() -> RosterEvidence<'static> {
+        RosterEvidence {
+            teacher_principal: "teacher-1",
+            role: "Teacher",
+            issued_unix_ms: 150,
+            expires_unix_ms: 300,
+            signature: Some(&[1]),
+            student_device_ids: &["device-1"],
+        }
+    }
+
+    #[test]
+    fn missing_roster_is_denied() {
+        assert_eq!(
+            qualify_teacher_roster(&request(None)),
+            Err(RosterRejection::MissingRoster)
+        );
+    }
+
+    #[test]
+    fn expired_roster_at_exact_boundary_is_denied() {
+        let mut roster = evidence();
+        roster.expires_unix_ms = 200;
+        assert_eq!(
+            qualify_teacher_roster(&request(Some(roster))),
+            Err(RosterRejection::ExpiredRoster)
+        );
+    }
+
+    #[test]
+    fn missing_and_empty_signatures_are_denied() {
+        for signature in [None, Some(&[][..])] {
+            let mut roster = evidence();
+            roster.signature = signature;
+            assert_eq!(
+                qualify_teacher_roster(&request(Some(roster))),
+                Err(RosterRejection::UnsignedRoster)
+            );
+        }
+    }
+
+    #[test]
+    fn wrong_teacher_principal_is_denied() {
+        let mut roster = evidence();
+        roster.teacher_principal = "another-teacher";
+        assert_eq!(
+            qualify_teacher_roster(&request(Some(roster))),
+            Err(RosterRejection::WrongPrincipal)
+        );
+    }
+
+    #[test]
+    fn wrong_teacher_role_is_denied() {
+        let mut roster = evidence();
+        roster.role = "Student";
+        assert_eq!(
+            qualify_teacher_roster(&request(Some(roster))),
+            Err(RosterRejection::WrongRole)
+        );
+    }
+
+    #[test]
+    fn stale_authorization_epoch_is_denied() {
+        let mut roster = evidence();
+        roster.issued_unix_ms = 99;
+        assert_eq!(
+            qualify_teacher_roster(&request(Some(roster))),
+            Err(RosterRejection::StaleAuthorization)
+        );
+    }
+
+    #[test]
+    fn plausible_unverified_roster_still_cannot_authorize() {
+        assert_eq!(
+            qualify_teacher_roster(&request(Some(evidence()))),
+            Err(RosterRejection::MissingApprovedVerifier)
+        );
+    }
+}
