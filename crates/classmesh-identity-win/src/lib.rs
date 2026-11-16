@@ -4,7 +4,8 @@ mod machine_identity;
 mod teacher_roster;
 
 pub use teacher_roster::{
-    RosterEvidence, RosterRejection, TeacherRosterRequest, qualify_teacher_roster,
+    RosterEvidence, RosterRejection, TeacherRosterRequest, qualify_teacher_device_roster,
+    qualify_teacher_roster,
 };
 
 pub use machine_identity::{
