@@ -1,0 +1,437 @@
+//! Read-only roster metadata screening. This is NOT signature verification or authorization.
+//! No approved issuer/trust anchor is configured: all candidates are denied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RosterRejection {
+    MissingRoster,
+    ExpiredRoster,
+    UnsignedRoster,
+    WrongPrincipal,
+    WrongRole,
+    StaleAuthorization,
+    MissingApprovedVerifier,
+    EmptyStudentDeviceRoster,
+    InvalidStudentDeviceRoster,
+    InvalidPrincipalOrRole,
+    InvalidIssuedTimestamp,
+    MissingAuthorizationEpoch,
+    OversizedStudentDeviceRoster,
+    OversizedStudentDeviceIdentifier,
+    OversizedUntrustedSignature,
+    OversizedPrincipalOrRole,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RosterEvidence<'a> {
+    pub teacher_principal: &'a str,
+    pub role: &'a str,
+    pub issued_unix_ms: u64,
+    pub expires_unix_ms: u64,
+    /// Untrusted bytes: presence alone never proves a signature.
+    pub signature: Option<&'a [u8]>,
+    pub student_device_ids: &'a [&'a str],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TeacherRosterRequest<'a> {
+    pub teacher_principal: &'a str,
+    pub required_role: &'a str,
+    pub now_unix_ms: u64,
+    pub authorization_not_before_unix_ms: u64,
+    pub roster: Option<RosterEvidence<'a>>,
+}
+
+/// Screens untrusted metadata for explicit denial reasons, never granting authority.
+///
+/// A production allow decision requires independently verified issuer provenance,
+/// signature, Teacher authorization, identity-to-CNG binding, and trusted session/peer.
+/// None is supplied by this API. Its return type intentionally has no Allow variant.
+pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), RosterRejection> {
+    let roster = request.roster.ok_or(RosterRejection::MissingRoster)?;
+    // Reject ambiguous or noncanonical identities before comparing principals/roles.
+    for value in [
+        request.teacher_principal,
+        request.required_role,
+        roster.teacher_principal,
+        roster.role,
+    ] {
+        if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+            return Err(RosterRejection::InvalidPrincipalOrRole);
+        }
+    }
+    // Bound untrusted identity strings before comparisons; this is not an identity policy.
+    if [
+        request.teacher_principal,
+        request.required_role,
+        roster.teacher_principal,
+        roster.role,
+    ]
+    .iter()
+    .any(|value| value.len() > 256)
+    {
+        return Err(RosterRejection::OversizedPrincipalOrRole);
+    }
+    // A missing authorization epoch cannot establish freshness or prevent replay.
+    if request.authorization_not_before_unix_ms == 0 {
+        return Err(RosterRejection::MissingAuthorizationEpoch);
+    }
+    if roster.issued_unix_ms == 0 {
+        return Err(RosterRejection::InvalidIssuedTimestamp);
+    }
+    if roster.expires_unix_ms <= request.now_unix_ms
+        || roster.expires_unix_ms <= roster.issued_unix_ms
+    {
+        return Err(RosterRejection::ExpiredRoster);
+    }
+    if roster.signature.is_none_or(|bytes| bytes.is_empty()) {
+        return Err(RosterRejection::UnsignedRoster);
+    }
+    // Bound attacker-controlled signature bytes without treating them as verified.
+    // This is a screening limit only, not a cryptographic algorithm policy.
+    if roster.signature.is_some_and(|bytes| bytes.len() > 4096) {
+        return Err(RosterRejection::OversizedUntrustedSignature);
+    }
+    if roster.teacher_principal != request.teacher_principal {
+        return Err(RosterRejection::WrongPrincipal);
+    }
+    if roster.role != request.required_role {
+        return Err(RosterRejection::WrongRole);
+    }
+    if roster.issued_unix_ms < request.authorization_not_before_unix_ms
+        || roster.issued_unix_ms > request.now_unix_ms
+    {
+        return Err(RosterRejection::StaleAuthorization);
+    }
+    // Bound work on attacker-controlled metadata before the quadratic duplicate scan.
+    // This is a deny-only resource guard, not an enrollment policy or trust decision.
+    if roster.student_device_ids.len() > 1024 {
+        return Err(RosterRejection::OversizedStudentDeviceRoster);
+    }
+    if roster.student_device_ids.is_empty() {
+        return Err(RosterRejection::EmptyStudentDeviceRoster);
+    }
+    let mut seen = std::collections::HashSet::with_capacity(roster.student_device_ids.len());
+    for id in roster.student_device_ids {
+        // Bound individual untrusted strings as well as roster cardinality.
+        if id.len() > 256 {
+            return Err(RosterRejection::OversizedStudentDeviceIdentifier);
+        }
+        if id.is_empty()
+            || id.trim() != *id
+            || id.chars().any(char::is_control)
+            || !seen.insert(*id)
+        {
+            return Err(RosterRejection::InvalidStudentDeviceRoster);
+        }
+    }
+    // Never interpret unverified signature bytes or embedded roster as authority.
+    Err(RosterRejection::MissingApprovedVerifier)
+}
+
+#[cfg(test)]
+mod identifier_hardening_tests {
+    use super::*;
+
+    fn request_with_ids<'a>(ids: &'a [&'a str]) -> TeacherRosterRequest<'a> {
+        TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: ids,
+            }),
+        }
+    }
+
+    #[test]
+    fn rejects_noncanonical_student_device_identifiers() {
+        for ids in [
+            &[" device-1"][..],
+            &["device-1 "][..],
+            &["device-1\n"][..],
+            &["device-1\t"][..],
+        ] {
+            assert_eq!(
+                qualify_teacher_roster(&request_with_ids(ids)),
+                Err(RosterRejection::InvalidStudentDeviceRoster)
+            );
+        }
+    }
+
+    #[test]
+    fn valid_identifiers_still_require_approved_verifier() {
+        assert_eq!(
+            qualify_teacher_roster(&request_with_ids(&["device-1", "device-2"])),
+            Err(RosterRejection::MissingApprovedVerifier)
+        );
+    }
+}
+
+#[cfg(test)]
+mod malformed_roster_metadata_tests {
+    use super::*;
+
+    fn request<'a>(principal: &'a str, role: &'a str, issued: u64) -> TeacherRosterRequest<'a> {
+        TeacherRosterRequest {
+            teacher_principal: principal,
+            required_role: role,
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: principal,
+                role,
+                issued_unix_ms: issued,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: &["device-1"],
+            }),
+        }
+    }
+
+    #[test]
+    fn malformed_teacher_principal_and_role_are_denied() {
+        for (principal, role) in [
+            ("", "Teacher"),
+            (" teacher-1", "Teacher"),
+            ("teacher-1\n", "Teacher"),
+            ("teacher-1", ""),
+            ("teacher-1", "Teacher\t"),
+        ] {
+            assert_eq!(
+                qualify_teacher_roster(&request(principal, role, 150)),
+                Err(RosterRejection::InvalidPrincipalOrRole)
+            );
+        }
+    }
+
+    #[test]
+    fn zero_issued_timestamp_is_denied() {
+        assert_eq!(
+            qualify_teacher_roster(&request("teacher-1", "Teacher", 0)),
+            Err(RosterRejection::InvalidIssuedTimestamp)
+        );
+    }
+
+    #[test]
+    fn well_formed_metadata_still_never_authorizes() {
+        assert_eq!(
+            qualify_teacher_roster(&request("teacher-1", "Teacher", 150)),
+            Err(RosterRejection::MissingApprovedVerifier)
+        );
+    }
+}
+
+#[cfg(test)]
+mod roster_resource_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_untrusted_roster_is_denied_before_duplicate_scan() {
+        let ids = vec!["device-1"; 1025];
+        let request = TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: &ids,
+            }),
+        };
+        assert_eq!(
+            qualify_teacher_roster(&request),
+            Err(RosterRejection::OversizedStudentDeviceRoster)
+        );
+    }
+}
+
+#[cfg(test)]
+mod roster_identifier_length_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_identifier_is_denied_even_in_small_roster() {
+        let oversized = "d".repeat(257);
+        let ids = [oversized.as_str()];
+        let request = TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: &ids,
+            }),
+        };
+        assert_eq!(
+            qualify_teacher_roster(&request),
+            Err(RosterRejection::OversizedStudentDeviceIdentifier)
+        );
+    }
+}
+
+#[cfg(test)]
+mod roster_duplicate_screening_tests {
+    use super::*;
+
+    fn screen(ids: &[&str]) -> Result<(), RosterRejection> {
+        qualify_teacher_roster(&TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: ids,
+            }),
+        })
+    }
+
+    #[test]
+    fn duplicate_at_end_of_maximum_roster_is_denied() {
+        let names: Vec<String> = (0..1023).map(|i| format!("device-{i}")).collect();
+        let mut ids: Vec<&str> = names.iter().map(String::as_str).collect();
+        ids.push("device-0");
+        assert_eq!(
+            screen(&ids),
+            Err(RosterRejection::InvalidStudentDeviceRoster)
+        );
+    }
+
+    #[test]
+    fn maximum_unique_roster_still_denied_without_approved_verifier() {
+        let names: Vec<String> = (0..1024).map(|i| format!("device-{i}")).collect();
+        let ids: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(screen(&ids), Err(RosterRejection::MissingApprovedVerifier));
+    }
+}
+
+#[cfg(test)]
+mod untrusted_signature_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_unverified_signature_is_denied() {
+        let signature = vec![1_u8; 4097];
+        let request = TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&signature),
+                student_device_ids: &["device-1"],
+            }),
+        };
+        assert_eq!(
+            qualify_teacher_roster(&request),
+            Err(RosterRejection::OversizedUntrustedSignature)
+        );
+    }
+
+    #[test]
+    fn bounded_unverified_signature_still_cannot_authorize() {
+        let signature = vec![1_u8; 4096];
+        let request = TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&signature),
+                student_device_ids: &["device-1"],
+            }),
+        };
+        assert_eq!(
+            qualify_teacher_roster(&request),
+            Err(RosterRejection::MissingApprovedVerifier)
+        );
+    }
+}
+
+#[cfg(test)]
+mod authorization_epoch_tests {
+    use super::*;
+
+    #[test]
+    fn zero_authorization_epoch_is_denied_even_with_plausible_roster() {
+        let request = TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 0,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: &["device-1"],
+            }),
+        };
+        assert_eq!(
+            qualify_teacher_roster(&request),
+            Err(RosterRejection::MissingAuthorizationEpoch)
+        );
+    }
+}
+
+#[cfg(test)]
+mod principal_role_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_principal_or_role_is_denied_before_trust_evaluation() {
+        let long = "t".repeat(257);
+        for (principal, role, roster_principal, roster_role) in [
+            (long.as_str(), "Teacher", long.as_str(), "Teacher"),
+            ("teacher-1", long.as_str(), "teacher-1", long.as_str()),
+            ("teacher-1", "Teacher", long.as_str(), "Teacher"),
+            ("teacher-1", "Teacher", "teacher-1", long.as_str()),
+        ] {
+            let request = TeacherRosterRequest {
+                teacher_principal: principal,
+                required_role: role,
+                now_unix_ms: 200,
+                authorization_not_before_unix_ms: 100,
+                roster: Some(RosterEvidence {
+                    teacher_principal: roster_principal,
+                    role: roster_role,
+                    issued_unix_ms: 150,
+                    expires_unix_ms: 300,
+                    signature: Some(&[1]),
+                    student_device_ids: &["device-1"],
+                }),
+            };
+            assert_eq!(
+                qualify_teacher_roster(&request),
+                Err(RosterRejection::OversizedPrincipalOrRole)
+            );
+        }
+    }
+}

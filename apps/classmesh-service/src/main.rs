@@ -2771,6 +2771,17 @@ mod windows_service_app {
                 // A revoked protected grant must also retire the corresponding
                 // in-process telemetry lifetime; stale clear is exact-match.
                 receiver_telemetry_runtime.revoke_matching_key(key_from_confirmed_grant(binding));
+                // A clear may race an in-flight install ACK. Retire the exact
+                // pending grant before processing Worker results this tick.
+                retire_matching_pending(
+                    &mut pending_presentation_key_install,
+                    |pending| pending.binding == binding,
+                    |pending| {
+                        let _ = pending
+                            .reply_tx
+                            .send(Err("control.presentation.key_cleared".to_owned()));
+                    },
+                );
                 if pending_presentation_multicast_start
                     .as_ref()
                     .is_some_and(|pending| pending.matches_key_binding(binding))
@@ -3386,6 +3397,33 @@ mod windows_service_app {
                             true,
                         );
                         receiver_telemetry_runtime.worker_changed();
+                        retire_presentation_on_worker_change(
+                            &mut pending_presentation_key_install,
+                            true,
+                            |pending| {
+                                let _ = pending
+                                    .reply_tx
+                                    .send(Err("control.presentation.worker_restarted".to_owned()));
+                            },
+                        );
+                        retire_presentation_on_worker_change(
+                            &mut pending_presentation_multicast_start,
+                            true,
+                            |pending| {
+                                let _ = pending
+                                    .reply_tx
+                                    .send(Err("control.presentation.worker_restarted".to_owned()));
+                            },
+                        );
+                        retire_presentation_on_worker_change(
+                            &mut pending_presentation_unicast_start,
+                            true,
+                            |pending| {
+                                let _ = pending
+                                    .reply_tx
+                                    .send(Err("control.presentation.worker_restarted".to_owned()));
+                            },
+                        );
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -3630,6 +3668,33 @@ mod windows_service_app {
                 workers.stop(old_session);
                 let event = workers.launch(new_session);
                 handle_worker_event(event, supervisor, input_availability);
+            }
+        }
+    }
+
+    // A synchronous session transition can revoke the Worker without a poll event.
+    // Retire presentation operations on that same transition, not 250ms later.
+    // Exact-match revocation must not cancel a newer grant for the same stream.
+    fn retire_matching_pending<T>(
+        pending: &mut Option<T>,
+        matches: impl FnOnce(&T) -> bool,
+        cancel: impl FnOnce(T),
+    ) {
+        if pending.as_ref().is_some_and(matches) {
+            if let Some(operation) = pending.take() {
+                cancel(operation);
+            }
+        }
+    }
+
+    fn retire_presentation_on_worker_change<T>(
+        pending: &mut Option<T>,
+        worker_changed: bool,
+        cancel: impl FnOnce(T),
+    ) {
+        if worker_changed {
+            if let Some(operation) = pending.take() {
+                cancel(operation);
             }
         }
     }
@@ -3940,6 +4005,48 @@ mod windows_service_app {
                 reply_rx.try_recv(),
                 Ok(TeacherInteractionDispatchOutcome::WorkerUnavailable)
             );
+        }
+
+        #[test]
+        fn clear_matching_pending_install_retires_ack_before_late_completion() {
+            let mut pending = Some((11_u8, "install"));
+            let mut cancelled = Vec::new();
+            retire_matching_pending(&mut pending, |p| p.0 == 11, |p| cancelled.push(p));
+            assert!(pending.is_none());
+            assert_eq!(cancelled, vec![(11, "install")]);
+            // No pending slot remains for a late Installed result to complete.
+            assert!(pending.take().is_none());
+        }
+
+        #[test]
+        fn clear_stale_grant_preserves_new_pending_install() {
+            let mut pending = Some((12_u8, "new grant"));
+            retire_matching_pending(
+                &mut pending,
+                |p| p.0 == 11,
+                |_| panic!("wrong grant revoked"),
+            );
+            assert_eq!(pending, Some((12, "new grant")));
+        }
+
+        #[test]
+        fn synchronous_session_revocation_retires_all_presentation_operations() {
+            let mut key_install = Some(1_u8);
+            let mut multicast = Some(2_u8);
+            let mut unicast = Some(3_u8);
+            let mut cancelled = Vec::new();
+            retire_presentation_on_worker_change(&mut key_install, true, |id| cancelled.push(id));
+            retire_presentation_on_worker_change(&mut multicast, true, |id| cancelled.push(id));
+            retire_presentation_on_worker_change(&mut unicast, true, |id| cancelled.push(id));
+            assert_eq!(cancelled, vec![1, 2, 3]);
+            assert!(key_install.is_none() && multicast.is_none() && unicast.is_none());
+        }
+
+        #[test]
+        fn unchanged_session_keeps_presentation_operations_pending() {
+            let mut pending = Some(7_u8);
+            retire_presentation_on_worker_change(&mut pending, false, |_| panic!("cancelled"));
+            assert_eq!(pending, Some(7));
         }
 
         #[test]
