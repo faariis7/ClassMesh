@@ -63,6 +63,15 @@ fn contains_invisible_formatting(value: &str) -> bool {
     })
 }
 
+// Unicode noncharacters have no valid identity semantics in this untrusted roster.
+// Reject them without inventing a canonicalization or enrollment contract.
+fn contains_unicode_noncharacter(value: &str) -> bool {
+    value.chars().any(|ch| {
+        let cp = ch as u32;
+        (0xfdd0..=0xfdef).contains(&cp) || (cp & 0xfffe == 0xfffe)
+    })
+}
+
 fn contains_bidi_formatting(value: &str) -> bool {
     value.chars().any(|ch| {
         matches!(
@@ -91,6 +100,7 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
             || value.chars().any(char::is_control)
             || contains_bidi_formatting(value)
             || contains_invisible_formatting(value)
+            || contains_unicode_noncharacter(value)
         {
             return Err(RosterRejection::InvalidPrincipalOrRole);
         }
@@ -161,6 +171,7 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
             || id.chars().any(char::is_control)
             || contains_bidi_formatting(id)
             || contains_invisible_formatting(id)
+            || contains_unicode_noncharacter(id)
             || !seen.insert(*id)
         {
             return Err(RosterRejection::InvalidStudentDeviceRoster);
@@ -239,6 +250,16 @@ mod identifier_hardening_tests {
     }
 
     #[test]
+    fn unicode_noncharacters_in_student_ids_are_denied() {
+        for id in ["device-\\u{fdd0}1", "device-\\u{ffff}1", "device-\\u{10ffff}1"] {
+            assert_eq!(
+                qualify_teacher_roster(&request_with_ids(&[id])),
+                Err(RosterRejection::InvalidStudentDeviceRoster)
+            );
+        }
+    }
+
+    #[test]
     fn valid_identifiers_still_require_approved_verifier() {
         assert_eq!(
             qualify_teacher_roster(&request_with_ids(&["device-1", "device-2"])),
@@ -308,6 +329,19 @@ mod malformed_roster_metadata_tests {
             ("teacher-1", "Teach\u{2060}er"),
             ("teacher-\u{fe0f}1", "Teacher"),
             ("teacher-\u{e0001}1", "Teacher"),
+        ] {
+            assert_eq!(
+                qualify_teacher_roster(&request(principal, role, 150)),
+                Err(RosterRejection::InvalidPrincipalOrRole)
+            );
+        }
+    }
+
+    #[test]
+    fn unicode_noncharacters_in_principal_or_role_are_denied() {
+        for (principal, role) in [
+            ("teacher-\\u{fdd0}1", "Teacher"),
+            ("teacher-1", "Teach\\u{ffff}er"),
         ] {
             assert_eq!(
                 qualify_teacher_roster(&request(principal, role, 150)),
