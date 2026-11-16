@@ -59,6 +59,8 @@ fn contains_invisible_formatting(value: &str) -> bool {
                 | '\u{feff}'
                 | '\u{fe0e}'
                 | '\u{fe0f}'
+                | '\u{2028}'
+                | '\u{2029}'
                 | '\u{e0000}'..='\u{e007f}'
         )
     })
@@ -348,6 +350,8 @@ mod identifier_hardening_tests {
             "device-\u{feff}1",
             "device-\u{fe0e}1",
             "device-\u{fe0f}1",
+            "device-\u{2028}1",
+            "device-\u{2029}1",
             "device-\u{e0001}1",
             "device-\u{e007f}1",
         ] {
@@ -437,6 +441,8 @@ mod malformed_roster_metadata_tests {
             ("teacher-\u{200b}1", "Teacher"),
             ("teacher-1", "Teach\u{2060}er"),
             ("teacher-\u{fe0f}1", "Teacher"),
+            ("teacher-\u{2028}1", "Teacher"),
+            ("teacher-1", "Teach\u{2029}er"),
             ("teacher-\u{e0001}1", "Teacher"),
         ] {
             assert_eq!(
