@@ -40,6 +40,10 @@ pub struct TeacherRosterRequest<'a> {
     pub roster: Option<RosterEvidence<'a>>,
 }
 
+fn contains_bidi_formatting(value: &str) -> bool {
+    value.chars().any(|ch| matches!(ch, '\u202a'..='\u202e' | '\u2066'..='\u2069' | '\u200e' | '\u200f'))
+}
+
 /// Screens untrusted metadata for explicit denial reasons, never granting authority.
 ///
 /// A production allow decision requires independently verified issuer provenance,
@@ -54,7 +58,7 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
         roster.teacher_principal,
         roster.role,
     ] {
-        if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) || contains_bidi_formatting(value) {
             return Err(RosterRejection::InvalidPrincipalOrRole);
         }
     }
@@ -118,6 +122,7 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
         if id.is_empty()
             || id.trim() != *id
             || id.chars().any(char::is_control)
+            || contains_bidi_formatting(id)
             || !seen.insert(*id)
         {
             return Err(RosterRejection::InvalidStudentDeviceRoster);
@@ -164,6 +169,14 @@ mod identifier_hardening_tests {
     }
 
     #[test]
+    fn bidi_override_student_device_identifier_is_denied() {
+        assert_eq!(
+            qualify_teacher_roster(&request_with_ids(&["device-\u202e1"])),
+            Err(RosterRejection::InvalidStudentDeviceRoster)
+        );
+    }
+
+    #[test]
     fn valid_identifiers_still_require_approved_verifier() {
         assert_eq!(
             qualify_teacher_roster(&request_with_ids(&["device-1", "device-2"])),
@@ -202,6 +215,16 @@ mod malformed_roster_metadata_tests {
             ("teacher-1", ""),
             ("teacher-1", "Teacher\t"),
         ] {
+            assert_eq!(
+                qualify_teacher_roster(&request(principal, role, 150)),
+                Err(RosterRejection::InvalidPrincipalOrRole)
+            );
+        }
+    }
+
+    #[test]
+    fn bidi_isolates_in_teacher_identity_or_role_are_denied() {
+        for (principal, role) in [("teacher-\u20661", "Teacher"), ("teacher-1", "Teach\u202eer")] {
             assert_eq!(
                 qualify_teacher_roster(&request(principal, role, 150)),
                 Err(RosterRejection::InvalidPrincipalOrRole)
