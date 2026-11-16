@@ -85,7 +85,8 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
     if roster.student_device_ids.is_empty() {
         return Err(RosterRejection::EmptyStudentDeviceRoster);
     }
-    for (index, id) in roster.student_device_ids.iter().enumerate() {
+    let mut seen = std::collections::HashSet::with_capacity(roster.student_device_ids.len());
+    for id in roster.student_device_ids {
         // Bound individual untrusted strings as well as roster cardinality.
         if id.len() > 256 {
             return Err(RosterRejection::OversizedStudentDeviceIdentifier);
@@ -93,7 +94,7 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
         if id.is_empty()
             || id.trim() != *id
             || id.chars().any(char::is_control)
-            || roster.student_device_ids[..index].contains(id)
+            || !seen.insert(*id)
         {
             return Err(RosterRejection::InvalidStudentDeviceRoster);
         }
@@ -255,5 +256,42 @@ mod roster_identifier_length_tests {
             qualify_teacher_roster(&request),
             Err(RosterRejection::OversizedStudentDeviceIdentifier)
         );
+    }
+}
+
+#[cfg(test)]
+mod roster_duplicate_screening_tests {
+    use super::*;
+
+    fn screen(ids: &[&str]) -> Result<(), RosterRejection> {
+        qualify_teacher_roster(&TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: ids,
+            }),
+        })
+    }
+
+    #[test]
+    fn duplicate_at_end_of_maximum_roster_is_denied() {
+        let names: Vec<String> = (0..1023).map(|i| format!("device-{i}")).collect();
+        let mut ids: Vec<&str> = names.iter().map(String::as_str).collect();
+        ids.push("device-0");
+        assert_eq!(screen(&ids), Err(RosterRejection::InvalidStudentDeviceRoster));
+    }
+
+    #[test]
+    fn maximum_unique_roster_still_denied_without_approved_verifier() {
+        let names: Vec<String> = (0..1024).map(|i| format!("device-{i}")).collect();
+        let ids: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(screen(&ids), Err(RosterRejection::MissingApprovedVerifier));
     }
 }
