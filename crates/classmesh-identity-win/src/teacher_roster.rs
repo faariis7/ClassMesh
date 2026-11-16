@@ -13,6 +13,7 @@ pub enum RosterRejection {
     InvalidStudentDeviceRoster,
     InvalidPrincipalOrRole,
     InvalidIssuedTimestamp,
+    MissingAuthorizationEpoch,
     OversizedStudentDeviceRoster,
     OversizedStudentDeviceIdentifier,
     OversizedUntrustedSignature,
@@ -55,6 +56,10 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
         if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
             return Err(RosterRejection::InvalidPrincipalOrRole);
         }
+    }
+    // A missing authorization epoch cannot establish freshness or prevent replay.
+    if request.authorization_not_before_unix_ms == 0 {
+        return Err(RosterRejection::MissingAuthorizationEpoch);
     }
     if roster.issued_unix_ms == 0 {
         return Err(RosterRejection::InvalidIssuedTimestamp);
@@ -352,6 +357,33 @@ mod untrusted_signature_bounds_tests {
         assert_eq!(
             qualify_teacher_roster(&request),
             Err(RosterRejection::MissingApprovedVerifier)
+        );
+    }
+}
+
+#[cfg(test)]
+mod authorization_epoch_tests {
+    use super::*;
+
+    #[test]
+    fn zero_authorization_epoch_is_denied_even_with_plausible_roster() {
+        let request = TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 0,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: &["device-1"],
+            }),
+        };
+        assert_eq!(
+            qualify_teacher_roster(&request),
+            Err(RosterRejection::MissingAuthorizationEpoch)
         );
     }
 }
