@@ -23,6 +23,7 @@ pub mod presentation_keyframe_retry;
 pub mod presentation_multicast_receive;
 #[cfg(windows)]
 pub mod presentation_multicast_send;
+pub mod presentation_receive_queue_budget;
 pub mod presentation_unicast_receive;
 #[cfg(windows)]
 pub mod receiver_render;

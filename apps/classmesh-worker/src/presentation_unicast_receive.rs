@@ -13,10 +13,11 @@ use classmesh_network::protected_unicast_receiver::{
 use classmesh_windows_runtime::ipc::ServicePresentationUnicastStart;
 use classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding;
 
-// Candidate frames are assembled before SFrame authentication. At most eight
-// full 8-MiB ciphertext candidates may queue; the Worker drains eight events
-// per media-loop iteration and drops overflow rather than retaining 512 MiB.
-const PRESENTATION_UNICAST_EVENT_CAPACITY: usize = 8;
+use crate::presentation_receive_queue_budget::{UnverifiedQueueBudget, candidate_bytes};
+
+// Keep the 64-event burst for normal streaming; enforce a separate 96-MiB
+// byte budget for completed ciphertext before SFrame authentication.
+const PRESENTATION_UNICAST_EVENT_CAPACITY: usize = 64;
 const PRESENTATION_UNICAST_START_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
@@ -66,6 +67,7 @@ pub struct WorkerPresentationUnicastRuntime {
     stop: Arc<AtomicBool>,
     failed: Arc<AtomicBool>,
     dropped_events: Arc<AtomicU64>,
+    queued_bytes: Arc<UnverifiedQueueBudget>,
     receive_rx: Receiver<ProtectedUnicastReceiveOutcome>,
     thread: Option<JoinHandle<()>>,
 }
@@ -91,9 +93,11 @@ impl WorkerPresentationUnicastRuntime {
         let stop = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(AtomicBool::new(false));
         let dropped_events = Arc::new(AtomicU64::new(0));
+        let queued_bytes = Arc::new(UnverifiedQueueBudget::default());
         let thread_stop = Arc::clone(&stop);
         let thread_failed = Arc::clone(&failed);
         let thread_dropped_events = Arc::clone(&dropped_events);
+        let thread_queued_bytes = Arc::clone(&queued_bytes);
 
         let thread = thread::Builder::new()
             .name("classmesh-presentation-unicast".to_owned())
@@ -118,13 +122,24 @@ impl WorkerPresentationUnicastRuntime {
                         u64::try_from(clock.elapsed().as_micros()).unwrap_or(u64::MAX)
                     }) {
                         Ok(ProtectedUnicastReceiveOutcome::Events(batch)) if batch.is_empty() => {}
-                        Ok(outcome) => match receive_tx.try_send(outcome) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(_)) => {
+                        Ok(outcome) => {
+                            let bytes = candidate_bytes(&outcome);
+                            if !thread_queued_bytes.try_reserve(bytes) {
                                 thread_dropped_events.fetch_add(1, Ordering::Relaxed);
+                                continue;
                             }
-                            Err(TrySendError::Disconnected(_)) => return,
-                        },
+                            match receive_tx.try_send(outcome) {
+                                Ok(()) => {}
+                                Err(TrySendError::Full(_)) => {
+                                    thread_queued_bytes.release(bytes);
+                                    thread_dropped_events.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(TrySendError::Disconnected(_)) => {
+                                    thread_queued_bytes.release(bytes);
+                                    return;
+                                }
+                            }
+                        }
                         Err(_) => {
                             thread_failed.store(true, Ordering::Release);
                             return;
@@ -140,6 +155,7 @@ impl WorkerPresentationUnicastRuntime {
                 stop,
                 failed,
                 dropped_events,
+                queued_bytes,
                 receive_rx,
                 thread: Some(thread),
             }),
@@ -176,7 +192,9 @@ impl WorkerPresentationUnicastRuntime {
     }
 
     pub fn try_receive(&self) -> Option<ProtectedUnicastReceiveOutcome> {
-        self.receive_rx.try_recv().ok()
+        let outcome = self.receive_rx.try_recv().ok()?;
+        self.queued_bytes.release(candidate_bytes(&outcome));
+        Some(outcome)
     }
 
     #[must_use]
@@ -248,13 +266,18 @@ mod tests {
 
     #[test]
     fn unauthenticated_ciphertext_queue_stays_under_ninety_six_mib() {
-        // Each queued result can hold a complete, but not yet authenticated,
-        // SFrame ciphertext. Capacity must be bounded by bytes, not just events.
-        let max_sealed = classmesh_security::group_media::MAX_GROUP_MEDIA_SEALED_BYTES;
-        assert!(
-            PRESENTATION_UNICAST_EVENT_CAPACITY * max_sealed <= 96 * 1024 * 1024,
-            "unverified UDP candidates can retain too much memory"
-        );
+        // Large completed ciphertext consumes a byte reservation independent
+        // of the normal event count; small frames keep all 64 slots.
+        assert_eq!(PRESENTATION_UNICAST_EVENT_CAPACITY, 64);
+        let budget = UnverifiedQueueBudget::default();
+        let large = classmesh_security::group_media::MAX_GROUP_MEDIA_SEALED_BYTES;
+        let full = crate::presentation_receive_queue_budget::MAX_QUEUED_CIPHERTEXT_BYTES / large;
+        for _ in 0..full {
+            assert!(budget.try_reserve(large));
+        }
+        assert!(!budget.try_reserve(large));
+        budget.release(large);
+        assert!(budget.try_reserve(large));
     }
 
     fn start(request_id: u64, teacher_source: IpAddr) -> ServicePresentationUnicastStart {
