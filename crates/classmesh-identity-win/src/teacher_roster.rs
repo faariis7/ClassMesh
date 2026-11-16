@@ -200,7 +200,13 @@ mod identifier_hardening_tests {
 
     #[test]
     fn invisible_student_device_format_characters_are_denied() {
-        for id in ["device-\u{200b}1", "device-\u{200c}1", "device-\u{200d}1", "device-\u{2060}1", "device-\u{feff}1"] {
+        for id in [
+            "device-\u{200b}1",
+            "device-\u{200c}1",
+            "device-\u{200d}1",
+            "device-\u{2060}1",
+            "device-\u{feff}1",
+        ] {
             assert_eq!(
                 qualify_teacher_roster(&request_with_ids(&[id])),
                 Err(RosterRejection::InvalidStudentDeviceRoster)
