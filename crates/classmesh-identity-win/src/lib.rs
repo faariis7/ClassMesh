@@ -1,6 +1,11 @@
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 
 mod machine_identity;
+mod teacher_roster;
+
+pub use teacher_roster::{
+    RosterEvidence, RosterRejection, TeacherRosterRequest, qualify_teacher_roster,
+};
 
 pub use machine_identity::{
     DurableMachineIdentity, MachineIdentityBundle, MachineIdentityStateError,
