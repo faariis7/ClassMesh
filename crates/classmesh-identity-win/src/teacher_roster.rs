@@ -41,7 +41,12 @@ pub struct TeacherRosterRequest<'a> {
 }
 
 fn contains_bidi_formatting(value: &str) -> bool {
-    value.chars().any(|ch| matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}'))
+    value.chars().any(|ch| {
+        matches!(
+            ch,
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}'
+        )
+    })
 }
 
 /// Screens untrusted metadata for explicit denial reasons, never granting authority.
@@ -58,7 +63,11 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
         roster.teacher_principal,
         roster.role,
     ] {
-        if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) || contains_bidi_formatting(value) {
+        if value.is_empty()
+            || value.trim() != value
+            || value.chars().any(char::is_control)
+            || contains_bidi_formatting(value)
+        {
             return Err(RosterRejection::InvalidPrincipalOrRole);
         }
     }
@@ -224,7 +233,10 @@ mod malformed_roster_metadata_tests {
 
     #[test]
     fn bidi_isolates_in_teacher_identity_or_role_are_denied() {
-        for (principal, role) in [("teacher-\u{2066}1", "Teacher"), ("teacher-1", "Teach\u{202e}er")] {
+        for (principal, role) in [
+            ("teacher-\u{2066}1", "Teacher"),
+            ("teacher-1", "Teach\u{202e}er"),
+        ] {
             assert_eq!(
                 qualify_teacher_roster(&request(principal, role, 150)),
                 Err(RosterRejection::InvalidPrincipalOrRole)
