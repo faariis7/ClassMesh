@@ -193,8 +193,10 @@ pub fn qualify_teacher_device_roster(
         Err(RosterRejection::MissingApprovedVerifier) => {}
         other => return other,
     }
+    if requested_student_device_id.len() > 256 {
+        return Err(RosterRejection::OversizedStudentDeviceIdentifier);
+    }
     if requested_student_device_id.is_empty()
-        || requested_student_device_id.len() > 256
         || requested_student_device_id.trim() != requested_student_device_id
         || requested_student_device_id.chars().any(char::is_control)
         || contains_bidi_formatting(requested_student_device_id)
@@ -256,6 +258,24 @@ mod scoped_student_device_tests {
         assert_eq!(
             qualify_teacher_device_roster(&request(&["device-1"]), "device-\u{202e}1"),
             Err(RosterRejection::InvalidStudentDeviceRoster)
+        );
+    }
+
+    #[test]
+    fn oversized_requested_device_is_rejected_with_resource_bound_reason() {
+        let oversized = "d".repeat(257);
+        assert_eq!(
+            qualify_teacher_device_roster(&request(&["device-1"]), &oversized),
+            Err(RosterRejection::OversizedStudentDeviceIdentifier)
+        );
+    }
+
+    #[test]
+    fn maximum_length_unlisted_device_is_denied_without_authorization() {
+        let max_length = "d".repeat(256);
+        assert_eq!(
+            qualify_teacher_device_roster(&request(&["device-1"]), &max_length),
+            Err(RosterRejection::UnlistedStudentDevice)
         );
     }
 
