@@ -47,7 +47,7 @@ fn contains_invisible_formatting(value: &str) -> bool {
     value.chars().any(|ch| {
         matches!(
             ch,
-            '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}' | '\u{fe0e}' | '\u{fe0f}'
+            '\u{00ad}' | '\u{034f}' | '\u{061c}' | '\u{180e}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}' | '\u{fe0e}' | '\u{fe0f}'
         )
     })
 }
@@ -206,6 +206,10 @@ mod identifier_hardening_tests {
     #[test]
     fn invisible_student_device_format_characters_are_denied() {
         for id in [
+            "device-\u{00ad}1",
+            "device-\u{034f}1",
+            "device-\u{061c}1",
+            "device-\u{180e}1",
             "device-\u{200b}1",
             "device-\u{200c}1",
             "device-\u{200d}1",
@@ -283,6 +287,10 @@ mod malformed_roster_metadata_tests {
     #[test]
     fn invisible_teacher_identity_and_role_format_characters_are_denied() {
         for (principal, role) in [
+            ("teacher-\u{00ad}1", "Teacher"),
+            ("teacher-\u{034f}1", "Teacher"),
+            ("teacher-\u{061c}1", "Teacher"),
+            ("teacher-\u{180e}1", "Teacher"),
             ("teacher-\u{200b}1", "Teacher"),
             ("teacher-1", "Teach\u{2060}er"),
             ("teacher-\u{fe0f}1", "Teacher"),
