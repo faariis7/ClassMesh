@@ -2,13 +2,14 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use classmesh_network::multicast::{
     MulticastContractError, MulticastMembership, MulticastProbeOutcome,
 };
+use classmesh_network::multicast_diagnostics::{DeliveryStage, DeliveryTrace};
 use classmesh_network::multicast_receiver::{
     ProtectedMulticastFrameReceiver, ProtectedMulticastReceiveError,
     ProtectedMulticastReceiveOutcome, ProtectedMulticastReceiverConfig,
@@ -79,7 +80,7 @@ pub struct WorkerPresentationMulticastRuntime {
     failed: Arc<AtomicBool>,
     dropped_events: Arc<AtomicU64>,
     receive_rx: Receiver<ProtectedMulticastReceiveOutcome>,
-    thread: Option<JoinHandle<()>>,
+    thread: Option<JoinHandle<Option<DeliveryTrace>>>,
 }
 
 impl std::fmt::Debug for WorkerPresentationMulticastRuntime {
@@ -96,6 +97,20 @@ impl std::fmt::Debug for WorkerPresentationMulticastRuntime {
 impl WorkerPresentationMulticastRuntime {
     pub fn start(
         binding: ServicePresentationMulticastStart,
+    ) -> Result<Self, WorkerPresentationMulticastStartError> {
+        Self::start_inner(binding, None)
+    }
+
+    /// Starts the same receiver with a bounded metadata trace on its socket thread.
+    pub fn start_diagnostics(
+        binding: ServicePresentationMulticastStart,
+    ) -> Result<Self, WorkerPresentationMulticastStartError> {
+        Self::start_inner(binding, Some(DeliveryTrace::new()))
+    }
+
+    fn start_inner(
+        binding: ServicePresentationMulticastStart,
+        mut trace: Option<DeliveryTrace>,
     ) -> Result<Self, WorkerPresentationMulticastStartError> {
         let config = receiver_config(binding)?;
         let (startup_tx, startup_rx) = mpsc::sync_channel(1);
@@ -114,36 +129,38 @@ impl WorkerPresentationMulticastRuntime {
                     Ok(receiver) => receiver,
                     Err(error) => {
                         let _ = startup_tx.send(StartupOutcome::Rejected(error));
-                        return;
+                        return trace;
                     }
                 };
                 if startup_tx.send(StartupOutcome::Started).is_err() {
-                    return;
+                    return trace;
                 }
 
                 let clock = Instant::now();
                 while !thread_stop.load(Ordering::Acquire) {
-                    // Read timeout is 10ms, but OS scheduling can exceed the
-                    // frame expiry budget. Timestamp only after the actual
-                    // receive/timeout; never count blocked time as frame age.
-                    match receiver.receive_once_with_clock(|| {
-                        u64::try_from(clock.elapsed().as_micros()).unwrap_or(u64::MAX)
-                    }) {
-                        Ok(ProtectedMulticastReceiveOutcome::Events(batch)) if batch.is_empty() => {
-                        }
-                        Ok(outcome) => match receive_tx.try_send(outcome) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(_)) => {
-                                thread_dropped_events.fetch_add(1, Ordering::Relaxed);
+                    // Sample after recv_from or timeout so the socket wait cannot age a frame.
+                    let outcome = receiver.receive_once_observed(
+                        || u64::try_from(clock.elapsed().as_micros()).unwrap_or(u64::MAX),
+                        trace.as_mut(),
+                    );
+                    match outcome {
+                        Ok(outcome) => {
+                            if !publish_outcome(
+                                &receive_tx,
+                                &thread_dropped_events,
+                                trace.as_mut(),
+                                outcome,
+                            ) {
+                                break;
                             }
-                            Err(TrySendError::Disconnected(_)) => return,
-                        },
+                        }
                         Err(_) => {
                             thread_failed.store(true, Ordering::Release);
-                            return;
+                            break;
                         }
                     }
                 }
+                trace
             })
             .map_err(WorkerPresentationMulticastStartError::ThreadSpawn)?;
 
@@ -209,13 +226,76 @@ impl WorkerPresentationMulticastRuntime {
     pub fn matches_key_binding(&self, key: PresentationKeyInstallBinding) -> bool {
         start_matches_key_binding(self.binding, key)
     }
+
+    /// Stops the producer and returns a consistent report after its final enqueue.
+    /// Already queued outcomes can still be drained with `try_receive`.
+    pub fn finish_diagnostics(&mut self) -> Option<DeliveryTrace> {
+        self.stop.store(true, Ordering::Release);
+        self.thread.take()?.join().ok().flatten()
+    }
 }
 
 impl Drop for WorkerPresentationMulticastRuntime {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        let _ = self.finish_diagnostics();
+    }
+}
+
+fn publish_outcome(
+    tx: &SyncSender<ProtectedMulticastReceiveOutcome>,
+    dropped_events: &AtomicU64,
+    mut trace: Option<&mut DeliveryTrace>,
+    outcome: ProtectedMulticastReceiveOutcome,
+) -> bool {
+    if let ProtectedMulticastReceiveOutcome::Events(batch) = &outcome {
+        if batch.is_empty() {
+            return true;
+        }
+        if let Some(trace) = trace.as_deref_mut() {
+            for frame in &batch.frames {
+                trace.record(DeliveryStage::FrameAssembled, Some(frame.frame_id()), None);
+            }
+            for _ in 0..batch.dropped_stale_frames {
+                trace.record(DeliveryStage::StaleFrame, None, None);
+            }
+            for _ in 0..batch.dropped_invalid_frames {
+                trace.record(DeliveryStage::InvalidFrame, None, None);
+            }
+        }
+    }
+
+    match tx.try_send(outcome) {
+        Ok(()) => {
+            if let Some(trace) = trace {
+                trace.record(DeliveryStage::Queued, None, None);
+            }
+            true
+        }
+        Err(error) => {
+            let (stage, frame_stage, dropped) = match error {
+                TrySendError::Full(outcome) => {
+                    dropped_events.fetch_add(1, Ordering::Relaxed);
+                    (
+                        DeliveryStage::QueueFull,
+                        DeliveryStage::FrameQueueFull,
+                        outcome,
+                    )
+                }
+                TrySendError::Disconnected(outcome) => (
+                    DeliveryStage::QueueDisconnected,
+                    DeliveryStage::FrameQueueDisconnected,
+                    outcome,
+                ),
+            };
+            if let Some(trace) = trace {
+                trace.record(stage, None, None);
+                if let ProtectedMulticastReceiveOutcome::Events(batch) = dropped {
+                    for frame in &batch.frames {
+                        trace.record(frame_stage, Some(frame.frame_id()), None);
+                    }
+                }
+            }
+            stage == DeliveryStage::QueueFull
         }
     }
 }
@@ -265,6 +345,8 @@ pub fn start_matches_key_binding(
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
+
+    use classmesh_network::multicast_receiver::MulticastPacketDropReason;
 
     use super::*;
 
@@ -379,5 +461,77 @@ mod tests {
         ] {
             assert!(!start_matches_key_binding(start, key));
         }
+    }
+
+    #[test]
+    fn full_worker_queue_counts_a_drop_without_losing_socket_accounting() {
+        let (tx, _rx) = mpsc::sync_channel(1);
+        let dropped = AtomicU64::new(0);
+        let mut trace = DeliveryTrace::new();
+        for _ in 0..2 {
+            trace.record(DeliveryStage::Malformed, None, None);
+            assert!(publish_outcome(
+                &tx,
+                &dropped,
+                Some(&mut trace),
+                ProtectedMulticastReceiveOutcome::Dropped(
+                    MulticastPacketDropReason::MalformedDatagram
+                ),
+            ));
+        }
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(trace.count(DeliveryStage::Malformed), 2);
+        assert_eq!(trace.count(DeliveryStage::Queued), 1);
+        assert_eq!(trace.count(DeliveryStage::QueueFull), 1);
+    }
+
+    #[test]
+    fn queue_pressure_preserves_the_id_of_the_discarded_candidate() {
+        use classmesh_network::multicast_receiver::ProtectedMulticastReceiveState;
+        use classmesh_network::{PacketizeMeta, packetize_frame};
+
+        let binding = start(1);
+        let mut state =
+            ProtectedMulticastReceiveState::new(receiver_config(binding).unwrap()).unwrap();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let dropped = AtomicU64::new(0);
+        let mut trace = DeliveryTrace::new();
+        for frame_id in 1..=2 {
+            let packets = packetize_frame(
+                &[0x5a; 32],
+                PacketizeMeta {
+                    protocol_major: 0,
+                    protocol_minor: 4,
+                    stream_id: binding.stream_id,
+                    frame_id,
+                    first_sequence: frame_id as u32,
+                    timestamp_us: frame_id,
+                    keyframe: true,
+                },
+            )
+            .unwrap();
+            let outcome = state.push_packet(
+                frame_id,
+                &packets[0],
+                (binding.teacher_source, 12345).into(),
+            );
+            assert!(publish_outcome(&tx, &dropped, Some(&mut trace), outcome));
+        }
+        let ProtectedMulticastReceiveOutcome::Events(batch) = rx.try_recv().unwrap() else {
+            panic!("expected a completed ciphertext candidate");
+        };
+        assert_eq!(batch.frames[0].frame_id(), 1);
+        assert_eq!(state.stats().assembled_ciphertext_frames, 2);
+        assert_eq!(trace.count(DeliveryStage::FrameAssembled), 2);
+        assert_eq!(trace.count(DeliveryStage::FrameQueueFull), 1);
+        assert_eq!(
+            trace
+                .events()
+                .iter()
+                .find(|event| event.stage == DeliveryStage::FrameQueueFull)
+                .unwrap()
+                .frame_id,
+            Some(2)
+        );
     }
 }
