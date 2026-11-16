@@ -14,6 +14,7 @@ pub enum RosterRejection {
     InvalidPrincipalOrRole,
     InvalidIssuedTimestamp,
     MissingAuthorizationEpoch,
+    FutureAuthorizationEpoch,
     OversizedStudentDeviceRoster,
     OversizedStudentDeviceIdentifier,
     OversizedUntrustedSignature,
@@ -98,6 +99,10 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
     // A missing authorization epoch cannot establish freshness or prevent replay.
     if request.authorization_not_before_unix_ms == 0 {
         return Err(RosterRejection::MissingAuthorizationEpoch);
+    }
+    // Reject a local clock older than the authorization epoch before assessing roster age.
+    if request.authorization_not_before_unix_ms > request.now_unix_ms {
+        return Err(RosterRejection::FutureAuthorizationEpoch);
     }
     if roster.issued_unix_ms == 0 {
         return Err(RosterRejection::InvalidIssuedTimestamp);
@@ -454,6 +459,28 @@ mod untrusted_signature_bounds_tests {
 #[cfg(test)]
 mod authorization_epoch_tests {
     use super::*;
+
+    #[test]
+    fn clock_rollback_before_authorization_epoch_is_denied() {
+        let request = TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 99,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 100,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: &["device-1"],
+            }),
+        };
+        assert_eq!(
+            qualify_teacher_roster(&request),
+            Err(RosterRejection::FutureAuthorizationEpoch)
+        );
+    }
 
     #[test]
     fn zero_authorization_epoch_is_denied_even_with_plausible_roster() {
