@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::multicast::MulticastMembership;
+use crate::multicast_diagnostics::{DeliveryStage, DeliveryTrace};
 pub(super) use crate::protected_media_receive::{
     DatagramFailureDisposition, classify_datagram_failure,
 };
@@ -51,16 +52,43 @@ impl ProtectedMulticastFrameReceiver {
         &mut self,
         clock: impl FnOnce() -> u64,
     ) -> Result<ProtectedMulticastReceiveOutcome, ProtectedMulticastReceiveError> {
+        self.receive_once_observed(clock, None)
+    }
+
+    /// Observes socket reads before queueing, retaining no datagram bytes.
+    pub fn receive_once_observed(
+        &mut self,
+        clock: impl FnOnce() -> u64,
+        trace: Option<&mut DeliveryTrace>,
+    ) -> Result<ProtectedMulticastReceiveOutcome, ProtectedMulticastReceiveError> {
         match self.socket.receive_packet() {
-            Ok((packet, source)) => Ok(self.state.push_packet(clock(), &packet, source)),
+            Ok((packet, source)) => {
+                let now = clock();
+                let observed = trace.as_ref().map(|trace| trace.elapsed_us());
+                let outcome = self.state.push_packet(now, &packet, source);
+                if let Some((trace, observed)) = trace.zip(observed) {
+                    let (stage, rejection) = match &outcome {
+                        ProtectedMulticastReceiveOutcome::Events(_) => {
+                            (DeliveryStage::SocketAccepted, None)
+                        }
+                        ProtectedMulticastReceiveOutcome::Dropped(reason) => {
+                            (DeliveryStage::SocketRejected, Some(*reason))
+                        }
+                    };
+                    trace.record_packet(stage, observed, packet.header, source, rejection);
+                }
+                Ok(outcome)
+            }
             Err(error) => match classify_datagram_failure(&error) {
                 DatagramFailureDisposition::Tick => Ok(ProtectedMulticastReceiveOutcome::Events(
                     self.state.tick(clock()),
                 )),
                 DatagramFailureDisposition::DropMalformed => {
-                    Ok(ProtectedMulticastReceiveOutcome::Dropped(
-                        MulticastPacketDropReason::MalformedDatagram,
-                    ))
+                    let reason = MulticastPacketDropReason::MalformedDatagram;
+                    if let Some(trace) = trace {
+                        trace.record(DeliveryStage::Malformed, None, Some(reason));
+                    }
+                    Ok(ProtectedMulticastReceiveOutcome::Dropped(reason))
                 }
                 DatagramFailureDisposition::Fail => Err(error.into()),
             },
@@ -158,19 +186,33 @@ mod receive_clock_tests {
                 )
                 .unwrap();
         });
+        let mut trace = DeliveryTrace::new();
         let outcome = receiver
-            .receive_once_with_clock(|| {
-                assert!(
-                    transmitted.load(Ordering::Acquire),
-                    "clock before read would falsely age fragments"
-                );
-                100_000
-            })
+            .receive_once_observed(
+                || {
+                    assert!(
+                        transmitted.load(Ordering::Acquire),
+                        "clock before read would falsely age fragments"
+                    );
+                    100_000
+                },
+                Some(&mut trace),
+            )
             .unwrap();
         assert!(
             matches!(outcome, ProtectedMulticastReceiveOutcome::Dropped(_)),
             "unapproved loopback sender must remain denied"
         );
+        assert_eq!(trace.count(DeliveryStage::SocketAccepted), 0);
+        assert_eq!(trace.count(DeliveryStage::SocketRejected), 1);
+        let event = trace.events()[0];
+        assert_eq!(event.packet.unwrap().sequence, 10);
+        assert_eq!(event.peer.unwrap().ip(), Ipv4Addr::LOCALHOST);
+        assert_eq!(
+            event.rejection,
+            Some(MulticastPacketDropReason::UnexpectedSource)
+        );
+        assert_eq!(receiver.stats().rejected_datagrams, 1);
         sender.join().unwrap();
         receiver
             .socket

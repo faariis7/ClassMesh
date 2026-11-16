@@ -62,6 +62,9 @@ jobs:
       - name: Test CI timing report helper
         run: python -B -m unittest discover -s scripts/tests -p test_ci_timing_report.py
 
+      - name: Test multicast delivery correlation
+        run: python -B -m unittest discover -s tools/classmesh-lab/scripts/tests -p test_multicast_delivery.py
+
       - name: Validate Phase 4 PowerShell runner
         shell: pwsh
         run: .\scripts\phase4-two-pc.ps1 -Mode Help
