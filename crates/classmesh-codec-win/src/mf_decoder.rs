@@ -8,7 +8,7 @@ use std::ptr::{self, null_mut, read};
 use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFDXGIBuffer, IMFMediaType, IMFSample, IMFTransform,
+    IMFActivate, IMFAttributes, IMFDXGIBuffer, IMFMediaType, IMFSample, IMFTransform,
     MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_MAJOR_TYPE,
     MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC, MFCreateMediaType, MFCreateMemoryBuffer,
     MFCreateSample, MFMediaType_Video, MFSampleExtension_Discontinuity, MFT_CATEGORY_VIDEO_DECODER,
@@ -288,24 +288,7 @@ impl MfH264Decoder {
                 "asynchronous H.264 decoder requires an event-driven input/output pump",
             ));
         }
-        let d3d11_aware = unsafe { attributes.GetUINT32(&MF_SA_D3D11_AWARE) }.unwrap_or(0) != 0;
-        if !d3d11_aware {
-            return Err(classmesh_decoder_error("H.264 decoder is not D3D11-aware"));
-        }
-        let _ = unsafe { attributes.SetUINT32(&MF_LOW_LATENCY, 1) };
-
-        let device_manager = MfDxgiDeviceManager::new(device)?;
-        unsafe {
-            transform.ProcessMessage(
-                MFT_MESSAGE_SET_D3D_MANAGER,
-                device_manager.manager().as_raw() as usize,
-            )?;
-        }
-
-        let input_type = create_h264_input_type()?;
-        unsafe { transform.SetInputType(0, &input_type, 0)? };
-        configure_nv12_output(&transform)?;
-        require_decoder_owned_output(&transform)?;
+        let device_manager = configure_decoder(&transform, &attributes, device, 0, 0)?;
 
         unsafe { transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)? };
         let decoder = Self {
@@ -380,10 +363,10 @@ impl MfH264Decoder {
                 ));
             }
         }
-        let output = match process_one_output(&self.transform, &self.device) {
+        let output = match process_one_output(&self.transform, &self.device, 0) {
             Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
-                configure_nv12_output(&self.transform)
-                    .and_then(|()| require_decoder_owned_output(&self.transform))
+                configure_nv12_output(&self.transform, 0)
+                    .and_then(|()| require_decoder_owned_output(&self.transform, 0))
                     .map(|()| DecoderOutput::Progress)
             }
             result => result,
@@ -436,6 +419,31 @@ fn prefer_device_failure(
         .unwrap_or(transform_error)
 }
 
+fn configure_decoder(
+    transform: &IMFTransform,
+    attributes: &IMFAttributes,
+    device: &ID3D11Device,
+    input_stream: u32,
+    output_stream: u32,
+) -> windows::core::Result<MfDxgiDeviceManager> {
+    if unsafe { attributes.GetUINT32(&MF_SA_D3D11_AWARE) }.unwrap_or(0) == 0 {
+        return Err(classmesh_decoder_error("H.264 decoder is not D3D11-aware"));
+    }
+    let _ = unsafe { attributes.SetUINT32(&MF_LOW_LATENCY, 1) };
+    let device_manager = MfDxgiDeviceManager::new(device)?;
+    unsafe {
+        transform.ProcessMessage(
+            MFT_MESSAGE_SET_D3D_MANAGER,
+            device_manager.manager().as_raw() as usize,
+        )?;
+    }
+    let input_type = create_h264_input_type()?;
+    unsafe { transform.SetInputType(input_stream, &input_type, 0)? };
+    configure_nv12_output(transform, output_stream)?;
+    require_decoder_owned_output(transform, output_stream)?;
+    Ok(device_manager)
+}
+
 fn create_h264_input_type() -> windows::core::Result<IMFMediaType> {
     let media_type = unsafe { MFCreateMediaType()? };
     unsafe {
@@ -445,15 +453,18 @@ fn create_h264_input_type() -> windows::core::Result<IMFMediaType> {
     Ok(media_type)
 }
 
-fn configure_nv12_output(transform: &IMFTransform) -> windows::core::Result<()> {
+fn configure_nv12_output(
+    transform: &IMFTransform,
+    output_stream: u32,
+) -> windows::core::Result<()> {
     for index in 0..64_u32 {
-        let media_type = match unsafe { transform.GetOutputAvailableType(0, index) } {
+        let media_type = match unsafe { transform.GetOutputAvailableType(output_stream, index) } {
             Ok(media_type) => media_type,
             Err(_) => break,
         };
         let subtype = unsafe { media_type.GetGUID(&MF_MT_SUBTYPE) };
         if subtype.is_ok_and(|subtype| subtype == MFVideoFormat_NV12) {
-            unsafe { transform.SetOutputType(0, &media_type, 0)? };
+            unsafe { transform.SetOutputType(output_stream, &media_type, 0)? };
             return Ok(());
         }
     }
@@ -462,8 +473,11 @@ fn configure_nv12_output(transform: &IMFTransform) -> windows::core::Result<()> 
     ))
 }
 
-fn require_decoder_owned_output(transform: &IMFTransform) -> windows::core::Result<()> {
-    let info = unsafe { transform.GetOutputStreamInfo(0)? };
+fn require_decoder_owned_output(
+    transform: &IMFTransform,
+    output_stream: u32,
+) -> windows::core::Result<()> {
+    let info = unsafe { transform.GetOutputStreamInfo(output_stream)? };
     let provides = MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0;
     if info.dwFlags & provides as u32 == 0 {
         return Err(classmesh_decoder_error(
@@ -473,11 +487,21 @@ fn require_decoder_owned_output(transform: &IMFTransform) -> windows::core::Resu
     Ok(())
 }
 
-fn create_compressed_sample(data: &[u8], timestamp_us: u64) -> windows::core::Result<IMFSample> {
-    let timestamp_100ns = timestamp_us
+fn checked_sample_time(timestamp_us: u64) -> windows::core::Result<i64> {
+    timestamp_us
         .checked_mul(10)
         .and_then(|ticks| i64::try_from(ticks).ok())
-        .ok_or_else(|| classmesh_decoder_error("H.264 timestamp exceeds Media Foundation limit"))?;
+        .ok_or_else(|| classmesh_decoder_error("H.264 timestamp exceeds Media Foundation limit"))
+}
+
+fn create_compressed_sample(data: &[u8], timestamp_us: u64) -> windows::core::Result<IMFSample> {
+    create_compressed_sample_at(data, checked_sample_time(timestamp_us)?)
+}
+
+fn create_compressed_sample_at(
+    data: &[u8],
+    timestamp_100ns: i64,
+) -> windows::core::Result<IMFSample> {
     let length = u32::try_from(data.len())
         .map_err(|_| classmesh_decoder_error("H.264 access unit exceeds Media Foundation limit"))?;
     let buffer = unsafe { MFCreateMemoryBuffer(length)? };
@@ -505,9 +529,10 @@ fn create_compressed_sample(data: &[u8], timestamp_us: u64) -> windows::core::Re
 fn process_one_output(
     transform: &IMFTransform,
     device: &ID3D11Device,
+    output_stream: u32,
 ) -> windows::core::Result<DecoderOutput> {
     let mut output = [MFT_OUTPUT_DATA_BUFFER {
-        dwStreamID: 0,
+        dwStreamID: output_stream,
         pSample: ManuallyDrop::new(None),
         dwStatus: 0,
         pEvents: ManuallyDrop::new(None),
@@ -820,3 +845,7 @@ mod tests {
         );
     }
 }
+
+#[path = "mf_decoder_async.rs"]
+mod asynchronous;
+pub use asynchronous::{AsyncDecoderPoll, AsyncDecoderSubmit, MfAsyncH264Decoder};

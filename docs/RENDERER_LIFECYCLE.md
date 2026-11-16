@@ -73,3 +73,28 @@ The standalone `classmesh-media-receiver --render` now exercises:
 - keyframe-gated resume after recovery.
 
 The remaining gate is **physical GPU fault qualification**. Hosted CI proves the code builds and tests, but does not prove a real Intel/NVIDIA/AMD driver reset recovers correctly. Before normal long-lived Worker integration, ClassMesh should exercise an explicit fault-injection or real device-reset test and confirm that video resumes without dropping the authenticated control session.
+
+## Asynchronous decoder qualification
+
+`MfAsyncH264Decoder::new_for_qualification` is the adapter entry point for a
+controlled run on the interactive Windows thread. The Student Worker's
+synchronous selector still rejects asynchronous MFTs. The qualification
+adapter requires the driver's event generator to support
+`GetEvent(MF_EVENT_FLAG_NO_WAIT)`, one H.264 input, and one NV12 DXGI output on
+the same D3D11 video device. Missing interfaces, malformed event credits,
+and output without a matching submitted timestamp fail closed.
+
+Poll at the caller's media tick. Each poll services up to 32 native events and
+hands out at most one borrowed frame. Input backpressure leaves the access
+unit with the caller. At normal completion call `begin_drain` and poll until
+`Drained` or error. Stop, reset, and device loss call for retiring the old
+instance and creating a fresh one. Each generation starts with an empty
+event-credit and timestamp ledger and waits for a new IDR.
+
+Qualification still requires an authorized physical Windows x64 adapter:
+record the decoder CLSID and driver, drive SPS-driven NV12 renegotiation,
+observe output events and exact timestamps on actual DXGI surfaces, and
+present changing authenticated video in the Student HWND. Include normal
+drain, reset with queued old events, Stop, a replaced GPU pipeline, and the
+minimize/restore acceptance sequence above. VM1 event-queue tests exercise the
+native Media Foundation event contract and state machine.
