@@ -47,7 +47,7 @@ fn contains_invisible_formatting(value: &str) -> bool {
     value.chars().any(|ch| {
         matches!(
             ch,
-            '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}'
+            '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}' | '\u{fe0e}' | '\u{fe0f}'
         )
     })
 }
@@ -211,6 +211,8 @@ mod identifier_hardening_tests {
             "device-\u{200d}1",
             "device-\u{2060}1",
             "device-\u{feff}1",
+            "device-\u{fe0e}1",
+            "device-\u{fe0f}1",
         ] {
             assert_eq!(
                 qualify_teacher_roster(&request_with_ids(&[id])),
@@ -283,6 +285,7 @@ mod malformed_roster_metadata_tests {
         for (principal, role) in [
             ("teacher-\u{200b}1", "Teacher"),
             ("teacher-1", "Teach\u{2060}er"),
+            ("teacher-\u{fe0f}1", "Teacher"),
         ] {
             assert_eq!(
                 qualify_teacher_roster(&request(principal, role, 150)),
