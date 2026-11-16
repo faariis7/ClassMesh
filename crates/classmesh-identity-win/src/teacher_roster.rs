@@ -40,6 +40,17 @@ pub struct TeacherRosterRequest<'a> {
     pub roster: Option<RosterEvidence<'a>>,
 }
 
+// Reject invisible format characters that can make distinct IDs look identical.
+// This is input screening, not an issuer identity normalization contract.
+fn contains_invisible_formatting(value: &str) -> bool {
+    value.chars().any(|ch| {
+        matches!(
+            ch,
+            '\\u{200b}' | '\\u{200c}' | '\\u{200d}' | '\\u{2060}' | '\\u{feff}'
+        )
+    })
+}
+
 fn contains_bidi_formatting(value: &str) -> bool {
     value.chars().any(|ch| {
         matches!(
@@ -67,6 +78,7 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
             || value.trim() != value
             || value.chars().any(char::is_control)
             || contains_bidi_formatting(value)
+            || contains_invisible_formatting(value)
         {
             return Err(RosterRejection::InvalidPrincipalOrRole);
         }
@@ -132,6 +144,7 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
             || id.trim() != *id
             || id.chars().any(char::is_control)
             || contains_bidi_formatting(id)
+            || contains_invisible_formatting(id)
             || !seen.insert(*id)
         {
             return Err(RosterRejection::InvalidStudentDeviceRoster);
@@ -186,6 +199,16 @@ mod identifier_hardening_tests {
     }
 
     #[test]
+    fn invisible_student_device_format_characters_are_denied() {
+        for id in ["device-\\u{200b}1", "device-\\u{200c}1", "device-\\u{200d}1", "device-\\u{2060}1", "device-\\u{feff}1"] {
+            assert_eq!(
+                qualify_teacher_roster(&request_with_ids(&[id])),
+                Err(RosterRejection::InvalidStudentDeviceRoster)
+            );
+        }
+    }
+
+    #[test]
     fn valid_identifiers_still_require_approved_verifier() {
         assert_eq!(
             qualify_teacher_roster(&request_with_ids(&["device-1", "device-2"])),
@@ -236,6 +259,19 @@ mod malformed_roster_metadata_tests {
         for (principal, role) in [
             ("teacher-\u{2066}1", "Teacher"),
             ("teacher-1", "Teach\u{202e}er"),
+        ] {
+            assert_eq!(
+                qualify_teacher_roster(&request(principal, role, 150)),
+                Err(RosterRejection::InvalidPrincipalOrRole)
+            );
+        }
+    }
+
+    #[test]
+    fn invisible_teacher_identity_and_role_format_characters_are_denied() {
+        for (principal, role) in [
+            ("teacher-\\u{200b}1", "Teacher"),
+            ("teacher-1", "Teach\\u{2060}er"),
         ] {
             assert_eq!(
                 qualify_teacher_roster(&request(principal, role, 150)),
