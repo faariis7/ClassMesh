@@ -140,6 +140,8 @@ impl fmt::Debug for FlipPresenter {
     }
 }
 
+type BackBufferObserver<'a> = dyn FnMut(&ID3D11Texture2D) -> windows::core::Result<()> + 'a;
+
 impl FlipPresenter {
     /// Creates a two-buffer flip-discard swap chain attached to `hwnd` using the same D3D11 device
     /// as the hardware decoder.
@@ -313,6 +315,30 @@ impl FlipPresenter {
         texture: &ID3D11Texture2D,
         subresource_index: u32,
     ) -> windows::core::Result<PresentOutcome> {
+        self.present_nv12_inner(texture, subresource_index, None)
+    }
+
+    /// Runs the same GPU presentation path and exposes the rendered BGRA
+    /// back buffer before DXGI discards it. Intended for lab readback.
+    ///
+    /// # Errors
+    /// Returns rendering, observation or presentation errors. A non-visible
+    /// presentation status is an error when collecting lab evidence.
+    pub fn present_nv12_observed(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        subresource_index: u32,
+        mut observe: impl FnMut(&ID3D11Texture2D) -> windows::core::Result<()>,
+    ) -> windows::core::Result<PresentOutcome> {
+        self.present_nv12_inner(texture, subresource_index, Some(&mut observe))
+    }
+
+    fn present_nv12_inner(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        subresource_index: u32,
+        observer: Option<&mut BackBufferObserver<'_>>,
+    ) -> windows::core::Result<PresentOutcome> {
         if self.suspended {
             self.metrics.skipped_while_suspended =
                 self.metrics.skipped_while_suspended.saturating_add(1);
@@ -412,7 +438,21 @@ impl FlipPresenter {
         }
         blit?;
 
-        unsafe { self.swap_chain.Present(1, DXGI_PRESENT(0)) }.ok()?;
+        let observed = observer.is_some();
+        if let Some(observe) = observer {
+            observe(&backbuffer)?;
+        }
+        let status = unsafe { self.swap_chain.Present(1, DXGI_PRESENT(0)) };
+        status.ok()?;
+        if observed && status != windows::Win32::Foundation::S_OK {
+            return Err(windows::core::Error::new(
+                windows::Win32::Foundation::E_FAIL,
+                format!(
+                    "DXGI Present returned visibility status 0x{:08X}",
+                    status.0 as u32
+                ),
+            ));
+        }
         self.metrics.presented_frames = self.metrics.presented_frames.saturating_add(1);
         Ok(PresentOutcome::Presented)
     }
