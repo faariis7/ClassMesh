@@ -87,6 +87,27 @@ impl fmt::Debug for VideoPipeline {
     }
 }
 
+#[derive(Debug, Default)]
+struct PendingFrameClear(bool);
+
+impl PendingFrameClear {
+    fn request(&mut self) {
+        self.0 = true;
+    }
+
+    fn apply(
+        &mut self,
+        suspended: bool,
+        clear: impl FnOnce() -> windows::core::Result<()>,
+    ) -> windows::core::Result<()> {
+        if self.0 && !suspended {
+            clear()?;
+            self.0 = false;
+        }
+        Ok(())
+    }
+}
+
 /// GPU-native NV12 presenter for the student presentation window.
 ///
 /// Decoded Media Foundation surfaces remain on the same D3D11 device. A D3D11 Video Processor
@@ -101,6 +122,7 @@ pub struct FlipPresenter {
     output_width: u32,
     output_height: u32,
     suspended: bool,
+    frame_clear: PendingFrameClear,
     pipeline: Option<VideoPipeline>,
     metrics: PresentMetrics,
 }
@@ -170,6 +192,7 @@ impl FlipPresenter {
             output_width,
             output_height,
             suspended: false,
+            frame_clear: PendingFrameClear::default(),
             pipeline: None,
             metrics: PresentMetrics::default(),
         })
@@ -207,17 +230,21 @@ impl FlipPresenter {
     ///
     /// # Errors
     /// Returns the underlying D3D11 or DXGI error.
-    pub fn clear_frame(&self) -> windows::core::Result<()> {
-        if self.suspended {
-            return Ok(());
-        }
-        let backbuffer = unsafe { self.swap_chain.GetBuffer::<ID3D11Texture2D>(0)? };
-        let render_target = create_render_target(&self.device, &backbuffer)?;
-        unsafe {
-            self.context
-                .ClearRenderTargetView(&render_target, &[0.0, 0.0, 0.0, 1.0]);
-            self.swap_chain.Present(0, DXGI_PRESENT(0)).ok()
-        }
+    pub fn clear_frame(&mut self) -> windows::core::Result<()> {
+        self.frame_clear.request();
+        self.apply_frame_clear()
+    }
+
+    fn apply_frame_clear(&mut self) -> windows::core::Result<()> {
+        self.frame_clear.apply(self.suspended, || {
+            let backbuffer = unsafe { self.swap_chain.GetBuffer::<ID3D11Texture2D>(0)? };
+            let render_target = create_render_target(&self.device, &backbuffer)?;
+            unsafe {
+                self.context
+                    .ClearRenderTargetView(&render_target, &[0.0, 0.0, 0.0, 1.0]);
+                self.swap_chain.Present(0, DXGI_PRESENT(0)).ok()
+            }
+        })
     }
 
     /// Updates the flip-model buffers to the current client size.
@@ -247,6 +274,7 @@ impl FlipPresenter {
             && output_width == self.output_width
             && output_height == self.output_height
         {
+            self.apply_frame_clear()?;
             return Ok(ResizeOutcome::Unchanged);
         }
 
@@ -268,6 +296,7 @@ impl FlipPresenter {
         self.output_height = output_height;
         self.suspended = false;
         self.metrics.swap_chain_resizes = self.metrics.swap_chain_resizes.saturating_add(1);
+        self.apply_frame_clear()?;
         Ok(ResizeOutcome::Resized)
     }
 
@@ -290,6 +319,7 @@ impl FlipPresenter {
             return Ok(PresentOutcome::SkippedSuspended);
         }
 
+        self.apply_frame_clear()?;
         let source_desc = texture_desc(texture);
         if source_desc.Width == 0
             || source_desc.Height == 0
@@ -523,6 +553,43 @@ fn invalid_argument(message: &'static str) -> windows::core::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_while_minimized_clears_on_restore_before_the_next_video_frame() {
+        let mut clear = PendingFrameClear::default();
+        clear.request();
+        clear.apply(true, || panic!("window is minimized")).unwrap();
+        let mut black_presents = 0;
+        clear
+            .apply(false, || {
+                black_presents += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(black_presents, 1, "restore lost the decoder reset clear");
+        clear
+            .apply(false, || panic!("completed reset clear repeated"))
+            .unwrap();
+    }
+
+    #[test]
+    fn failed_clear_stays_pending_for_the_next_restore_attempt() {
+        let mut clear = PendingFrameClear::default();
+        clear.request();
+        assert!(
+            clear
+                .apply(false, || Err(invalid_argument("injected clear failure")))
+                .is_err()
+        );
+        let mut retried = false;
+        clear
+            .apply(false, || {
+                retried = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(retried);
+    }
 
     #[test]
     fn fit_rect_letterboxes_wide_source() {

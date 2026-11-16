@@ -26,6 +26,24 @@ While suspended:
 
 On restore the first non-zero `WM_SIZE` resizes the swap chain and presentation resumes without a teacher reconnect.
 
+A decoder reset while minimized leaves a clear pending. Restore first resizes the swap chain and
+presents black. A failed clear is retried before another video present. When the decoder has reset,
+it accepts delta frames only after an authenticated keyframe has been accepted.
+
+### Physical minimize and reset acceptance
+
+1. On an authorized Windows x64 student with a D3D11 video-capable driver, display a changing
+   authenticated stream with an easily identifiable image from the current key epoch.
+2. Minimize the student window and rotate the key through the normal presentation control path.
+   Keep the new epoch's first authenticated IDR delayed using the test sender.
+3. Restore the window. Record the first visible refresh through IDR arrival. The pre-rotation image
+   must never reappear, including during restore or repeated resize.
+4. Release the fresh IDR and confirm changing new-epoch video. Repeat with a decoder reset and
+   retain the capture, exact build SHA, GPU/driver and synchronized reset/IDR timestamps.
+
+Native state-machine tests verify the pending-clear ordering. Compositor behavior during the first
+visible refresh remains a physical acceptance test.
+
 ## Device loss
 
 DXGI errors corresponding to device removed, reset, hung, or driver-internal failure are classified separately from ordinary presentation errors.

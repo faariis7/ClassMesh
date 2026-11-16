@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use std::time::Instant;
 
 use classmesh_network::AssembledFrame;
@@ -8,8 +8,12 @@ use classmesh_network::AssembledFrame;
 #[cfg(windows)]
 use classmesh_codec_win::mf_decoder::{DecoderOutput, MfH264Decoder};
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const MAX_OUTPUT_STEPS_PER_PUMP: usize = 32;
+#[cfg(any(windows, test))]
+const MAX_SHUTDOWN_OUTPUT_STEPS: usize = 8 * MAX_OUTPUT_STEPS_PER_PUMP;
+#[cfg(any(windows, test))]
+const SHUTDOWN_OUTPUT_TIME: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PresentationRecoveryTelemetry {
@@ -30,6 +34,35 @@ pub struct PresentationDecodeBatch {
 pub enum PresentationDecodeStep {
     Decoded(PresentationDecodeBatch),
     WaitingForKeyframe,
+}
+
+#[cfg(any(windows, test))]
+fn finish_outputs(
+    deadline: Instant,
+    mut step: impl FnMut(&mut PresentationDecodeBatch) -> Result<bool, Box<dyn std::error::Error>>,
+) -> Result<PresentationDecodeBatch, Box<dyn std::error::Error>> {
+    let mut batch = PresentationDecodeBatch::default();
+    // Media Foundation's synchronous calls cannot be cancelled in flight.
+    // This bounds further calls and runs only on the standalone receiver's
+    // shutdown path, after it has stopped receiving.
+    for _ in 0..MAX_SHUTDOWN_OUTPUT_STEPS {
+        if Instant::now() >= deadline {
+            return Err(incomplete_drain("elapsed-time budget exhausted", &batch));
+        }
+        if step(&mut batch)? {
+            return Ok(batch);
+        }
+    }
+    Err(incomplete_drain("output-step budget exhausted", &batch))
+}
+
+#[cfg(any(windows, test))]
+fn incomplete_drain(reason: &str, batch: &PresentationDecodeBatch) -> Box<dyn std::error::Error> {
+    format!(
+        "incomplete H.264 drain after {} decoded frames and {} presents: {reason}",
+        batch.decoded, batch.presented
+    )
+    .into()
 }
 
 // A minimized DXGI presenter returns success without swapping a frame. Keep
@@ -286,56 +319,66 @@ impl PresentationDecodeRuntime {
         &mut self,
         recover_device_loss: bool,
     ) -> Result<PresentationDecodeBatch, Box<dyn std::error::Error>> {
-        use classmesh_render_win::{DxgiFailureClass, classify_dxgi_error};
-
         let mut batch = PresentationDecodeBatch::default();
         for _ in 0..MAX_OUTPUT_STEPS_PER_PUMP {
-            let frame = match self
-                .decoder
-                .as_ref()
-                .expect("an active presentation has a decoder")
-                .poll_decoded()
+            if self.poll_and_present(&mut batch, recover_device_loss)? {
+                break;
+            }
+        }
+        Ok(batch)
+    }
+
+    // True means the current pump has ended. During final drain, NeedInput is
+    // the only successful terminal result because device recovery is disabled.
+    fn poll_and_present(
+        &mut self,
+        batch: &mut PresentationDecodeBatch,
+        recover_device_loss: bool,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        use classmesh_render_win::{DxgiFailureClass, classify_dxgi_error};
+
+        let frame = match self
+            .decoder
+            .as_ref()
+            .expect("an active presentation has a decoder")
+            .poll_decoded()
+        {
+            Ok(DecoderOutput::Frame(frame)) => frame,
+            Ok(DecoderOutput::Progress) => return Ok(false),
+            Ok(DecoderOutput::NeedInput) => return Ok(true),
+            Err(error)
+                if recover_device_loss
+                    && classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost =>
             {
-                Ok(DecoderOutput::Frame(frame)) => frame,
-                Ok(DecoderOutput::Progress) => continue,
-                Ok(DecoderOutput::NeedInput) => break,
-                Err(error)
-                    if recover_device_loss
-                        && classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost =>
-                {
-                    self.rebuild_gpu_pipeline("decoder output device loss")?;
-                    break;
+                self.rebuild_gpu_pipeline("decoder output device loss")?;
+                return Ok(true);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        batch.decoded = batch.decoded.saturating_add(1);
+        if let Some(presentation) = self.presentation.as_mut() {
+            match presentation.present(&frame) {
+                Ok(classmesh_render_win::PresentOutcome::Presented) => {
+                    batch.presented = count_presented_outcome(batch.presented, true);
                 }
-                Err(error) => return Err(error.into()),
-            };
-            batch.decoded = batch.decoded.saturating_add(1);
-            if let Some(presentation) = self.presentation.as_mut() {
-                match presentation.present(&frame) {
-                    Ok(classmesh_render_win::PresentOutcome::Presented) => {
-                        batch.presented = count_presented_outcome(batch.presented, true);
-                    }
-                    Ok(classmesh_render_win::PresentOutcome::SkippedSuspended) => {
-                        batch.presented = count_presented_outcome(batch.presented, false);
-                    }
-                    Err(error) => {
-                        batch.present_errors = batch.present_errors.saturating_add(1);
-                        if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
-                            if !recover_device_loss {
-                                return Err(error.into());
-                            }
-                            drop(frame);
-                            self.rebuild_gpu_pipeline("presentation device loss")?;
-                            break;
+                Ok(classmesh_render_win::PresentOutcome::SkippedSuspended) => {
+                    batch.presented = count_presented_outcome(batch.presented, false);
+                }
+                Err(error) => {
+                    batch.present_errors = batch.present_errors.saturating_add(1);
+                    if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
+                        if !recover_device_loss {
+                            return Err(error.into());
                         }
-                        eprintln!(
-                            "D3D11 presentation failed while decode remains healthy: {error}"
-                        );
+                        drop(frame);
+                        self.rebuild_gpu_pipeline("presentation device loss")?;
+                        return Ok(true);
                     }
+                    eprintln!("D3D11 presentation failed while decode remains healthy: {error}");
                 }
             }
         }
-
-        Ok(batch)
+        Ok(false)
     }
 
     #[must_use]
@@ -360,7 +403,7 @@ impl PresentationDecodeRuntime {
             .expect("an active presentation has a decoder")
             .flush()
             .and_then(|()| {
-                self.presentation.as_ref().map_or(
+                self.presentation.as_mut().map_or(
                     Ok(()),
                     crate::receiver_render::PresentationWindow::clear_frame,
                 )
@@ -417,12 +460,25 @@ impl PresentationDecodeRuntime {
         let should_drain = self.state == DecoderState::Running;
         self.state = DecoderState::Retired;
         let decoded = if should_drain {
+            let deadline = Instant::now() + SHUTDOWN_OUTPUT_TIME;
             self.decoder
                 .as_mut()
                 .expect("an active presentation has a decoder")
                 .begin_drain()
                 .map_err(Into::into)
-                .and_then(|()| self.drain_decoded(false))
+                .and_then(|()| {
+                    finish_outputs(deadline, |batch| {
+                        if let Some(window) = self.presentation.as_mut() {
+                            if !window.pump_messages() {
+                                return Err(incomplete_drain("student window closed", batch));
+                            }
+                            if window.take_device_lost() {
+                                return Err(incomplete_drain("presentation device lost", batch));
+                            }
+                        }
+                        self.poll_and_present(batch, false)
+                    })
+                })
         } else {
             Ok(PresentationDecodeBatch::default())
         };
@@ -504,6 +560,51 @@ impl PresentationDecodeRuntime {
 #[cfg(test)]
 mod window_recovery_tests {
     use super::{count_presented_outcome, keep_window_stream_alive};
+
+    #[test]
+    fn shutdown_drains_past_one_live_pump_until_need_input() {
+        use super::{Instant, MAX_OUTPUT_STEPS_PER_PUMP, SHUTDOWN_OUTPUT_TIME, finish_outputs};
+
+        let mut remaining = MAX_OUTPUT_STEPS_PER_PUMP + 3;
+        let mut saw_need_input = false;
+        let batch = finish_outputs(Instant::now() + SHUTDOWN_OUTPUT_TIME, |batch| {
+            if remaining == 0 {
+                saw_need_input = true;
+                return Ok(true);
+            }
+            remaining -= 1;
+            batch.decoded += 1;
+            Ok(false)
+        })
+        .unwrap();
+
+        assert_eq!(remaining, 0, "shutdown returned with pending output");
+        assert!(saw_need_input, "completion requires an explicit NeedInput");
+        assert_eq!(batch.decoded, MAX_OUTPUT_STEPS_PER_PUMP + 3);
+    }
+
+    #[test]
+    fn shutdown_progress_without_need_input_exhausts_the_budget() {
+        use super::{Instant, MAX_SHUTDOWN_OUTPUT_STEPS, SHUTDOWN_OUTPUT_TIME, finish_outputs};
+
+        let mut steps = 0;
+        let error = finish_outputs(Instant::now() + SHUTDOWN_OUTPUT_TIME, |_| {
+            steps += 1;
+            Ok(false)
+        })
+        .unwrap_err();
+        assert_eq!(steps, MAX_SHUTDOWN_OUTPUT_STEPS);
+        assert!(error.to_string().contains("output-step budget exhausted"));
+    }
+
+    #[test]
+    fn shutdown_expired_deadline_stops_before_polling() {
+        use super::{Instant, finish_outputs};
+
+        let error =
+            finish_outputs(Instant::now(), |_| panic!("expired drain polled output")).unwrap_err();
+        assert!(error.to_string().contains("elapsed-time budget exhausted"));
+    }
 
     #[test]
     fn rejected_decoder_reset_retires_the_pipeline_even_for_an_idr() {

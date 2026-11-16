@@ -10,7 +10,7 @@ use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, GetClientRect, IDC_ARROW, IsWindow, LoadCursorW, MSG, PM_REMOVE,
+    DispatchMessageW, GetClientRect, IDC_ARROW, IsIconic, IsWindow, LoadCursorW, MSG, PM_REMOVE,
     PeekMessageW, RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WM_QUIT, WNDCLASSW,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
@@ -131,6 +131,9 @@ impl PresentationWindow {
     /// # Errors
     /// Returns a D3D11/DXGI error if the new flip-model presenter cannot be constructed.
     pub fn recover_device(&mut self, device: &ID3D11Device) -> windows::core::Result<()> {
+        if unsafe { IsIconic(self.hwnd).as_bool() } {
+            self.client_size = (0, 0);
+        }
         let (client_width, client_height) = self.client_size;
         let fallback_size = self
             .presenter
@@ -163,13 +166,17 @@ impl PresentationWindow {
         Ok(())
     }
 
-    pub(crate) fn clear_frame(&self) -> windows::core::Result<()> {
-        let presenter = self.presenter.as_ref().ok_or_else(|| {
+    pub(crate) fn clear_frame(&mut self) -> windows::core::Result<()> {
+        let presenter = self.presenter.as_mut().ok_or_else(|| {
             windows::core::Error::new(
                 windows::core::HRESULT(0x8000_4005_u32 as i32),
                 "presentation GPU resources are unavailable during reset",
             )
         })?;
+        if unsafe { IsIconic(self.hwnd).as_bool() } {
+            presenter.resize_output(0, 0)?;
+            self.client_size = (0, 0);
+        }
         presenter.clear_frame()
     }
 
@@ -260,8 +267,14 @@ impl PresentationWindow {
         if !self.closed {
             let mut rect = RECT::default();
             if unsafe { GetClientRect(self.hwnd, &mut rect) }.is_ok() {
-                let width = u32::try_from(rect.right - rect.left).unwrap_or(0);
-                let height = u32::try_from(rect.bottom - rect.top).unwrap_or(0);
+                let (width, height) = if unsafe { IsIconic(self.hwnd).as_bool() } {
+                    (0, 0)
+                } else {
+                    (
+                        u32::try_from(rect.right - rect.left).unwrap_or(0),
+                        u32::try_from(rect.bottom - rect.top).unwrap_or(0),
+                    )
+                };
                 if self.client_size != (width, height) {
                     match resize(self, width, height) {
                         Ok(outcome) => {

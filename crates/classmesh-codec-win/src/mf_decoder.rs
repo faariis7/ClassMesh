@@ -17,7 +17,7 @@ use windows::Win32::Media::MediaFoundation::{
     MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_MESSAGE_TYPE,
-    MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE,
+    MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_DATA_BUFFER_INCOMPLETE, MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE,
     MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
     MFT_REGISTER_TYPE_INFO, MFT_TRANSFORM_CLSID_Attribute, MFTEnumEx, MFVideoFormat_H264,
     MFVideoFormat_NV12,
@@ -514,8 +514,31 @@ fn process_one_output(
     }];
     let mut status = 0_u32;
     let result = unsafe { transform.ProcessOutput(0, &mut output, &mut status) };
-    let sample = ManuallyDrop::into_inner(unsafe { ptr::read(&output[0].pSample) });
-    let events = ManuallyDrop::into_inner(unsafe { ptr::read(&output[0].pEvents) });
+    let [output] = output;
+    interpret_output(output, status, result, |sample| {
+        validate_gpu_frame(sample, device)
+    })
+}
+
+fn interpret_output(
+    output: MFT_OUTPUT_DATA_BUFFER,
+    status: u32,
+    result: windows::core::Result<()>,
+    validate: impl FnOnce(IMFSample) -> windows::core::Result<DecodedGpuFrame>,
+) -> windows::core::Result<DecoderOutput> {
+    let sample = ManuallyDrop::into_inner(output.pSample);
+    let events = ManuallyDrop::into_inner(output.pEvents);
+
+    if status != 0
+        && (result.is_ok()
+            || result
+                .as_ref()
+                .is_err_and(|error| error.code() == MF_E_TRANSFORM_STREAM_CHANGE))
+    {
+        return Err(classmesh_decoder_error(
+            "H.264 decoder returned unsupported output stream changes",
+        ));
+    }
 
     match result {
         Ok(()) => {}
@@ -525,14 +548,23 @@ fn process_one_output(
         Err(error) => return Err(error),
     }
 
-    let no_sample = MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE.0 as u32;
-    if sample.is_none() && events.is_some() && output[0].dwStatus & no_sample == no_sample {
-        return Ok(DecoderOutput::Progress);
+    const NO_SAMPLE: u32 = MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE.0 as u32;
+    const INCOMPLETE: u32 = MFT_OUTPUT_DATA_BUFFER_INCOMPLETE.0 as u32;
+    match (output.dwStatus, sample, events) {
+        (NO_SAMPLE, None, _) => Ok(DecoderOutput::Progress),
+        (0 | INCOMPLETE, Some(sample), _) => Ok(DecoderOutput::Frame(validate(sample)?)),
+        (0, None, Some(events)) => {
+            if unsafe { events.GetElementCount()? } == 0 {
+                return Err(classmesh_decoder_error(
+                    "H.264 decoder returned an empty event collection",
+                ));
+            }
+            Ok(DecoderOutput::Progress)
+        }
+        _ => Err(classmesh_decoder_error(
+            "H.264 decoder returned an invalid output status or sample",
+        )),
     }
-    let sample = sample.ok_or_else(|| {
-        classmesh_decoder_error("H.264 decoder reported output without an IMFSample")
-    })?;
-    Ok(DecoderOutput::Frame(validate_gpu_frame(sample, device)?))
 }
 
 fn validate_gpu_frame(
@@ -603,6 +635,95 @@ fn classmesh_decoder_error(message: &'static str) -> windows::core::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn successful_no_sample_without_events_is_progress() {
+        let output = MFT_OUTPUT_DATA_BUFFER {
+            dwStreamID: 0,
+            pSample: ManuallyDrop::new(None),
+            dwStatus: MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE.0 as u32,
+            pEvents: ManuallyDrop::new(None),
+        };
+        let result = interpret_output(output, 0, Ok(()), |_| panic!("no sample to validate"));
+        assert!(matches!(result.unwrap(), DecoderOutput::Progress));
+    }
+
+    #[test]
+    fn unexpected_success_status_cannot_be_treated_as_progress() {
+        use windows::Win32::Media::MediaFoundation::{
+            MFT_OUTPUT_DATA_BUFFER_FORMAT_CHANGE, MFT_OUTPUT_DATA_BUFFER_STREAM_END,
+        };
+        for status in [
+            0,
+            MFT_OUTPUT_DATA_BUFFER_INCOMPLETE.0,
+            MFT_OUTPUT_DATA_BUFFER_FORMAT_CHANGE.0,
+            MFT_OUTPUT_DATA_BUFFER_STREAM_END.0,
+            MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE.0 | MFT_OUTPUT_DATA_BUFFER_INCOMPLETE.0,
+        ] {
+            let output = MFT_OUTPUT_DATA_BUFFER {
+                dwStreamID: 0,
+                pSample: ManuallyDrop::new(None),
+                dwStatus: status as u32,
+                pEvents: ManuallyDrop::new(None),
+            };
+            assert!(interpret_output(output, 0, Ok(()), |_| unreachable!()).is_err());
+        }
+    }
+
+    #[test]
+    fn no_sample_status_rejects_a_returned_sample() {
+        let _platform = crate::mf::MfPlatform::startup().unwrap();
+        let sample = unsafe { MFCreateSample() }.unwrap();
+        let output = MFT_OUTPUT_DATA_BUFFER {
+            dwStreamID: 0,
+            pSample: ManuallyDrop::new(Some(sample)),
+            dwStatus: MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE.0 as u32,
+            pEvents: ManuallyDrop::new(None),
+        };
+        assert!(interpret_output(output, 0, Ok(()), |_| unreachable!()).is_err());
+    }
+
+    #[test]
+    fn output_collection_releases_its_elements_on_success_and_failure() {
+        use std::sync::Arc;
+        use windows::Win32::Media::MediaFoundation::MFCreateCollection;
+
+        #[windows::core::implement()]
+        struct OwnedEvent {
+            _lifetime: Arc<()>,
+        }
+
+        let _platform = crate::mf::MfPlatform::startup().unwrap();
+        for accepted in [true, false] {
+            let lifetime = Arc::new(());
+            let released = Arc::downgrade(&lifetime);
+            let event: IUnknown = OwnedEvent {
+                _lifetime: lifetime,
+            }
+            .into();
+            let collection = unsafe { MFCreateCollection() }.unwrap();
+            unsafe { collection.AddElement(&event) }.unwrap();
+            drop(event);
+            assert!(released.upgrade().is_some());
+
+            let output = MFT_OUTPUT_DATA_BUFFER {
+                dwStreamID: 0,
+                pSample: ManuallyDrop::new(None),
+                dwStatus: 0,
+                pEvents: ManuallyDrop::new(Some(collection)),
+            };
+            let result = if accepted {
+                Ok(())
+            } else {
+                Err(classmesh_decoder_error("injected output failure"))
+            };
+            assert_eq!(
+                interpret_output(output, 0, result, |_| unreachable!()).is_ok(),
+                accepted
+            );
+            assert!(released.upgrade().is_none());
+        }
+    }
 
     #[test]
     fn empty_access_unit_error_is_stable() {
