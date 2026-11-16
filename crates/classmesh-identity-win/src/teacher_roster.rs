@@ -41,7 +41,7 @@ pub struct TeacherRosterRequest<'a> {
 }
 
 fn contains_bidi_formatting(value: &str) -> bool {
-    value.chars().any(|ch| matches!(ch, '\u202a'..='\u202e' | '\u2066'..='\u2069' | '\u200e' | '\u200f'))
+    value.chars().any(|ch| matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}'))
 }
 
 /// Screens untrusted metadata for explicit denial reasons, never granting authority.
@@ -171,7 +171,7 @@ mod identifier_hardening_tests {
     #[test]
     fn bidi_override_student_device_identifier_is_denied() {
         assert_eq!(
-            qualify_teacher_roster(&request_with_ids(&["device-\u202e1"])),
+            qualify_teacher_roster(&request_with_ids(&["device-\u{202e}1"])),
             Err(RosterRejection::InvalidStudentDeviceRoster)
         );
     }
@@ -224,7 +224,7 @@ mod malformed_roster_metadata_tests {
 
     #[test]
     fn bidi_isolates_in_teacher_identity_or_role_are_denied() {
-        for (principal, role) in [("teacher-\u20661", "Teacher"), ("teacher-1", "Teach\u202eer")] {
+        for (principal, role) in [("teacher-\u{2066}1", "Teacher"), ("teacher-1", "Teach\u{202e}er")] {
             assert_eq!(
                 qualify_teacher_roster(&request(principal, role, 150)),
                 Err(RosterRejection::InvalidPrincipalOrRole)
