@@ -15,6 +15,7 @@ pub enum RosterRejection {
     InvalidIssuedTimestamp,
     OversizedStudentDeviceRoster,
     OversizedStudentDeviceIdentifier,
+    OversizedUntrustedSignature,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -65,6 +66,11 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
     }
     if roster.signature.is_none_or(|bytes| bytes.is_empty()) {
         return Err(RosterRejection::UnsignedRoster);
+    }
+    // Bound attacker-controlled signature bytes without treating them as verified.
+    // This is a screening limit only, not a cryptographic algorithm policy.
+    if roster.signature.is_some_and(|bytes| bytes.len() > 4096) {
+        return Err(RosterRejection::OversizedUntrustedSignature);
     }
     if roster.teacher_principal != request.teacher_principal {
         return Err(RosterRejection::WrongPrincipal);
@@ -293,5 +299,56 @@ mod roster_duplicate_screening_tests {
         let names: Vec<String> = (0..1024).map(|i| format!("device-{i}")).collect();
         let ids: Vec<&str> = names.iter().map(String::as_str).collect();
         assert_eq!(screen(&ids), Err(RosterRejection::MissingApprovedVerifier));
+    }
+}
+
+#[cfg(test)]
+mod untrusted_signature_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_unverified_signature_is_denied() {
+        let signature = vec![1_u8; 4097];
+        let request = TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&signature),
+                student_device_ids: &["device-1"],
+            }),
+        };
+        assert_eq!(
+            qualify_teacher_roster(&request),
+            Err(RosterRejection::OversizedUntrustedSignature)
+        );
+    }
+
+    #[test]
+    fn bounded_unverified_signature_still_cannot_authorize() {
+        let signature = vec![1_u8; 4096];
+        let request = TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&signature),
+                student_device_ids: &["device-1"],
+            }),
+        };
+        assert_eq!(
+            qualify_teacher_roster(&request),
+            Err(RosterRejection::MissingApprovedVerifier)
+        );
     }
 }
