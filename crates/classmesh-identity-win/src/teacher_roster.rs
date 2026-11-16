@@ -254,7 +254,7 @@ mod scoped_student_device_tests {
     #[test]
     fn malformed_requested_device_is_denied() {
         assert_eq!(
-            qualify_teacher_device_roster(&request(&["device-1"]), "device-\\u{202e}1"),
+            qualify_teacher_device_roster(&request(&["device-1"]), "device-\u{202e}1"),
             Err(RosterRejection::InvalidStudentDeviceRoster)
         );
     }
