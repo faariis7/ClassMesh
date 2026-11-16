@@ -58,6 +58,7 @@ fn contains_invisible_formatting(value: &str) -> bool {
                 | '\u{feff}'
                 | '\u{fe0e}'
                 | '\u{fe0f}'
+                | '\u{e0000}'..='\u{e007f}'
         )
     })
 }
@@ -227,6 +228,8 @@ mod identifier_hardening_tests {
             "device-\u{feff}1",
             "device-\u{fe0e}1",
             "device-\u{fe0f}1",
+            "device-\u{e0001}1",
+            "device-\u{e007f}1",
         ] {
             assert_eq!(
                 qualify_teacher_roster(&request_with_ids(&[id])),
@@ -304,6 +307,7 @@ mod malformed_roster_metadata_tests {
             ("teacher-\u{200b}1", "Teacher"),
             ("teacher-1", "Teach\u{2060}er"),
             ("teacher-\u{fe0f}1", "Teacher"),
+            ("teacher-\u{e0001}1", "Teacher"),
         ] {
             assert_eq!(
                 qualify_teacher_roster(&request(principal, role, 150)),
