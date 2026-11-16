@@ -5,21 +5,23 @@ use std::fmt;
 use std::mem::ManuallyDrop;
 use std::ptr::{self, null_mut, read};
 
+use windows::Win32::Foundation::LUID;
 use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFAttributes, IMFDXGIBuffer, IMFMediaType, IMFSample, IMFTransform,
-    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_MAJOR_TYPE,
-    MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC, MFCreateMediaType, MFCreateMemoryBuffer,
-    MFCreateSample, MFMediaType_Video, MFSampleExtension_Discontinuity, MFT_CATEGORY_VIDEO_DECODER,
-    MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
+    IMFActivate, IMFAttributes, IMFDXGIBuffer, IMFMediaEventGenerator, IMFMediaType, IMFSample,
+    IMFShutdown, IMFTransform, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
+    MF_LOW_LATENCY, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC,
+    MFCreateAttributes, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video,
+    MFSampleExtension_Discontinuity, MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_ADAPTER_LUID,
+    MFT_ENUM_FLAG, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
     MFT_ENUM_FLAG_SYNCMFT, MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN,
     MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_MESSAGE_TYPE,
     MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_DATA_BUFFER_INCOMPLETE, MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE,
     MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MFT_REGISTER_TYPE_INFO, MFT_TRANSFORM_CLSID_Attribute, MFTEnumEx, MFVideoFormat_H264,
+    MFT_REGISTER_TYPE_INFO, MFT_TRANSFORM_CLSID_Attribute, MFTEnum2, MFTEnumEx, MFVideoFormat_H264,
     MFVideoFormat_NV12,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
@@ -56,13 +58,65 @@ impl MfDecoderActivation {
     }
 }
 
+/// Interfaces and attributes read from an activated transform.
+#[derive(Debug, serde::Serialize)]
+pub struct MfDecoderCapabilities {
+    pub asynchronous: bool,
+    pub d3d11_aware: bool,
+    pub event_generator: bool,
+    pub shutdown: bool,
+}
+
+impl MfDecoderActivation {
+    /// Opens this registration to inspect runtime attributes, then shuts it down.
+    /// Enumerate fresh activations for a subsequent playback run.
+    ///
+    /// # Errors
+    /// Returns the activation or attribute query failure.
+    pub fn inspect_for_qualification(self) -> windows::core::Result<MfDecoderCapabilities> {
+        let guard = DecoderActivationGuard::new(self.activation);
+        let transform = guard.activate()?;
+        let attributes = unsafe { transform.GetAttributes()? };
+        Ok(MfDecoderCapabilities {
+            asynchronous: unsafe { attributes.GetUINT32(&MF_TRANSFORM_ASYNC) }
+                .is_ok_and(|value| value == 1),
+            d3d11_aware: unsafe { attributes.GetUINT32(&MF_SA_D3D11_AWARE) }.unwrap_or(0) != 0,
+            event_generator: transform.cast::<IMFMediaEventGenerator>().is_ok(),
+            shutdown: transform.cast::<IMFShutdown>().is_ok(),
+        })
+    }
+}
+
 // IMFActivate owns a cached reference and is responsible for shutting down
 // the transform, including candidates that fail qualification.
-struct DecoderActivationGuard(IMFActivate);
+struct DecoderActivationGuard {
+    activation: IMFActivate,
+    shutdown_requested: bool,
+}
+
+impl DecoderActivationGuard {
+    fn new(activation: IMFActivate) -> Self {
+        Self {
+            activation,
+            shutdown_requested: false,
+        }
+    }
+
+    fn activate(&self) -> windows::core::Result<IMFTransform> {
+        unsafe { self.activation.ActivateObject() }
+    }
+
+    fn shutdown(&mut self) -> windows::core::Result<()> {
+        if std::mem::replace(&mut self.shutdown_requested, true) {
+            return Ok(());
+        }
+        unsafe { self.activation.ShutdownObject() }
+    }
+}
 
 impl Drop for DecoderActivationGuard {
     fn drop(&mut self) {
-        let _ = unsafe { self.0.ShutdownObject() };
+        let _ = self.shutdown();
     }
 }
 
@@ -74,30 +128,80 @@ impl Drop for DecoderActivationGuard {
 /// # Errors
 /// Returns the Media Foundation enumeration error.
 pub fn enumerate_h264_decoders() -> windows::core::Result<Vec<MfDecoderActivation>> {
-    let input_type = MFT_REGISTER_TYPE_INFO {
-        guidMajorType: MFMediaType_Video,
-        guidSubtype: MFVideoFormat_H264,
-    };
     let output_type = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_NV12,
     };
-    let flags = MFT_ENUM_FLAG_SYNCMFT
-        | MFT_ENUM_FLAG_ASYNCMFT
-        | MFT_ENUM_FLAG_HARDWARE
-        | MFT_ENUM_FLAG_SORTANDFILTER;
+    enumerate_h264(
+        MFT_ENUM_FLAG_SYNCMFT
+            | MFT_ENUM_FLAG_ASYNCMFT
+            | MFT_ENUM_FLAG_HARDWARE
+            | MFT_ENUM_FLAG_SORTANDFILTER,
+        Some(&output_type),
+        None,
+    )
+}
+
+/// Enumerates H.264 registrations without an output subtype filter. With a
+/// LUID, only hardware registrations for that DXGI adapter are returned.
+///
+/// # Errors
+/// Returns the Media Foundation enumeration or adapter attribute error.
+pub fn enumerate_h264_decoders_for_qualification(
+    adapter: Option<LUID>,
+) -> windows::core::Result<Vec<MfDecoderActivation>> {
+    if let Some(luid) = adapter {
+        let mut attributes = None;
+        unsafe { MFCreateAttributes(&mut attributes, 1)? };
+        let attributes = attributes
+            .ok_or_else(|| classmesh_decoder_error("missing MFT enumeration attributes"))?;
+        let mut luid_bytes = [0; 8];
+        luid_bytes[..4].copy_from_slice(&luid.LowPart.to_le_bytes());
+        luid_bytes[4..].copy_from_slice(&luid.HighPart.to_le_bytes());
+        unsafe { attributes.SetBlob(&MFT_ENUM_ADAPTER_LUID, &luid_bytes)? };
+        enumerate_h264(MFT_ENUM_FLAG_HARDWARE, None, Some(&attributes))
+    } else {
+        enumerate_h264(
+            MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_HARDWARE,
+            None,
+            None,
+        )
+    }
+}
+
+fn enumerate_h264(
+    flags: MFT_ENUM_FLAG,
+    output_type: Option<&MFT_REGISTER_TYPE_INFO>,
+    attributes: Option<&IMFAttributes>,
+) -> windows::core::Result<Vec<MfDecoderActivation>> {
+    let input_type = MFT_REGISTER_TYPE_INFO {
+        guidMajorType: MFMediaType_Video,
+        guidSubtype: MFVideoFormat_H264,
+    };
+    let output_type = output_type.map(ptr::from_ref);
     let mut raw_activations: *mut Option<IMFActivate> = null_mut();
     let mut activation_count = 0_u32;
-
     unsafe {
-        MFTEnumEx(
-            MFT_CATEGORY_VIDEO_DECODER,
-            flags,
-            Some(&input_type),
-            Some(&output_type),
-            &mut raw_activations,
-            &mut activation_count,
-        )?;
+        if let Some(attributes) = attributes {
+            MFTEnum2(
+                MFT_CATEGORY_VIDEO_DECODER,
+                flags,
+                Some(&input_type),
+                output_type,
+                attributes,
+                &mut raw_activations,
+                &mut activation_count,
+            )?;
+        } else {
+            MFTEnumEx(
+                MFT_CATEGORY_VIDEO_DECODER,
+                flags,
+                Some(&input_type),
+                output_type,
+                &mut raw_activations,
+                &mut activation_count,
+            )?;
+        }
     }
 
     let count = usize::try_from(activation_count).unwrap_or(usize::MAX);
@@ -280,15 +384,21 @@ impl MfH264Decoder {
         activation: MfDecoderActivation,
         device: &ID3D11Device,
     ) -> windows::core::Result<Self> {
-        let guard = DecoderActivationGuard(activation.activation);
-        let transform = unsafe { guard.0.ActivateObject::<IMFTransform>()? };
+        let guard = DecoderActivationGuard::new(activation.activation);
+        let transform = guard.activate()?;
         let attributes = unsafe { transform.GetAttributes()? };
         if unsafe { attributes.GetUINT32(&MF_TRANSFORM_ASYNC) }.unwrap_or(0) != 0 {
             return Err(classmesh_decoder_error(
                 "asynchronous H.264 decoder requires an event-driven input/output pump",
             ));
         }
-        let device_manager = configure_decoder(&transform, &attributes, device, 0, 0)?;
+        let device_manager = configure_decoder(
+            &transform,
+            &attributes,
+            device,
+            (0, 0),
+            &create_h264_input_type()?,
+        )?;
 
         unsafe { transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)? };
         let decoder = Self {
@@ -423,8 +533,8 @@ fn configure_decoder(
     transform: &IMFTransform,
     attributes: &IMFAttributes,
     device: &ID3D11Device,
-    input_stream: u32,
-    output_stream: u32,
+    (input_stream, output_stream): (u32, u32),
+    input_type: &IMFMediaType,
 ) -> windows::core::Result<MfDxgiDeviceManager> {
     if unsafe { attributes.GetUINT32(&MF_SA_D3D11_AWARE) }.unwrap_or(0) == 0 {
         return Err(classmesh_decoder_error("H.264 decoder is not D3D11-aware"));
@@ -437,8 +547,7 @@ fn configure_decoder(
             device_manager.manager().as_raw() as usize,
         )?;
     }
-    let input_type = create_h264_input_type()?;
-    unsafe { transform.SetInputType(input_stream, &input_type, 0)? };
+    unsafe { transform.SetInputType(input_stream, input_type, 0)? };
     configure_nv12_output(transform, output_stream)?;
     require_decoder_owned_output(transform, output_stream)?;
     Ok(device_manager)
@@ -848,4 +957,6 @@ mod tests {
 
 #[path = "mf_decoder_async.rs"]
 mod asynchronous;
-pub use asynchronous::{AsyncDecoderPoll, AsyncDecoderSubmit, MfAsyncH264Decoder};
+pub use asynchronous::{
+    AsyncDecoderEvents, AsyncDecoderPoll, AsyncDecoderSubmit, MfAsyncH264Decoder,
+};

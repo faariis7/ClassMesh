@@ -4,19 +4,20 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::E_NOTIMPL;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Multithread, ID3D11VideoDevice};
 use windows::Win32::Media::MediaFoundation::{
-    IMFMediaEvent, IMFMediaEventGenerator, IMFShutdown, IMFTransform, MEError,
+    IMFMediaEvent, IMFMediaEventGenerator, IMFMediaType, IMFShutdown, IMFTransform, MEError,
     METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
     MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT,
-    MF_EVENT_MFT_INPUT_STREAM_ID, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK,
-    MFSampleExtension_Discontinuity, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_TYPE,
+    MF_EVENT_MFT_INPUT_STREAM_ID, MF_MT_FRAME_SIZE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK,
+    MFSampleExtension_CleanPoint, MFSampleExtension_Discontinuity, MFT_MESSAGE_COMMAND_DRAIN,
+    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_TYPE,
 };
 use windows::core::{Interface, Result};
 
 use super::{
     DecodedGpuFrame, DecoderActivationGuard, DecoderOutput, MfDecoderActivation, StreamState,
     checked_sample_time, classmesh_decoder_error, configure_decoder, configure_nv12_output,
-    create_compressed_sample_at, prefer_device_failure, process_one_output,
+    create_compressed_sample_at, create_h264_input_type, prefer_device_failure, process_one_output,
     require_decoder_owned_output,
 };
 use crate::mf::{MfDxgiDeviceManager, MfPlatform};
@@ -40,6 +41,15 @@ pub enum AsyncDecoderPoll<Frame> {
     Drained,
 }
 
+/// Successful native events handled by a single decoder generation.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct AsyncDecoderEvents {
+    pub need_input: u64,
+    pub have_output: u64,
+    pub drain_complete: u64,
+    pub stream_changes: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Streaming,
@@ -54,16 +64,18 @@ struct AsyncEvents {
     input_credits: usize,
     pending: BTreeSet<i64>,
     waiting_for_keyframe: bool,
+    events: AsyncDecoderEvents,
 }
 
 impl AsyncEvents {
-    const fn new(input_stream: u32) -> Self {
+    fn new(input_stream: u32) -> Self {
         Self {
             phase: Phase::Streaming,
             input_stream,
             input_credits: 0,
             pending: BTreeSet::new(),
             waiting_for_keyframe: true,
+            events: AsyncDecoderEvents::default(),
         }
     }
 
@@ -149,6 +161,7 @@ impl AsyncEvents {
             match unsafe { event.GetType()? } {
                 NEED_INPUT => {
                     validate_event_stream(&event, self.input_stream)?;
+                    self.events.need_input += 1;
                     // NeedInput events may already have been queued when EOS was sent.
                     if self.phase == Phase::Streaming {
                         if self.input_credits == MAX_INPUT_CREDITS {
@@ -159,18 +172,21 @@ impl AsyncEvents {
                         self.input_credits += 1;
                     }
                 }
-                HAVE_OUTPUT => match output()? {
-                    DecoderOutput::Frame(frame) => {
-                        self.match_output_time(frame.timestamp_100ns())?;
-                        return Ok(AsyncDecoderPoll::Frame(frame));
+                HAVE_OUTPUT => {
+                    self.events.have_output += 1;
+                    match output()? {
+                        DecoderOutput::Frame(frame) => {
+                            self.match_output_time(frame.timestamp_100ns())?;
+                            return Ok(AsyncDecoderPoll::Frame(frame));
+                        }
+                        DecoderOutput::Progress => {}
+                        DecoderOutput::NeedInput => {
+                            return Err(classmesh_decoder_error(
+                                "async H.264 returned NeedInput after a HaveOutput event",
+                            ));
+                        }
                     }
-                    DecoderOutput::Progress => {}
-                    DecoderOutput::NeedInput => {
-                        return Err(classmesh_decoder_error(
-                            "async H.264 returned NeedInput after a HaveOutput event",
-                        ));
-                    }
-                },
+                }
                 DRAIN_COMPLETE => {
                     validate_event_stream(&event, self.input_stream)?;
                     if !matches!(self.phase, Phase::Draining(_)) {
@@ -179,6 +195,7 @@ impl AsyncEvents {
                         ));
                     }
                     self.pending.clear();
+                    self.events.drain_complete += 1;
                     self.phase = Phase::Drained;
                     return Ok(AsyncDecoderPoll::Drained);
                 }
@@ -205,7 +222,7 @@ pub struct MfAsyncH264Decoder<'platform> {
     returned_frame: Option<DecodedGpuFrame>,
     transform: IMFTransform,
     events: IMFMediaEventGenerator,
-    _activation: DecoderActivationGuard,
+    activation: DecoderActivationGuard,
     device: ID3D11Device,
     _device_manager: MfDxgiDeviceManager,
     _platform: &'platform MfPlatform,
@@ -227,6 +244,37 @@ impl<'platform> MfAsyncH264Decoder<'platform> {
         activation: MfDecoderActivation,
         device: &ID3D11Device,
     ) -> Result<Self> {
+        Self::open(platform, activation, device, &create_h264_input_type()?)
+    }
+
+    /// Opens the decoder with the fixture's initial coded size. The MFT
+    /// still negotiates output and any later size change from the bitstream.
+    ///
+    /// # Errors
+    /// Returns a Windows error when setup, negotiation or startup fails.
+    pub fn new_for_qualification_at_size(
+        platform: &'platform MfPlatform,
+        activation: MfDecoderActivation,
+        device: &ID3D11Device,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
+        let input_type = create_h264_input_type()?;
+        unsafe {
+            input_type.SetUINT64(
+                &MF_MT_FRAME_SIZE,
+                (u64::from(width) << 32) | u64::from(height),
+            )?
+        };
+        Self::open(platform, activation, device, &input_type)
+    }
+
+    fn open(
+        platform: &'platform MfPlatform,
+        activation: MfDecoderActivation,
+        device: &ID3D11Device,
+        input_type: &IMFMediaType,
+    ) -> Result<Self> {
         device.cast::<ID3D11VideoDevice>()?;
         let context = unsafe { device.GetImmediateContext()? };
         let threading: ID3D11Multithread = context.cast()?;
@@ -238,8 +286,8 @@ impl<'platform> MfAsyncH264Decoder<'platform> {
                 ));
             }
         }
-        let guard = DecoderActivationGuard(activation.activation);
-        let transform = unsafe { guard.0.ActivateObject::<IMFTransform>()? };
+        let guard = DecoderActivationGuard::new(activation.activation);
+        let transform = guard.activate()?;
         let attributes = unsafe { transform.GetAttributes()? };
         if unsafe { attributes.GetUINT32(&MF_TRANSFORM_ASYNC)? } != 1 {
             return Err(classmesh_decoder_error("H.264 decoder is not an async MFT"));
@@ -249,14 +297,19 @@ impl<'platform> MfAsyncH264Decoder<'platform> {
         transform.cast::<IMFShutdown>()?;
         unsafe { attributes.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)? };
         let (input_stream, output_stream) = stream_ids(&transform)?;
-        let device_manager =
-            configure_decoder(&transform, &attributes, device, input_stream, output_stream)?;
+        let device_manager = configure_decoder(
+            &transform,
+            &attributes,
+            device,
+            (input_stream, output_stream),
+            input_type,
+        )?;
 
         let mut decoder = Self {
             returned_frame: None,
             transform,
             events,
-            _activation: guard,
+            activation: guard,
             device: device.clone(),
             _device_manager: device_manager,
             _platform: platform,
@@ -303,6 +356,9 @@ impl<'platform> MfAsyncH264Decoder<'platform> {
         self.state
             .submit(timestamp_us, keyframe, |timestamp, first| {
                 let sample = create_compressed_sample_at(access_unit, timestamp)?;
+                if keyframe {
+                    unsafe { sample.SetUINT32(&MFSampleExtension_CleanPoint, 1)? };
+                }
                 if first {
                     unsafe { sample.SetUINT32(&MFSampleExtension_Discontinuity, 1)? };
                 }
@@ -319,17 +375,20 @@ impl<'platform> MfAsyncH264Decoder<'platform> {
     /// Returns an event, decoder, device, or drain-timeout error and retires the decoder.
     pub fn poll(&mut self) -> Result<AsyncDecoderPoll<&DecodedGpuFrame>> {
         drop(self.returned_frame.take());
+        let mut changes = 0;
         let result = self.state.poll(
             || unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) },
             || match process_one_output(&self.transform, &self.device, self.output_stream) {
                 Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
                     configure_nv12_output(&self.transform, self.output_stream)?;
                     require_decoder_owned_output(&self.transform, self.output_stream)?;
+                    changes += 1;
                     Ok(DecoderOutput::Progress)
                 }
                 result => result,
             },
         );
+        self.state.events.stream_changes += changes;
         match result {
             Ok(AsyncDecoderPoll::Frame(frame)) => {
                 Ok(AsyncDecoderPoll::Frame(self.returned_frame.insert(frame)))
@@ -341,6 +400,12 @@ impl<'platform> MfAsyncH264Decoder<'platform> {
                 Err(prefer_device_failure(&self.device, error))
             }
         }
+    }
+
+    /// Counts observed transform events and successful NV12 renegotiations.
+    #[must_use]
+    pub const fn events(&self) -> AsyncDecoderEvents {
+        self.state.events
     }
 
     /// Closes input. Poll until the transform signals DrainComplete.
@@ -373,7 +438,8 @@ impl<'platform> MfAsyncH264Decoder<'platform> {
     /// # Errors
     /// Returns the first transform cleanup error.
     pub fn stop(mut self) -> Result<()> {
-        self.stop_stream()
+        let end = self.stop_stream();
+        end.and(self.activation.shutdown())
     }
 
     fn stop_stream(&mut self) -> Result<()> {
@@ -507,6 +573,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!((inputs, outputs), (2, 1));
+        assert_eq!(state.events.need_input, 2);
+        assert_eq!(state.events.have_output, 1);
+        assert_eq!(state.events.drain_complete, 0);
         unsafe { queue.Shutdown() }.unwrap();
     }
 
@@ -545,6 +614,7 @@ mod tests {
             state.poll(|| unreachable!(), || unreachable!()).unwrap(),
             AsyncDecoderPoll::Drained
         ));
+        assert_eq!(state.events.drain_complete, 1);
         unsafe { queue.Shutdown() }.unwrap();
     }
 
