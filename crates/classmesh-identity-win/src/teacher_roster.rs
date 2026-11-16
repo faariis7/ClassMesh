@@ -9,6 +9,7 @@ pub enum RosterRejection {
     WrongRole,
     StaleAuthorization,
     MissingApprovedVerifier,
+    UnlistedStudentDevice,
     EmptyStudentDeviceRoster,
     InvalidStudentDeviceRoster,
     InvalidPrincipalOrRole,
@@ -179,6 +180,94 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
     }
     // Never interpret unverified signature bytes or embedded roster as authority.
     Err(RosterRejection::MissingApprovedVerifier)
+}
+
+/// Deny-only screening for a specifically requested StudentDevice.
+/// Membership in unverified roster metadata is never authorization.
+/// All plausible inputs remain denied until approved provenance exists.
+pub fn qualify_teacher_device_roster(
+    request: &TeacherRosterRequest<'_>,
+    requested_student_device_id: &str,
+) -> Result<(), RosterRejection> {
+    match qualify_teacher_roster(request) {
+        Err(RosterRejection::MissingApprovedVerifier) => {}
+        other => return other,
+    }
+    if requested_student_device_id.is_empty()
+        || requested_student_device_id.len() > 256
+        || requested_student_device_id.trim() != requested_student_device_id
+        || requested_student_device_id.chars().any(char::is_control)
+        || contains_bidi_formatting(requested_student_device_id)
+        || contains_invisible_formatting(requested_student_device_id)
+        || contains_unicode_noncharacter(requested_student_device_id)
+    {
+        return Err(RosterRejection::InvalidStudentDeviceRoster);
+    }
+    if !request
+        .roster
+        .expect("roster screened above")
+        .student_device_ids
+        .contains(&requested_student_device_id)
+    {
+        return Err(RosterRejection::UnlistedStudentDevice);
+    }
+    Err(RosterRejection::MissingApprovedVerifier)
+}
+
+#[cfg(test)]
+mod scoped_student_device_tests {
+    use super::*;
+
+    fn request<'a>(ids: &'a [&'a str]) -> TeacherRosterRequest<'a> {
+        TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: ids,
+            }),
+        }
+    }
+
+    #[test]
+    fn unlisted_device_is_denied() {
+        assert_eq!(
+            qualify_teacher_device_roster(&request(&["device-1"]), "device-2"),
+            Err(RosterRejection::UnlistedStudentDevice)
+        );
+    }
+
+    #[test]
+    fn listed_device_still_requires_approved_verifier() {
+        assert_eq!(
+            qualify_teacher_device_roster(&request(&["device-1"]), "device-1"),
+            Err(RosterRejection::MissingApprovedVerifier)
+        );
+    }
+
+    #[test]
+    fn malformed_requested_device_is_denied() {
+        assert_eq!(
+            qualify_teacher_device_roster(&request(&["device-1"]), "device-\\u{202e}1"),
+            Err(RosterRejection::InvalidStudentDeviceRoster)
+        );
+    }
+
+    #[test]
+    fn missing_roster_is_denied_before_device_lookup() {
+        let mut candidate = request(&["device-1"]);
+        candidate.roster = None;
+        assert_eq!(
+            qualify_teacher_device_roster(&candidate, "device-1"),
+            Err(RosterRejection::MissingRoster)
+        );
+    }
 }
 
 #[cfg(test)]
