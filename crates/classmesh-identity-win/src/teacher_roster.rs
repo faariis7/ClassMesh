@@ -59,9 +59,14 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
         }
     }
     // Bound untrusted identity strings before comparisons; this is not an identity policy.
-    if [request.teacher_principal, request.required_role, roster.teacher_principal, roster.role]
-        .iter()
-        .any(|value| value.len() > 256)
+    if [
+        request.teacher_principal,
+        request.required_role,
+        roster.teacher_principal,
+        roster.role,
+    ]
+    .iter()
+    .any(|value| value.len() > 256)
     {
         return Err(RosterRejection::OversizedPrincipalOrRole);
     }
