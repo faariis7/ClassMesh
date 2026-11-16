@@ -17,6 +17,7 @@ pub enum RosterRejection {
     OversizedStudentDeviceRoster,
     OversizedStudentDeviceIdentifier,
     OversizedUntrustedSignature,
+    OversizedPrincipalOrRole,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -56,6 +57,13 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
         if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
             return Err(RosterRejection::InvalidPrincipalOrRole);
         }
+    }
+    // Bound untrusted identity strings before comparisons; this is not an identity policy.
+    if [request.teacher_principal, request.required_role, roster.teacher_principal, roster.role]
+        .iter()
+        .any(|value| value.len() > 256)
+    {
+        return Err(RosterRejection::OversizedPrincipalOrRole);
     }
     // A missing authorization epoch cannot establish freshness or prevent replay.
     if request.authorization_not_before_unix_ms == 0 {
@@ -385,5 +393,40 @@ mod authorization_epoch_tests {
             qualify_teacher_roster(&request),
             Err(RosterRejection::MissingAuthorizationEpoch)
         );
+    }
+}
+
+#[cfg(test)]
+mod principal_role_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_principal_or_role_is_denied_before_trust_evaluation() {
+        let long = "t".repeat(257);
+        for (principal, role, roster_principal, roster_role) in [
+            (long.as_str(), "Teacher", long.as_str(), "Teacher"),
+            ("teacher-1", long.as_str(), "teacher-1", long.as_str()),
+            ("teacher-1", "Teacher", long.as_str(), "Teacher"),
+            ("teacher-1", "Teacher", "teacher-1", long.as_str()),
+        ] {
+            let request = TeacherRosterRequest {
+                teacher_principal: principal,
+                required_role: role,
+                now_unix_ms: 200,
+                authorization_not_before_unix_ms: 100,
+                roster: Some(RosterEvidence {
+                    teacher_principal: roster_principal,
+                    role: roster_role,
+                    issued_unix_ms: 150,
+                    expires_unix_ms: 300,
+                    signature: Some(&[1]),
+                    student_device_ids: &["device-1"],
+                }),
+            };
+            assert_eq!(
+                qualify_teacher_roster(&request),
+                Err(RosterRejection::OversizedPrincipalOrRole)
+            );
+        }
     }
 }
