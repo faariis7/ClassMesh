@@ -35,7 +35,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Second fixture encode failed' }
 
 ## Run and capture evidence
 
-This wrapper captures the JSON, the completed-stage log and the exit code. The outer deadline also covers synchronous vendor calls that could hang. Run the three commands in order. Run the decode-only command even when presenting on the machine is unavailable.
+This wrapper captures the JSON, the completed-stage log and the exit code. The outer deadline also covers synchronous vendor calls that could hang. Run the commands in order. Run the decode-only command even when presenting on the machine is unavailable.
 
 ```powershell
 function Invoke-H264Lab {
@@ -43,22 +43,44 @@ function Invoke-H264Lab {
 
     $jsonPath = Join-Path $evidence "$Name.json"
     $stagePath = Join-Path $evidence "$Name.stages.log"
-    $process = Start-Process -FilePath $exe -ArgumentList $CommandLine -NoNewWindow -PassThru `
-        -RedirectStandardOutput $jsonPath -RedirectStandardError $stagePath
-    if (-not $process.WaitForExit(120000)) {
-        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-        $lastStage = Get-Content -LiteralPath $stagePath -Tail 1
-        @{
-            status = 'failed'
-            physical_qualification = $null
-            failure = @{ stage = 'process_watchdog'; last_completed_stage = $lastStage }
-        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $jsonPath
-        Set-Content -LiteralPath (Join-Path $evidence "$Name.exit.txt") 124
-        Write-Host "$Name hit the process deadline. Last progress: $lastStage"
-        return
+    $start = [System.Diagnostics.ProcessStartInfo]::new($exe, $CommandLine)
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $start.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    $process = [System.Diagnostics.Process]::Start($start)
+    try {
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $timedOut = -not $process.WaitForExit(120000)
+        if ($timedOut) {
+            try { $process.Kill() } catch { if (-not $process.HasExited) { throw } }
+            $null = $process.WaitForExit(5000)
+        }
+        $progress = if ($stderr.Wait(5000)) { $stderr.Result } else { '' }
+        Set-Content -LiteralPath $stagePath -Value $progress -Encoding UTF8
+        $report = $null
+        if (-not $timedOut -and $stdout.Wait(5000)) {
+            try { $report = $stdout.Result | ConvertFrom-Json -ErrorAction Stop } catch {}
+        }
+        if ($null -eq $report) {
+            $stage = if ($timedOut) { 'process_watchdog' } else { 'process_terminated_without_report' }
+            $lastStage = ($progress.Trim() -split '\r?\n')[-1]
+            $report = [ordered]@{
+                status = 'failed'
+                physical_qualification = $null
+                failure = @{ stage = $stage; last_completed_stage = $lastStage }
+            }
+        }
+        $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
+        Set-Content -LiteralPath (Join-Path $evidence "$Name.exit.txt") $exitCode
+        $report | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+        $report
+    } finally {
+        $process.Dispose()
     }
-    Set-Content -LiteralPath (Join-Path $evidence "$Name.exit.txt") $process.ExitCode
-    Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json
 }
 
 Get-CimInstance Win32_ComputerSystem | Select-Object Manufacturer, Model, SystemType |
