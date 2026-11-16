@@ -17,7 +17,10 @@ use classmesh_network::multicast_receiver::{
 use classmesh_windows_runtime::ipc::ServicePresentationMulticastStart;
 use classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding;
 
-const PRESENTATION_MULTICAST_EVENT_CAPACITY: usize = 64;
+// Candidate frames are assembled before SFrame authentication. At most eight
+// full 8-MiB ciphertext candidates may queue; the Worker drains eight events
+// per media-loop iteration and drops overflow rather than retaining 512 MiB.
+const PRESENTATION_MULTICAST_EVENT_CAPACITY: usize = 8;
 const PRESENTATION_MULTICAST_START_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
@@ -349,6 +352,17 @@ mod tests {
     use classmesh_network::multicast_receiver::MulticastPacketDropReason;
 
     use super::*;
+
+    #[test]
+    fn unauthenticated_ciphertext_queue_stays_under_ninety_six_mib() {
+        // Each queued result can hold a complete, but not yet authenticated,
+        // SFrame ciphertext. Capacity must be bounded by bytes, not just events.
+        let max_sealed = classmesh_security::group_media::MAX_GROUP_MEDIA_SEALED_BYTES;
+        assert!(
+            PRESENTATION_MULTICAST_EVENT_CAPACITY * max_sealed <= 96 * 1024 * 1024,
+            "unverified UDP candidates can retain too much memory"
+        );
+    }
 
     fn start(request_id: u64) -> ServicePresentationMulticastStart {
         ServicePresentationMulticastStart {
