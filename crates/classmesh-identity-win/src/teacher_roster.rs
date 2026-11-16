@@ -251,7 +251,7 @@ mod identifier_hardening_tests {
 
     #[test]
     fn unicode_noncharacters_in_student_ids_are_denied() {
-        for id in ["device-\\u{fdd0}1", "device-\\u{ffff}1", "device-\\u{10ffff}1"] {
+        for id in ["device-\u{fdd0}1", "device-\u{ffff}1", "device-\u{10ffff}1"] {
             assert_eq!(
                 qualify_teacher_roster(&request_with_ids(&[id])),
                 Err(RosterRejection::InvalidStudentDeviceRoster)
@@ -340,8 +340,8 @@ mod malformed_roster_metadata_tests {
     #[test]
     fn unicode_noncharacters_in_principal_or_role_are_denied() {
         for (principal, role) in [
-            ("teacher-\\u{fdd0}1", "Teacher"),
-            ("teacher-1", "Teach\\u{ffff}er"),
+            ("teacher-\u{fdd0}1", "Teacher"),
+            ("teacher-1", "Teach\u{ffff}er"),
         ] {
             assert_eq!(
                 qualify_teacher_roster(&request(principal, role, 150)),
