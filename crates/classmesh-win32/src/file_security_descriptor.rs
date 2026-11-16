@@ -235,7 +235,10 @@ mod tests {
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     };
-    use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, GetSecurityDescriptorOwner};
+    use windows_sys::Win32::Security::{
+        ACL_SIZE_INFORMATION, AclSizeInformation, GetAclInformation, GetSecurityDescriptorDacl,
+        GetSecurityDescriptorOwner,
+    };
 
     fn fixture(sddl: &str) -> (Descriptor, usize, PSID, *mut ACL) {
         let sddl: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
@@ -277,6 +280,7 @@ mod tests {
     }
 
     const ALLOW_DESCRIPTOR: &str = "O:SYD:P(A;;FR;;;SY)(A;;FA;;;BA)";
+    const SYSTEM_SID_SIZE: usize = offset_of!(SID, SubAuthority) + size_of::<u32>();
 
     #[test]
     fn descriptor_rejects_dacl_outside_available_range() {
@@ -289,8 +293,20 @@ mod tests {
         assert_eq!(snapshot.entries[1].sid, "S-1-5-32-544");
 
         let dacl_offset = dacl.addr() - descriptor.0.addr();
-        // Safety: dacl is part of the live, valid Windows-generated fixture.
-        let dacl_size = usize::from(unsafe { dacl.read() }.AclSize);
+        let mut info = ACL_SIZE_INFORMATION::default();
+        // Safety: dacl comes from the live fixture and the output struct is writable.
+        assert_ne!(
+            unsafe {
+                GetAclInformation(
+                    dacl,
+                    (&raw mut info).cast(),
+                    size_of::<ACL_SIZE_INFORMATION>() as u32,
+                    AclSizeInformation,
+                )
+            },
+            0
+        );
+        let dacl_size = (info.AclBytesInUse + info.AclBytesFree) as usize;
         // Shorten the permitted range only. The native allocation stays intact.
         for available in [size_of::<ACL>() - 1, dacl_size - 1] {
             // Safety: same fixture and pointers; the supplied range is smaller.
@@ -308,8 +324,8 @@ mod tests {
         // Safety: dacl is part of the live, valid Windows-generated fixture.
         assert_ne!(unsafe { GetAce(dacl, 0, &raw mut ace) }, 0);
         assert!(!ace.is_null());
-        // Safety: GetAce returned a complete header from the fixture.
-        let ace_size = usize::from(unsafe { ace.cast::<ACE_HEADER>().read() }.AceSize);
+        // The fixture's first ACE is a basic allow ACE for SYSTEM.
+        let ace_size = offset_of!(ACCESS_ALLOWED_ACE, SidStart) + SYSTEM_SID_SIZE;
         // Safety: the complete Windows-generated ACE fits in the live fixture.
         assert_eq!(
             unsafe { read_allowed_entry(ace, ace_size) }.unwrap().sid,
@@ -330,7 +346,7 @@ mod tests {
         let sid_header = offset_of!(SID, SubAuthority);
         // Safety: the fixture owner is SYSTEM, whose SID contains one subauthority.
         assert_eq!(
-            unsafe { sid_string(owner, sid_header + size_of::<u32>()) }.unwrap(),
+            unsafe { sid_string(owner, SYSTEM_SID_SIZE) }.unwrap(),
             "S-1-5-18"
         );
         for available in [sid_header - 1, sid_header] {
