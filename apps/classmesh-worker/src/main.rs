@@ -419,6 +419,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     > = None;
     let mut presentation_keyframe_request_retry =
         classmesh_worker::presentation_keyframe_retry::PresentationKeyframeRetry::default();
+    // UDP assembly hints are not yet authenticated; do not reset their
+    // keyframe rate limit when an unrelated valid frame is decoded.
+    let mut presentation_assembly_keyframe_retry =
+        classmesh_worker::presentation_keyframe_retry::PresentationKeyframeRetry::default();
     let mut presentation_silence =
         classmesh_worker::presentation_keyframe_retry::PresentationKeyframeSilence::default();
     let mut presentation_delivery_telemetry =
@@ -1192,16 +1196,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                             for feedback in batch.feedback {
-                                if !group_media_keys.should_forward_assembly_feedback(&feedback) {
+                                let Some(feedback) = group_media_keys.prepare_assembly_feedback(feedback)
+                                else {
                                     continue;
+                                };
+                                match feedback {
+                                    // Expiry is observable before SFrame verification. Cap
+                                    // requests and use the last authenticated frame ID,
+                                    // never the unauthenticated transport header's ID.
+                                    classmesh_protocol::feedback::FeedbackMessage::RequestKeyframe {
+                                        after_frame_id, ..
+                                    } => {
+                                        request_worker_presentation_keyframe_limited(
+                                            &pipe,
+                                            std::process::id(),
+                                            actual_session,
+                                            binding,
+                                            after_frame_id,
+                                            &mut presentation_assembly_keyframe_retry,
+                                        )?;
+                                    }
+                                    nack @ classmesh_protocol::feedback::FeedbackMessage::Nack { .. } => {
+                                        publish_worker_presentation_feedback(
+                                            &pipe,
+                                            std::process::id(),
+                                            actual_session,
+                                            binding,
+                                            nack,
+                                        )?;
+                                    }
                                 }
-                                publish_worker_presentation_feedback(
-                                    &pipe,
-                                    std::process::id(),
-                                    actual_session,
-                                    binding,
-                                    feedback,
-                                )?;
                             }
                             for frame in batch.frames {
                                 let frame_id = frame.frame_id();

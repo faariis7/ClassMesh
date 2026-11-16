@@ -235,6 +235,30 @@ impl WorkerGroupMediaKeyState {
         })
     }
 
+    /// Repair requests originate from unverified UDP assembly, not SFrame.
+    /// Never let its untrusted frame ID become the privileged control-plane
+    /// recovery watermark; use only the current key epoch's authenticated ID.
+    /// NACK indices and frame IDs remain bounded transport hints.
+    #[must_use]
+    pub fn prepare_assembly_feedback(&self, feedback: FeedbackMessage) -> Option<FeedbackMessage> {
+        if !self.should_forward_assembly_feedback(&feedback) {
+            return None;
+        }
+        match feedback {
+            FeedbackMessage::RequestKeyframe { stream_id, .. } => {
+                Some(FeedbackMessage::RequestKeyframe {
+                    stream_id,
+                    after_frame_id: self
+                        .installed
+                        .as_ref()?
+                        .latest_authenticated_frame
+                        .unwrap_or(0),
+                })
+            }
+            nack @ FeedbackMessage::Nack { .. } => Some(nack),
+        }
+    }
+
     pub fn open_access_unit(
         &mut self,
         frame: ReceivedGroupMediaCiphertext,
@@ -411,6 +435,80 @@ mod tests {
         let debug = format!("{state:?}");
         assert!(debug.contains("presentation_id"));
         assert!(!debug.contains("51, 51"));
+    }
+
+    #[test]
+    fn unauthenticated_keyframe_feedback_cannot_choose_a_future_recovery_watermark() {
+        let mut state = WorkerGroupMediaKeyState::default();
+        let forged = FeedbackMessage::RequestKeyframe {
+            stream_id: STREAM_ID,
+            after_frame_id: 1_000_000,
+        };
+        // No installed presentation may publish recovery feedback.
+        assert_eq!(state.prepare_assembly_feedback(forged.clone()), None);
+
+        state
+            .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x34))
+            .unwrap();
+        assert_eq!(
+            state.prepare_assembly_feedback(forged.clone()),
+            Some(FeedbackMessage::RequestKeyframe {
+                stream_id: STREAM_ID,
+                after_frame_id: 0,
+            }),
+            "before any authenticated frame, recovery starts from the trusted zero baseline"
+        );
+
+        let good = sealed(3, 0x34, 8, 20, true, b"verified");
+        assert_eq!(state.open_frame(&received(&good)).unwrap(), b"verified");
+        assert_eq!(
+            state.prepare_assembly_feedback(forged.clone()),
+            Some(FeedbackMessage::RequestKeyframe {
+                stream_id: STREAM_ID,
+                after_frame_id: 8,
+            }),
+            "untrusted future IDs must not be forwarded to the privileged control channel"
+        );
+        assert_eq!(
+            state.prepare_assembly_feedback(FeedbackMessage::RequestKeyframe {
+                stream_id: STREAM_ID + 1,
+                after_frame_id: 1_000_000,
+            }),
+            None
+        );
+        assert!(state.clear_if_matches(ServicePresentationKeyClear {
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: PRESENTATION_ID,
+            stream_id: STREAM_ID,
+            epoch: 3,
+        }));
+        assert_eq!(state.prepare_assembly_feedback(forged), None);
+    }
+
+    #[test]
+    fn authenticated_recovery_does_not_rewrite_bounded_nack_frame_ids() {
+        let mut state = WorkerGroupMediaKeyState::default();
+        state
+            .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x34))
+            .unwrap();
+        let nack = FeedbackMessage::Nack {
+            stream_id: STREAM_ID,
+            frame_id: 50,
+            missing_packet_indices: vec![1, 2],
+        };
+        assert_eq!(state.prepare_assembly_feedback(nack.clone()), Some(nack));
+        let good = sealed(3, 0x34, 60, 20, true, b"verified");
+        state.open_frame(&received(&good)).unwrap();
+        assert_eq!(
+            state.prepare_assembly_feedback(FeedbackMessage::Nack {
+                stream_id: STREAM_ID,
+                frame_id: 50,
+                missing_packet_indices: vec![1],
+            }),
+            None,
+            "assembly feedback older than authenticated media must remain rejected"
+        );
     }
 
     #[test]
