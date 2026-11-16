@@ -90,10 +90,11 @@ fn create_decoder_device() -> Result<
     }
 
     let mut failures = Vec::new();
-    for candidate in &candidates {
+    for candidate in candidates {
+        let name = candidate.name().to_owned();
         match MfH264Decoder::new(candidate, &device) {
             Ok(decoder) => return Ok((device, decoder)),
-            Err(error) => failures.push(format!("{}: {error}", candidate.name())),
+            Err(error) => failures.push(format!("{name}: {error}")),
         }
     }
 
