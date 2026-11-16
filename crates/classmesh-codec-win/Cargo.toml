@@ -23,5 +23,8 @@ windows = { version = "0.61.3", features = [
     "Win32_System_Variant",
 ] }
 
+[target.'cfg(windows)'.dev-dependencies]
+windows-core = "0.61.2"
+
 [lints]
 workspace = true

@@ -189,12 +189,14 @@ fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     if window_closed {
         eprintln!("student presentation window closed; stopping media receiver");
     }
-    if let Some(active) = decoder.as_mut() {
+    let mut exit_status = ExitCode::SUCCESS;
+    if !window_closed && let Some(active) = decoder.as_mut() {
         match active.finish() {
             Ok(batch) => apply_decode_batch(&mut counters, batch),
             Err(error) => {
                 counters.decode_errors = counters.decode_errors.saturating_add(1);
                 eprintln!("hardware decoder shutdown reported: {error}");
+                exit_status = ExitCode::FAILURE;
             }
         }
     }
@@ -203,8 +205,13 @@ fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let recovery = decoder
         .as_ref()
         .map_or_else(RecoveryTelemetry::default, DecodeProbe::recovery_telemetry);
+    let shutdown_status = if exit_status == ExitCode::SUCCESS {
+        "complete"
+    } else {
+        "shutdown incomplete"
+    };
     eprintln!(
-        "ClassMesh media receiver complete: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} sequence_missing_packets={} reordered={} nack_requests={} keyframe_requests={} feedback_sent={} feedback_errors={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={} forced_gpu_recoveries={} last_gpu_recovery_ms={:.2} longest_gpu_recovery_ms={:.2} status_reports_dropped={status_reports_dropped} elapsed={:.2}s",
+        "ClassMesh media receiver {shutdown_status}: datagrams={} frames={} bytes={} keyframes={} sequence_gaps={} sequence_missing_packets={} reordered={} nack_requests={} keyframe_requests={} feedback_sent={} feedback_errors={} stale_drops={} decoded_gpu_frames={} presented_frames={} present_errors={} decode_errors={} decode_waiting_frames={} gpu_recoveries={} forced_gpu_recoveries={} last_gpu_recovery_ms={:.2} longest_gpu_recovery_ms={:.2} status_reports_dropped={status_reports_dropped} elapsed={:.2}s",
         stats.datagrams_received,
         counters.frames,
         counters.bytes,
@@ -231,7 +238,7 @@ fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     if let Some(timings) = fragment_timings {
         timings.report();
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(exit_status)
 }
 
 fn handle_events<W: Write>(
@@ -263,7 +270,6 @@ fn handle_events<W: Write>(
                         }
                         Err(_) => {
                             counters.decode_errors = counters.decode_errors.saturating_add(1);
-                            active.recover_after_loss();
                         }
                     }
                 }
