@@ -226,7 +226,7 @@ impl ProtectedMediaReceiveState {
         Ok(Self {
             expected_sender,
             stream_id,
-            receiver: ReceiverWindow::new(ReceiverPolicy::default()),
+            receiver: ReceiverWindow::for_unverified_frames(ReceiverPolicy::default()),
             protocol_major,
             protocol_minor,
             stats: ProtectedMediaReceiveStats::default(),

@@ -123,8 +123,12 @@ impl WorkerPresentationMulticastRuntime {
 
                 let clock = Instant::now();
                 while !thread_stop.load(Ordering::Acquire) {
-                    let now_us = u64::try_from(clock.elapsed().as_micros()).unwrap_or(u64::MAX);
-                    match receiver.receive_once(now_us) {
+                    // Read timeout is 10ms, but OS scheduling can exceed the
+                    // frame expiry budget. Timestamp only after the actual
+                    // receive/timeout; never count blocked time as frame age.
+                    match receiver.receive_once_with_clock(|| {
+                        u64::try_from(clock.elapsed().as_micros()).unwrap_or(u64::MAX)
+                    }) {
                         Ok(ProtectedMulticastReceiveOutcome::Events(batch)) if batch.is_empty() => {
                         }
                         Ok(outcome) => match receive_tx.try_send(outcome) {
@@ -293,6 +297,24 @@ mod tests {
             config.local_bind(),
             SocketAddr::from((Ipv4Addr::UNSPECIFIED, start.port))
         );
+    }
+
+    #[test]
+    fn an_occupied_port_cannot_report_multicast_startup_ready() {
+        use classmesh_network::udp::DatagramError;
+
+        let reservation = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let start = ServicePresentationMulticastStart {
+            port: reservation.local_addr().unwrap().port(),
+            ..start(44)
+        };
+        let result = WorkerPresentationMulticastRuntime::start(start);
+        assert!(matches!(
+            result,
+            Err(WorkerPresentationMulticastStartError::Receiver(
+                ProtectedMulticastReceiveError::Datagram(DatagramError::Io(error))
+            )) if error.kind() == std::io::ErrorKind::AddrInUse
+        ));
     }
 
     #[test]
