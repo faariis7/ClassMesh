@@ -47,7 +47,17 @@ fn contains_invisible_formatting(value: &str) -> bool {
     value.chars().any(|ch| {
         matches!(
             ch,
-            '\u{00ad}' | '\u{034f}' | '\u{061c}' | '\u{180e}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}' | '\u{fe0e}' | '\u{fe0f}'
+            '\u{00ad}'
+                | '\u{034f}'
+                | '\u{061c}'
+                | '\u{180e}'
+                | '\u{200b}'
+                | '\u{200c}'
+                | '\u{200d}'
+                | '\u{2060}'
+                | '\u{feff}'
+                | '\u{fe0e}'
+                | '\u{fe0f}'
         )
     })
 }
