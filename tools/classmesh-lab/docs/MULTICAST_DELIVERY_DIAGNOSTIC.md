@@ -48,13 +48,15 @@ the receiving host set `$side = 'inbound'`. Use a fresh directory for each run
 and only synthetic traffic on the selected multicast group and UDP port.
 
 ```powershell
+$component = 12 # Replace with this machine's selected NIC component ID.
 pktmon filter add ClassMeshDelivery -i $group -p $port -t UDP
-pktmon start --capture --comp $component --type flow --pkt-size 80 --file-size 16 --log-mode circular --file-name "$side.etl"
+pktmon start --capture --comp $component --type all --flags 0x013 --pkt-size 80 --file-size 64 --log-mode memory
 ```
 
-Verify both commands succeeded before starting the lab. The capture is capped
-at 16 MiB and only retains a short packet prefix. Retain capture counters and
-NIC identity with each capture. [Pktmon start](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/pktmon-start)
+Verify both commands succeeded before starting the lab. Pktmon uses a bounded
+64 MB memory budget and retains a short packet prefix. Stop it from the same
+run directory to write `PktMon.etl`. Retain counters and NIC identity with each
+capture. [Pktmon start](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/pktmon-start)
 
 Run on the receiver. Wait for `receiver_ready` before starting the sender, and
 leave enough time for sending and the receiver's expiry window before it exits.
@@ -80,11 +82,23 @@ local to the lab, and use the JSON report and application TSVs for handoff.
 pktmon counters | Set-Content -Encoding ascii "$side-counters.txt"
 pktmon stop
 pktmon filter remove
-pktmon etl2pcap "$side.etl" --out "$side.pcapng" --component-id $component
+pktmon etl2pcap PktMon.etl --out "$side.pcapng" --component-id $component
 $tshark = "$env:ProgramFiles\Wireshark\tshark.exe"
 & $tshark -r "$side.pcapng" -Y "ip.dst == $group && udp.dstport == $port" -T fields -E occurrence=f -e frame.time_epoch -e ip.src -e udp.srcport -e ip.dst -e udp.dstport -e udp.payload |
-    Set-Content -Encoding ascii "$side.tsv"
+    ForEach-Object {
+        $fields = $_ -split "`t", 6
+        if ($fields.Count -eq 6) {
+            $prefix = $fields[5].Replace(':', '')
+            $fields[5] = $prefix.Substring(0, [Math]::Min(52, $prefix.Length))
+        }
+        $fields -join "`t"
+    } | Set-Content -Encoding ascii "$side.tsv"
 ```
+
+Confirm that the exported packet count agrees with the relevant NIC flow
+counters for this run. If the NIC counters increased but the export is empty or
+incomplete, treat that capture as unavailable. The NIC TSV retains only the
+first 26 bytes of the UDP payload, which are CMV1 header fields on this route.
 
 Copy `receiver.tsv` and the NIC TSV exports to the analysis host. Python 3
 compares the exact sender endpoint, destination, stream, sequence, frame and
