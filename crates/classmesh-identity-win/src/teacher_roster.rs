@@ -291,7 +291,10 @@ mod roster_duplicate_screening_tests {
         let names: Vec<String> = (0..1023).map(|i| format!("device-{i}")).collect();
         let mut ids: Vec<&str> = names.iter().map(String::as_str).collect();
         ids.push("device-0");
-        assert_eq!(screen(&ids), Err(RosterRejection::InvalidStudentDeviceRoster));
+        assert_eq!(
+            screen(&ids),
+            Err(RosterRejection::InvalidStudentDeviceRoster)
+        );
     }
 
     #[test]
