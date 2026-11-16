@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::E_NOTIMPL;
-use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11VideoDevice};
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Multithread, ID3D11VideoDevice};
 use windows::Win32::Media::MediaFoundation::{
     IMFMediaEvent, IMFMediaEventGenerator, IMFShutdown, IMFTransform, MEError,
     METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
@@ -216,6 +216,8 @@ pub struct MfAsyncH264Decoder<'platform> {
 
 impl<'platform> MfAsyncH264Decoder<'platform> {
     /// Opens an async, video-capable MFT for a controlled qualification run.
+    /// Enables multithread protection on the device's immediate context before
+    /// sharing it with the transform.
     ///
     /// # Errors
     /// Returns a Windows error when a required interface, stream, media type,
@@ -226,6 +228,16 @@ impl<'platform> MfAsyncH264Decoder<'platform> {
         device: &ID3D11Device,
     ) -> Result<Self> {
         device.cast::<ID3D11VideoDevice>()?;
+        let context = unsafe { device.GetImmediateContext()? };
+        let threading: ID3D11Multithread = context.cast()?;
+        unsafe {
+            let _ = threading.SetMultithreadProtected(true);
+            if !threading.GetMultithreadProtected().as_bool() {
+                return Err(classmesh_decoder_error(
+                    "async H.264 requires a protected D3D11 immediate context",
+                ));
+            }
+        }
         let guard = DecoderActivationGuard(activation.activation);
         let transform = unsafe { guard.0.ActivateObject::<IMFTransform>()? };
         let attributes = unsafe { transform.GetAttributes()? };
