@@ -46,7 +46,7 @@ fn contains_invisible_formatting(value: &str) -> bool {
     value.chars().any(|ch| {
         matches!(
             ch,
-            '\\u{200b}' | '\\u{200c}' | '\\u{200d}' | '\\u{2060}' | '\\u{feff}'
+            '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}'
         )
     })
 }
@@ -200,7 +200,7 @@ mod identifier_hardening_tests {
 
     #[test]
     fn invisible_student_device_format_characters_are_denied() {
-        for id in ["device-\\u{200b}1", "device-\\u{200c}1", "device-\\u{200d}1", "device-\\u{2060}1", "device-\\u{feff}1"] {
+        for id in ["device-\u{200b}1", "device-\u{200c}1", "device-\u{200d}1", "device-\u{2060}1", "device-\u{feff}1"] {
             assert_eq!(
                 qualify_teacher_roster(&request_with_ids(&[id])),
                 Err(RosterRejection::InvalidStudentDeviceRoster)
@@ -270,8 +270,8 @@ mod malformed_roster_metadata_tests {
     #[test]
     fn invisible_teacher_identity_and_role_format_characters_are_denied() {
         for (principal, role) in [
-            ("teacher-\\u{200b}1", "Teacher"),
-            ("teacher-1", "Teach\\u{2060}er"),
+            ("teacher-\u{200b}1", "Teacher"),
+            ("teacher-1", "Teach\u{2060}er"),
         ] {
             assert_eq!(
                 qualify_teacher_roster(&request(principal, role, 150)),
