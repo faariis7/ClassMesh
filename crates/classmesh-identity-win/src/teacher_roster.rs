@@ -215,12 +215,11 @@ pub fn qualify_teacher_device_roster(
     {
         return Err(RosterRejection::InvalidStudentDeviceRoster);
     }
-    if !request
-        .roster
-        .expect("roster screened above")
-        .student_device_ids
-        .contains(&requested_student_device_id)
-    {
+    // Preserve fail-closed behavior even if the upstream screening order changes.
+    let Some(roster) = request.roster else {
+        return Err(RosterRejection::MissingRoster);
+    };
+    if !roster.student_device_ids.contains(&requested_student_device_id) {
         return Err(RosterRejection::UnlistedStudentDevice);
     }
     Err(RosterRejection::MissingApprovedVerifier)
