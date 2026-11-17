@@ -51,8 +51,8 @@ impl GpuNv12Config {
             || self.target_height == 0
             || self.fps_numerator == 0
             || self.fps_denominator == 0
-            || self.target_width % 2 != 0
-            || self.target_height % 2 != 0
+            || !self.target_width.is_multiple_of(2)
+            || !self.target_height.is_multiple_of(2)
         {
             return Err(invalid_argument(
                 "invalid GPU NV12 conversion configuration",

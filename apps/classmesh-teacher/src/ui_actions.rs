@@ -68,10 +68,10 @@ pub fn show_device_actions(
     let message_validation = validate_message(&draft.message);
     if !message_available {
         ui.small("Teacher messages are unavailable for this device.");
-    } else if !draft.message.is_empty() {
-        if let Err(error) = message_validation {
-            ui.small(message_error_label(error));
-        }
+    } else if !draft.message.is_empty()
+        && let Err(error) = message_validation
+    {
+        ui.small(message_error_label(error));
     }
     let message_valid = message_validation.is_ok();
     if ui
@@ -93,10 +93,10 @@ pub fn show_device_actions(
     let url_validation = validate_https_url(&draft.https_url);
     if !open_available {
         ui.small("Open-target actions are unavailable for this device.");
-    } else if !draft.https_url.is_empty() {
-        if let Err(error) = url_validation {
-            ui.small(url_error_label(error));
-        }
+    } else if !draft.https_url.is_empty()
+        && let Err(error) = url_validation
+    {
+        ui.small(url_error_label(error));
     }
     let url_valid = url_validation.is_ok();
     if ui
@@ -126,16 +126,15 @@ pub fn show_device_actions(
                 }
             });
     });
-    if let Some(app) = draft.app {
-        if ui
+    if let Some(app) = draft.app
+        && ui
             .add_enabled(
                 open_available && !action_pending,
                 egui::Button::new("Open app"),
             )
             .clicked()
-        {
-            return Some(TeacherInteractionUiRequest::App(app));
-        }
+    {
+        return Some(TeacherInteractionUiRequest::App(app));
     }
 
     None

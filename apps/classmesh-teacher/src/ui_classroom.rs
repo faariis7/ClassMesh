@@ -75,10 +75,10 @@ pub fn show_classroom(
         }
     }
 
-    if let Some(message) = requested_message {
-        if let Some(action) = shell.handle(message) {
-            let _ = action.apply_to_classroom(classroom);
-        }
+    if let Some(message) = requested_message
+        && let Some(action) = shell.handle(message)
+    {
+        let _ = action.apply_to_classroom(classroom);
     }
 }
 

@@ -125,6 +125,19 @@ and qualifies it with tests. Raising MSRV activates additional Clippy suggestion
 the accompanying source edits apply those syntax/API suggestions, with warnings
 still denied. Protocols, authorization decisions and feature gates are unchanged.
 
+The Windows-only follow-up was preflighted in an isolated Windows 11 ARM64 VM
+using Rust 1.100.0, targeting x86_64 MSVC:
+`cargo clippy --target x86_64-pc-windows-msvc --workspace --all-targets --all-features -- -D warnings`
+passed after the mechanical lint edits. This includes the optional trusted-policy
+code. Review checked that the chained conditions retain their previous evaluation
+order: Worker key/receiver binding checks still precede telemetry/keyframe work,
+Service generation checks still precede key confirmation, and stale Teacher
+actions still fail closed. Remainder checks become equivalent `is_multiple_of`
+checks with nonzero constant divisors; the hex decoder still validates input
+length before iterating fixed-size chunks. No parser, unsafe operation, trust
+fallback or cryptographic algorithm was added. The full hosted Windows test and
+Rust 1.88 qualification results remain distinct from this VM lint evidence.
+
 ### Windows artifact-discovery repair
 
 In baseline [Windows job 133951565003](https://github.com/faariis7/ClassMesh/actions/runs/44057811599/job/133951565003),

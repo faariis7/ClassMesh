@@ -122,7 +122,7 @@ pub(crate) fn query_object_link(name: &str) -> io::Result<String> {
         )
     } != 0
         || output.length == 0
-        || output.length % 2 != 0
+        || !output.length.is_multiple_of(2)
         || output.length > output.maximum_length
     {
         return Err(denied());
