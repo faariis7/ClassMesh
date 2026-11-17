@@ -286,7 +286,7 @@ mod scoped_batch_roster_tests {
 
     #[test]
     fn oversized_principal_is_denied_before_unicode_scan() {
-        let oversized = format!("{}\\u{202e}", "t".repeat(1024 * 1024));
+        let oversized = format!("{}\u{202e}", "t".repeat(1024 * 1024));
         let mut candidate = request(&["device-1"]);
         candidate.teacher_principal = &oversized;
         assert_eq!(
