@@ -834,13 +834,25 @@ mod interior_whitespace_denial_tests {
             roster: Some(roster),
         };
         request.teacher_principal = "teacher\u{00a0}1";
-        assert_eq!(qualify_teacher_roster(&request), Err(RosterRejection::InvalidPrincipalOrRole));
+        assert_eq!(
+            qualify_teacher_roster(&request),
+            Err(RosterRejection::InvalidPrincipalOrRole)
+        );
         request.teacher_principal = "teacher-1";
         request.required_role = "Tea\u{2003}cher";
-        assert_eq!(qualify_teacher_roster(&request), Err(RosterRejection::InvalidPrincipalOrRole));
+        assert_eq!(
+            qualify_teacher_roster(&request),
+            Err(RosterRejection::InvalidPrincipalOrRole)
+        );
         request.required_role = "Teacher";
-        assert_eq!(qualify_teacher_device_roster(&request, "device\u{00a0}1"), Err(RosterRejection::InvalidStudentDeviceRoster));
+        assert_eq!(
+            qualify_teacher_device_roster(&request, "device\u{00a0}1"),
+            Err(RosterRejection::InvalidStudentDeviceRoster)
+        );
         request.roster.as_mut().unwrap().student_device_ids = &["device\u{2003}1"];
-        assert_eq!(qualify_teacher_roster(&request), Err(RosterRejection::InvalidStudentDeviceRoster));
+        assert_eq!(
+            qualify_teacher_roster(&request),
+            Err(RosterRejection::InvalidStudentDeviceRoster)
+        );
     }
 }
