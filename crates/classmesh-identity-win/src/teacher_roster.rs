@@ -313,7 +313,9 @@ mod scoped_batch_roster_tests {
 
     #[test]
     fn deprecated_directional_controls_are_denied_in_teacher_and_device_ids() {
-        for control in ['\u{206a}', '\u{206b}', '\u{206c}', '\u{206d}', '\u{206e}', '\u{206f}'] {
+        for control in [
+            '\u{206a}', '\u{206b}', '\u{206c}', '\u{206d}', '\u{206e}', '\u{206f}',
+        ] {
             let principal = format!("teacher-{control}1");
             let mut candidate = request(&["device-1"]);
             candidate.teacher_principal = &principal;
