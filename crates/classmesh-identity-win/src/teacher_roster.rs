@@ -243,6 +243,15 @@ pub fn qualify_teacher_device_roster_batch(
     if requested_student_device_ids.len() > 1024 {
         return Err(RosterRejection::OversizedStudentDeviceRoster);
     }
+    // Validate untrusted roster metadata exactly once, before any membership
+    // lookup. Only MissingApprovedVerifier permits continued deny-only screening.
+    match qualify_teacher_roster(request) {
+        Err(RosterRejection::MissingApprovedVerifier) => {}
+        other => return other,
+    }
+    let Some(roster) = request.roster else {
+        return Err(RosterRejection::MissingRoster);
+    };
     // Repeated requested IDs are ambiguous for a batch operation; deny before
     // treating any member as qualified, even when every ID is listed.
     let mut requested_seen =
@@ -255,9 +264,21 @@ pub fn qualify_teacher_device_roster_batch(
         if !requested_seen.insert(*id) {
             return Err(RosterRejection::DuplicateRequestedStudentDevice);
         }
-        match qualify_teacher_device_roster(request, id) {
-            Err(RosterRejection::MissingApprovedVerifier) => {}
-            other => return other,
+        // Screen the roster once per batch, not once per requested device.
+        // A requested ID must be canonical and explicitly listed, but neither
+        // membership nor a present signature is an authorization decision.
+        if id.is_empty()
+            || id.trim() != *id
+            || id.chars().any(char::is_control)
+            || id.chars().any(char::is_whitespace)
+            || contains_bidi_formatting(id)
+            || contains_invisible_formatting(id)
+            || contains_unicode_noncharacter(id)
+        {
+            return Err(RosterRejection::InvalidStudentDeviceRoster);
+        }
+        if !roster.student_device_ids.contains(id) {
+            return Err(RosterRejection::UnlistedStudentDevice);
         }
     }
     Err(RosterRejection::MissingApprovedVerifier)
