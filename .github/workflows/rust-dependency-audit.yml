@@ -1,0 +1,109 @@
+name: Rust dependency audit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-dependency-audit-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: RustSec (${{ matrix.scope }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scope: workspace
+            manifest: Cargo.toml
+            lockfile: Cargo.lock
+            toolchain: stable
+          - scope: fuzz
+            manifest: fuzz/Cargo.toml
+            lockfile: fuzz/Cargo.lock
+            toolchain: nightly
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install cargo-audit 0.23.0
+        run: |
+          archive=cargo-audit-x86_64-unknown-linux-gnu-v0.23.0.tgz
+          cd "$RUNNER_TEMP"
+          curl --fail --silent --show-error --location --retry 3 --max-time 60 \
+            --output "$archive" "https://github.com/RustSec/rustsec/releases/download/cargo-audit/v0.23.0/$archive"
+          echo "b77993532b253fcbf550996d7716465ec3d734d4e74e7f87bfb65a19add0fb59  $archive" | sha256sum --check
+          tar -xzf "$archive" "${archive%.tgz}/cargo-audit"
+          echo "$RUNNER_TEMP/${archive%.tgz}" >> "$GITHUB_PATH"
+          {
+            echo "CARGO_HOME=$RUNNER_TEMP/rust-audit-cargo-home"
+            echo "AUDIT_DIR=$RUNNER_TEMP/rust-dependency-audit"
+          } >> "$GITHUB_ENV"
+
+      - name: Resolve dependencies
+        env:
+          MANIFEST: ${{ matrix.manifest }}
+          LOCKFILE: ${{ matrix.lockfile }}
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: |
+          rustup toolchain install "$TOOLCHAIN" --profile minimal --no-self-update
+          mkdir -p "$AUDIT_DIR"
+          if [[ -f "$LOCKFILE" ]]; then
+            cargo +"$TOOLCHAIN" fetch --locked --manifest-path "$MANIFEST"
+            lock_source=checked-in
+          else
+            cargo +"$TOOLCHAIN" generate-lockfile --manifest-path "$MANIFEST"
+            lock_source=generated
+          fi
+          cp "$LOCKFILE" "$AUDIT_DIR/Cargo.lock"
+          {
+            printf 'Revision: %s\nLockfile: %s (%s)\n' "$(git rev-parse HEAD)" "$LOCKFILE" "$lock_source"
+            cargo +"$TOOLCHAIN" --version
+            cargo-audit --version
+          } > "$AUDIT_DIR/audit.txt"
+
+      - name: Audit against the current RustSec database
+        id: audit
+        run: |
+          cd "$AUDIT_DIR"
+          status=0
+          cargo-audit audit --file Cargo.lock --db "$RUNNER_TEMP/rustsec-advisory-db" \
+            --color never --deny unsound --deny yanked >> audit.txt 2>&1 || status=$?
+          # cargo-audit can report registry lookup errors without failing the scan.
+          if grep -Eq "^(warning|error): couldn't (update crates.io index|check if the package is yanked)" audit.txt; then
+            status=2
+          fi
+          if db_sha=$(git -C "$RUNNER_TEMP/rustsec-advisory-db" rev-parse HEAD 2>/dev/null); then
+            printf '\nRustSec revision: %s\n' "$db_sha" >> audit.txt
+          fi
+          printf '\nAudit exit status: %s\n' "$status" >> audit.txt
+          {
+            printf '### RustSec results\n\n'
+            sed 's/^/    /' audit.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Upload audit report and scanned lockfile
+        if: ${{ !cancelled() && (steps.audit.outcome == 'success' || steps.audit.outcome == 'failure') }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rustsec-${{ matrix.scope }}-${{ github.run_attempt }}
+          path: ${{ env.AUDIT_DIR }}/
+          if-no-files-found: error
+          retention-days: 30

@@ -98,10 +98,10 @@ impl TeacherClassroomViewModel {
         &mut self,
         source_id: Option<MonitoringSourceId>,
     ) -> Result<(), ClassroomViewError> {
-        if let Some(source_id) = source_id {
-            if !self.devices.contains_key(&source_id) {
-                return Err(ClassroomViewError::UnknownDevice);
-            }
+        if let Some(source_id) = source_id
+            && !self.devices.contains_key(&source_id)
+        {
+            return Err(ClassroomViewError::UnknownDevice);
         }
         self.selected = source_id;
         Ok(())

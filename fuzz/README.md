@@ -1,6 +1,6 @@
 # ClassMesh fuzzing
 
-This directory is an independent Cargo workspace so fuzz-only nightly/libFuzzer dependencies do not affect the ClassMesh stable toolchain or Rust 1.85 production MSRV.
+This directory is an independent Cargo workspace so fuzz-only nightly/libFuzzer dependencies do not affect the ClassMesh stable toolchain or Rust 1.88 production MSRV.
 
 ## Requirements
 

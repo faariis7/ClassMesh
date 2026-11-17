@@ -706,8 +706,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let classmesh_network::multicast_receiver::ProtectedMulticastReceiveOutcome::Events(
                         batch,
                     ) = outcome
-                    {
-                        if let Some(binding) = group_media_keys.binding() {
+                        && let Some(binding) = group_media_keys.binding() {
                             let receiver_matches_binding = presentation_multicast
                                 .as_ref()
                                 .is_some_and(|receiver| receiver.matches_key_binding(binding))
@@ -803,7 +802,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                    }
                 }
                 presentation_pipeline_failed = receiver_failed || !decoder.pump_window();
             } else {
@@ -834,100 +832,111 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // IDR. The live event loop ticks even if receive queues are empty.
         // Requests reuse the existing bound/authorized feedback channel, and
         // the 2-second retry gate prevents a periodic recovery storm.
-        if let Some(decoder) = presentation_decode.as_ref() {
-            if let Some(binding) = group_media_keys.binding() {
-                let exact_receiver = presentation_multicast.as_ref().is_some_and(|receiver| {
-                    !receiver.failed() && receiver.matches_key_binding(binding)
-                }) ^ presentation_unicast.as_ref().is_some_and(|receiver| {
-                    !receiver.failed() && receiver.matches_key_binding(binding)
-                });
-                if exact_receiver {
-                    if let Some(after_frame_id) = presentation_silence.due(
-                        binding,
-                        Instant::now(),
-                        decoder.waiting_for_keyframe(),
-                    ) {
-                        if request_worker_presentation_keyframe_limited(
-                            &pipe,
-                            std::process::id(),
-                            actual_session,
-                            binding,
-                            after_frame_id,
-                            &mut presentation_keyframe_request_retry,
-                        )? {
-                            presentation_silence.note_request_sent(binding);
-                        }
-                    }
-                }
+        if let Some(decoder) = presentation_decode.as_ref()
+            && let Some(binding) = group_media_keys.binding()
+        {
+            let exact_receiver = presentation_multicast.as_ref().is_some_and(|receiver| {
+                !receiver.failed() && receiver.matches_key_binding(binding)
+            }) ^ presentation_unicast.as_ref().is_some_and(|receiver| {
+                !receiver.failed() && receiver.matches_key_binding(binding)
+            });
+            if exact_receiver
+                && let Some(after_frame_id) = presentation_silence.due(
+                    binding,
+                    Instant::now(),
+                    decoder.waiting_for_keyframe(),
+                )
+                && request_worker_presentation_keyframe_limited(
+                    &pipe,
+                    std::process::id(),
+                    actual_session,
+                    binding,
+                    after_frame_id,
+                    &mut presentation_keyframe_request_retry,
+                )?
+            {
+                presentation_silence.note_request_sent(binding);
             }
         }
         // Local diagnostics only: do not send unauthenticated or unversioned
         // counters across the privileged Service/Teacher IPC boundary. Queue
         // drops must come only from ONE healthy receiver matching the key epoch;
         // a stale, failed or conflicting receiver cannot publish statistics.
-        if presentation_decode.is_some() {
-            if let (Some(binding), Some(authenticated)) = (
+        if presentation_decode.is_some()
+            && let (Some(binding), Some(authenticated)) = (
                 group_media_keys.binding(),
                 group_media_keys.authentication_stats(),
-            ) {
-                let multicast_drops = presentation_multicast
-                    .as_ref()
-                    .filter(|receiver| !receiver.failed() && receiver.matches_key_binding(binding))
-                    .map(|receiver| receiver.dropped_events());
-                let unicast_drops = presentation_unicast
-                    .as_ref()
-                    .filter(|receiver| !receiver.failed() && receiver.matches_key_binding(binding))
-                    .map(|receiver| receiver.dropped_events());
-                if let Some(queue_drops) =
-                    classmesh_worker::presentation_delivery_telemetry::single_exact_receiver_queue_drops(
-                        multicast_drops,
-                        unicast_drops,
-                    )
-                {
-                    if let Some(report) = presentation_delivery_telemetry.report_if_due(
-                        Instant::now(),
-                        binding,
-                        authenticated,
-                        queue_drops,
-                    ) {
-                        // Real cumulative playback counters are encoded
-                        // only after verifying the exact installed key,
-                        // active receiver start and Service-issued lifetime.
-                        // The one-slot sender never blocks the media loop.
-                        if let Some(sender) = native_telemetry_sender.as_ref() {
-                            let active_start = presentation_multicast.as_ref()
-                                .filter(|receiver| !receiver.failed()
-                                    && receiver.matches_key_binding(binding))
+            )
+        {
+            let multicast_drops = presentation_multicast
+                .as_ref()
+                .filter(|receiver| !receiver.failed() && receiver.matches_key_binding(binding))
+                .map(|receiver| receiver.dropped_events());
+            let unicast_drops = presentation_unicast
+                .as_ref()
+                .filter(|receiver| !receiver.failed() && receiver.matches_key_binding(binding))
+                .map(|receiver| receiver.dropped_events());
+            if let Some(queue_drops) =
+                classmesh_worker::presentation_delivery_telemetry::single_exact_receiver_queue_drops(
+                    multicast_drops,
+                    unicast_drops,
+                )
+                && let Some(report) = presentation_delivery_telemetry.report_if_due(
+                    Instant::now(),
+                    binding,
+                    authenticated,
+                    queue_drops,
+                )
+            {
+                // Real cumulative playback counters are encoded
+                // only after verifying the exact installed key,
+                // active receiver start and Service-issued lifetime.
+                // The one-slot sender never blocks the media loop.
+                if let Some(sender) = native_telemetry_sender.as_ref() {
+                    let active_start = presentation_multicast
+                        .as_ref()
+                        .filter(|receiver| {
+                            !receiver.failed() && receiver.matches_key_binding(binding)
+                        })
+                        .map(|receiver| receiver.binding().request_id)
+                        .or_else(|| {
+                            presentation_unicast
+                                .as_ref()
+                                .filter(|receiver| {
+                                    !receiver.failed() && receiver.matches_key_binding(binding)
+                                })
                                 .map(|receiver| receiver.binding().request_id)
-                                .or_else(|| presentation_unicast.as_ref()
-                                    .filter(|receiver| !receiver.failed()
-                                        && receiver.matches_key_binding(binding))
-                                    .map(|receiver| receiver.binding().request_id));
-                            if sender.offer(
-                                report, binding, active_start,
-                                primary_service_pid, std::process::id(), actual_session,
-                            ).is_err() {
-                                native_telemetry_sender = None;
-                            }
-                        }
-                        let counters = report.playback_counters();
-                        eprintln!(
-                            "ClassMesh Worker local presentation playback: presentation={} stream={} epoch={} sample_sequence={} auth_opened={} auth_rejected={} decoded={} presented={} present_errors={} decode_errors={} waiting_for_keyframe={} queue_drop_events_total={}",
-                            binding.presentation_id,
-                            binding.stream_id,
-                            binding.epoch,
-                            report.sample_sequence,
-                            counters.authenticated_frames,
-                            counters.rejected_frames,
-                            counters.decoded_frames,
-                            counters.presented_frames,
-                            counters.present_errors,
-                            counters.decode_errors,
-                            counters.keyframe_waits,
-                            counters.queue_drops,
-                        );
+                        });
+                    if sender
+                        .offer(
+                            report,
+                            binding,
+                            active_start,
+                            primary_service_pid,
+                            std::process::id(),
+                            actual_session,
+                        )
+                        .is_err()
+                    {
+                        native_telemetry_sender = None;
                     }
                 }
+                let counters = report.playback_counters();
+                eprintln!(
+                    "ClassMesh Worker local presentation playback: presentation={} stream={} epoch={} sample_sequence={} auth_opened={} auth_rejected={} decoded={} presented={} present_errors={} decode_errors={} waiting_for_keyframe={} queue_drop_events_total={}",
+                    binding.presentation_id,
+                    binding.stream_id,
+                    binding.epoch,
+                    report.sample_sequence,
+                    counters.authenticated_frames,
+                    counters.rejected_frames,
+                    counters.decoded_frames,
+                    counters.presented_frames,
+                    counters.present_errors,
+                    counters.decode_errors,
+                    counters.keyframe_waits,
+                    counters.queue_drops,
+                );
             }
         }
 
@@ -969,7 +978,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match active_capture.poll(16) {
             CaptureStep::Frame { meta, frame } => {
                 captured_frames = captured_frames.saturating_add(1);
-                if captured_frames == 1 || captured_frames % 300 == 0 {
+                if captured_frames == 1 || captured_frames.is_multiple_of(300) {
                     eprintln!(
                         "DXGI frame {}: {}x{}, accumulated={}, pointer_visible={}",
                         meta.frame_id,

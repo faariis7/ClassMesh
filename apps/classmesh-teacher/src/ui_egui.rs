@@ -380,10 +380,10 @@ impl TeacherEguiShell {
     #[must_use]
     pub fn take_pending_action(&mut self) -> Option<TeacherUiAction> {
         let action = self.pending_action.take()?;
-        if let TeacherUiAction::Focus(focus) = &action {
-            if !self.focus_action_still_current(*focus) {
-                return None;
-            }
+        if let TeacherUiAction::Focus(focus) = &action
+            && !self.focus_action_still_current(*focus)
+        {
+            return None;
         }
         if let TeacherUiAction::TeacherInteraction(interaction) = &action {
             validate_teacher_interaction_ui_action(
@@ -563,19 +563,17 @@ impl TeacherEguiShell {
             TeacherUiSection::Focus => {
                 if let Some(message) =
                     show_focus(ui, &self.classroom, self.pending_action.is_some())
+                    && let Some(action) = self.shell.handle(message)
                 {
-                    if let Some(action) = self.shell.handle(message) {
-                        self.queue_action(action);
-                    }
+                    self.queue_action(action);
                 }
             }
             TeacherUiSection::Presentation => {
                 if let Some(message) =
                     show_presentation(ui, self.presentation, self.pending_action.is_some())
+                    && let Some(action) = self.shell.handle(message)
                 {
-                    if let Some(action) = self.shell.handle(message) {
-                        self.queue_action(action);
-                    }
+                    self.queue_action(action);
                 }
             }
             TeacherUiSection::DeviceActions => {
@@ -606,13 +604,9 @@ impl TeacherEguiShell {
                         egui::Button::new("Receive staged file"),
                     )
                     .clicked()
+                    && let Some(candidate) = self.staged_file_candidate
                 {
-                    if let Some(candidate) = self.staged_file_candidate {
-                        self.queue_file_pull_request(
-                            candidate.transfer_id,
-                            candidate.opaque_source_id,
-                        );
-                    }
+                    self.queue_file_pull_request(candidate.transfer_id, candidate.opaque_source_id);
                 }
             }
             TeacherUiSection::Diagnostics => {
@@ -624,10 +618,9 @@ impl TeacherEguiShell {
                     playback,
                     &mut self.diagnostics_draft,
                     self.pending_action.is_some(),
-                ) {
-                    if let Some(action) = self.shell.handle(message) {
-                        self.queue_action(action);
-                    }
+                ) && let Some(action) = self.shell.handle(message)
+                {
+                    self.queue_action(action);
                 }
             }
         }
