@@ -11,6 +11,7 @@ pub enum RosterRejection {
     StaleAuthorization,
     MissingApprovedVerifier,
     UnlistedStudentDevice,
+    DuplicateRequestedStudentDevice,
     EmptyStudentDeviceRoster,
     InvalidStudentDeviceRoster,
     InvalidPrincipalOrRole,
@@ -241,7 +242,13 @@ pub fn qualify_teacher_device_roster_batch(
     if requested_student_device_ids.len() > 1024 {
         return Err(RosterRejection::OversizedStudentDeviceRoster);
     }
+    // Repeated requested IDs are ambiguous for a batch operation; deny before
+    // treating any member as qualified, even when every ID is listed.
+    let mut requested_seen = std::collections::HashSet::with_capacity(requested_student_device_ids.len());
     for id in requested_student_device_ids {
+        if !requested_seen.insert(*id) {
+            return Err(RosterRejection::DuplicateRequestedStudentDevice);
+        }
         match qualify_teacher_device_roster(request, id) {
             Err(RosterRejection::MissingApprovedVerifier) => {}
             other => return other,
@@ -290,6 +297,28 @@ mod scoped_batch_roster_tests {
                 &["device-1", "device-3"],
             ),
             Err(RosterRejection::UnlistedStudentDevice)
+        );
+    }
+
+    #[test]
+    fn duplicate_requested_device_denies_batch_even_when_listed() {
+        assert_eq!(
+            qualify_teacher_device_roster_batch(
+                &request(&["device-1", "device-2"]),
+                &["device-1", "device-1"],
+            ),
+            Err(RosterRejection::DuplicateRequestedStudentDevice)
+        );
+    }
+
+    #[test]
+    fn duplicate_requested_device_at_end_denies_batch() {
+        assert_eq!(
+            qualify_teacher_device_roster_batch(
+                &request(&["device-1", "device-2"]),
+                &["device-1", "device-2", "device-1"],
+            ),
+            Err(RosterRejection::DuplicateRequestedStudentDevice)
         );
     }
 
