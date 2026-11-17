@@ -86,7 +86,7 @@ fn contains_bidi_formatting(value: &str) -> bool {
     value.chars().any(|ch| {
         matches!(
             ch,
-            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}'
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{206f}' | '\u{200e}' | '\u{200f}'
         )
     })
 }
@@ -255,6 +255,58 @@ mod scoped_batch_roster_tests {
                 student_device_ids: ids,
             }),
         }
+    }
+
+    #[test]
+    fn deprecated_directional_controls_are_denied_in_teacher_and_device_ids() {
+        for control in [
+            '\u{206a}', '\u{206b}', '\u{206c}', '\u{206d}', '\u{206e}', '\u{206f}',
+        ] {
+            let principal = format!("teacher-{control}1");
+            let mut candidate = request(&["device-1"]);
+            candidate.teacher_principal = &principal;
+            assert_eq!(
+                qualify_teacher_roster(&candidate),
+                Err(RosterRejection::InvalidPrincipalOrRole)
+            );
+
+            let device = format!("device-{control}1");
+            assert_eq!(
+                qualify_teacher_device_roster(&request(&["device-1"]), &device),
+                Err(RosterRejection::InvalidStudentDeviceRoster)
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_principal_is_denied_before_unicode_scan() {
+        let oversized = format!("{}\u{202e}", "t".repeat(1024 * 1024));
+        let mut candidate = request(&["device-1"]);
+        candidate.teacher_principal = &oversized;
+        assert_eq!(
+            qualify_teacher_roster(&candidate),
+            Err(RosterRejection::OversizedPrincipalOrRole)
+        );
+    }
+
+    #[test]
+    fn malformed_duplicate_is_rejected_as_invalid_before_hashing() {
+        assert_eq!(
+            qualify_teacher_device_roster_batch(
+                &request(&["device-1"]),
+                &["device-1", "device-\u{202e}1", "device-\u{202e}1"],
+            ),
+            Err(RosterRejection::InvalidStudentDeviceRoster)
+        );
+    }
+
+    #[test]
+    fn oversized_requested_id_is_denied_before_batch_hashing() {
+        let oversized = "d".repeat(1024 * 1024);
+        assert_eq!(
+            qualify_teacher_device_roster_batch(&request(&["device-1"]), &[&oversized]),
+            Err(RosterRejection::OversizedStudentDeviceIdentifier)
+        );
     }
 
     #[test]
