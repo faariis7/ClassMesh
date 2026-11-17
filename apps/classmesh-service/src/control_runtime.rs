@@ -4662,6 +4662,54 @@ mod tests {
     }
 
     #[test]
+    fn presentation_start_uncommitted_timeout_cancels_late_worker_commit() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test Tokio runtime");
+        runtime.block_on(async {
+            let commit = MediaStartCommit::pending();
+            let (reply_tx, mut reply_rx) = oneshot::channel();
+            let result = await_presentation_start(commit.clone(), &mut reply_rx).await;
+            assert_eq!(result, Err("control.presentation.start_timeout".to_owned()));
+            assert!(
+                !commit.try_commit(),
+                "late worker must not commit a timed-out start"
+            );
+            drop(reply_tx);
+        });
+    }
+
+    #[test]
+    fn presentation_start_committed_before_timeout_waits_for_late_worker_result() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test Tokio runtime");
+        runtime.block_on(async {
+            let commit = MediaStartCommit::pending();
+            let (reply_tx, mut reply_rx) = oneshot::channel();
+            assert!(commit.try_commit());
+            let mut result = std::pin::pin!(await_presentation_start(commit, &mut reply_rx));
+            std::future::poll_fn(|cx| {
+                assert!(result.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+
+            // Keep the reply pending while the deadline passes.
+            tokio::select! {
+                biased;
+                outcome = &mut result => panic!("committed start resolved before reply: {outcome:?}"),
+                () = tokio::time::sleep(PRESENTATION_START_TIMEOUT) => {}
+            }
+
+            reply_tx.send(Ok(())).expect("reply receiver must remain alive");
+            assert_eq!(result.await, Ok(()));
+        });
+    }
+
+    #[test]
     fn focused_media_start_commit_is_single_winner() {
         let cancelled = MediaStartCommit::pending();
         assert!(cancelled.cancel());
