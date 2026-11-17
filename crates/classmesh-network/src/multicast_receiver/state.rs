@@ -1,6 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 
 use crate::MediaPacket;
+use crate::multicast_diagnostics::DeliveryTrace;
 use crate::protected_media_receive::{ProtectedMediaReceiveCoreError, ProtectedMediaReceiveState};
 
 use super::config::{ProtectedMulticastReceiveError, ProtectedMulticastReceiverConfig};
@@ -38,9 +39,29 @@ impl ProtectedMulticastReceiveState {
         self.inner.push_packet(now_us, packet, source)
     }
 
+    pub(super) fn push_packet_observed(
+        &mut self,
+        now_us: u64,
+        packet: &MediaPacket,
+        source: SocketAddr,
+        trace: Option<&mut DeliveryTrace>,
+    ) -> ProtectedMulticastReceiveOutcome {
+        self.inner
+            .push_packet_observed(now_us, packet, source, trace)
+    }
+
     #[must_use]
     pub fn tick(&mut self, now_us: u64) -> ProtectedMulticastReceiveBatch {
         self.inner.tick(now_us)
+    }
+
+    #[must_use]
+    pub(super) fn tick_observed(
+        &mut self,
+        now_us: u64,
+        trace: Option<&mut DeliveryTrace>,
+    ) -> ProtectedMulticastReceiveBatch {
+        self.inner.tick_observed(now_us, trace)
     }
 
     #[must_use]

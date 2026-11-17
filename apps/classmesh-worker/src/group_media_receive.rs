@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 
 use classmesh_network::AssembledFrame;
 use classmesh_network::multicast_receiver::ReceivedGroupMediaCiphertext;
+use classmesh_protocol::feedback::FeedbackMessage;
 use classmesh_security::group_media::{
     GroupMediaEpoch, GroupMediaError, GroupMediaFrameBinding, GroupMediaKeyMaterial,
     GroupMediaReceiver,
@@ -18,6 +19,7 @@ pub enum WorkerGroupMediaKeyError {
     StaleEpoch { current: u32, received: u32 },
     NoInstalledKey,
     StreamMismatch { expected: u32, received: u32 },
+    StaleFrameId { latest: u64, received: u64 },
     Security(GroupMediaError),
 }
 
@@ -36,6 +38,10 @@ impl Display for WorkerGroupMediaKeyError {
                 formatter,
                 "group-media ciphertext stream mismatch: expected={expected}, received={received}"
             ),
+            Self::StaleFrameId { latest, received } => write!(
+                formatter,
+                "group-media frame is older than or equal to the last authenticated frame: latest={latest}, received={received}"
+            ),
             Self::Security(error) => write!(formatter, "group-media security: {error}"),
         }
     }
@@ -48,7 +54,8 @@ impl Error for WorkerGroupMediaKeyError {
             Self::BindingChangeRequiresClear
             | Self::StaleEpoch { .. }
             | Self::NoInstalledKey
-            | Self::StreamMismatch { .. } => None,
+            | Self::StreamMismatch { .. }
+            | Self::StaleFrameId { .. } => None,
         }
     }
 }
@@ -62,6 +69,7 @@ impl From<GroupMediaError> for WorkerGroupMediaKeyError {
 struct InstalledWorkerGroupMediaKey {
     binding: PresentationKeyInstallBinding,
     receiver: GroupMediaReceiver,
+    latest_authenticated_frame: Option<u64>,
 }
 
 impl std::fmt::Debug for InstalledWorkerGroupMediaKey {
@@ -73,8 +81,8 @@ impl std::fmt::Debug for InstalledWorkerGroupMediaKey {
     }
 }
 
-/// Key-epoch-scoped cryptographically authenticated frame counters.
-/// These are not decoded or rendered frame counts.
+/// Key-epoch-scoped counts for authenticated, in-order admissions and rejected
+/// candidates. These are not decoded or rendered frame counts.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerGroupMediaAuthenticationStats {
     pub opened_frames: u64,
@@ -140,7 +148,11 @@ impl WorkerGroupMediaKeyState {
         let key_material = GroupMediaKeyMaterial::import_received_wire(&mut key_bytes[..])?;
         let receiver = GroupMediaReceiver::with_default_replay_tolerance(epoch, &key_material)?;
 
-        self.installed = Some(InstalledWorkerGroupMediaKey { binding, receiver });
+        self.installed = Some(InstalledWorkerGroupMediaKey {
+            binding,
+            receiver,
+            latest_authenticated_frame: None,
+        });
         self.authentication_stats = WorkerGroupMediaAuthenticationStats::default();
         self.decoder_resync_pending |= replacing_existing_key;
         Ok(binding)
@@ -181,19 +193,70 @@ impl WorkerGroupMediaKeyState {
             });
         }
 
+        let frame_id = frame.frame_id();
         let epoch = GroupMediaEpoch::new(installed.binding.epoch)?;
         let binding = GroupMediaFrameBinding::new(
             installed.binding.presentation_id,
             installed.binding.stream_id,
             epoch,
-            frame.frame_id(),
+            frame_id,
             frame.timestamp_us(),
             frame.keyframe(),
         )?;
-        installed
+        if let Some(latest) = installed
+            .latest_authenticated_frame
+            .filter(|latest| frame_id <= *latest)
+        {
+            return Err(WorkerGroupMediaKeyError::StaleFrameId {
+                latest,
+                received: frame_id,
+            });
+        }
+        let data = installed
             .receiver
-            .open_bound_frame(frame.ciphertext(), binding)
-            .map_err(Into::into)
+            .open_bound_frame(frame.ciphertext(), binding)?;
+        installed.latest_authenticated_frame = Some(frame_id);
+        Ok(data)
+    }
+
+    /// Reassembly can finish or expire in a different order than playback.
+    /// Feedback for frames already superseded by authenticated media is stale.
+    #[must_use]
+    pub fn should_forward_assembly_feedback(&self, feedback: &FeedbackMessage) -> bool {
+        let reference = match feedback {
+            FeedbackMessage::Nack { frame_id, .. } => *frame_id,
+            FeedbackMessage::RequestKeyframe { after_frame_id, .. } => *after_frame_id,
+        };
+        self.installed.as_ref().is_some_and(|installed| {
+            feedback.stream_id() == installed.binding.stream_id
+                && installed
+                    .latest_authenticated_frame
+                    .is_none_or(|latest| reference > latest)
+        })
+    }
+
+    /// Repair requests originate from unverified UDP assembly, not SFrame.
+    /// Never let its untrusted frame ID become the privileged control-plane
+    /// recovery watermark; use only the current key epoch's authenticated ID.
+    /// NACK indices and frame IDs remain bounded transport hints.
+    #[must_use]
+    pub fn prepare_assembly_feedback(&self, feedback: FeedbackMessage) -> Option<FeedbackMessage> {
+        if !self.should_forward_assembly_feedback(&feedback) {
+            return None;
+        }
+        match feedback {
+            FeedbackMessage::RequestKeyframe { stream_id, .. } => {
+                Some(FeedbackMessage::RequestKeyframe {
+                    stream_id,
+                    after_frame_id: self
+                        .installed
+                        .as_ref()?
+                        .latest_authenticated_frame
+                        .unwrap_or(0),
+                })
+            }
+            nack @ FeedbackMessage::Nack { .. } => Some(nack),
+        }
     }
 
     pub fn open_access_unit(
@@ -372,6 +435,80 @@ mod tests {
         let debug = format!("{state:?}");
         assert!(debug.contains("presentation_id"));
         assert!(!debug.contains("51, 51"));
+    }
+
+    #[test]
+    fn unauthenticated_keyframe_feedback_cannot_choose_a_future_recovery_watermark() {
+        let mut state = WorkerGroupMediaKeyState::default();
+        let forged = FeedbackMessage::RequestKeyframe {
+            stream_id: STREAM_ID,
+            after_frame_id: 1_000_000,
+        };
+        // No installed presentation may publish recovery feedback.
+        assert_eq!(state.prepare_assembly_feedback(forged.clone()), None);
+
+        state
+            .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x34))
+            .unwrap();
+        assert_eq!(
+            state.prepare_assembly_feedback(forged.clone()),
+            Some(FeedbackMessage::RequestKeyframe {
+                stream_id: STREAM_ID,
+                after_frame_id: 0,
+            }),
+            "before any authenticated frame, recovery starts from the trusted zero baseline"
+        );
+
+        let good = sealed(3, 0x34, 8, 20, true, b"verified");
+        assert_eq!(state.open_frame(&received(&good)).unwrap(), b"verified");
+        assert_eq!(
+            state.prepare_assembly_feedback(forged.clone()),
+            Some(FeedbackMessage::RequestKeyframe {
+                stream_id: STREAM_ID,
+                after_frame_id: 8,
+            }),
+            "untrusted future IDs must not be forwarded to the privileged control channel"
+        );
+        assert_eq!(
+            state.prepare_assembly_feedback(FeedbackMessage::RequestKeyframe {
+                stream_id: STREAM_ID + 1,
+                after_frame_id: 1_000_000,
+            }),
+            None
+        );
+        assert!(state.clear_if_matches(ServicePresentationKeyClear {
+            control_session_id: 77,
+            request_id: 44,
+            presentation_id: PRESENTATION_ID,
+            stream_id: STREAM_ID,
+            epoch: 3,
+        }));
+        assert_eq!(state.prepare_assembly_feedback(forged), None);
+    }
+
+    #[test]
+    fn authenticated_recovery_does_not_rewrite_bounded_nack_frame_ids() {
+        let mut state = WorkerGroupMediaKeyState::default();
+        state
+            .install(sensitive(77, 44, PRESENTATION_ID, STREAM_ID, 3, 0x34))
+            .unwrap();
+        let nack = FeedbackMessage::Nack {
+            stream_id: STREAM_ID,
+            frame_id: 50,
+            missing_packet_indices: vec![1, 2],
+        };
+        assert_eq!(state.prepare_assembly_feedback(nack.clone()), Some(nack));
+        let good = sealed(3, 0x34, 60, 20, true, b"verified");
+        state.open_frame(&received(&good)).unwrap();
+        assert_eq!(
+            state.prepare_assembly_feedback(FeedbackMessage::Nack {
+                stream_id: STREAM_ID,
+                frame_id: 50,
+                missing_packet_indices: vec![1],
+            }),
+            None,
+            "assembly feedback older than authenticated media must remain rejected"
+        );
     }
 
     #[test]
@@ -633,14 +770,13 @@ mod tests {
         let regressed_sealed = sender
             .seal_bound_frame(b"reordered frame", regressed)
             .expect("seal regressed frame ID");
-        let regressed_unit = state
-            .open_access_unit(received(&regressed_sealed))
-            .expect("distinct authenticated SFrame counter with older frame ID");
-        silence.note_authenticated_frame(
-            new_binding,
-            regressed_unit.frame_id,
-            start + Duration::from_millis(8_500),
-        );
+        assert!(matches!(
+            state.open_access_unit(received(&regressed_sealed)),
+            Err(WorkerGroupMediaKeyError::StaleFrameId {
+                latest: 10,
+                received: 9
+            })
+        ));
         assert_eq!(
             silence.due(new_binding, start + Duration::from_millis(8_500), true),
             Some(10)

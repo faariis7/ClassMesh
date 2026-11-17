@@ -62,6 +62,18 @@ jobs:
       - name: Test CI timing report helper
         run: python -B -m unittest discover -s scripts/tests -p test_ci_timing_report.py
 
+      - name: Test multicast delivery correlation
+        run: python -B -m unittest discover -s tools/classmesh-lab/scripts/tests -p test_multicast_delivery.py
+
+      - name: Parse multicast delivery runner in Windows PowerShell
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          $path = (Resolve-Path '.\tools\classmesh-lab\scripts\multicast_delivery.ps1').Path
+          $null = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+          if ($errors) { throw ($errors -join [Environment]::NewLine) }
+
       - name: Validate Phase 4 PowerShell runner
         shell: pwsh
         run: .\scripts\phase4-two-pc.ps1 -Mode Help
@@ -136,6 +148,36 @@ jobs:
 
       - name: Build media diagnostics
         run: cargo build -p classmesh-worker --bin classmesh-media-probe --bin classmesh-media-receiver --bin classmesh-media-recovery-probe --release
+
+      - name: Build async H.264 qualification lab
+        shell: pwsh
+        run: |
+          cargo build -p classmesh-lab --bin classmesh-async-h264-qualify --release
+          if ($LASTEXITCODE -ne 0) { throw 'Async H.264 qualification build failed' }
+          $targetDir = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).target_directory
+          $exe = Join-Path $targetDir 'release/classmesh-async-h264-qualify.exe'
+          & $exe --help
+          if ($LASTEXITCODE -ne 0) { throw 'Async H.264 help failed' }
+
+          # Exercise the executable and its structured failure without a GPU or a camera fixture.
+          $missing = Join-Path $env:RUNNER_TEMP 'missing-first-fixture.h264'
+          $result = (& $exe --inspect $missing $missing) | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 1 -or $result.failure.stage -ne 'first_fixture' -or
+              $result.status -ne 'failed' -or $null -ne $result.physical_qualification) {
+            throw 'Unexpected async H.264 fixture failure evidence'
+          }
+          New-Item -ItemType Directory -Path async-h264-bundle -Force | Out-Null
+          Copy-Item -LiteralPath $exe -Destination async-h264-bundle/
+          Copy-Item docs/M3_ASYNC_H264_HARDWARE_QUALIFICATION.md async-h264-bundle/
+          git rev-parse HEAD | Set-Content async-h264-bundle/source-revision.txt
+
+      - name: Upload async H.264 qualification lab
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-async-h264-qualification-windows-x64
+          path: async-h264-bundle/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
       - name: Build network impairment proxy
         run: cargo build -p classmesh-lab --bin classmesh-network-impairment-proxy --release

@@ -6,6 +6,7 @@ use classmesh_protocol::feedback::{FeedbackMessage, MAX_NACK_PACKET_INDICES};
 use classmesh_protocol::media::{MAX_PACKET_PAYLOAD, MEDIA_PROTOCOL_VERSION, MediaFlags};
 use classmesh_security::group_media::MAX_GROUP_MEDIA_SEALED_BYTES;
 
+use crate::multicast_diagnostics::DeliveryTrace;
 use crate::receiver::{ReceiverEvent, ReceiverPolicy, ReceiverWindow};
 use crate::udp::DatagramError;
 use crate::{AssembleError, AssembledFrame, MediaPacket};
@@ -226,7 +227,7 @@ impl ProtectedMediaReceiveState {
         Ok(Self {
             expected_sender,
             stream_id,
-            receiver: ReceiverWindow::new(ReceiverPolicy::default()),
+            receiver: ReceiverWindow::for_unverified_frames(ReceiverPolicy::default()),
             protocol_major,
             protocol_minor,
             stats: ProtectedMediaReceiveStats::default(),
@@ -239,7 +240,17 @@ impl ProtectedMediaReceiveState {
         packet: &MediaPacket,
         source: SocketAddr,
     ) -> ProtectedMediaReceiveOutcome {
-        let outcome = self.push_checked_packet(now_us, packet, source);
+        self.push_packet_observed(now_us, packet, source, None)
+    }
+
+    pub(crate) fn push_packet_observed(
+        &mut self,
+        now_us: u64,
+        packet: &MediaPacket,
+        source: SocketAddr,
+        trace: Option<&mut DeliveryTrace>,
+    ) -> ProtectedMediaReceiveOutcome {
+        let outcome = self.push_checked_packet(now_us, packet, source, trace);
         match &outcome {
             ProtectedMediaReceiveOutcome::Dropped(_) => {
                 self.stats.rejected_datagrams = self.stats.rejected_datagrams.saturating_add(1);
@@ -257,6 +268,7 @@ impl ProtectedMediaReceiveState {
         now_us: u64,
         packet: &MediaPacket,
         source: SocketAddr,
+        trace: Option<&mut DeliveryTrace>,
     ) -> ProtectedMediaReceiveOutcome {
         if source.ip() != self.expected_sender {
             return ProtectedMediaReceiveOutcome::Dropped(
@@ -292,7 +304,7 @@ impl ProtectedMediaReceiveState {
             );
         }
 
-        match self.receiver.push(now_us, packet) {
+        match self.receiver.push_observed(now_us, packet, trace) {
             Ok(events) => ProtectedMediaReceiveOutcome::Events(
                 ProtectedMediaReceiveBatch::from_receiver_events(events),
             ),
@@ -304,7 +316,17 @@ impl ProtectedMediaReceiveState {
 
     #[must_use]
     pub(crate) fn tick(&mut self, now_us: u64) -> ProtectedMediaReceiveBatch {
-        let batch = ProtectedMediaReceiveBatch::from_receiver_events(self.receiver.tick(now_us));
+        self.tick_observed(now_us, None)
+    }
+
+    #[must_use]
+    pub(crate) fn tick_observed(
+        &mut self,
+        now_us: u64,
+        trace: Option<&mut DeliveryTrace>,
+    ) -> ProtectedMediaReceiveBatch {
+        let batch =
+            ProtectedMediaReceiveBatch::from_receiver_events(self.receiver.expire(now_us, trace));
         self.count_batch(&batch);
         batch
     }

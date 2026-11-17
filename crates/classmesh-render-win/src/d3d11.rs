@@ -87,6 +87,27 @@ impl fmt::Debug for VideoPipeline {
     }
 }
 
+#[derive(Debug, Default)]
+struct PendingFrameClear(bool);
+
+impl PendingFrameClear {
+    fn request(&mut self) {
+        self.0 = true;
+    }
+
+    fn apply(
+        &mut self,
+        suspended: bool,
+        clear: impl FnOnce() -> windows::core::Result<()>,
+    ) -> windows::core::Result<()> {
+        if self.0 && !suspended {
+            clear()?;
+            self.0 = false;
+        }
+        Ok(())
+    }
+}
+
 /// GPU-native NV12 presenter for the student presentation window.
 ///
 /// Decoded Media Foundation surfaces remain on the same D3D11 device. A D3D11 Video Processor
@@ -101,6 +122,7 @@ pub struct FlipPresenter {
     output_width: u32,
     output_height: u32,
     suspended: bool,
+    frame_clear: PendingFrameClear,
     pipeline: Option<VideoPipeline>,
     metrics: PresentMetrics,
 }
@@ -117,6 +139,8 @@ impl fmt::Debug for FlipPresenter {
             .finish_non_exhaustive()
     }
 }
+
+type BackBufferObserver<'a> = dyn FnMut(&ID3D11Texture2D) -> windows::core::Result<()> + 'a;
 
 impl FlipPresenter {
     /// Creates a two-buffer flip-discard swap chain attached to `hwnd` using the same D3D11 device
@@ -170,6 +194,7 @@ impl FlipPresenter {
             output_width,
             output_height,
             suspended: false,
+            frame_clear: PendingFrameClear::default(),
             pipeline: None,
             metrics: PresentMetrics::default(),
         })
@@ -188,6 +213,40 @@ impl FlipPresenter {
     #[must_use]
     pub const fn is_suspended(&self) -> bool {
         self.suspended
+    }
+
+    /// Releases the flip-model swap chain before reusing its HWND.
+    pub fn release_swap_chain(self) {
+        let context = self.context.clone();
+        drop(self);
+        // D3D11 defers destruction of released objects. Force it before
+        // CreateSwapChainForHwnd can attach a replacement to the same HWND.
+        unsafe {
+            context.ClearState();
+            context.Flush();
+        }
+    }
+
+    /// Replaces the last displayed video with black while waiting for a fresh stream.
+    /// A reset present does not count as a displayed video frame.
+    ///
+    /// # Errors
+    /// Returns the underlying D3D11 or DXGI error.
+    pub fn clear_frame(&mut self) -> windows::core::Result<()> {
+        self.frame_clear.request();
+        self.apply_frame_clear()
+    }
+
+    fn apply_frame_clear(&mut self) -> windows::core::Result<()> {
+        self.frame_clear.apply(self.suspended, || {
+            let backbuffer = unsafe { self.swap_chain.GetBuffer::<ID3D11Texture2D>(0)? };
+            let render_target = create_render_target(&self.device, &backbuffer)?;
+            unsafe {
+                self.context
+                    .ClearRenderTargetView(&render_target, &[0.0, 0.0, 0.0, 1.0]);
+                self.swap_chain.Present(0, DXGI_PRESENT(0)).ok()
+            }
+        })
     }
 
     /// Updates the flip-model buffers to the current client size.
@@ -217,6 +276,7 @@ impl FlipPresenter {
             && output_width == self.output_width
             && output_height == self.output_height
         {
+            self.apply_frame_clear()?;
             return Ok(ResizeOutcome::Unchanged);
         }
 
@@ -238,6 +298,7 @@ impl FlipPresenter {
         self.output_height = output_height;
         self.suspended = false;
         self.metrics.swap_chain_resizes = self.metrics.swap_chain_resizes.saturating_add(1);
+        self.apply_frame_clear()?;
         Ok(ResizeOutcome::Resized)
     }
 
@@ -254,12 +315,37 @@ impl FlipPresenter {
         texture: &ID3D11Texture2D,
         subresource_index: u32,
     ) -> windows::core::Result<PresentOutcome> {
+        self.present_nv12_inner(texture, subresource_index, None)
+    }
+
+    /// Runs the same GPU presentation path and exposes the rendered BGRA
+    /// back buffer before DXGI discards it. Intended for lab readback.
+    ///
+    /// # Errors
+    /// Returns rendering, observation or presentation errors. A non-visible
+    /// presentation status is an error when collecting lab evidence.
+    pub fn present_nv12_observed(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        subresource_index: u32,
+        mut observe: impl FnMut(&ID3D11Texture2D) -> windows::core::Result<()>,
+    ) -> windows::core::Result<PresentOutcome> {
+        self.present_nv12_inner(texture, subresource_index, Some(&mut observe))
+    }
+
+    fn present_nv12_inner(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        subresource_index: u32,
+        observer: Option<&mut BackBufferObserver<'_>>,
+    ) -> windows::core::Result<PresentOutcome> {
         if self.suspended {
             self.metrics.skipped_while_suspended =
                 self.metrics.skipped_while_suspended.saturating_add(1);
             return Ok(PresentOutcome::SkippedSuspended);
         }
 
+        self.apply_frame_clear()?;
         let source_desc = texture_desc(texture);
         if source_desc.Width == 0
             || source_desc.Height == 0
@@ -352,7 +438,21 @@ impl FlipPresenter {
         }
         blit?;
 
-        unsafe { self.swap_chain.Present(1, DXGI_PRESENT(0)) }.ok()?;
+        let observed = observer.is_some();
+        if let Some(observe) = observer {
+            observe(&backbuffer)?;
+        }
+        let status = unsafe { self.swap_chain.Present(1, DXGI_PRESENT(0)) };
+        status.ok()?;
+        if observed && status != windows::Win32::Foundation::S_OK {
+            return Err(windows::core::Error::new(
+                windows::Win32::Foundation::E_FAIL,
+                format!(
+                    "DXGI Present returned visibility status 0x{:08X}",
+                    status.0 as u32
+                ),
+            ));
+        }
         self.metrics.presented_frames = self.metrics.presented_frames.saturating_add(1);
         Ok(PresentOutcome::Presented)
     }
@@ -493,6 +593,43 @@ fn invalid_argument(message: &'static str) -> windows::core::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_while_minimized_clears_on_restore_before_the_next_video_frame() {
+        let mut clear = PendingFrameClear::default();
+        clear.request();
+        clear.apply(true, || panic!("window is minimized")).unwrap();
+        let mut black_presents = 0;
+        clear
+            .apply(false, || {
+                black_presents += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(black_presents, 1, "restore lost the decoder reset clear");
+        clear
+            .apply(false, || panic!("completed reset clear repeated"))
+            .unwrap();
+    }
+
+    #[test]
+    fn failed_clear_stays_pending_for_the_next_restore_attempt() {
+        let mut clear = PendingFrameClear::default();
+        clear.request();
+        assert!(
+            clear
+                .apply(false, || Err(invalid_argument("injected clear failure")))
+                .is_err()
+        );
+        let mut retried = false;
+        clear
+            .apply(false, || {
+                retried = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(retried);
+    }
 
     #[test]
     fn fit_rect_letterboxes_wide_source() {

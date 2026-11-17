@@ -419,6 +419,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     > = None;
     let mut presentation_keyframe_request_retry =
         classmesh_worker::presentation_keyframe_retry::PresentationKeyframeRetry::default();
+    // UDP assembly hints are not yet authenticated; do not reset their
+    // keyframe rate limit when an unrelated valid frame is decoded.
+    let mut presentation_assembly_keyframe_retry =
+        classmesh_worker::presentation_keyframe_retry::PresentationKeyframeRetry::default();
     let mut presentation_silence =
         classmesh_worker::presentation_keyframe_retry::PresentationKeyframeSilence::default();
     let mut presentation_delivery_telemetry =
@@ -1078,6 +1082,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 presentation_delivery_telemetry.reset();
                                 if let Some(decoder) = presentation_decode.as_mut() {
                                     decoder.recover_after_loss();
+                                    if decoder.is_retired() {
+                                        presentation_multicast = None;
+                                        presentation_unicast = None;
+                                        presentation_decode = None;
+                                    }
                                 }
                             }
                             classmesh_windows_runtime::ipc::WorkerPresentationKeyInstallStatus::Installed
@@ -1158,7 +1167,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     || presentation_unicast
                         .as_ref()
                         .is_some_and(|receiver| receiver.failed());
-                for _ in 0..PRESENTATION_RECEIVE_DRAIN_LIMIT {
+                'receive_media: for _ in 0..PRESENTATION_RECEIVE_DRAIN_LIMIT {
+                    if receiver_failed || decoder.is_retired() {
+                        break;
+                    }
                     let outcome = if let Some(receiver) = presentation_multicast.as_ref() {
                         receiver.try_receive()
                     } else {
@@ -1184,13 +1196,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                             for feedback in batch.feedback {
-                                publish_worker_presentation_feedback(
-                                    &pipe,
-                                    std::process::id(),
-                                    actual_session,
-                                    binding,
-                                    feedback,
-                                )?;
+                                let Some(feedback) = group_media_keys.prepare_assembly_feedback(feedback)
+                                else {
+                                    continue;
+                                };
+                                match feedback {
+                                    // Expiry is observable before SFrame verification. Cap
+                                    // requests and use the last authenticated frame ID,
+                                    // never the unauthenticated transport header's ID.
+                                    classmesh_protocol::feedback::FeedbackMessage::RequestKeyframe {
+                                        after_frame_id, ..
+                                    } => {
+                                        request_worker_presentation_keyframe_limited(
+                                            &pipe,
+                                            std::process::id(),
+                                            actual_session,
+                                            binding,
+                                            after_frame_id,
+                                            &mut presentation_assembly_keyframe_retry,
+                                        )?;
+                                    }
+                                    nack @ classmesh_protocol::feedback::FeedbackMessage::Nack { .. } => {
+                                        publish_worker_presentation_feedback(
+                                            &pipe,
+                                            std::process::id(),
+                                            actual_session,
+                                            binding,
+                                            nack,
+                                        )?;
+                                    }
+                                }
                             }
                             for frame in batch.frames {
                                 let frame_id = frame.frame_id();
@@ -1201,9 +1236,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             access_unit.frame_id,
                                             Instant::now(),
                                         );
-                                        if access_unit.keyframe {
-                                            presentation_keyframe_request_retry.reset();
-                                        }
                                         match decoder.submit(&access_unit) {
                                             Ok(classmesh_worker::presentation_decode_render::PresentationDecodeStep::Decoded(batch)) => {
                                                 presentation_delivery_telemetry.accept_decoded(
@@ -1246,10 +1278,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Err(error) => {
                                                 presentation_delivery_telemetry.accept_decode_error(binding);
                                                 eprintln!(
-                                                    "ClassMesh Worker presentation decode failed on frame={}: {error}; waiting for a new keyframe",
+                                                    "ClassMesh Worker presentation decode failed on frame={}: {error}",
                                                     access_unit.frame_id
                                                 );
-                                                decoder.recover_after_loss();
+                                                if decoder.is_retired() {
+                                                    break 'receive_media;
+                                                }
                                                 request_worker_presentation_keyframe_limited(
                                                     &pipe,
                                                     std::process::id(),
@@ -1261,6 +1295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                     }
+                                    Err(classmesh_worker::group_media_receive::WorkerGroupMediaKeyError::StaleFrameId { .. }) => {}
                                     Err(error) => {
                                         eprintln!(
                                             "ClassMesh Worker dropped unauthenticated presentation ciphertext before decode on frame={frame_id}: {error}"

@@ -2,13 +2,14 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use classmesh_network::multicast::{
     MulticastContractError, MulticastMembership, MulticastProbeOutcome,
 };
+use classmesh_network::multicast_diagnostics::{DeliveryStage, DeliveryTrace};
 use classmesh_network::multicast_receiver::{
     ProtectedMulticastFrameReceiver, ProtectedMulticastReceiveError,
     ProtectedMulticastReceiveOutcome, ProtectedMulticastReceiverConfig,
@@ -16,6 +17,10 @@ use classmesh_network::multicast_receiver::{
 use classmesh_windows_runtime::ipc::ServicePresentationMulticastStart;
 use classmesh_windows_runtime::ipc_sensitive::PresentationKeyInstallBinding;
 
+use crate::presentation_receive_queue_budget::{UnverifiedQueueBudget, candidate_bytes};
+
+// Keep the 64-event burst for normal streaming; enforce a separate 96-MiB
+// byte budget for completed ciphertext before SFrame authentication.
 const PRESENTATION_MULTICAST_EVENT_CAPACITY: usize = 64;
 const PRESENTATION_MULTICAST_START_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -78,8 +83,9 @@ pub struct WorkerPresentationMulticastRuntime {
     stop: Arc<AtomicBool>,
     failed: Arc<AtomicBool>,
     dropped_events: Arc<AtomicU64>,
+    queued_bytes: Arc<UnverifiedQueueBudget>,
     receive_rx: Receiver<ProtectedMulticastReceiveOutcome>,
-    thread: Option<JoinHandle<()>>,
+    thread: Option<JoinHandle<Option<DeliveryTrace>>>,
 }
 
 impl std::fmt::Debug for WorkerPresentationMulticastRuntime {
@@ -97,15 +103,31 @@ impl WorkerPresentationMulticastRuntime {
     pub fn start(
         binding: ServicePresentationMulticastStart,
     ) -> Result<Self, WorkerPresentationMulticastStartError> {
+        Self::start_inner(binding, None)
+    }
+
+    /// Starts the same receiver with a bounded metadata trace on its socket thread.
+    pub fn start_diagnostics(
+        binding: ServicePresentationMulticastStart,
+    ) -> Result<Self, WorkerPresentationMulticastStartError> {
+        Self::start_inner(binding, Some(DeliveryTrace::new()))
+    }
+
+    fn start_inner(
+        binding: ServicePresentationMulticastStart,
+        mut trace: Option<DeliveryTrace>,
+    ) -> Result<Self, WorkerPresentationMulticastStartError> {
         let config = receiver_config(binding)?;
         let (startup_tx, startup_rx) = mpsc::sync_channel(1);
         let (receive_tx, receive_rx) = mpsc::sync_channel(PRESENTATION_MULTICAST_EVENT_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(AtomicBool::new(false));
         let dropped_events = Arc::new(AtomicU64::new(0));
+        let queued_bytes = Arc::new(UnverifiedQueueBudget::default());
         let thread_stop = Arc::clone(&stop);
         let thread_failed = Arc::clone(&failed);
         let thread_dropped_events = Arc::clone(&dropped_events);
+        let thread_queued_bytes = Arc::clone(&queued_bytes);
 
         let thread = thread::Builder::new()
             .name("classmesh-presentation-multicast".to_owned())
@@ -114,32 +136,39 @@ impl WorkerPresentationMulticastRuntime {
                     Ok(receiver) => receiver,
                     Err(error) => {
                         let _ = startup_tx.send(StartupOutcome::Rejected(error));
-                        return;
+                        return trace;
                     }
                 };
                 if startup_tx.send(StartupOutcome::Started).is_err() {
-                    return;
+                    return trace;
                 }
 
                 let clock = Instant::now();
                 while !thread_stop.load(Ordering::Acquire) {
-                    let now_us = u64::try_from(clock.elapsed().as_micros()).unwrap_or(u64::MAX);
-                    match receiver.receive_once(now_us) {
-                        Ok(ProtectedMulticastReceiveOutcome::Events(batch)) if batch.is_empty() => {
-                        }
-                        Ok(outcome) => match receive_tx.try_send(outcome) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(_)) => {
-                                thread_dropped_events.fetch_add(1, Ordering::Relaxed);
+                    // Sample after recv_from or timeout so the socket wait cannot age a frame.
+                    let outcome = receiver.receive_once_observed(
+                        || u64::try_from(clock.elapsed().as_micros()).unwrap_or(u64::MAX),
+                        trace.as_mut(),
+                    );
+                    match outcome {
+                        Ok(outcome) => {
+                            if !publish_outcome(
+                                &receive_tx,
+                                &thread_dropped_events,
+                                &thread_queued_bytes,
+                                trace.as_mut(),
+                                outcome,
+                            ) {
+                                break;
                             }
-                            Err(TrySendError::Disconnected(_)) => return,
-                        },
+                        }
                         Err(_) => {
                             thread_failed.store(true, Ordering::Release);
-                            return;
+                            break;
                         }
                     }
                 }
+                trace
             })
             .map_err(WorkerPresentationMulticastStartError::ThreadSpawn)?;
 
@@ -149,6 +178,7 @@ impl WorkerPresentationMulticastRuntime {
                 stop,
                 failed,
                 dropped_events,
+                queued_bytes,
                 receive_rx,
                 thread: Some(thread),
             }),
@@ -185,7 +215,9 @@ impl WorkerPresentationMulticastRuntime {
     }
 
     pub fn try_receive(&self) -> Option<ProtectedMulticastReceiveOutcome> {
-        self.receive_rx.try_recv().ok()
+        let outcome = self.receive_rx.try_recv().ok()?;
+        self.queued_bytes.release(candidate_bytes(&outcome));
+        Some(outcome)
     }
 
     #[must_use]
@@ -205,13 +237,92 @@ impl WorkerPresentationMulticastRuntime {
     pub fn matches_key_binding(&self, key: PresentationKeyInstallBinding) -> bool {
         start_matches_key_binding(self.binding, key)
     }
+
+    /// Stops the producer and returns a consistent report after its final enqueue.
+    /// Already queued outcomes can still be drained with `try_receive`.
+    pub fn finish_diagnostics(&mut self) -> Option<DeliveryTrace> {
+        self.stop.store(true, Ordering::Release);
+        self.thread.take()?.join().ok().flatten()
+    }
 }
 
 impl Drop for WorkerPresentationMulticastRuntime {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        let _ = self.finish_diagnostics();
+    }
+}
+
+fn publish_outcome(
+    tx: &SyncSender<ProtectedMulticastReceiveOutcome>,
+    dropped_events: &AtomicU64,
+    budget: &UnverifiedQueueBudget,
+    mut trace: Option<&mut DeliveryTrace>,
+    outcome: ProtectedMulticastReceiveOutcome,
+) -> bool {
+    if let ProtectedMulticastReceiveOutcome::Events(batch) = &outcome {
+        if batch.is_empty() {
+            return true;
+        }
+        if let Some(trace) = trace.as_deref_mut() {
+            for frame in &batch.frames {
+                trace.record(DeliveryStage::FrameAssembled, Some(frame.frame_id()), None);
+            }
+            for _ in 0..batch.dropped_stale_frames {
+                trace.record(DeliveryStage::StaleFrame, None, None);
+            }
+            for _ in 0..batch.dropped_invalid_frames {
+                trace.record(DeliveryStage::InvalidFrame, None, None);
+            }
+        }
+    }
+
+    let bytes = candidate_bytes(&outcome);
+    if !budget.try_reserve(bytes) {
+        dropped_events.fetch_add(1, Ordering::Relaxed);
+        if let Some(trace) = trace.as_deref_mut() {
+            trace.record(DeliveryStage::QueueFull, None, None);
+            if let ProtectedMulticastReceiveOutcome::Events(batch) = &outcome {
+                for frame in &batch.frames {
+                    trace.record(DeliveryStage::FrameQueueFull, Some(frame.frame_id()), None);
+                }
+            }
+        }
+        return true;
+    }
+
+    match tx.try_send(outcome) {
+        Ok(()) => {
+            if let Some(trace) = trace {
+                trace.record(DeliveryStage::Queued, None, None);
+            }
+            true
+        }
+        Err(error) => {
+            budget.release(bytes);
+            let (stage, frame_stage, dropped) = match error {
+                TrySendError::Full(outcome) => {
+                    dropped_events.fetch_add(1, Ordering::Relaxed);
+                    (
+                        DeliveryStage::QueueFull,
+                        DeliveryStage::FrameQueueFull,
+                        outcome,
+                    )
+                }
+                TrySendError::Disconnected(outcome) => (
+                    DeliveryStage::QueueDisconnected,
+                    DeliveryStage::FrameQueueDisconnected,
+                    outcome,
+                ),
+            };
+            if let Some(trace) = trace {
+                trace.record(stage, None, None);
+                if let ProtectedMulticastReceiveOutcome::Events(batch) = dropped {
+                    for frame in &batch.frames {
+                        trace.record(frame_stage, Some(frame.frame_id()), None);
+                    }
+                }
+            }
+            stage == DeliveryStage::QueueFull
         }
     }
 }
@@ -262,7 +373,25 @@ pub fn start_matches_key_binding(
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
+    use classmesh_network::multicast_receiver::MulticastPacketDropReason;
+
     use super::*;
+
+    #[test]
+    fn unauthenticated_ciphertext_queue_stays_under_ninety_six_mib() {
+        // Large completed ciphertext consumes a byte reservation independent
+        // of the normal event count; small frames keep all 64 slots.
+        assert_eq!(PRESENTATION_MULTICAST_EVENT_CAPACITY, 64);
+        let budget = UnverifiedQueueBudget::default();
+        let large = classmesh_security::group_media::MAX_GROUP_MEDIA_SEALED_BYTES;
+        let full = crate::presentation_receive_queue_budget::MAX_QUEUED_CIPHERTEXT_BYTES / large;
+        for _ in 0..full {
+            assert!(budget.try_reserve(large));
+        }
+        assert!(!budget.try_reserve(large));
+        budget.release(large);
+        assert!(budget.try_reserve(large));
+    }
 
     fn start(request_id: u64) -> ServicePresentationMulticastStart {
         ServicePresentationMulticastStart {
@@ -293,6 +422,24 @@ mod tests {
             config.local_bind(),
             SocketAddr::from((Ipv4Addr::UNSPECIFIED, start.port))
         );
+    }
+
+    #[test]
+    fn an_occupied_port_cannot_report_multicast_startup_ready() {
+        use classmesh_network::udp::DatagramError;
+
+        let reservation = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let start = ServicePresentationMulticastStart {
+            port: reservation.local_addr().unwrap().port(),
+            ..start(44)
+        };
+        let result = WorkerPresentationMulticastRuntime::start(start);
+        assert!(matches!(
+            result,
+            Err(WorkerPresentationMulticastStartError::Receiver(
+                ProtectedMulticastReceiveError::Datagram(DatagramError::Io(error))
+            )) if error.kind() == std::io::ErrorKind::AddrInUse
+        ));
     }
 
     #[test]
@@ -357,5 +504,134 @@ mod tests {
         ] {
             assert!(!start_matches_key_binding(start, key));
         }
+    }
+
+    #[test]
+    fn memory_budget_drops_unverified_ciphertext_without_filling_the_event_channel() {
+        use classmesh_network::multicast_receiver::ProtectedMulticastReceiveState;
+        use classmesh_network::{PacketizeMeta, packetize_frame};
+
+        let binding = start(1);
+        let mut receiver =
+            ProtectedMulticastReceiveState::new(receiver_config(binding).unwrap()).unwrap();
+        let packet = packetize_frame(
+            &[0x5a; 32],
+            PacketizeMeta {
+                protocol_major: 0,
+                protocol_minor: 4,
+                stream_id: binding.stream_id,
+                frame_id: 77,
+                first_sequence: 1,
+                timestamp_us: 77,
+                keyframe: true,
+            },
+        )
+        .unwrap();
+        let outcome =
+            receiver.push_packet(1_000, &packet[0], (binding.teacher_source, 12345).into());
+        let (tx, rx) = mpsc::sync_channel(64);
+        let dropped = AtomicU64::new(0);
+        let budget = UnverifiedQueueBudget::default();
+        assert!(
+            budget
+                .try_reserve(crate::presentation_receive_queue_budget::MAX_QUEUED_CIPHERTEXT_BYTES)
+        );
+        let mut trace = DeliveryTrace::new();
+        assert!(publish_outcome(
+            &tx,
+            &dropped,
+            &budget,
+            Some(&mut trace),
+            outcome,
+        ));
+        assert!(rx.try_recv().is_err(), "the event channel still has space");
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(trace.count(DeliveryStage::QueueFull), 1);
+        assert_eq!(trace.count(DeliveryStage::FrameQueueFull), 1);
+        assert_eq!(
+            budget.queued(),
+            crate::presentation_receive_queue_budget::MAX_QUEUED_CIPHERTEXT_BYTES
+        );
+    }
+
+    #[test]
+    fn full_worker_queue_counts_a_drop_without_losing_socket_accounting() {
+        let (tx, _rx) = mpsc::sync_channel(1);
+        let dropped = AtomicU64::new(0);
+        let budget = UnverifiedQueueBudget::default();
+        let mut trace = DeliveryTrace::new();
+        for _ in 0..2 {
+            trace.record(DeliveryStage::Malformed, None, None);
+            assert!(publish_outcome(
+                &tx,
+                &dropped,
+                &budget,
+                Some(&mut trace),
+                ProtectedMulticastReceiveOutcome::Dropped(
+                    MulticastPacketDropReason::MalformedDatagram
+                ),
+            ));
+        }
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(trace.count(DeliveryStage::Malformed), 2);
+        assert_eq!(trace.count(DeliveryStage::Queued), 1);
+        assert_eq!(trace.count(DeliveryStage::QueueFull), 1);
+    }
+
+    #[test]
+    fn queue_pressure_preserves_the_id_of_the_discarded_candidate() {
+        use classmesh_network::multicast_receiver::ProtectedMulticastReceiveState;
+        use classmesh_network::{PacketizeMeta, packetize_frame};
+
+        let binding = start(1);
+        let mut state =
+            ProtectedMulticastReceiveState::new(receiver_config(binding).unwrap()).unwrap();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let dropped = AtomicU64::new(0);
+        let budget = UnverifiedQueueBudget::default();
+        let mut trace = DeliveryTrace::new();
+        for frame_id in 1..=2 {
+            let packets = packetize_frame(
+                &[0x5a; 32],
+                PacketizeMeta {
+                    protocol_major: 0,
+                    protocol_minor: 4,
+                    stream_id: binding.stream_id,
+                    frame_id,
+                    first_sequence: frame_id as u32,
+                    timestamp_us: frame_id,
+                    keyframe: true,
+                },
+            )
+            .unwrap();
+            let outcome = state.push_packet(
+                frame_id,
+                &packets[0],
+                (binding.teacher_source, 12345).into(),
+            );
+            assert!(publish_outcome(
+                &tx,
+                &dropped,
+                &budget,
+                Some(&mut trace),
+                outcome
+            ));
+        }
+        let ProtectedMulticastReceiveOutcome::Events(batch) = rx.try_recv().unwrap() else {
+            panic!("expected a completed ciphertext candidate");
+        };
+        assert_eq!(batch.frames[0].frame_id(), 1);
+        assert_eq!(state.stats().assembled_ciphertext_frames, 2);
+        assert_eq!(trace.count(DeliveryStage::FrameAssembled), 2);
+        assert_eq!(trace.count(DeliveryStage::FrameQueueFull), 1);
+        assert_eq!(
+            trace
+                .events()
+                .iter()
+                .find(|event| event.stage == DeliveryStage::FrameQueueFull)
+                .unwrap()
+                .frame_id,
+            Some(2)
+        );
     }
 }

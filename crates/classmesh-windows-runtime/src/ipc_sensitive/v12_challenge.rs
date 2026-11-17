@@ -8,7 +8,7 @@
 use std::fmt;
 
 use ring::hmac;
-use ring::rand::{SecureRandom, SystemRandom};
+use ring::rand::{SystemRandom, generate};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::clipboard_read_frame::CLIPBOARD_READ_SUCCESS_FUTURE_MINOR;
@@ -92,10 +92,9 @@ impl SensitiveV12Challenge {
         if !current.binding.is_valid() || current.binding != expected {
             return Err(SensitiveV12ChallengeError::BindingChanged);
         }
-        let mut nonce = [0_u8; 32];
-        SystemRandom::new()
-            .fill(&mut nonce)
-            .map_err(|_| SensitiveV12ChallengeError::EntropyUnavailable)?;
+        let nonce = generate::<[u8; 32]>(&SystemRandom::new())
+            .map_err(|_| SensitiveV12ChallengeError::EntropyUnavailable)?
+            .expose();
         Ok(Self {
             expected,
             key,

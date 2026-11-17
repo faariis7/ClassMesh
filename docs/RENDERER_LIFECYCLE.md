@@ -26,6 +26,24 @@ While suspended:
 
 On restore the first non-zero `WM_SIZE` resizes the swap chain and presentation resumes without a teacher reconnect.
 
+A decoder reset while minimized leaves a clear pending. Restore first resizes the swap chain and
+presents black. A failed clear is retried before another video present. When the decoder has reset,
+it accepts delta frames only after an authenticated keyframe has been accepted.
+
+### Physical minimize and reset acceptance
+
+1. On an authorized Windows x64 student with a D3D11 video-capable driver, display a changing
+   authenticated stream with an easily identifiable image from the current key epoch.
+2. Minimize the student window and rotate the key through the normal presentation control path.
+   Keep the new epoch's first authenticated IDR delayed using the test sender.
+3. Restore the window. Record the first visible refresh through IDR arrival. The pre-rotation image
+   must never reappear, including during restore or repeated resize.
+4. Release the fresh IDR and confirm changing new-epoch video. Repeat with a decoder reset and
+   retain the capture, exact build SHA, GPU/driver and synchronized reset/IDR timestamps.
+
+Native state-machine tests verify the pending-clear ordering. Compositor behavior during the first
+visible refresh remains a physical acceptance test.
+
 ## Device loss
 
 DXGI errors corresponding to device removed, reset, hung, or driver-internal failure are classified separately from ordinary presentation errors.
@@ -55,3 +73,28 @@ The standalone `classmesh-media-receiver --render` now exercises:
 - keyframe-gated resume after recovery.
 
 The remaining gate is **physical GPU fault qualification**. Hosted CI proves the code builds and tests, but does not prove a real Intel/NVIDIA/AMD driver reset recovers correctly. Before normal long-lived Worker integration, ClassMesh should exercise an explicit fault-injection or real device-reset test and confirm that video resumes without dropping the authenticated control session.
+
+## Asynchronous decoder qualification
+
+`MfAsyncH264Decoder::new_for_qualification` is the adapter entry point for a
+controlled run on the interactive Windows thread. The Student Worker's
+synchronous selector still rejects asynchronous MFTs. The qualification
+adapter requires the driver's event generator to support
+`GetEvent(MF_EVENT_FLAG_NO_WAIT)`, one H.264 input, and one NV12 DXGI output on
+the same D3D11 video device. Missing interfaces, malformed event credits,
+and output without a matching submitted timestamp fail closed.
+
+Poll at the caller's media tick. Each poll services up to 32 native events and
+hands out at most one borrowed frame. Input backpressure leaves the access
+unit with the caller. At normal completion call `begin_drain` and poll until
+`Drained` or error. Stop, reset, and device loss call for retiring the old
+instance and creating a fresh one. Each generation starts with an empty
+event-credit and timestamp ledger and waits for a new IDR.
+
+Qualification still requires an authorized physical Windows x64 adapter:
+record the decoder CLSID and driver, drive SPS-driven NV12 renegotiation,
+observe output events and exact timestamps on actual DXGI surfaces, and
+present changing authenticated video in the Student HWND. Include normal
+drain, reset with queued old events, Stop, a replaced GPU pipeline, and the
+minimize/restore acceptance sequence above. VM1 event-queue tests exercise the
+native Media Foundation event contract and state machine.

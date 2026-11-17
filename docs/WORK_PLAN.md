@@ -1,3 +1,30 @@
+## M3 final multicast integration candidate — 2026-11-18
+
+PR #771 combines the existing protected M3/decoder recovery, #769 bounded
+multicast diagnostics, #770 async H.264 qualification lab and #772 security
+hardening with the three additional qualification commits from #775
+(`3b0f3168`, `95741822`, `d33d6b72`). #769 is already an ancestor; its endpoints
+and diagnostic implementation are reused, not reintroduced.
+
+The #775 increment adds the bounded Windows PowerShell runner, selected-NIC
+counter-checked gap attribution, exact reassembly expiry/window-eviction IDs,
+Worker consumer totals, redacted reports and native runner parsing in CI.
+The merge retains the integrated receive-window byte budget. Production UDP,
+SFrame and NACK policy, authentication and decoder selection are unchanged.
+
+Acceptance requires Rustfmt, workspace Clippy with warnings denied, workspace
+tests, correlation regressions, available native VM1 paths and both CI/security
+workflows on the final #771 head. Exact commits, commands, outcomes and scan
+refs are recorded in PR #771; older checkpoint results do not qualify this head.
+The candidate remains Draft and is not merged to `main`.
+
+Open gates: two physical Windows x64 hosts on the target wired VLAN, paired
+NIC captures on the affected and comparison adapters, authenticated changing
+nonblank Student HWND/D3D11 frames through Stop/restart/device loss and
+minimize/restore, independent security sign-off, and the protected M2 trust
+roots/signers plus authorized LocalSystem-to-Teacher-to-Worker flow (#688).
+VM1 ARM64 and synthetic ciphertext-consumer counts do not satisfy those gates.
+
 ## Active execution checkpoint — Phase 13 signed release manifest foundation (2026-10-31)
 
 **Next isolated signing batch:** branch `codex/phase13-release-signing` adds a create-only detached-CMS producer using a CurrentUser RSA-2048+ code-signing certificate supplied by the release operator. VM1 RED lacked signer; GREEN generated a signed manifest for the exact copied #644 bundle, independent verifier accepted it, duplicate overwrite and zero sequence were denied; disposable cert and directory cleanup followed. Windows CI must run this native test after the verifier test. This does not supply a production certificate, Authenticode signatures, protected verifier pin or installer/update authority.

@@ -1,3 +1,4 @@
+use crate::multicast_diagnostics::{DeliveryStage, DeliveryTrace};
 use std::fmt;
 use std::net::{SocketAddr, SocketAddrV4};
 use std::time::Duration;
@@ -473,9 +474,34 @@ impl ProtectedMulticastFrameSender {
         &mut self,
         frame: &SealedGroupMediaFrame,
     ) -> Result<ProtectedMulticastTrySendOutcome, ProtectedMulticastSendError> {
+        self.try_send_frame_observed(frame, None)
+    }
+
+    /// Uses the live send path while recording complete writes and failed attempts.
+    pub fn try_send_frame_observed(
+        &mut self,
+        frame: &SealedGroupMediaFrame,
+        mut trace: Option<&mut DeliveryTrace>,
+    ) -> Result<ProtectedMulticastTrySendOutcome, ProtectedMulticastSendError> {
         let prepared = self.packetizer.packetize(frame)?;
         try_send_prepared_frame(frame, &prepared, |packet| {
-            self.socket.send_packet_to(packet, self.destination)
+            let result = self.socket.send_packet_to(packet, self.destination);
+            if let Some(trace) = trace.as_deref_mut() {
+                let stage = if matches!(&result, Ok(bytes) if *bytes == classmesh_protocol::media::MEDIA_HEADER_LEN + packet.payload.len())
+                {
+                    DeliveryStage::Written
+                } else {
+                    DeliveryStage::WriteFailed
+                };
+                trace.record_packet(
+                    stage,
+                    trace.elapsed_us(),
+                    packet.header,
+                    self.destination,
+                    None,
+                );
+            }
+            result
         })
     }
 

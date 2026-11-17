@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::multicast::MulticastMembership;
+use crate::multicast_diagnostics::{DeliveryStage, DeliveryTrace};
 pub(super) use crate::protected_media_receive::{
     DatagramFailureDisposition, classify_datagram_failure,
 };
@@ -36,20 +37,60 @@ impl ProtectedMulticastFrameReceiver {
         })
     }
 
+    /// Compatibility API for callers that already own a precise media clock.
     pub fn receive_once(
         &mut self,
         now_us: u64,
     ) -> Result<ProtectedMulticastReceiveOutcome, ProtectedMulticastReceiveError> {
+        self.receive_once_with_clock(|| now_us)
+    }
+
+    /// Samples monotonic time after the OS socket wait on both packet arrival
+    /// and timeout expiry; protected source/stream/epoch admission remains
+    /// unchanged and media policies keep their existing bounded deadlines.
+    pub fn receive_once_with_clock(
+        &mut self,
+        clock: impl FnOnce() -> u64,
+    ) -> Result<ProtectedMulticastReceiveOutcome, ProtectedMulticastReceiveError> {
+        self.receive_once_observed(clock, None)
+    }
+
+    /// Observes socket reads before queueing, retaining no datagram bytes.
+    pub fn receive_once_observed(
+        &mut self,
+        clock: impl FnOnce() -> u64,
+        mut trace: Option<&mut DeliveryTrace>,
+    ) -> Result<ProtectedMulticastReceiveOutcome, ProtectedMulticastReceiveError> {
         match self.socket.receive_packet() {
-            Ok((packet, source)) => Ok(self.state.push_packet(now_us, &packet, source)),
+            Ok((packet, source)) => {
+                let now = clock();
+                let observed = trace.as_ref().map(|trace| trace.elapsed_us());
+                let outcome =
+                    self.state
+                        .push_packet_observed(now, &packet, source, trace.as_deref_mut());
+                if let Some((trace, observed)) = trace.zip(observed) {
+                    let (stage, rejection) = match &outcome {
+                        ProtectedMulticastReceiveOutcome::Events(_) => {
+                            (DeliveryStage::SocketAccepted, None)
+                        }
+                        ProtectedMulticastReceiveOutcome::Dropped(reason) => {
+                            (DeliveryStage::SocketRejected, Some(*reason))
+                        }
+                    };
+                    trace.record_packet(stage, observed, packet.header, source, rejection);
+                }
+                Ok(outcome)
+            }
             Err(error) => match classify_datagram_failure(&error) {
                 DatagramFailureDisposition::Tick => Ok(ProtectedMulticastReceiveOutcome::Events(
-                    self.state.tick(now_us),
+                    self.state.tick_observed(clock(), trace),
                 )),
                 DatagramFailureDisposition::DropMalformed => {
-                    Ok(ProtectedMulticastReceiveOutcome::Dropped(
-                        MulticastPacketDropReason::MalformedDatagram,
-                    ))
+                    let reason = MulticastPacketDropReason::MalformedDatagram;
+                    if let Some(trace) = trace {
+                        trace.record(DeliveryStage::Malformed, None, Some(reason));
+                    }
+                    Ok(ProtectedMulticastReceiveOutcome::Dropped(reason))
                 }
                 DatagramFailureDisposition::Fail => Err(error.into()),
             },
@@ -76,5 +117,123 @@ impl Drop for ProtectedMulticastFrameReceiver {
         let _ = self
             .socket
             .leave_multicast_v4(self.membership.group(), self.membership.interface());
+    }
+}
+
+#[cfg(test)]
+mod receive_clock_tests {
+    use super::*;
+    use crate::multicast::MulticastProbeOutcome;
+    use crate::{PacketizeMeta, packetize_frame};
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    #[test]
+    fn protected_multicast_socket_samples_clock_after_packet_or_timeout() {
+        // The real multicast interface is intentionally NOT joined in this
+        // timing test. Use a test-only loopback socket; source is deliberately
+        // invalid for the enrolled multicast sender and remains denied.
+        let membership = MulticastMembership::new(
+            Ipv4Addr::new(239, 10, 20, 30),
+            Ipv4Addr::new(192, 168, 50, 10),
+        )
+        .unwrap();
+        let config = ProtectedMulticastReceiverConfig::new(
+            membership,
+            50000,
+            Ipv4Addr::new(192, 168, 50, 20),
+            800,
+            MulticastProbeOutcome::Available,
+        )
+        .unwrap();
+        let socket =
+            UdpMediaSocket::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
+                .unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(400)))
+            .unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let mut receiver = ProtectedMulticastFrameReceiver {
+            socket,
+            membership,
+            state: ProtectedMulticastReceiveState::new(config).unwrap(),
+        };
+        let transmitted = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&transmitted);
+        let sender = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            let socket =
+                UdpMediaSocket::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
+                    .unwrap();
+            let frame = packetize_frame(
+                &[0x5a],
+                PacketizeMeta {
+                    protocol_major: 0,
+                    protocol_minor: 4,
+                    stream_id: 800,
+                    frame_id: 1,
+                    first_sequence: 10,
+                    timestamp_us: 100_000,
+                    keyframe: true,
+                },
+            )
+            .unwrap();
+            signal.store(true, Ordering::Release);
+            socket
+                .send_packet_to(
+                    &frame[0],
+                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)),
+                )
+                .unwrap();
+        });
+        let mut trace = DeliveryTrace::new();
+        let outcome = receiver
+            .receive_once_observed(
+                || {
+                    assert!(
+                        transmitted.load(Ordering::Acquire),
+                        "clock before read would falsely age fragments"
+                    );
+                    100_000
+                },
+                Some(&mut trace),
+            )
+            .unwrap();
+        assert!(
+            matches!(outcome, ProtectedMulticastReceiveOutcome::Dropped(_)),
+            "unapproved loopback sender must remain denied"
+        );
+        assert_eq!(trace.count(DeliveryStage::SocketAccepted), 0);
+        assert_eq!(trace.count(DeliveryStage::SocketRejected), 1);
+        let event = trace.events()[0];
+        assert_eq!(event.packet.unwrap().sequence, 10);
+        assert_eq!(event.peer.unwrap().ip(), Ipv4Addr::LOCALHOST);
+        assert_eq!(
+            event.rejection,
+            Some(MulticastPacketDropReason::UnexpectedSource)
+        );
+        assert_eq!(receiver.stats().rejected_datagrams, 1);
+        sender.join().unwrap();
+        receiver
+            .socket
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let mut sampled_on_timeout = false;
+        let outcome = receiver
+            .receive_once_with_clock(|| {
+                sampled_on_timeout = true;
+                200_000
+            })
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            ProtectedMulticastReceiveOutcome::Events(_)
+        ));
+        assert!(
+            sampled_on_timeout,
+            "timeout tick clock must be sampled after recv wait"
+        );
     }
 }
