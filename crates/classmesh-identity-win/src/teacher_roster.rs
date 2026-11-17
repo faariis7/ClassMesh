@@ -228,6 +228,99 @@ pub fn qualify_teacher_device_roster(
     Err(RosterRejection::MissingApprovedVerifier)
 }
 
+/// Deny-only screening for a bounded set of requested StudentDevices.
+/// Every requested device must appear in the untrusted roster; matching is
+/// never proof of provenance or authorization.
+pub fn qualify_teacher_device_roster_batch(
+    request: &TeacherRosterRequest<'_>,
+    requested_student_device_ids: &[&str],
+) -> Result<(), RosterRejection> {
+    if requested_student_device_ids.is_empty() {
+        return Err(RosterRejection::EmptyStudentDeviceRoster);
+    }
+    if requested_student_device_ids.len() > 1024 {
+        return Err(RosterRejection::OversizedStudentDeviceRoster);
+    }
+    for id in requested_student_device_ids {
+        match qualify_teacher_device_roster(request, id) {
+            Err(RosterRejection::MissingApprovedVerifier) => {}
+            other => return other,
+        }
+    }
+    Err(RosterRejection::MissingApprovedVerifier)
+}
+
+#[cfg(test)]
+mod scoped_batch_roster_tests {
+    use super::*;
+
+    fn request<'a>(ids: &'a [&'a str]) -> TeacherRosterRequest<'a> {
+        TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: ids,
+            }),
+        }
+    }
+
+    #[test]
+    fn all_listed_devices_still_denied_without_approved_verifier() {
+        assert_eq!(
+            qualify_teacher_device_roster_batch(
+                &request(&["device-1", "device-2"]),
+                &["device-1", "device-2"],
+            ),
+            Err(RosterRejection::MissingApprovedVerifier)
+        );
+    }
+
+    #[test]
+    fn one_unlisted_device_denies_entire_batch() {
+        assert_eq!(
+            qualify_teacher_device_roster_batch(
+                &request(&["device-1", "device-2"]),
+                &["device-1", "device-3"],
+            ),
+            Err(RosterRejection::UnlistedStudentDevice)
+        );
+    }
+
+    #[test]
+    fn missing_roster_denies_batch() {
+        let mut candidate = request(&["device-1"]);
+        candidate.roster = None;
+        assert_eq!(
+            qualify_teacher_device_roster_batch(&candidate, &["device-1"]),
+            Err(RosterRejection::MissingRoster)
+        );
+    }
+
+    #[test]
+    fn empty_batch_is_denied() {
+        assert_eq!(
+            qualify_teacher_device_roster_batch(&request(&["device-1"]), &[]),
+            Err(RosterRejection::EmptyStudentDeviceRoster)
+        );
+    }
+
+    #[test]
+    fn oversized_batch_is_denied_before_membership_scan() {
+        let ids = vec!["device-1"; 1025];
+        assert_eq!(
+            qualify_teacher_device_roster_batch(&request(&["device-1"]), &ids),
+            Err(RosterRejection::OversizedStudentDeviceRoster)
+        );
+    }
+}
+
 #[cfg(test)]
 mod scoped_student_device_tests {
     use super::*;
