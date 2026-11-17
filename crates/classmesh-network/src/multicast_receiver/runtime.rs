@@ -59,13 +59,15 @@ impl ProtectedMulticastFrameReceiver {
     pub fn receive_once_observed(
         &mut self,
         clock: impl FnOnce() -> u64,
-        trace: Option<&mut DeliveryTrace>,
+        mut trace: Option<&mut DeliveryTrace>,
     ) -> Result<ProtectedMulticastReceiveOutcome, ProtectedMulticastReceiveError> {
         match self.socket.receive_packet() {
             Ok((packet, source)) => {
                 let now = clock();
                 let observed = trace.as_ref().map(|trace| trace.elapsed_us());
-                let outcome = self.state.push_packet(now, &packet, source);
+                let outcome =
+                    self.state
+                        .push_packet_observed(now, &packet, source, trace.as_deref_mut());
                 if let Some((trace, observed)) = trace.zip(observed) {
                     let (stage, rejection) = match &outcome {
                         ProtectedMulticastReceiveOutcome::Events(_) => {
@@ -81,7 +83,7 @@ impl ProtectedMulticastFrameReceiver {
             }
             Err(error) => match classify_datagram_failure(&error) {
                 DatagramFailureDisposition::Tick => Ok(ProtectedMulticastReceiveOutcome::Events(
-                    self.state.tick(clock()),
+                    self.state.tick_observed(clock(), trace),
                 )),
                 DatagramFailureDisposition::DropMalformed => {
                     let reason = MulticastPacketDropReason::MalformedDatagram;

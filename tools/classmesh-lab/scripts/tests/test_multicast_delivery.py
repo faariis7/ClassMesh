@@ -38,6 +38,22 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(result["outbound_without_inbound_observation"], [[2, 3]])
         self.assertEqual(result["inbound_without_socket_read"], [[1, 1]])
 
+    def test_attribution_requires_verified_capture_and_excludes_later_observations(self):
+        written = [(9, seq, 19, seq) for seq in range(1, 7)]
+        outbound = written[:4]
+        inbound = [written[1], written[4]]
+        received = [written[2], written[4]]
+        result = diagnostic.compare(
+            written, received, outbound, inbound, outbound_verified=True, inbound_verified=True,
+        )
+        self.assertEqual(result["network_path_gap"], [[1, 1], [4, 4]])
+        self.assertEqual(result["receiver_nic_to_socket_gap"], [[2, 2]])
+        self.assertEqual(result["sender_to_nic_gap"], [[6, 6]])
+        self.assertEqual(result["unattributed_socket_gap"], [])
+        unverified = diagnostic.compare(written, received, outbound, inbound)
+        self.assertIsNone(unverified["network_path_gap"])
+        self.assertEqual(unverified["unattributed_socket_gap"], [[1, 2], [4, 4], [6, 6]])
+
     def test_capture_correlates_only_the_selected_route_and_stream(self):
         def row(source, stream, sequence):
             header = b"CMV1\x00\x04\x00\x00" + struct.pack(">IQIH", stream, 3, sequence, 2)
@@ -55,6 +71,10 @@ class DeliveryTests(unittest.TestCase):
                 diagnostic.capture(path, "192.168.50.10:50123", "239.1.1.4:50494", 9),
                 {(9, 41, 3, 2)},
             )
+            verified = diagnostic.capture(path, "192.168.50.10:50123", "239.1.1.4:50494", 9, 1)
+            self.assertEqual(verified, {(9, 41, 3, 2)})
+            with self.assertRaisesRegex(ValueError, "expected 2 from NIC counters"):
+                diagnostic.capture(path, "192.168.50.10:50123", "239.1.1.4:50494", 9, 2)
             path.write_text("1.25\t192.168.50.10\t50123\t239.1.1.4\t50494\t434d\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "too short"):
                 diagnostic.capture(path, "192.168.50.10:50123", "239.1.1.4:50494", 9)

@@ -24,10 +24,12 @@ pub enum DeliveryStage {
     FrameQueueDisconnected,
     StaleFrame,
     InvalidFrame,
+    FrameExpired,
+    FrameWindowEvicted,
 }
 
 impl DeliveryStage {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::Written,
         Self::WriteFailed,
         Self::SocketAccepted,
@@ -41,6 +43,8 @@ impl DeliveryStage {
         Self::FrameQueueDisconnected,
         Self::StaleFrame,
         Self::InvalidFrame,
+        Self::FrameExpired,
+        Self::FrameWindowEvicted,
     ];
 }
 
