@@ -894,3 +894,87 @@ mod unbounded_expiry_denial_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod device_denial_propagation_tests {
+    use super::*;
+
+    fn request() -> TeacherRosterRequest<'static> {
+        TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: 300,
+                signature: Some(&[1]),
+                student_device_ids: &["device-1"],
+            }),
+        }
+    }
+
+    #[test]
+    fn device_lookup_preserves_missing_roster_denial() {
+        let mut candidate = request();
+        candidate.roster = None;
+        assert_eq!(
+            qualify_teacher_device_roster(&candidate, "device-1"),
+            Err(RosterRejection::MissingRoster)
+        );
+    }
+
+    #[test]
+    fn device_lookup_preserves_expired_and_unsigned_denials() {
+        let mut candidate = request();
+        candidate.roster.as_mut().unwrap().expires_unix_ms = 200;
+        assert_eq!(
+            qualify_teacher_device_roster(&candidate, "device-1"),
+            Err(RosterRejection::ExpiredRoster)
+        );
+
+        let mut candidate = request();
+        candidate.roster.as_mut().unwrap().signature = None;
+        assert_eq!(
+            qualify_teacher_device_roster(&candidate, "device-1"),
+            Err(RosterRejection::UnsignedRoster)
+        );
+    }
+
+    #[test]
+    fn device_lookup_preserves_principal_and_role_denials() {
+        let mut candidate = request();
+        candidate.roster.as_mut().unwrap().teacher_principal = "other-teacher";
+        assert_eq!(
+            qualify_teacher_device_roster(&candidate, "device-1"),
+            Err(RosterRejection::WrongPrincipal)
+        );
+
+        let mut candidate = request();
+        candidate.roster.as_mut().unwrap().role = "Student";
+        assert_eq!(
+            qualify_teacher_device_roster(&candidate, "device-1"),
+            Err(RosterRejection::WrongRole)
+        );
+    }
+
+    #[test]
+    fn device_lookup_preserves_stale_authorization_denial() {
+        let mut candidate = request();
+        candidate.authorization_not_before_unix_ms = 160;
+        assert_eq!(
+            qualify_teacher_device_roster(&candidate, "device-1"),
+            Err(RosterRejection::StaleAuthorization)
+        );
+    }
+
+    #[test]
+    fn matching_device_and_unverified_signature_never_authorize() {
+        assert_eq!(
+            qualify_teacher_device_roster(&request(), "device-1"),
+            Err(RosterRejection::MissingApprovedVerifier)
+        );
+    }
+}
