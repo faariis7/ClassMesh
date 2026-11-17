@@ -244,7 +244,8 @@ pub fn qualify_teacher_device_roster_batch(
     }
     // Repeated requested IDs are ambiguous for a batch operation; deny before
     // treating any member as qualified, even when every ID is listed.
-    let mut requested_seen = std::collections::HashSet::with_capacity(requested_student_device_ids.len());
+    let mut requested_seen =
+        std::collections::HashSet::with_capacity(requested_student_device_ids.len());
     for id in requested_student_device_ids {
         // Bound attacker-controlled bytes before hashing or roster membership work.
         if id.len() > 256 {
