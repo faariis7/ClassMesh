@@ -404,10 +404,9 @@ mod tests {
         for packet in &packets {
             if let ProtectedMulticastReceiveOutcome::Events(batch) =
                 receiver.push_packet(1_000, packet, source)
+                && let Some(frame) = batch.frames.into_iter().next()
             {
-                if let Some(frame) = batch.frames.into_iter().next() {
-                    ready = Some(frame);
-                }
+                ready = Some(frame);
             }
         }
         ready.expect("reassembled ciphertext")

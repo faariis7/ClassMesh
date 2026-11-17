@@ -25,6 +25,17 @@ minimize/restore, independent security sign-off, and the protected M2 trust
 roots/signers plus authorized LocalSystem-to-Teacher-to-Worker flow (#688).
 VM1 ARM64 and synthetic ciphertext-consumer counts do not satisfy those gates.
 
+## RustSec / CI candidate — PR #774 (2026-11-18)
+
+Qualify the Rust 1.88 minimum and published dependency remediation through the
+full stable Portable Rust/Windows Build checks, full native Windows workspace
+tests on 1.88, and the unchanged RustSec policy. The Phase 10 freeze step reads
+Cargo's executable artifact instead of assuming an output directory. The
+[dependency report](RUST_DEPENDENCY_AUDIT.md) records the tested 1.85 backport
+alternatives and why a crypto downgrade was rejected. Exact-head hosted outcomes
+belong to PR #774; merging is not authorized by this task. Physical classroom,
+Windows deployment, and trust qualification remain separate.
+
 ## Active execution checkpoint — Phase 13 signed release manifest foundation (2026-10-31)
 
 **Next isolated signing batch:** branch `codex/phase13-release-signing` adds a create-only detached-CMS producer using a CurrentUser RSA-2048+ code-signing certificate supplied by the release operator. VM1 RED lacked signer; GREEN generated a signed manifest for the exact copied #644 bundle, independent verifier accepted it, duplicate overwrite and zero sequence were denied; disposable cert and directory cleanup followed. Windows CI must run this native test after the verifier test. This does not supply a production certificate, Authenticode signatures, protected verifier pin or installer/update authority.

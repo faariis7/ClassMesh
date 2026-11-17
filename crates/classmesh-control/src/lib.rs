@@ -199,13 +199,13 @@ impl HeartbeatTracker {
             });
         }
 
-        if let Some(previous) = self.last_sequence {
-            if sample.sequence <= previous {
-                return Err(HeartbeatError::NonIncreasingSequence {
-                    previous,
-                    received: sample.sequence,
-                });
-            }
+        if let Some(previous) = self.last_sequence
+            && sample.sequence <= previous
+        {
+            return Err(HeartbeatError::NonIncreasingSequence {
+                previous,
+                received: sample.sequence,
+            });
         }
 
         self.last_sequence = Some(sample.sequence);

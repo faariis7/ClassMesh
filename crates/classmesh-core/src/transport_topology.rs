@@ -204,10 +204,10 @@ pub fn media_path_blocking_gate(
         MediaTransport::ReliableFallback => None,
     };
 
-    if let Some((gate, status)) = transport_gate {
-        if status != PhysicalGateStatus::Qualified {
-            return Some((gate, status));
-        }
+    if let Some((gate, status)) = transport_gate
+        && status != PhysicalGateStatus::Qualified
+    {
+        return Some((gate, status));
     }
 
     if candidate.topology == MediaTopology::Relay

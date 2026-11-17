@@ -62,6 +62,10 @@ jobs:
       - name: Test CI timing report helper
         run: python -B -m unittest discover -s scripts/tests -p test_ci_timing_report.py
 
+      - name: Test Cargo native test artifact selection
+        shell: pwsh
+        run: .\scripts\tests\freeze_native_tests.ps1
+
       - name: Test multicast delivery correlation
         run: python -B -m unittest discover -s tools/classmesh-lab/scripts/tests -p test_multicast_delivery.py
 
@@ -116,35 +120,10 @@ jobs:
 
       # Freeze the default-feature native test image immediately after
       # workspace tests, BEFORE opt-in feature tests build another
-      # classmesh_win32-<hash>.exe under target/debug/deps.
+      # classmesh_win32-<hash>.exe. Resolve its path via Cargo's JSON API.
       - name: Freeze Phase 10 native Windows unit-test executable
         shell: pwsh
-        run: |
-          # Cargo may use a runner-level CARGO_TARGET_DIR outside the checkout.
-          # Resolve its actual target directory instead of assuming ./target.
-          $targetDir = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).target_directory
-          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($targetDir)) {
-            throw 'Unable to resolve Cargo target directory for native test image'
-          }
-          # Cargo's native Windows runner currently places test executables in
-          # debug/build/<package>/<hash>/out, not necessarily debug/deps.
-          # Inspect only these two known layouts; never pick an arbitrary exe.
-          $depsDir = Join-Path $targetDir 'debug/deps'
-          $buildDir = Join-Path $targetDir 'debug/build'
-          $bins = @()
-          if (Test-Path -LiteralPath $depsDir -PathType Container) {
-            $bins += @(Get-ChildItem -LiteralPath $depsDir -Filter 'classmesh_win32-*.exe' -File)
-          }
-          if (Test-Path -LiteralPath $buildDir -PathType Container) {
-            $bins += @(Get-ChildItem -LiteralPath $buildDir -Directory -Filter 'classmesh-win32' |
-              Get-ChildItem -Directory |
-              ForEach-Object { Get-ChildItem -LiteralPath (Join-Path $_.FullName 'out') -Filter 'classmesh_win32-*.exe' -File -ErrorAction SilentlyContinue })
-          }
-          if ($bins.Count -ne 1) {
-            throw "Expected exactly one default-feature native test executable under $targetDir, found $($bins.Count)"
-          }
-          New-Item -ItemType Directory -Path phase10-native-telemetry-bundle -Force | Out-Null
-          Copy-Item -LiteralPath $bins[0].FullName -Destination phase10-native-telemetry-bundle/classmesh-win32-native-tests.exe
+        run: .\scripts\freeze-native-tests.ps1
 
       - name: Build media diagnostics
         run: cargo build -p classmesh-worker --bin classmesh-media-probe --bin classmesh-media-receiver --bin classmesh-media-recovery-probe --release
@@ -215,11 +194,15 @@ jobs:
       - name: Build Teacher UI shell
         run: cargo build -p classmesh-teacher --bin classmesh-teacher-ui --release
 
-      - name: Validate Teacher UI workspace MSRV
+      - name: Validate native Windows workspace MSRV (Rust 1.88)
         shell: pwsh
         run: |
-          rustup toolchain install 1.85.0 --profile minimal --no-self-update
-          cargo +1.85.0 check -p classmesh-teacher --bin classmesh-teacher-ui
+          rustup toolchain install 1.88.0 --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'MSRV toolchain installation failed' }
+          cargo +1.88.0 test --workspace
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows workspace MSRV tests failed' }
+          cargo +1.88.0 check -p classmesh-teacher --bin classmesh-teacher-ui
+          if ($LASTEXITCODE -ne 0) { throw 'Teacher UI MSRV check failed' }
 
       - name: Validate Phase 11F4 Teacher UI smoke helper
         shell: pwsh
