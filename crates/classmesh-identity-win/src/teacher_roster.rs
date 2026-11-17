@@ -246,6 +246,10 @@ pub fn qualify_teacher_device_roster_batch(
     // treating any member as qualified, even when every ID is listed.
     let mut requested_seen = std::collections::HashSet::with_capacity(requested_student_device_ids.len());
     for id in requested_student_device_ids {
+        // Bound attacker-controlled bytes before hashing or roster membership work.
+        if id.len() > 256 {
+            return Err(RosterRejection::OversizedStudentDeviceIdentifier);
+        }
         if !requested_seen.insert(*id) {
             return Err(RosterRejection::DuplicateRequestedStudentDevice);
         }
@@ -337,6 +341,15 @@ mod scoped_batch_roster_tests {
         assert_eq!(
             qualify_teacher_device_roster_batch(&request(&["device-1"]), &[]),
             Err(RosterRejection::EmptyStudentDeviceRoster)
+        );
+    }
+
+    #[test]
+    fn oversized_requested_id_is_denied_before_batch_hashing() {
+        let oversized = "d".repeat(1024 * 1024);
+        assert_eq!(
+            qualify_teacher_device_roster_batch(&request(&["device-1"]), &[&oversized]),
+            Err(RosterRejection::OversizedStudentDeviceIdentifier)
         );
     }
 
