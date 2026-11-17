@@ -252,6 +252,10 @@ pub fn qualify_teacher_device_roster_batch(
     let Some(roster) = request.roster else {
         return Err(RosterRejection::MissingRoster);
     };
+    // The roster has already passed bounded, duplicate-free metadata screening.
+    // Index its IDs once to avoid repeated linear scans for each requested device.
+    let roster_ids: std::collections::HashSet<&str> =
+        roster.student_device_ids.iter().copied().collect();
     // Repeated requested IDs are ambiguous for a batch operation; deny before
     // treating any member as qualified, even when every ID is listed.
     let mut requested_seen =
@@ -277,7 +281,7 @@ pub fn qualify_teacher_device_roster_batch(
         {
             return Err(RosterRejection::InvalidStudentDeviceRoster);
         }
-        if !roster.student_device_ids.contains(id) {
+        if !roster_ids.contains(id) {
             return Err(RosterRejection::UnlistedStudentDevice);
         }
     }
