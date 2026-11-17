@@ -265,12 +265,8 @@ pub fn qualify_teacher_device_roster_batch(
         if id.len() > 256 {
             return Err(RosterRejection::OversizedStudentDeviceIdentifier);
         }
-        if !requested_seen.insert(*id) {
-            return Err(RosterRejection::DuplicateRequestedStudentDevice);
-        }
-        // Screen the roster once per batch, not once per requested device.
-        // A requested ID must be canonical and explicitly listed, but neither
-        // membership nor a present signature is an authorization decision.
+        // Reject noncanonical IDs before inserting untrusted bytes into the
+        // duplicate-detection set. Membership is not authorization.
         if id.is_empty()
             || id.trim() != *id
             || id.chars().any(char::is_control)
@@ -280,6 +276,9 @@ pub fn qualify_teacher_device_roster_batch(
             || contains_unicode_noncharacter(id)
         {
             return Err(RosterRejection::InvalidStudentDeviceRoster);
+        }
+        if !requested_seen.insert(*id) {
+            return Err(RosterRejection::DuplicateRequestedStudentDevice);
         }
         if !roster_ids.contains(id) {
             return Err(RosterRejection::UnlistedStudentDevice);
@@ -339,6 +338,17 @@ mod scoped_batch_roster_tests {
                 &["device-1", "device-3"],
             ),
             Err(RosterRejection::UnlistedStudentDevice)
+        );
+    }
+
+    #[test]
+    fn malformed_duplicate_is_rejected_as_invalid_before_hashing() {
+        assert_eq!(
+            qualify_teacher_device_roster_batch(
+                &request(&["device-1"]),
+                &["device-1", "device-\\u{202e}1", "device-\\u{202e}1"],
+            ),
+            Err(RosterRejection::InvalidStudentDeviceRoster)
         );
     }
 
