@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 
+use crate::multicast_diagnostics::{DeliveryStage, DeliveryTrace};
 use crate::{AssembleError, AssembledFrame, FrameAssembler, MediaPacket};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +92,16 @@ impl ReceiverWindow {
         now_us: u64,
         packet: &MediaPacket,
     ) -> Result<Vec<ReceiverEvent>, AssembleError> {
-        let mut events = self.expire(now_us);
+        self.push_observed(now_us, packet, None)
+    }
+
+    pub(crate) fn push_observed(
+        &mut self,
+        now_us: u64,
+        packet: &MediaPacket,
+        mut trace: Option<&mut DeliveryTrace>,
+    ) -> Result<Vec<ReceiverEvent>, AssembleError> {
+        let mut events = self.expire(now_us, trace.as_deref_mut());
         let frame_id = packet.header.frame_id;
 
         if self
@@ -106,6 +116,9 @@ impl ReceiverWindow {
             if self.inflight.len() == self.policy.max_inflight_frames {
                 let (oldest_id, oldest) = self.inflight.pop_first().expect("full receive window");
                 self.remember_discarded(oldest_id);
+                if let Some(trace) = trace {
+                    trace.record(DeliveryStage::FrameWindowEvicted, Some(oldest_id), None);
+                }
                 self.report_drop(
                     oldest.assembler.stream_id_for_receiver(),
                     oldest_id,
@@ -167,10 +180,14 @@ impl ReceiverWindow {
     }
 
     pub fn tick(&mut self, now_us: u64) -> Vec<ReceiverEvent> {
-        self.expire(now_us)
+        self.expire(now_us, None)
     }
 
-    fn expire(&mut self, now_us: u64) -> Vec<ReceiverEvent> {
+    pub(crate) fn expire(
+        &mut self,
+        now_us: u64,
+        mut trace: Option<&mut DeliveryTrace>,
+    ) -> Vec<ReceiverEvent> {
         let mut events = Vec::new();
         let mut remove = Vec::new();
         let mut request_keyframe = None;
@@ -204,6 +221,9 @@ impl ReceiverWindow {
         for frame_id in remove {
             if let Some(frame) = self.inflight.remove(&frame_id) {
                 self.remember_discarded(frame_id);
+                if let Some(trace) = trace.as_deref_mut() {
+                    trace.record(DeliveryStage::FrameExpired, Some(frame_id), None);
+                }
                 self.report_drop(
                     frame.assembler.stream_id_for_receiver(),
                     frame_id,
@@ -267,6 +287,34 @@ mod tests {
             },
         )
         .expect("test frame should packetize")
+    }
+
+    #[test]
+    fn observed_drops_distinguish_expiry_and_window_eviction() {
+        let policy = ReceiverPolicy::default();
+        let mut window = ReceiverWindow::for_unverified_frames(policy);
+        let mut trace = DeliveryTrace::new();
+        for frame_id in 1..=4 {
+            window
+                .push_observed(0, &packets(frame_id)[0], Some(&mut trace))
+                .unwrap();
+        }
+        window.expire(policy.drop_after_us - 1, Some(&mut trace));
+        assert_eq!(trace.count(DeliveryStage::FrameExpired), 0);
+        window.expire(policy.drop_after_us, Some(&mut trace));
+        assert_eq!(
+            trace
+                .events()
+                .iter()
+                .map(|event| (event.stage, event.frame_id))
+                .collect::<Vec<_>>(),
+            vec![
+                (DeliveryStage::FrameWindowEvicted, Some(1)),
+                (DeliveryStage::FrameExpired, Some(2)),
+                (DeliveryStage::FrameExpired, Some(3)),
+                (DeliveryStage::FrameExpired, Some(4)),
+            ]
+        );
     }
 
     #[test]

@@ -55,6 +55,7 @@ impl Route {
         sender: impl std::fmt::Display,
         complete: bool,
         trace: &DeliveryTrace,
+        consumer: Option<(u64, u64)>,
     ) -> io::Result<()> {
         let mut out = io::BufWriter::new(io::stdout().lock());
         writeln!(out, "# format=classmesh-multicast-delivery-v1")?;
@@ -74,6 +75,10 @@ impl Route {
                 .as_micros()
         )?;
         writeln!(out, "# omitted={}", trace.omitted())?;
+        if let Some((outcomes, frames)) = consumer {
+            writeln!(out, "# worker_consumer_outcomes={outcomes}")?;
+            writeln!(out, "# worker_consumer_frames={frames}")?;
+        }
         for stage in DeliveryStage::ALL {
             writeln!(out, "# {stage:?}={}", trace.count(stage))?;
         }
@@ -173,7 +178,7 @@ fn send(route: Route, frames: u64, frame_bytes: usize) -> LabResult<()> {
         }
         Ok(())
     })();
-    route.report("send", source, result.is_ok(), &trace)?;
+    route.report("send", source, result.is_ok(), &trace, None)?;
     eprintln!("sender_backpressured_frames={backpressured_frames}");
     result
 }
@@ -229,7 +234,13 @@ fn receive(route: Route, sender: Ipv4Addr, seconds: u64) -> LabResult<()> {
         && drained == trace.count(DeliveryStage::Queued)
         && worker.dropped_events() == trace.count(DeliveryStage::QueueFull)
         && drained_frames + dropped_frames == trace.count(DeliveryStage::FrameAssembled);
-    route.report("receive", sender, complete, &trace)?;
+    route.report(
+        "receive",
+        sender,
+        complete,
+        &trace,
+        Some((drained, drained_frames)),
+    )?;
     if !complete {
         return Err("receiver terminated early or trace and Worker totals disagree".into());
     }
