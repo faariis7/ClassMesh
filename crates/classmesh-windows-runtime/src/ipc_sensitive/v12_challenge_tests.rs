@@ -74,15 +74,15 @@ fn wrong_key_or_mac_poison_challenge_permanently() {
     let mut p = pending();
     let wrong = [0xAA; 32];
     let mac = proof(&p, &wrong, VERSION, binding());
+    let valid_mac = proof(&p, &key(), VERSION, binding());
+    assert_ne!(mac, valid_mac);
     assert_eq!(
         p.verify(&mac, VERSION, START + 1, || live(binding(), grants())),
         Err(SensitiveV12ChallengeError::InvalidProof)
     );
-    let valid_mac =
-        compute_v12_challenge_mac(&key(), &p.nonce().unwrap_or([0x00; 32]), VERSION, binding());
-    assert_ne!(mac, valid_mac);
+    assert_eq!(p.nonce(), None);
     assert_eq!(
-        p.verify(&mac, VERSION, START + 2, || live(binding(), grants())),
+        p.verify(&valid_mac, VERSION, START + 2, || live(binding(), grants())),
         Err(SensitiveV12ChallengeError::AlreadyUsed)
     );
 }
