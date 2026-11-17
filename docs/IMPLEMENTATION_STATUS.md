@@ -1,3 +1,14 @@
+## RustSec / CI candidate — PR #774 (2026-11-18)
+
+PR #774 raises the workspace MSRV to Rust 1.88 to consume published fixes for
+the `quick-xml` and `time` advisories, retains the fixed `p256` crypto graph,
+and resolves the Phase 10 test executable through Cargo JSON. Local Rust 1.88
+workspace tests and the upgraded-graph audit pass; exact-head hosted results
+are recorded on the PR. Windows CI now tests the full workspace on 1.88 in
+addition to its existing stable checks. See [the dependency report](RUST_DEPENDENCY_AUDIT.md)
+for the measured backport comparison, compiler compatibility, and evidence limits.
+This tooling/toolchain candidate does not close any physical or production gate.
+
 **Phase 13 create-only signed manifest producer (2026-10-31):** Isolated branch `codex/phase13-release-signing` adds an operator-owned RSA-2048+ code-signing certificate producer for fixed Service/Worker metadata. VM1 RED missing signer and GREEN signed output/independent verification, duplicate and zero-sequence negatives pass. Production certificate, Authenticode signing, protected pin enrollment, installer and release rollback remain open.
 
 **Phase 13 signed release manifest foundation (2026-10-31):** #644 merged `ce6fe692` after CI `41138625385`, and #649 merged `9d20c90e` after exact-head CI `41141769130`; both Portable Rust and Windows Build passed. Exact #644 Service/Worker artifact passed VM1 validation/preflight; Service, Worker and Teacher EXEs are `NotSigned`. The same Teacher artifact passed VM1 seven-second Session 1 window smoke. #649 pinned detached-CMS verifier passed VM1 temporary-certificate positive/wrong pin/SHA-1/tamper negatives and hosted Windows native test. Production pin, release certificate, installer and release rollback remain open.

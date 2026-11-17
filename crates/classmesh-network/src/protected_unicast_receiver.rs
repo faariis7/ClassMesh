@@ -417,10 +417,10 @@ mod tests {
             let outcome = receiver
                 .receive_once(u64::try_from(index).expect("small index"))
                 .expect("packet receives");
-            if let ProtectedUnicastReceiveOutcome::Events(batch) = outcome {
-                if let Some(frame) = batch.frames.into_iter().next() {
-                    ready = Some(frame);
-                }
+            if let ProtectedUnicastReceiveOutcome::Events(batch) = outcome
+                && let Some(frame) = batch.frames.into_iter().next()
+            {
+                ready = Some(frame);
             }
         }
 
