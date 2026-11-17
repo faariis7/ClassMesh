@@ -4,6 +4,7 @@
 pub enum RosterRejection {
     MissingRoster,
     ExpiredRoster,
+    UnboundedRosterExpiry,
     UnsignedRoster,
     WrongPrincipal,
     WrongRole,
@@ -131,6 +132,10 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
     }
     if roster.issued_unix_ms == 0 {
         return Err(RosterRejection::InvalidIssuedTimestamp);
+    }
+    // A maximum timestamp is an effectively permanent unverified grant; deny it.
+    if roster.expires_unix_ms == u64::MAX {
+        return Err(RosterRejection::UnboundedRosterExpiry);
     }
     if roster.expires_unix_ms <= request.now_unix_ms
         || roster.expires_unix_ms <= roster.issued_unix_ms
@@ -853,6 +858,37 @@ mod interior_whitespace_denial_tests {
         assert_eq!(
             qualify_teacher_roster(&request),
             Err(RosterRejection::InvalidStudentDeviceRoster)
+        );
+    }
+}
+
+#[cfg(test)]
+mod unbounded_expiry_denial_tests {
+    use super::*;
+
+    #[test]
+    fn indefinite_roster_expiry_is_denied_before_provenance_screening() {
+        let request = TeacherRosterRequest {
+            teacher_principal: "teacher-1",
+            required_role: "Teacher",
+            now_unix_ms: 200,
+            authorization_not_before_unix_ms: 100,
+            roster: Some(RosterEvidence {
+                teacher_principal: "teacher-1",
+                role: "Teacher",
+                issued_unix_ms: 150,
+                expires_unix_ms: u64::MAX,
+                signature: Some(&[1]),
+                student_device_ids: &["device-1"],
+            }),
+        };
+        assert_eq!(
+            qualify_teacher_roster(&request),
+            Err(RosterRejection::UnboundedRosterExpiry)
+        );
+        assert_eq!(
+            qualify_teacher_device_roster(&request, "device-1"),
+            Err(RosterRejection::UnboundedRosterExpiry)
         );
     }
 }
