@@ -41,6 +41,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pipe_name = parse_pipe_name(&args)?;
     let pipe = NamedPipeClient::connect(&pipe_name, Duration::from_secs(5))?;
+    // Bind the handshake to the OS-observed pipe server before sending Worker
+    // identity. A ServiceReady payload alone is not peer authentication.
+    let primary_service_pid = pipe.server_process_id()?;
+    if primary_service_pid == 0 || primary_service_pid == std::process::id() {
+        return Err("invalid Worker IPC server process identity".into());
+    }
+    // A Service-owned pipe must originate in Windows Session 0. Reject a
+    // same-user Session 1 pipe before disclosing WorkerHello. This is only
+    // an additional OS-level boundary, not LocalSystem token authentication.
+    if pipe.server_session_id()? != 0 {
+        return Err("Worker IPC server is not running in Windows Session 0".into());
+    }
     let hello = IpcFrame::worker_hello(std::process::id(), actual_session)
         .encode()
         .map_err(ipc_frame_error)?;
@@ -48,18 +60,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ready = read_one_frame(&pipe)?;
     match ready.message().map_err(ipc_message_error)? {
-        IpcMessage::ServiceReady => {
-            eprintln!("ClassMesh Worker IPC peer validated by Service");
-        }
+        IpcMessage::ServiceReady => {}
         other => {
             return Err(format!("unexpected IPC handshake message: {other:?}").into());
         }
     }
 
-    // Pin the original privileged control pipe's native Service PID before
-    // considering any optional diagnostic grant. Worker report bytes and
-    // the secondary telemetry address are not Service authentication.
-    let primary_service_pid = pipe.server_process_id()?;
+    // Fail closed if the native pipe server identity changes during handshake.
+    // This is continuity checking, not proof of a LocalSystem Service token.
+    if pipe.server_session_id()? != 0 {
+        return Err("Worker IPC server session changed during handshake".into());
+    }
+    if pipe.server_process_id()? != primary_service_pid {
+        return Err("Worker IPC server process changed during handshake".into());
+    }
+    eprintln!(
+        "ClassMesh Worker IPC ServiceReady received; Session 0/PID continuity checked (LocalSystem authorization unverified)"
+    );
     let (event_tx, event_rx) = mpsc::sync_channel(WORKER_IPC_EVENT_QUEUE_CAPACITY);
     let reader_pipe = pipe.try_clone()?;
     let _ipc_thread = spawn_ipc_reader(reader_pipe, event_tx);
@@ -143,7 +160,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             wait = wait.min(Duration::from_millis(10));
         }
 
-        match event_rx.recv_timeout(wait) {
+        let next_event = event_rx.recv_timeout(wait);
+        // Do not dispatch privileged control/input/media events if the OS-level
+        // pipe peer no longer matches the Service process observed at handshake.
+        // This remains a continuity check, not LocalSystem authorization.
+        if next_event.is_ok() {
+            // A failed native identity query is also a lost trust boundary.
+            // Release held keys/buttons before returning its error; `?` here
+            // would exit without releasing remote input.
+            let peer_identity = (|| -> Result<bool, Box<dyn std::error::Error>> {
+                Ok(pipe.server_process_id()? == primary_service_pid
+                    && pipe.server_session_id()? == 0)
+            })();
+            match peer_identity {
+                Ok(true) => {}
+                Ok(false) => {
+                    release_tracked_input(&mut input_injector);
+                    return Err("Worker IPC server identity changed before event dispatch".into());
+                }
+                Err(error) => {
+                    release_tracked_input(&mut input_injector);
+                    return Err(format!("Worker IPC server identity query failed: {error}").into());
+                }
+            }
+        }
+        match next_event {
             Ok(WorkerEvent::Control(command)) => match command {
                 classmesh_windows_runtime::ipc::IpcControlCommand::SuspendMedia => {
                     release_tracked_input(&mut input_injector);
@@ -1837,8 +1878,13 @@ fn read_one_frame(
         let mut frames = decoder
             .push_bytes(&buffer[..read])
             .map_err(ipc_frame_error)?;
-        if !frames.is_empty() {
-            return Ok(frames.remove(0));
+        if frames.len() > 1 {
+            return Err(
+                "ClassMesh Service sent multiple IPC frames before handshake completed".into(),
+            );
+        }
+        if let Some(frame) = frames.pop() {
+            return Ok(frame);
         }
     }
 }

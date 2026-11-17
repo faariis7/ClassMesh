@@ -172,7 +172,10 @@ impl PresentationWindow {
     /// `ID3D11Texture2D`, when the subresource index cannot be queried, when recovery has left the
     /// window temporarily without GPU presentation resources, or when D3D11/DXGI fails to present
     /// the frame.
-    pub fn present(&mut self, frame: &DecodedGpuFrame) -> windows::core::Result<()> {
+    pub fn present(
+        &mut self,
+        frame: &DecodedGpuFrame,
+    ) -> windows::core::Result<classmesh_render_win::PresentOutcome> {
         let mut texture: Option<ID3D11Texture2D> = None;
         unsafe {
             frame
@@ -194,7 +197,7 @@ impl PresentationWindow {
             ));
         };
         match presenter.present_nv12(&texture, subresource_index) {
-            Ok(_) => Ok(()),
+            Ok(outcome) => Ok(outcome),
             Err(error) => {
                 if classify_dxgi_error(&error) == DxgiFailureClass::DeviceLost {
                     self.device_lost = true;
