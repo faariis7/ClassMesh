@@ -93,6 +93,19 @@ fn contains_bidi_formatting(value: &str) -> bool {
 /// None is supplied by this API. Its return type intentionally has no Allow variant.
 pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), RosterRejection> {
     let roster = request.roster.ok_or(RosterRejection::MissingRoster)?;
+    // Reject oversized attacker-controlled principal/role bytes before any Unicode scan.
+    // This is a resource bound, not an identity policy.
+    if [
+        request.teacher_principal,
+        request.required_role,
+        roster.teacher_principal,
+        roster.role,
+    ]
+    .iter()
+    .any(|value| value.len() > 256)
+    {
+        return Err(RosterRejection::OversizedPrincipalOrRole);
+    }
     // Reject ambiguous or noncanonical identities before comparing principals/roles.
     for value in [
         request.teacher_principal,
@@ -110,18 +123,6 @@ pub fn qualify_teacher_roster(request: &TeacherRosterRequest<'_>) -> Result<(), 
         {
             return Err(RosterRejection::InvalidPrincipalOrRole);
         }
-    }
-    // Bound untrusted identity strings before comparisons; this is not an identity policy.
-    if [
-        request.teacher_principal,
-        request.required_role,
-        roster.teacher_principal,
-        roster.role,
-    ]
-    .iter()
-    .any(|value| value.len() > 256)
-    {
-        return Err(RosterRejection::OversizedPrincipalOrRole);
     }
     // A missing authorization epoch cannot establish freshness or prevent replay.
     if request.authorization_not_before_unix_ms == 0 {
@@ -281,6 +282,17 @@ mod scoped_batch_roster_tests {
                 student_device_ids: ids,
             }),
         }
+    }
+
+    #[test]
+    fn oversized_principal_is_denied_before_unicode_scan() {
+        let oversized = format!("{}\\u{202e}", "t".repeat(1024 * 1024));
+        let mut candidate = request(&["device-1"]);
+        candidate.teacher_principal = &oversized;
+        assert_eq!(
+            qualify_teacher_roster(&candidate),
+            Err(RosterRejection::OversizedPrincipalOrRole)
+        );
     }
 
     #[test]
