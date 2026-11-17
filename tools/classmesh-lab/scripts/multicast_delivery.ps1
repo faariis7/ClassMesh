@@ -99,6 +99,8 @@ try {
         WorkingDirectory = $runPath; RedirectStandardOutput = $trace; RedirectStandardError = $log
     }
     $process = Start-Process @processArgs
+    # Windows PowerShell can lose ExitCode after a fast child exits without an open handle.
+    $null = $process.Handle
     $elapsed = [Diagnostics.Stopwatch]::StartNew()
     $ready = $false
     while (!$process.WaitForExit(100)) {
