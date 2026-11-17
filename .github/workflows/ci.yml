@@ -65,6 +65,15 @@ jobs:
       - name: Test multicast delivery correlation
         run: python -B -m unittest discover -s tools/classmesh-lab/scripts/tests -p test_multicast_delivery.py
 
+      - name: Parse multicast delivery runner in Windows PowerShell
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          $path = (Resolve-Path '.\tools\classmesh-lab\scripts\multicast_delivery.ps1').Path
+          $null = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+          if ($errors) { throw ($errors -join [Environment]::NewLine) }
+
       - name: Validate Phase 4 PowerShell runner
         shell: pwsh
         run: .\scripts\phase4-two-pc.ps1 -Mode Help
