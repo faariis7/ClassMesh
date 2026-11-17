@@ -346,7 +346,7 @@ mod scoped_batch_roster_tests {
         assert_eq!(
             qualify_teacher_device_roster_batch(
                 &request(&["device-1"]),
-                &["device-1", "device-\\u{202e}1", "device-\\u{202e}1"],
+                &["device-1", "device-\u{202e}1", "device-\u{202e}1"],
             ),
             Err(RosterRejection::InvalidStudentDeviceRoster)
         );
