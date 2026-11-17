@@ -45,6 +45,7 @@ $ownsFilter = $false
 $ownsCapture = $false
 $lock = $null
 $locked = $false
+$locationPushed = $false
 $process = $null
 $complete = $false
 $etl = Join-Path $runPath 'PktMon.etl'
@@ -79,8 +80,11 @@ try {
         }
         Invoke-Pktmon filter add $filter -i "$TeacherIp" "$Group" -p $Port -t UDP | Out-Null
         $ownsFilter = $true
+        # Pktmon memory mode writes PktMon.etl in the stop command's working directory.
+        Push-Location -LiteralPath $runPath
+        $locationPushed = $true
         $captureArgs = @('start', '--capture', '--comp', $ComponentId, '--type', 'all', '--flags', '0x013',
-            '--pkt-size', 80, '--file-name', $etl, '--file-size', 64, '--log-mode', 'memory')
+            '--pkt-size', 80, '--file-size', 64, '--log-mode', 'memory')
         Invoke-Pktmon @captureArgs | Out-Null
         $ownsCapture = $true
     }
@@ -175,6 +179,7 @@ try {
                         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
                     }
                 }
+                if ($locationPushed) { Pop-Location }
                 if ($locked) { $lock.ReleaseMutex() }
                 if ($null -ne $lock) { $lock.Dispose() }
             }
