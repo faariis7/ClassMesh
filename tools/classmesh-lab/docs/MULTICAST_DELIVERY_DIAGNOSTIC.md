@@ -1,3 +1,13 @@
+## Unified RC gate — 2026-11-18
+
+Use one exact candidate SHA and `cargo build --locked` on both physical Windows
+x64 hosts. The network owner executes the existing two-host commands below for
+256-byte and 8192-byte frames on target and comparison adapters, retaining NIC
+counter/packet attribution and Worker-consumer totals. Synthetic ciphertext delivery
+does not establish SFrame open, decode or presentation: pair it with the approved
+authenticated Student production run. VM loopback is diagnostic only. Do not
+change persistent firewall/SCM/trust policy to obtain a passing result.
+
 # Protected multicast delivery on Windows
 
 Run the existing synthetic multicast lab as Teacher and Student on two Windows

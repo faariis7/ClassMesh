@@ -1,3 +1,97 @@
+## Unified release candidate — 2026-11-18
+
+Branch `integration/classmesh-unified-release-candidate`, Draft stacked on #771.
+Candidate SHA, current check URLs, native logs and artifact checksums are recorded
+in the Draft PR evidence section; source-PR results never qualify this candidate.
+
+### Integrated provenance
+
+- #771 `11233f8236d15fa36aefab1ebb559997d412eed5` is the M3 baseline,
+  including #772 `71efba19` and #775 `d33d6b72` by ancestry.
+- Merge #773 `9a4373a2cc75d44c8b24b693ec14fbdcb0c4e5b1`: only the missing
+  `a2368353`, `6ffe2d5a`, `9a4373a2` commits above shared base `49fdd990`.
+  Retains Service #761/#764 revocation and exact pending-install cancellation;
+  #763 `2426ca65` changes are consolidated in #773, not duplicated by history.
+- Cherry-pick #774 `a3a56ef0`, `0c972966`, `4bd9441d` with `-x` trailers;
+  no unrelated-history merge. `git range-diff` confirms source patches;
+  workflow conflicts preserve multicast checks plus Cargo-JSON test discovery.
+- Merge current main `19a472e5`, retaining #696 `34a3826d` unified Windows
+  packaging and engineering instructions, absent from the older M3 base.
+- RC-specific changes: one equivalent heartbeat let-chain for new MSRV Clippy;
+  committed root/fuzz lockfiles, locked CI and dependency inventory/provenance.
+  No new protocol, trust authority, allow path, feature activation or crypto downgrade.
+
+### Release checklist and evidence rules
+
+- [x] One reversible unified branch; source branches unchanged; no main merge.
+- [x] Software boundaries retained: deny-only bounded roster screening; exact
+  Worker/session revocation; bounded starts and cancellation; authenticated IPC;
+  authenticated SFrame before H.264, replay/rotation and bounded recovery queues.
+- [x] All source heads refreshed and hosted source CI/Security verified before import.
+- [ ] Exact final SHA: macOS fmt, Clippy, workspace/doc tests, correlation and audit.
+- [ ] Exact final SHA: VM1 native workspace, Service/Worker/Teacher/Identity,
+  ACL/v12, trusted-policy, protected loopback, Clippy, native guards/build/bundle.
+- [ ] Exact final SHA: Portable Rust, Windows Build including Rust 1.88 tests,
+  CodeQL analysis AND alert gate, Gitleaks, root/fuzz RustSec and fuzz smoke.
+- [ ] Download same-head Windows x64 package; validate fixed executables/index,
+  record ZIP/index/executable SHA-256 and source/CI metadata; inspect for secrets.
+- [ ] Independent security-owner and release-owner review, trust approval,
+  physical GPU/two-host qualification and authorized deployment decision.
+
+Unchecked boxes are release gates, not claims of failed implementation. The Draft
+PR carries live measured outcomes to avoid self-referential SHA edits and stale
+CI claims in source. VM1 is Windows 11 ARM64, not physical x64. Hosted x64 tests,
+VM tests, implemented code and production approval are separate statuses.
+
+### Security disposition and external owners
+
+Main CodeQL alerts #1–#5 remain OPEN, verified through GitHub on 2026-11-18.
+#1 nonce buffer was filled with OS randomness before use and failed on entropy
+error; #772 uses explicit `ring::rand::generate`. #2 was a test-only zero fallback,
+now replaced by live-proof replay denial. #3–#5 unchecked descriptor/ACE/SID typed
+reads are bounded/aligned by #772, with native negative regressions. They are
+remediated on this candidate, not dismissed on main. Final CodeQL must find no
+candidate alerts. Independent security review is still required; automated scans
+and this integration review do not grant that approval.
+
+| Gate | Accountable role | Required evidence |
+| --- | --- | --- |
+| M2 trust and real Completed | Security/trust owner + Service/Teacher owners | Approved CA/root, image signer, enrollment, roster issuer/verifier; LocalSystem to ordinary Teacher to Worker Completed; unauthorized/replay rejection and cleanup (#688) |
+| M3 GPU/presentation | Media/GPU owner + physical lab operator | Windows x64 D3D11 H.264, authenticated changing nonblank Student output, Stop/restart/recovery/device loss/minimize/restore |
+| Multicast target network | Network owner + two-host lab operator | Two physical x64 hosts/VLAN, selected sender/receiver NIC counters, attributed packets and Worker delivery |
+| Independent security/release approval | Security reviewer + release owner | Alert disposition, dependency maintenance notices, signing/installer/rollback approval |
+
+Roles are required owners, not an assertion that a named person has accepted.
+
+### Installation and rollback
+
+Use the existing [Windows package guide](WINDOWS_MVP_QUICKSTART.md) to download,
+verify ZIP SHA-256 from trusted CI, expand into a fresh local private directory,
+and Validate with independently recorded source/run/attempt/index pins. Package
+`0.0.1` is an unsigned RC: Windows 11 x64 is the qualification target, Rust 1.88+
+plus MSVC/Windows SDK is required for source builds, and the x64 VC++ runtime
+must satisfy each executable's generated bundle index. Preflight the actual
+machine; compilation does not prove runtime availability. Both lockfiles are the
+dependency inventory; toolchain/image versions must accompany any rebuild.
+
+Do not install Service or enroll trust from this task. An approved deployment
+requires protected paths/ACLs, approved Authenticode images, independently enrolled
+trust/roster authority, actual LocalSystem lifecycle and verified previous signed
+artifacts. Keep async H.264 confined to the qualification lab.
+
+For this noninstalled package, close only its own Teacher process, retain evidence,
+and remove only the newly created extraction/report directories. Roll back code
+by selecting the prior reviewed SHA on a new branch (no source-branch resets).
+For a future installed release, the Service/installer owner must stop the approved
+Service, retire Worker/session/key state, invoke the approved signed rollback
+transaction and recheck exact image pins, policy epoch, ordinary-account denial
+and authorized Completed. Never copy old policy files, lower an antirollback epoch,
+change trusted signers or assume an older EXE alone is an authorized rollback.
+
+Recommendation remains **NO-GO for production** until all independent/physical
+and exact-candidate validation gates are satisfied. Software RC review may proceed
+once the exact-head checks and artifacts are verified in the Draft PR.
+
 ## M3 final multicast integration candidate — 2026-11-18
 
 PR #771 combines the existing protected M3/decoder recovery, #769 bounded
