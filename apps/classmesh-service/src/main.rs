@@ -3678,10 +3678,10 @@ mod windows_service_app {
         matches: impl FnOnce(&T) -> bool,
         cancel: impl FnOnce(T),
     ) {
-        if pending.as_ref().is_some_and(matches) {
-            if let Some(operation) = pending.take() {
-                cancel(operation);
-            }
+        if pending.as_ref().is_some_and(matches)
+            && let Some(operation) = pending.take()
+        {
+            cancel(operation);
         }
     }
 
@@ -3690,10 +3690,8 @@ mod windows_service_app {
         worker_changed: bool,
         cancel: impl FnOnce(T),
     ) {
-        if worker_changed {
-            if let Some(operation) = pending.take() {
-                cancel(operation);
-            }
+        if worker_changed && let Some(operation) = pending.take() {
+            cancel(operation);
         }
     }
 
