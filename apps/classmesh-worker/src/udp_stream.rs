@@ -24,11 +24,11 @@ fn request_pending_keyframe<E>(
     now_us: u64,
     mut request: impl FnMut() -> Result<(), E>,
 ) -> Result<(), E> {
-    if keyframes.poll(now_us) {
-        if let Err(error) = request() {
-            keyframes.request();
-            return Err(error);
-        }
+    if keyframes.poll(now_us)
+        && let Err(error) = request()
+    {
+        keyframes.request();
+        return Err(error);
     }
     Ok(())
 }

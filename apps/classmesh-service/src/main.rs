@@ -2809,12 +2809,11 @@ mod windows_service_app {
                 .as_ref()
                 .is_some_and(|pending| pending.reply_tx.is_closed())
                 && let Some(pending) = pending_presentation_key_install.take()
+                && let Err(error) = workers.clear_presentation_key(pending.binding)
             {
-                if let Err(error) = workers.clear_presentation_key(pending.binding) {
-                    eprintln!(
-                        "ClassMesh Service could not clear abandoned Worker presentation key: {error}"
-                    );
-                }
+                eprintln!(
+                    "ClassMesh Service could not clear abandoned Worker presentation key: {error}"
+                );
             }
 
             while let Ok(result) = worker_presentation_key_result_rx.try_recv() {
@@ -2853,15 +2852,14 @@ mod windows_service_app {
                         // Worker incarnation can confirm telemetry ownership.
                         if let Some(peer) = workers.current_authenticated_receiver_worker()
                             && peer.worker_generation == pending.expected_worker_generation
-                        {
-                            if let Err(error) = receiver_telemetry_runtime.confirm_key_installed(
+                            && let Err(error) = receiver_telemetry_runtime.confirm_key_installed(
                                 key_from_confirmed_grant(pending.binding),
                                 peer,
-                            ) {
-                                eprintln!(
-                                    "ClassMesh Phase10 receiver key admission stayed disabled: {error:?}"
-                                );
-                            }
+                            )
+                        {
+                            eprintln!(
+                                "ClassMesh Phase10 receiver key admission stayed disabled: {error:?}"
+                            );
                         }
                         let _ = pending.reply_tx.send(Ok(pending.binding));
                     }
@@ -3680,10 +3678,10 @@ mod windows_service_app {
         matches: impl FnOnce(&T) -> bool,
         cancel: impl FnOnce(T),
     ) {
-        if pending.as_ref().is_some_and(matches) {
-            if let Some(operation) = pending.take() {
-                cancel(operation);
-            }
+        if pending.as_ref().is_some_and(matches)
+            && let Some(operation) = pending.take()
+        {
+            cancel(operation);
         }
     }
 
@@ -3692,10 +3690,8 @@ mod windows_service_app {
         worker_changed: bool,
         cancel: impl FnOnce(T),
     ) {
-        if worker_changed {
-            if let Some(operation) = pending.take() {
-                cancel(operation);
-            }
+        if worker_changed && let Some(operation) = pending.take() {
+            cancel(operation);
         }
     }
 

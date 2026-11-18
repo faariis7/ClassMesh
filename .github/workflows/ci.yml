@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -31,25 +33,25 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
       - name: Synthetic media lab
-        run: cargo run -p classmesh-lab --bin classmesh-lab
+        run: cargo run --locked -p classmesh-lab --bin classmesh-lab
 
       - name: Synthetic Wi-Fi direct fanout baseline
-        run: cargo run -p classmesh-lab --bin classmesh-wifi-fanout-benchmark -- --strategy direct-unicast --receivers 5 --frames 120
+        run: cargo run --locked -p classmesh-lab --bin classmesh-wifi-fanout-benchmark -- --strategy direct-unicast --receivers 5 --frames 120
 
       - name: Synthetic Wi-Fi relay fanout baseline
-        run: cargo run -p classmesh-lab --bin classmesh-wifi-fanout-benchmark -- --strategy relay --receivers 5 --frames 120
+        run: cargo run --locked -p classmesh-lab --bin classmesh-wifi-fanout-benchmark -- --strategy relay --receivers 5 --frames 120
 
       - name: Synthetic monitoring grid baseline
-        run: cargo run -p classmesh-lab --bin classmesh-monitoring-grid-benchmark -- --sources 30 --rounds 30
+        run: cargo run --locked -p classmesh-lab --bin classmesh-monitoring-grid-benchmark -- --sources 30 --rounds 30
 
       - name: Synthetic adaptive controller baseline
-        run: cargo run -p classmesh-lab --bin classmesh-adaptive-controller-benchmark -- --receivers 30 --rounds 30
+        run: cargo run --locked -p classmesh-lab --bin classmesh-adaptive-controller-benchmark -- --receivers 30 --rounds 30
 
   windows:
     name: Windows Build
@@ -57,10 +59,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       # Read-only Python stdlib regression check, before expensive builds.
       - name: Test CI timing report helper
         run: python -B -m unittest discover -s scripts/tests -p test_ci_timing_report.py
+
+      - name: Test Cargo native test artifact selection
+        shell: pwsh
+        run: .\scripts\tests\freeze_native_tests.ps1
 
       - name: Test multicast delivery correlation
         run: python -B -m unittest discover -s tools/classmesh-lab/scripts/tests -p test_multicast_delivery.py
@@ -73,6 +81,14 @@ jobs:
           $path = (Resolve-Path '.\tools\classmesh-lab\scripts\multicast_delivery.ps1').Path
           $null = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
           if ($errors) { throw ($errors -join [Environment]::NewLine) }
+
+      - name: Test Windows MVP packaging and diagnostic decisions
+        shell: pwsh
+        run: |
+          .\scripts\tests\windows_mvp_bundle.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'MVP bundle tests failed' }
+          .\scripts\tests\windows_mvp_diagnostics.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'MVP diagnostic tests failed' }
 
       - name: Validate Phase 4 PowerShell runner
         shell: pwsh
@@ -109,50 +125,25 @@ jobs:
           components: rustfmt, clippy
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
       # Freeze the default-feature native test image immediately after
       # workspace tests, BEFORE opt-in feature tests build another
-      # classmesh_win32-<hash>.exe under target/debug/deps.
+      # classmesh_win32-<hash>.exe. Resolve its path via Cargo's JSON API.
       - name: Freeze Phase 10 native Windows unit-test executable
         shell: pwsh
-        run: |
-          # Cargo may use a runner-level CARGO_TARGET_DIR outside the checkout.
-          # Resolve its actual target directory instead of assuming ./target.
-          $targetDir = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).target_directory
-          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($targetDir)) {
-            throw 'Unable to resolve Cargo target directory for native test image'
-          }
-          # Cargo's native Windows runner currently places test executables in
-          # debug/build/<package>/<hash>/out, not necessarily debug/deps.
-          # Inspect only these two known layouts; never pick an arbitrary exe.
-          $depsDir = Join-Path $targetDir 'debug/deps'
-          $buildDir = Join-Path $targetDir 'debug/build'
-          $bins = @()
-          if (Test-Path -LiteralPath $depsDir -PathType Container) {
-            $bins += @(Get-ChildItem -LiteralPath $depsDir -Filter 'classmesh_win32-*.exe' -File)
-          }
-          if (Test-Path -LiteralPath $buildDir -PathType Container) {
-            $bins += @(Get-ChildItem -LiteralPath $buildDir -Directory -Filter 'classmesh-win32' |
-              Get-ChildItem -Directory |
-              ForEach-Object { Get-ChildItem -LiteralPath (Join-Path $_.FullName 'out') -Filter 'classmesh_win32-*.exe' -File -ErrorAction SilentlyContinue })
-          }
-          if ($bins.Count -ne 1) {
-            throw "Expected exactly one default-feature native test executable under $targetDir, found $($bins.Count)"
-          }
-          New-Item -ItemType Directory -Path phase10-native-telemetry-bundle -Force | Out-Null
-          Copy-Item -LiteralPath $bins[0].FullName -Destination phase10-native-telemetry-bundle/classmesh-win32-native-tests.exe
+        run: .\scripts\freeze-native-tests.ps1
 
       - name: Build media diagnostics
-        run: cargo build -p classmesh-worker --bin classmesh-media-probe --bin classmesh-media-receiver --bin classmesh-media-recovery-probe --release
+        run: cargo build --locked -p classmesh-worker --bin classmesh-media-probe --bin classmesh-media-receiver --bin classmesh-media-recovery-probe --release
 
       - name: Build async H.264 qualification lab
         shell: pwsh
         run: |
-          cargo build -p classmesh-lab --bin classmesh-async-h264-qualify --release
+          cargo build --locked -p classmesh-lab --bin classmesh-async-h264-qualify --release
           if ($LASTEXITCODE -ne 0) { throw 'Async H.264 qualification build failed' }
           $targetDir = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).target_directory
           $exe = Join-Path $targetDir 'release/classmesh-async-h264-qualify.exe'
@@ -180,46 +171,65 @@ jobs:
           retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
       - name: Build network impairment proxy
-        run: cargo build -p classmesh-lab --bin classmesh-network-impairment-proxy --release
+        run: cargo build --locked -p classmesh-lab --bin classmesh-network-impairment-proxy --release
 
       - name: Build transport benchmark
-        run: cargo build -p classmesh-lab --bin classmesh-transport-benchmark --release
+        run: cargo build --locked -p classmesh-lab --bin classmesh-transport-benchmark --release
 
       - name: Build Wi-Fi fanout benchmark
-        run: cargo build -p classmesh-lab --bin classmesh-wifi-fanout-benchmark --release
+        run: cargo build --locked -p classmesh-lab --bin classmesh-wifi-fanout-benchmark --release
 
       - name: Build monitoring grid benchmark
-        run: cargo build -p classmesh-lab --bin classmesh-monitoring-grid-benchmark --release
+        run: cargo build --locked -p classmesh-lab --bin classmesh-monitoring-grid-benchmark --release
 
       - name: Build adaptive controller benchmark
-        run: cargo build -p classmesh-lab --bin classmesh-adaptive-controller-benchmark --release
+        run: cargo build --locked -p classmesh-lab --bin classmesh-adaptive-controller-benchmark --release
 
       - name: Clippy opt-in trusted policy Service
-        run: cargo clippy -p classmesh-service -p classmesh-win32 --all-targets --features experimental-trusted-policy -- -D warnings
+        run: cargo clippy --locked -p classmesh-service -p classmesh-win32 --all-targets --features experimental-trusted-policy -- -D warnings
 
       - name: Test opt-in trusted policy store
-        run: cargo test -p classmesh-win32 --features experimental-trusted-policy
+        run: cargo test --locked -p classmesh-win32 --features experimental-trusted-policy
 
       - name: Test opt-in trusted Service config parser
-        run: cargo test -p classmesh-service --features experimental-trusted-policy trusted_config_parser_matches_existing_version_one_contract
+        run: cargo test --locked -p classmesh-service --features experimental-trusted-policy trusted_config_parser_matches_existing_version_one_contract
 
       - name: Build opt-in trusted policy Service
-        run: cargo build -p classmesh-service --features experimental-trusted-policy
+        run: cargo build --locked -p classmesh-service --features experimental-trusted-policy
 
       - name: Build Phase 12B4 Service qualification binary
-        run: cargo build -p classmesh-service --release
-
-      - name: Build Phase 13 Worker deployment candidate
-        run: cargo build -p classmesh-worker --bin classmesh-worker --release
-
-      - name: Build Teacher UI shell
-        run: cargo build -p classmesh-teacher --bin classmesh-teacher-ui --release
-
-      - name: Validate Teacher UI workspace MSRV
         shell: pwsh
         run: |
-          rustup toolchain install 1.85.0 --profile minimal --no-self-update
-          cargo +1.85.0 check -p classmesh-teacher --bin classmesh-teacher-ui
+          cargo build --locked -p classmesh-service --release
+          if ($LASTEXITCODE -ne 0) { throw 'Service build failed' }
+          $env:GITHUB_SHA = (git rev-parse HEAD) # Receipts identify the explicit candidate checkout.
+          .\scripts\windows-mvp-bundle.ps1 -Mode RecordBuild -ExecutableName classmesh-service.exe -ReceiptsDir "$env:RUNNER_TEMP/classmesh-mvp-receipts"
+
+      - name: Build Phase 13 Worker deployment candidate
+        shell: pwsh
+        run: |
+          cargo build --locked -p classmesh-worker --bin classmesh-worker --release
+          if ($LASTEXITCODE -ne 0) { throw 'Worker build failed' }
+          $env:GITHUB_SHA = (git rev-parse HEAD) # Receipts identify the explicit candidate checkout.
+          .\scripts\windows-mvp-bundle.ps1 -Mode RecordBuild -ExecutableName classmesh-worker.exe -ReceiptsDir "$env:RUNNER_TEMP/classmesh-mvp-receipts"
+
+      - name: Build Teacher UI shell
+        shell: pwsh
+        run: |
+          cargo build --locked -p classmesh-teacher --bin classmesh-teacher-ui --release
+          if ($LASTEXITCODE -ne 0) { throw 'Teacher build failed' }
+          $env:GITHUB_SHA = (git rev-parse HEAD) # Receipts identify the explicit candidate checkout.
+          .\scripts\windows-mvp-bundle.ps1 -Mode RecordBuild -ExecutableName classmesh-teacher-ui.exe -ReceiptsDir "$env:RUNNER_TEMP/classmesh-mvp-receipts"
+
+      - name: Validate native Windows workspace MSRV (Rust 1.88)
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'MSRV toolchain installation failed' }
+          cargo +1.88.0 test --locked --workspace
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows workspace MSRV tests failed' }
+          cargo +1.88.0 check --locked -p classmesh-teacher --bin classmesh-teacher-ui
+          if ($LASTEXITCODE -ne 0) { throw 'Teacher UI MSRV check failed' }
 
       - name: Validate Phase 11F4 Teacher UI smoke helper
         shell: pwsh
@@ -258,22 +268,22 @@ jobs:
           if ($errors.Count -gt 0) { throw ($errors | Out-String) }
 
       - name: Build Phase 7 multicast probe
-        run: cargo build -p classmesh-lab --bin classmesh-multicast-probe --release
+        run: cargo build --locked -p classmesh-lab --bin classmesh-multicast-probe --release
 
       - name: Build Phase 6F interactive qualification client
-        run: cargo build -p classmesh-lab --bin classmesh-interactive-qualification --release
+        run: cargo build --locked -p classmesh-lab --bin classmesh-interactive-qualification --release
 
       - name: Build protected Teacher enrollment request tool
-        run: cargo build -p classmesh-lab --bin classmesh-enrollment-request --release
+        run: cargo build --locked -p classmesh-lab --bin classmesh-enrollment-request --release
 
       - name: Build approved Teacher enrollment installer
-        run: cargo build -p classmesh-lab --bin classmesh-enrollment-install --release
+        run: cargo build --locked -p classmesh-lab --bin classmesh-enrollment-install --release
 
       - name: Build offline Teacher enrollment authority
-        run: cargo build -p classmesh-lab --bin classmesh-enrollment-authority --release
+        run: cargo build --locked -p classmesh-lab --bin classmesh-enrollment-authority --release
 
       - name: Build Student Teacher authorization tool
-        run: cargo build -p classmesh-lab --bin classmesh-student-authorize-teacher --release
+        run: cargo build --locked -p classmesh-lab --bin classmesh-student-authorize-teacher --release
 
       - name: Validate Phase 6F tool help
         shell: pwsh
@@ -599,7 +609,7 @@ jobs:
           retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
       # Reuse the exact native Windows unit-test binary already built by
-      # cargo test --workspace; no extra x64 compiler on VMPal Windows ARM.
+      # cargo test --locked --workspace; no extra x64 compiler on VMPal Windows ARM.
       - name: Stage Phase 10 native Windows telemetry VM smoke bundle
         shell: pwsh
         run: |
@@ -675,6 +685,50 @@ jobs:
         with:
           name: classmesh-phase13-service-worker-windows-x64
           path: phase13-service-worker-bundle/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
+
+      - name: Stage unified Windows MVP from this job only
+        shell: pwsh
+        run: |
+          $env:GITHUB_SHA = (git rev-parse HEAD) # Same clean candidate as all build receipts.
+          .\scripts\windows-mvp-bundle.ps1 -Mode Stage -ReceiptsDir "$env:RUNNER_TEMP/classmesh-mvp-receipts" -OutputDir windows-mvp-output
+          $zip = 'windows-mvp-output/classmesh-windows-mvp-x64.zip'
+          $expanded = Join-Path $env:RUNNER_TEMP 'classmesh-mvp-ci-extracted'
+          $index = 'windows-mvp-output/classmesh-windows-mvp-x64/mvp-bundle-index.json'
+          $indexSha256 = (Get-FileHash -LiteralPath $index -Algorithm SHA256).Hash
+          Expand-Archive -LiteralPath $zip -DestinationPath $expanded
+          .\scripts\windows-mvp-bundle.ps1 -Mode Validate -BundleDir $expanded -ExpectedSourceRevision (git rev-parse HEAD) `
+            -ExpectedCiRunId $env:GITHUB_RUN_ID -ExpectedCiRunAttempt $env:GITHUB_RUN_ATTEMPT -ExpectedIndexSha256 $indexSha256
+
+      - name: Record release candidate dependency inventory
+        shell: pwsh
+        run: |
+          Copy-Item Cargo.lock windows-mvp-output/Cargo.lock
+          Copy-Item fuzz/Cargo.lock windows-mvp-output/fuzz-Cargo.lock
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate metadata failed' }
+          $provenance = [ordered]@{
+            source_revision = (git rev-parse HEAD)
+            version = $metadata.packages[0].version
+            target = 'x86_64-pc-windows-msvc'
+            rustc = (rustc -V)
+            cargo_lock_sha256 = (Get-FileHash Cargo.lock -Algorithm SHA256).Hash.ToLowerInvariant()
+            fuzz_lock_sha256 = (Get-FileHash fuzz/Cargo.lock -Algorithm SHA256).Hash.ToLowerInvariant()
+            production_qualified = $false
+          }
+          $provenance | ConvertTo-Json | Set-Content windows-mvp-output/release-candidate.json
+
+      - name: Upload unified Windows MVP ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: classmesh-windows-mvp-x64
+          path: |
+            windows-mvp-output/classmesh-windows-mvp-x64.zip
+            windows-mvp-output/classmesh-windows-mvp-x64.zip.sha256
+            windows-mvp-output/Cargo.lock
+            windows-mvp-output/fuzz-Cargo.lock
+            windows-mvp-output/release-candidate.json
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 

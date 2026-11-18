@@ -152,6 +152,19 @@ function Validate-Bundle {
     $index
 }
 
+function Stop-OwnedTeacherSmokeProcess {
+    param($Process)
+    $Process.Refresh()
+    if ($Process.HasExited) { return }
+    # Use the process object returned by Start-Process.
+    try { $Process.Kill() }
+    catch {
+        $Process.Refresh()
+        if (-not $Process.HasExited) { throw }
+    }
+    if (-not $Process.WaitForExit(5000)) { throw 'Teacher smoke cleanup could not confirm process exit' }
+}
+
 switch ($Mode) {
     "Help" {
         Show-Help
@@ -239,7 +252,7 @@ switch ($Mode) {
                 throw "Teacher UI window smoke failed: no responsive ClassMesh Teacher window; inspect Windows loader errors and runtime prerequisites"
             }
 
-            [ordered]@{
+            $evidence = [ordered]@{
                 schema_version = $SchemaVersion
                 observed_utc = (Get-Date).ToUniversalTime().ToString("o")
                 ui_scope_only = $true
@@ -258,30 +271,27 @@ switch ($Mode) {
                 visual_accessibility_reviewed = $null
                 physical_media_transport_qualified = $null
                 note = "Launch smoke only. Visual/accessibility acceptance and unrelated physical qualification remain separate."
-            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $evidencePath -Encoding utf8
-            $smokeSucceeded = $true
-
-            Write-Host "launch_smoke_passed=true"
-            Write-Host "process_id=$($process.Id)"
-            Write-Host "session_id=$sessionId"
-            Write-Host 'main_window_observed=true'
-            Write-Host "evidence=$evidencePath"
-            Write-Host "visual_accessibility_reviewed=undetermined"
-        }
-        finally {
-            if ($null -ne $process -and (-not $LeaveRunning -or -not $smokeSucceeded)) {
-                $process.Refresh()
-                if (-not $process.HasExited) {
-                    # Use the retained process object; a recycled PID must not
-                    # allow smoke cleanup to terminate an unrelated process.
-                    try { $process.Kill() }
-                    catch {
-                        $process.Refresh()
-                        if (-not $process.HasExited) { throw }
-                    }
-                    $process.WaitForExit(5000) | Out-Null
-                }
+            }
+            if ($LeaveRunning) {
+                $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $evidencePath -Encoding utf8
+                $smokeSucceeded = $true
             }
         }
+        finally {
+            if ($null -ne $process) {
+                try {
+                    if (-not $LeaveRunning -or -not $smokeSucceeded) { Stop-OwnedTeacherSmokeProcess $process }
+                } finally { $process.Dispose() }
+            }
+        }
+        if (-not $LeaveRunning) {
+            $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $evidencePath -Encoding utf8
+        }
+        Write-Host "launch_smoke_passed=true"
+        Write-Host "process_id=$($evidence.process_id)"
+        Write-Host "session_id=$sessionId"
+        Write-Host 'main_window_observed=true'
+        Write-Host "evidence=$evidencePath"
+        Write-Host "visual_accessibility_reviewed=undetermined"
     }
 }

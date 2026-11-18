@@ -1,3 +1,14 @@
+## Unified RC gate — 2026-11-18
+
+Use the exact unified Draft candidate and its locked graph (`cargo build --locked`).
+The commands below qualify the separate async lab only. Production Student still
+uses synchronous H.264; do not enable async from a VM or fixture result. The media
+owner must also record the authenticated production Student path through Stop,
+restart, recovery, device loss, minimize/restore and changing nonblank output on
+physical Windows x64. Pair the hardware/driver inventory with source/executable
+SHA-256, per-stage logs, HRESULTs, frame counters and cleanup; record unmeasured
+stages explicitly. This task has no physical GPU acceptance result.
+
 # M3 async H.264 hardware qualification
 
 Use an authorized physical Windows 11 x64 PC with an installed vendor graphics driver. Sign in at the local desktop in a regular user session. Keep the qualification window visible during the presentation run. The lab uses the default hardware D3D11 video adapter, so confirm its identity before interpreting the result. Record the GPU and driver separately for every machine tested. If the adapter or driver changes, repeat qualification.

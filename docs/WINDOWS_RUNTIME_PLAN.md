@@ -1,3 +1,30 @@
+## Unified RC physical trust qualification (2026-11-18)
+
+Software compilation/tests do not supply an approved root, signer, roster verifier
+or installation authority. See the current [RC checklist](WORK_PLAN.md). Once
+those inputs and protected installation are independently approved, the authorized
+operator runs the existing ACK probe from an ordinary interactive account:
+
+```powershell
+$probe = '.\tools\classmesh-lab\scripts\Invoke-ApprovedTeacherAck.ps1'
+& $probe -TeacherExe $ApprovedTeacherExe -Identity $ApprovedTeacherIdentity `
+  -ServiceName ClassMeshService -Connect $ApprovedEndpoint `
+  -ServerName $ApprovedServerName -Message 'RC qualification message' `
+  -Receipt $NewReceiptPath -TrustedSignerThumbprint $ApprovedImageSigner `
+  -TimeoutSeconds 35
+```
+
+Each variable must come from the approved lab configuration; the receipt path
+must be new under an existing protected local parent. The probe never provisions,
+starts or installs Service/Worker. A GUI human-click command must additionally
+reach correlated Worker `Completed` in that same approved trust/session topology.
+Record exact source/image hashes, SCM LocalSystem PID/session, ordinary Teacher
+token/session, Worker incarnation, correlated request/result, unauthorized/replay
+rejections, key clear, Stop/restart and no surviving test-owned processes. A missing
+roster verifier remains an explicit blocker; never add an allow path to obtain PASS.
+The disposable SCM script's `-Mode Plan` is safe preparation; `-Mode Run` remains
+a separate approved, exclusive lab operation. No VM2 or persistent policy changes.
+
 # Windows Runtime Validation Plan
 
 This plan converts architectural assumptions into executable tests before ClassMesh grows a large UI or feature surface.
