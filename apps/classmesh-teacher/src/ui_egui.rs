@@ -375,10 +375,10 @@ impl TeacherEguiShell {
         {
             return;
         }
-        if let Some((session, status)) = self.command_status.get_mut(&request_id) {
-            if *session == control_session_id {
-                *status = advance_command_status(*status, state);
-            }
+        if let Some((session, status)) = self.command_status.get_mut(&request_id)
+            && *session == control_session_id
+        {
+            *status = advance_command_status(*status, state);
         }
     }
 
