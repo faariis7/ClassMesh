@@ -43,6 +43,35 @@ PR carries live measured outcomes to avoid self-referential SHA edits and stale
 CI claims in source. VM1 is Windows 11 ARM64, not physical x64. Hosted x64 tests,
 VM tests, implemented code and production approval are separate statuses.
 
+### Measured candidate validation
+
+The unified candidate has passed macOS ARM64 Rust 1.100 stable and Rust 1.88
+workspace/doc tests (1,333 each), rustfmt, workspace Clippy with warnings denied,
+6 multicast correlation regressions, Cargo artifact selection fixtures, 28 package
+and 30 diagnostic regressions. Root/fuzz audits use cargo-audit 0.23.0 and database
+`233155b4025b854c68a4b199c0e32d7fd53291a2`: zero blocking vulnerabilities, no ignores;
+four visible root maintenance notices remain. Reviewed #774 external dependency
+versions are retained; only local workspace dependency edges are reconciled.
+
+VM1 Windows 11 ARM64 / Rust 1.99 native validation is split by required privileges:
+1,749 top-level workspace tests passed as the ordinary account; 49 tests needing
+machine CNG keys, protected test ACL/Registry/volume access or symlink fixtures
+passed in a narrowly filtered elevated rerun. This covers all 1,798 top-level
+workspace tests, with no ignored tests or unresolved failures. Child-process
+results are kept in logs rather than double-counted. Ordinary-user Clippy and
+trusted-policy Clippy, Service config parser, protected unicast/multicast loopback
+(replay, forged high ID, epoch rotation), and native application builds passed.
+The initial OS permission failures are retained as harness evidence, not presented
+as code regressions or hidden by skips. No Service was installed and no persistent
+trust/SCM setting was changed. VM1 is not physical x64 qualification.
+
+The final immutable SHA, same-SHA reruns, hosted outcomes, CodeQL scan ref/tree,
+artifact URLs and ZIP/index/executable checksums are the live evidence record in
+[Draft PR #776](https://github.com/faariis7/ClassMesh/pull/776). These prose counts
+alone never qualify a later commit: exact-head Actions and native evidence remain
+mandatory. Hosted x64 stable/MSRV builds and package validation are independent
+of VM1; no unsigned bundle is commercially trusted or approved for installation.
+
 ### Security disposition and external owners
 
 Main CodeQL alerts #1–#5 remain OPEN, verified through GitHub on 2026-11-18.
