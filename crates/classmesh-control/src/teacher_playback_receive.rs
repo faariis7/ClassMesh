@@ -218,10 +218,10 @@ async fn receive_authenticated_teacher_control_over(
     // Heartbeat repeats the session identifier inside its payload. A valid
     // outer envelope must not launder a heartbeat from another session into
     // the owning dispatcher, even on an authenticated QUIC connection.
-    if let Some(control_envelope::Payload::Heartbeat(heartbeat)) = &envelope.payload {
-        if heartbeat.control_session_id != envelope.control_session_id {
-            return Err(AuthenticatedTeacherReceiveError::InnerSessionMismatch);
-        }
+    if let Some(control_envelope::Payload::Heartbeat(heartbeat)) = &envelope.payload
+        && heartbeat.control_session_id != envelope.control_session_id
+    {
+        return Err(AuthenticatedTeacherReceiveError::InnerSessionMismatch);
     }
     let is_playback = matches!(
         envelope.payload,

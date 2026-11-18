@@ -18,15 +18,23 @@ the audit finds vulnerabilities.
 
 ## Lockfile policy
 
-At baseline revision `19a472e5714c0945ab6585093584ba3848e53e09`, Git tracked
-neither lockfile. CI resolved packages from manifests at build time, with a
-separate Rust 1.85 Teacher UI check. The audit preserves that workflow by
-generating a lockfile in the runner when absent. If a lockfile is added in the
-future, the audit validates it with `cargo fetch --locked` and scans it without
-updating it. The audit captures a point-in-time resolution that may differ
-from other builds. Reproducible releases would require adopting a reviewed
-lockfile and making build and release jobs consume it with `--locked`. See the
-[Cargo lockfile guidance](https://doc.rust-lang.org/cargo/faq.html#why-have-cargolock-in-version-control).
+The unified release candidate commits both Cargo-generated lockfiles. Portable,
+Windows stable/MSRV and release builds use `--locked`; the audit fetches and
+scans those exact files, retaining their hashes and reports. The unified artifact
+also carries both lockfiles as the dependency inventory and `release-candidate.json`
+with version, source SHA, target, compiler and lockfile SHA-256 values. This is
+an intentional change from #774's point-in-time untracked-lock policy, required
+for repeatable candidate dependency resolution. No manifest dependency version,
+accessibility feature or crypto selection was relaxed.
+
+Build and audit therefore share an all-target resolution; compiled feature and
+platform subsets naturally differ. Fuzz has its own committed resolution, not
+an assertion that the two workspaces are identical. Rust stable and the hosted
+Windows image remain moving inputs: a locked graph does not establish bit-for-bit
+PE reproducibility across compiler/SDK versions. Record the CI toolchain and keep
+the original artifact and checksums for release review. Update locks only through
+a reviewed change followed by both audits and all affected build gates. See the
+[Cargo lockfile guidance](https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html).
 
 ## Initial findings
 
