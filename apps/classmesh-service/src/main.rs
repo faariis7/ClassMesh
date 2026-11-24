@@ -346,6 +346,15 @@ mod windows_service_app {
         }
     }
 
+    // A committed Worker start owns its slot even if the caller has gone away.
+    // The slot is retired only by a correlated result or Worker/key retirement.
+    fn presentation_start_slot_busy(
+        multicast: Option<&tokio::sync::oneshot::Sender<Result<(), String>>>,
+        unicast: Option<&tokio::sync::oneshot::Sender<Result<(), String>>>,
+    ) -> bool {
+        multicast.is_some() || unicast.is_some()
+    }
+
     #[derive(Debug)]
     struct PendingPresentationMulticastStart {
         expected_process_id: u32,
@@ -2901,12 +2910,9 @@ mod windows_service_app {
                 }
             }
 
-            if pending_presentation_multicast_start
-                .as_ref()
-                .is_some_and(|pending| pending.reply_tx.is_closed())
-            {
-                pending_presentation_multicast_start = None;
-            }
+            // The caller may time out after the authenticated Worker accepted
+            // this committed start. Keep the slot until its correlated Worker
+            // result or Worker retirement; otherwise a second start can overlap.
 
             if pending_presentation_multicast_start
                 .as_ref()
@@ -2921,12 +2927,9 @@ mod windows_service_app {
                     .send(Err("control.presentation.worker_exited".to_owned()));
             }
 
-            if pending_presentation_unicast_start
-                .as_ref()
-                .is_some_and(|pending| pending.reply_tx.is_closed())
-            {
-                pending_presentation_unicast_start = None;
-            }
+            // The caller may time out after the authenticated Worker accepted
+            // this committed start. Keep the slot until its correlated Worker
+            // result or Worker retirement; otherwise a second start can overlap.
 
             if pending_presentation_unicast_start
                 .as_ref()
@@ -3006,9 +3009,14 @@ mod windows_service_app {
             }
 
             while let Ok(dispatch) = presentation_multicast_start_rx.try_recv() {
-                if pending_presentation_multicast_start.is_some()
-                    || pending_presentation_unicast_start.is_some()
-                {
+                if presentation_start_slot_busy(
+                    pending_presentation_multicast_start
+                        .as_ref()
+                        .map(|p| &p.reply_tx),
+                    pending_presentation_unicast_start
+                        .as_ref()
+                        .map(|p| &p.reply_tx),
+                ) {
                     let _ = dispatch
                         .reply_tx
                         .send(Err("control.presentation.worker_busy".to_owned()));
@@ -3108,9 +3116,14 @@ mod windows_service_app {
             }
 
             while let Ok(dispatch) = presentation_unicast_start_rx.try_recv() {
-                if pending_presentation_multicast_start.is_some()
-                    || pending_presentation_unicast_start.is_some()
-                {
+                if presentation_start_slot_busy(
+                    pending_presentation_multicast_start
+                        .as_ref()
+                        .map(|p| &p.reply_tx),
+                    pending_presentation_unicast_start
+                        .as_ref()
+                        .map(|p| &p.reply_tx),
+                ) {
                     let _ = dispatch
                         .reply_tx
                         .send(Err("control.presentation.worker_busy".to_owned()));
@@ -4262,6 +4275,19 @@ mod windows_service_app {
             wrong = exact;
             wrong.stream_id = 8;
             assert!(!pending.matches(&wrong));
+        }
+
+        #[test]
+        fn committed_start_keeps_busy_slot_after_reply_receiver_drops() {
+            let (multicast_tx, multicast_rx) = tokio::sync::oneshot::channel();
+            drop(multicast_rx);
+            assert!(multicast_tx.is_closed());
+            assert!(presentation_start_slot_busy(Some(&multicast_tx), None));
+            let (unicast_tx, unicast_rx) = tokio::sync::oneshot::channel();
+            drop(unicast_rx);
+            assert!(unicast_tx.is_closed());
+            assert!(presentation_start_slot_busy(None, Some(&unicast_tx)));
+            assert!(!presentation_start_slot_busy(None, None));
         }
 
         #[test]
