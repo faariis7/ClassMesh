@@ -678,7 +678,7 @@ const MEDIA_START_CANCELLED: u8 = 2;
 pub(crate) struct MediaStartCommit(Arc<AtomicU8>);
 
 impl MediaStartCommit {
-    fn pending() -> Self {
+    pub(crate) fn pending() -> Self {
         Self(Arc::new(AtomicU8::new(MEDIA_START_PENDING)))
     }
 
@@ -1833,6 +1833,20 @@ async fn await_presentation_start(
     }
 }
 
+async fn await_live_presentation_start(
+    connection: &quinn::Connection,
+    commit: MediaStartCommit,
+    reply_rx: &mut oneshot::Receiver<Result<(), String>>,
+) -> Result<(), String> {
+    tokio::select! {
+        result = await_presentation_start(commit.clone(), reply_rx) => result,
+        _ = connection.closed() => {
+            commit.cancel();
+            Err("control.presentation.start_disconnected".to_owned())
+        }
+    }
+}
+
 async fn run_established_session(
     connection: &quinn::Connection,
     channel: ControlChannel,
@@ -2379,7 +2393,8 @@ async fn run_established_session(
                                                             },
                                                         ) {
                                                         Ok(()) => {
-                                                            await_presentation_start(
+                                                            await_live_presentation_start(
+                                                                connection,
                                                                 commit,
                                                                 &mut reply_rx,
                                                             )
@@ -2423,8 +2438,12 @@ async fn run_established_session(
                                                 },
                                             ) {
                                                 Ok(()) => {
-                                                    await_presentation_start(commit, &mut reply_rx)
-                                                        .await
+                                                    await_live_presentation_start(
+                                                        connection,
+                                                        commit,
+                                                        &mut reply_rx,
+                                                    )
+                                                    .await
                                                 }
                                                 Err(mpsc::TrySendError::Full(_)) => {
                                                     Err("control.presentation.start_backpressure"
