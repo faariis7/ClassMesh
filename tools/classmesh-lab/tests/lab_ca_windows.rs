@@ -671,6 +671,51 @@ fn teacher_authorization_requires_proven_issuer_and_role_before_grant() {
         &correct_ca,
     );
 
+    // Grant the one opted-in capability through the same enrolled identity path.
+    let message_authorization = stage.join("state/authorization-message.json");
+    fs::write(&message_authorization, &original_state).unwrap();
+    let authorize_message = |result_path: &Path| {
+        run(
+            GRANT,
+            &[
+                "--request",
+                text(&teacher_request),
+                "--result",
+                text(result_path),
+                "--trust-root",
+                text(&correct_ca),
+                "--authorization",
+                text(&message_authorization),
+                "--allow-teacher-message",
+            ],
+        )
+    };
+    assert!(!authorize_message(&forged_path).status.success());
+    assert_eq!(fs::read(&message_authorization).unwrap(), original_state);
+    let output = authorize_message(&approved_path);
+    assert!(
+        output.status.success(),
+        "explicit signed Message grant failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let message_store = DurableAuthorizationState::new(&message_authorization)
+        .load()
+        .unwrap()
+        .unwrap();
+    let message_grant = message_store
+        .principal(PrincipalId(
+            teacher.principal_id.clone().try_into().unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        message_grant.permissions,
+        std::collections::BTreeSet::from([
+            classmesh_security::Permission::ViewInteractive,
+            classmesh_security::Permission::ControlInput,
+            classmesh_security::Permission::SendTeacherMessage,
+        ])
+    );
+
     // A valid signed and issuer-verified Teacher may get ONLY these two
     // existing control permissions; no credential or privilege is invented.
     let result = authorized(&teacher_request, &approved_path, &correct_ca);

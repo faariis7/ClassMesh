@@ -1,3 +1,17 @@
+## Live Teacher runtime — current #776 iteration
+
+The Teacher command stream starts after the Hello sequence, publishes liveness
+heartbeats on the same stream and can bootstrap M2 control before a
+presentation exists. Use the [proposed roster trust decision](decisions/0009-teacher-roster-trust.md)
+to obtain the issuer, organization, signed evidence, protected freshness policy
+and CNG access contract. Then wire verified enrollment and the approved
+connector into the Windows Teacher entry point.
+
+Run the authorized Service/Worker Message acceptance before full M3 and M4.
+The operator must confirm the visible Message and record a genuine correlated
+Completed, unauthorized/replay denial, key and Worker retirement, and cleanup.
+Use the unified x64 artifact and existing signing/SCM guides for M5.
+
 ## Unified RC follow-up — 2026-11-25
 
 The single release-integration branch remains [Draft PR #776](https://github.com/faariis7/ClassMesh/pull/776),

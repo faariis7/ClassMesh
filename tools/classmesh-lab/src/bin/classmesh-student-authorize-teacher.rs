@@ -35,6 +35,7 @@ mod windows_app {
         result: PathBuf,
         authorization: PathBuf,
         trust_roots: Vec<PathBuf>,
+        allow_teacher_message: bool,
     }
 
     impl Config {
@@ -44,6 +45,7 @@ mod windows_app {
             let mut result = None;
             let mut trust_roots = Vec::new();
             let mut authorization = None;
+            let mut allow_teacher_message = false;
 
             while let Some(arg) = args.next() {
                 let mut value = || {
@@ -55,6 +57,7 @@ mod windows_app {
                     "--trust-root" => trust_roots.push(PathBuf::from(value()?)),
                     "--result" => result = Some(PathBuf::from(value()?)),
                     "--authorization" => authorization = Some(PathBuf::from(value()?)),
+                    "--allow-teacher-message" => allow_teacher_message = true,
                     "--help" | "-h" => return Err(Self::usage().to_owned()),
                     _ => return Err(format!("unknown argument: {arg}\n\n{}", Self::usage())),
                 }
@@ -66,6 +69,7 @@ mod windows_app {
             Ok(Self {
                 request: request.ok_or("--request is required")?,
                 trust_roots,
+                allow_teacher_message,
                 result: result
                     .ok_or_else(|| format!("--result is required\n\n{}", Self::usage()))?,
                 authorization: authorization
@@ -80,8 +84,9 @@ Required:\n\
   --trust-root <trusted-ca.der> (repeat 1..=16)\n\
   --result <teacher-approved.pb>\n\
   --authorization <Student authorization.json>\n\n\
-Adds exactly one previously-absent Teacher principal with only ViewInteractive and\n\
-ControlInput permissions. Existing principals are never replaced by this qualification tool."
+Adds one previously absent Teacher with ViewInteractive and ControlInput.\n\
+  --allow-teacher-message additionally grants SendTeacherMessage for approved qualification.\n\
+Existing principals are never replaced."
         }
     }
 
@@ -193,6 +198,9 @@ ControlInput permissions. Existing principals are never replaced by this qualifi
         let mut permissions = BTreeSet::new();
         permissions.insert(Permission::ViewInteractive);
         permissions.insert(Permission::ControlInput);
+        if config.allow_teacher_message {
+            permissions.insert(Permission::SendTeacherMessage);
+        }
         let fingerprint = approved.credential.fingerprint;
         let mut credentials = BTreeMap::new();
         credentials.insert(fingerprint, approved.credential);
@@ -213,7 +221,11 @@ ControlInput permissions. Existing principals are never replaced by this qualifi
         println!("teacher_authorization=installed");
         println!("principal_id={}", hex(&approved.principal_id.0));
         println!("credential_fingerprint_sha256={}", hex(&fingerprint.0));
-        println!("permissions=ViewInteractive,ControlInput");
+        if config.allow_teacher_message {
+            println!("permissions=ViewInteractive,ControlInput,SendTeacherMessage");
+        } else {
+            println!("permissions=ViewInteractive,ControlInput");
+        }
         println!("authorization={}", config.authorization.display());
         Ok(())
     }

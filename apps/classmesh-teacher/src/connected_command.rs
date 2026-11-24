@@ -5,13 +5,13 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 
 use classmesh_control::NegotiatedHello;
 use classmesh_control::client_session::ClientControlSession;
-use classmesh_control::handshake::EstablishedControlSession;
+use classmesh_control::handshake::{EstablishedControlSession, FIRST_POST_HELLO_SEQUENCE};
 use classmesh_control::live_authorization::{LiveAuthorizationError, LiveAuthorizationStore};
 use classmesh_control::peer_identity::{PeerIdentityError, authenticated_peer_identity};
 use classmesh_control::quic::{ControlChannel, ControlSendHalf, ControlTransportError};
 use classmesh_protocol::control_wire::TeacherInteractionKind;
 use classmesh_protocol::control_wire::{
-    ControlEnvelope, ProtocolVersion as WireVersion, control_envelope,
+    ControlEnvelope, Heartbeat, MediaHealth, ProtocolVersion as WireVersion, control_envelope,
 };
 use classmesh_protocol::teacher_interaction::{self, TeacherInteractionError};
 use classmesh_protocol::{ControlRole, teacher_interaction::TEACHER_INTERACTION_MIN_VERSION};
@@ -41,22 +41,85 @@ pub enum TeacherCommandSendError {
     Transport(ControlTransportError),
 }
 
+/// Expected StudentDevice, enrolled monitoring source and exact QUIC session.
+/// The route describes what to verify. It never grants authorization itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TeacherControlRoute {
+    expected_student: PrincipalId,
+    source_id: MonitoringSourceId,
+    control_session_id: u64,
+    playback_binding: Option<TeacherPlaybackBinding>,
+    active: bool,
+}
+
+impl TeacherControlRoute {
+    pub fn new(
+        expected_student: PrincipalId,
+        source_id: MonitoringSourceId,
+        control_session_id: u64,
+    ) -> Result<Self, TeacherCommandSendError> {
+        if control_session_id == 0 {
+            return Err(TeacherCommandSendError::SessionMismatch);
+        }
+        if source_id.0 == 0 || expected_student == PrincipalId([0; 32]) {
+            return Err(TeacherCommandSendError::SourceMismatch);
+        }
+        Ok(Self {
+            expected_student,
+            source_id,
+            control_session_id,
+            playback_binding: None,
+            active: true,
+        })
+    }
+
+    #[must_use]
+    pub const fn control_session_id(self) -> u64 {
+        self.control_session_id
+    }
+
+    #[must_use]
+    pub const fn expected_student(self) -> PrincipalId {
+        self.expected_student
+    }
+
+    #[must_use]
+    pub const fn source_id(self) -> MonitoringSourceId {
+        self.source_id
+    }
+
+    #[must_use]
+    pub const fn is_active(self) -> bool {
+        self.active
+    }
+}
+
+impl From<&TeacherPlaybackSessionOwner> for TeacherControlRoute {
+    fn from(owner: &TeacherPlaybackSessionOwner) -> Self {
+        Self {
+            expected_student: owner.expected_student(),
+            source_id: owner.source_id(),
+            control_session_id: owner.binding().control_session_id,
+            playback_binding: Some(owner.binding()),
+            active: owner.is_active(),
+        }
+    }
+}
+
 fn prepare_teacher_interaction(
-    owner: &TeacherPlaybackSessionOwner,
+    route: TeacherControlRoute,
     negotiated: &NegotiatedHello,
     action: &TeacherInteractionUiAction,
     sequence: u64,
     request_id: u64,
 ) -> Result<ControlEnvelope, TeacherCommandSendError> {
-    if !owner.is_active() {
+    if !route.active {
         return Err(TeacherCommandSendError::Retired);
     }
-    if owner.source_id() != action.source_id {
+    if route.source_id != action.source_id {
         return Err(TeacherCommandSendError::SourceMismatch);
     }
-    if owner.binding().control_session_id == 0
-        || owner.binding().control_session_id != action.control_session_id
-    {
+    if route.control_session_id == 0 || route.control_session_id != action.control_session_id {
         return Err(TeacherCommandSendError::SessionMismatch);
     }
     if negotiated.role != ControlRole::Teacher {
@@ -86,7 +149,7 @@ fn prepare_teacher_interaction(
         return Err(TeacherCommandSendError::CapabilityUnavailable);
     }
     Ok(ControlEnvelope {
-        control_session_id: owner.binding().control_session_id,
+        control_session_id: route.control_session_id,
         sequence,
         request_id,
         protocol_version: Some(WireVersion {
@@ -100,7 +163,7 @@ fn prepare_teacher_interaction(
 }
 
 pub(crate) fn verify_current_student(
-    owner: &TeacherPlaybackSessionOwner,
+    expected_student: PrincipalId,
     connection: &Connection,
     authorization: &LiveAuthorizationStore,
     now_ms: u64,
@@ -110,7 +173,7 @@ pub(crate) fn verify_current_student(
         .map_err(TeacherCommandSendError::Authorization)?;
     let peer = authenticated_peer_identity(connection, snapshot.store(), now_ms)
         .map_err(TeacherCommandSendError::PeerIdentity)?;
-    if peer.principal_id() != owner.expected_student()
+    if peer.principal_id() != expected_student
         || snapshot
             .store()
             .principal(peer.principal_id())
@@ -124,9 +187,7 @@ pub(crate) fn verify_current_student(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TeacherCommandRoute {
-    expected_student: PrincipalId,
-    source_id: MonitoringSourceId,
-    binding: TeacherPlaybackBinding,
+    control: TeacherControlRoute,
     teacher_principal: PrincipalId,
     connection_id: usize,
 }
@@ -145,7 +206,7 @@ pub struct TeacherCommandSender {
 impl Default for TeacherCommandSender {
     fn default() -> Self {
         Self {
-            next_sequence: 1,
+            next_sequence: FIRST_POST_HELLO_SEQUENCE,
             next_request_id: 1,
             bound: None,
             retired: false,
@@ -194,7 +255,7 @@ impl TeacherCommandSender {
         now_ms: impl Fn() -> u64,
     ) -> Result<u64, TeacherCommandSendError> {
         self.send_over(
-            owner,
+            owner.into(),
             (&session.connection, &session.established),
             TeacherWriter::Whole(&mut session.channel),
             authorization,
@@ -216,8 +277,22 @@ impl TeacherCommandSender {
         action: &TeacherInteractionUiAction,
         now_ms: impl Fn() -> u64,
     ) -> Result<u64, TeacherCommandSendError> {
+        self.send_control_on_split(owner.into(), session, sender, authorization, action, now_ms)
+            .await
+    }
+
+    /// Write an interaction on an authenticated control session before any presentation exists.
+    pub async fn send_control_on_split(
+        &mut self,
+        route: TeacherControlRoute,
+        session: (&Connection, &EstablishedControlSession),
+        sender: &mut ControlSendHalf,
+        authorization: &LiveAuthorizationStore,
+        action: &TeacherInteractionUiAction,
+        now_ms: impl Fn() -> u64,
+    ) -> Result<u64, TeacherCommandSendError> {
         self.send_over(
-            owner,
+            route,
             session,
             TeacherWriter::Half(sender),
             authorization,
@@ -227,65 +302,130 @@ impl TeacherCommandSender {
         .await
     }
 
+    /// Send control-plane liveness on the same stream and sequence ledger as commands.
+    pub async fn send_heartbeat_on_split(
+        &mut self,
+        route: TeacherControlRoute,
+        session: (&Connection, &EstablishedControlSession),
+        sender: &mut ControlSendHalf,
+        authorization: &LiveAuthorizationStore,
+        monotonic_time_us: u64,
+        now_ms: impl Fn() -> u64,
+    ) -> Result<(), TeacherCommandSendError> {
+        let version = session.1.negotiated.version;
+        let frame = ControlEnvelope {
+            control_session_id: route.control_session_id,
+            sequence: self.next_sequence,
+            request_id: 0,
+            protocol_version: Some(WireVersion {
+                major: u32::from(version.major),
+                minor: u32::from(version.minor),
+            }),
+            payload: Some(control_envelope::Payload::Heartbeat(Heartbeat {
+                monotonic_time_us,
+                control_session_id: route.control_session_id,
+                media: MediaHealth::Idle as i32,
+            })),
+        };
+        self.write_reserved(
+            route,
+            session,
+            TeacherWriter::Half(sender),
+            authorization,
+            &frame,
+            now_ms,
+        )
+        .await
+    }
+
     async fn send_over(
         &mut self,
-        owner: &TeacherPlaybackSessionOwner,
+        route: TeacherControlRoute,
         session: (&Connection, &EstablishedControlSession),
-        mut writer: TeacherWriter<'_>,
+        writer: TeacherWriter<'_>,
         authorization: &LiveAuthorizationStore,
         action: &TeacherInteractionUiAction,
         now_ms: impl Fn() -> u64,
     ) -> Result<u64, TeacherCommandSendError> {
-        let (connection, established) = session;
         if self.retired {
             return Err(TeacherCommandSendError::Retired);
         }
-        if established.control_session_id != owner.binding().control_session_id {
-            self.retire(connection);
+        if session.1.control_session_id != route.control_session_id {
+            self.retire(session.0);
             return Err(TeacherCommandSendError::SessionMismatch);
         }
         let frame = prepare_teacher_interaction(
-            owner,
-            &established.negotiated,
+            route,
+            &session.1.negotiated,
             action,
             self.next_sequence,
             self.next_request_id,
         )?;
-        let (Some(next_sequence), Some(next_request_id)) = (
-            self.next_sequence.checked_add(1),
-            self.next_request_id.checked_add(1),
-        ) else {
-            self.retire(connection);
+        let Some(next_request_id) = self.next_request_id.checked_add(1) else {
+            self.retire(session.0);
             return Err(TeacherCommandSendError::InvalidCounters);
         };
-        if let Err(error) = verify_current_student(owner, connection, authorization, now_ms()) {
+        self.write_reserved(route, session, writer, authorization, &frame, now_ms)
+            .await?;
+        self.next_request_id = next_request_id;
+        Ok(frame.request_id)
+    }
+
+    async fn write_reserved(
+        &mut self,
+        route: TeacherControlRoute,
+        session: (&Connection, &EstablishedControlSession),
+        mut writer: TeacherWriter<'_>,
+        authorization: &LiveAuthorizationStore,
+        frame: &ControlEnvelope,
+        now_ms: impl Fn() -> u64,
+    ) -> Result<(), TeacherCommandSendError> {
+        let (connection, established) = session;
+        if self.retired || !route.active {
+            return Err(TeacherCommandSendError::Retired);
+        }
+        if established.control_session_id != route.control_session_id
+            || route.control_session_id == 0
+        {
+            self.retire(connection);
+            return Err(TeacherCommandSendError::SessionMismatch);
+        }
+        if established.negotiated.role != ControlRole::Teacher {
+            self.retire(connection);
+            return Err(TeacherCommandSendError::WrongRole);
+        }
+        if let Err(error) =
+            verify_current_student(route.expected_student, connection, authorization, now_ms())
+        {
             self.retire(connection);
             return Err(error);
         }
-        let route = TeacherCommandRoute {
-            expected_student: owner.expected_student(),
-            source_id: owner.source_id(),
-            binding: owner.binding(),
+        let bound = TeacherCommandRoute {
+            control: route,
             teacher_principal: established.negotiated.principal_id,
             connection_id: connection.stable_id(),
         };
-        if let Err(error) = self.ensure_route(route) {
+        if let Err(error) = self.ensure_route(bound) {
             self.retire(connection);
             return Err(error);
         }
-        // Reserve both identifiers *before* the network write. A partial write
-        // can never be retried on this session with the same sequence/request.
+        let Some(next_sequence) = self.next_sequence.checked_add(1) else {
+            self.retire(connection);
+            return Err(TeacherCommandSendError::InvalidCounters);
+        };
+        // Reserve before I/O: a failed or ambiguous write permanently retires the sender.
         self.next_sequence = next_sequence;
-        self.next_request_id = next_request_id;
-        if let Err(error) = writer.send(&frame).await {
+        if let Err(error) = writer.send(frame).await {
             self.retire(connection);
             return Err(TeacherCommandSendError::Transport(error));
         }
-        if let Err(error) = verify_current_student(owner, connection, authorization, now_ms()) {
+        if let Err(error) =
+            verify_current_student(route.expected_student, connection, authorization, now_ms())
+        {
             self.retire(connection);
             return Err(error);
         }
-        Ok(frame.request_id)
+        Ok(())
     }
 
     fn retire(&mut self, connection: &Connection) {
@@ -462,7 +602,8 @@ mod tests {
 
     #[test]
     fn bound_teacher_action_produces_exact_wire_contract() {
-        let frame = prepare_teacher_interaction(&owner(), &negotiated(), &action(), 1, 9).unwrap();
+        let frame =
+            prepare_teacher_interaction((&owner()).into(), &negotiated(), &action(), 1, 9).unwrap();
         assert_eq!(frame.control_session_id, SESSION);
         assert_eq!(frame.sequence, 1);
         assert_eq!(frame.request_id, 9);
@@ -481,25 +622,25 @@ mod tests {
         let mut wrong_source = a.clone();
         wrong_source.source_id = MonitoringSourceId(9);
         assert!(matches!(
-            prepare_teacher_interaction(&o, &n, &wrong_source, 1, 1),
+            prepare_teacher_interaction((&o).into(), &n, &wrong_source, 1, 1),
             Err(TeacherCommandSendError::SourceMismatch)
         ));
         let mut wrong_session = a.clone();
         wrong_session.control_session_id = SESSION + 1;
         assert!(matches!(
-            prepare_teacher_interaction(&o, &n, &wrong_session, 1, 1),
+            prepare_teacher_interaction((&o).into(), &n, &wrong_session, 1, 1),
             Err(TeacherCommandSendError::SessionMismatch)
         ));
         let mut wrong_role = n.clone();
         wrong_role.role = ControlRole::StudentDevice;
         assert!(matches!(
-            prepare_teacher_interaction(&o, &wrong_role, &a, 1, 1),
+            prepare_teacher_interaction((&o).into(), &wrong_role, &a, 1, 1),
             Err(TeacherCommandSendError::WrongRole)
         ));
         let mut missing_cap = n.clone();
         missing_cap.capabilities.clear();
         assert!(matches!(
-            prepare_teacher_interaction(&o, &missing_cap, &a, 1, 1),
+            prepare_teacher_interaction((&o).into(), &missing_cap, &a, 1, 1),
             Err(TeacherCommandSendError::CapabilityUnavailable)
         ));
     }
@@ -508,9 +649,7 @@ mod tests {
     fn sender_retirement_rejects_stale_connection_or_roster_route() {
         let mut sender = TeacherCommandSender::default();
         let route = TeacherCommandRoute {
-            expected_student: STUDENT,
-            source_id: SOURCE,
-            binding: owner().binding(),
+            control: (&owner()).into(),
             teacher_principal: PrincipalId([8; 32]),
             connection_id: 4,
         };
@@ -537,21 +676,21 @@ mod tests {
         let mut a = action();
         a.request.action = None;
         assert!(matches!(
-            prepare_teacher_interaction(&o, &n, &a, 1, 1),
+            prepare_teacher_interaction((&o).into(), &n, &a, 1, 1),
             Err(TeacherCommandSendError::InvalidRequest(_))
         ));
         assert!(matches!(
-            prepare_teacher_interaction(&o, &n, &action(), 0, 1),
+            prepare_teacher_interaction((&o).into(), &n, &action(), 0, 1),
             Err(TeacherCommandSendError::InvalidCounters)
         ));
         assert!(matches!(
-            prepare_teacher_interaction(&o, &n, &action(), 1, 0),
+            prepare_teacher_interaction((&o).into(), &n, &action(), 1, 0),
             Err(TeacherCommandSendError::InvalidCounters)
         ));
         let mut retired = owner();
         assert!(retired.retire_exact(SOURCE, retired.binding()));
         assert!(matches!(
-            prepare_teacher_interaction(&retired, &n, &action(), 1, 1),
+            prepare_teacher_interaction((&retired).into(), &n, &action(), 1, 1),
             Err(TeacherCommandSendError::Retired)
         ));
     }
@@ -565,8 +704,12 @@ mod authenticated_quic_tests {
     use std::sync::Arc;
 
     use classmesh_control::ControlHello;
+    use classmesh_control::authorization::{AuthenticatedControlGuard, CommandAuthorizationError};
     use classmesh_control::client_session::connect_client_session_with_retries;
-    use classmesh_control::handshake::{ServerHelloConfig, server_hello};
+    use classmesh_control::dispatch::{
+        PrivilegedControlCommand, PrivilegedDispatchError, dispatch_privileged_command,
+    };
+    use classmesh_control::handshake::{ServerHelloConfig, server_hello_enrolled};
     use classmesh_control::live_authorization::LiveAuthorizationStore;
     use classmesh_control::quic::{
         ControlChannel, DEFAULT_IO_TIMEOUT, accept, enrolled_client_config, enrolled_server_config,
@@ -581,8 +724,8 @@ mod authenticated_quic_tests {
     };
     use classmesh_protocol::{Capability, ControlRole, ProtocolVersion};
     use classmesh_security::{
-        AuthorizationStore, CredentialFingerprint, CredentialRecord, Principal, PrincipalId,
-        PrincipalKind,
+        AuthorizationStore, CredentialFingerprint, CredentialRecord, Permission, Principal,
+        PrincipalId, PrincipalKind,
     };
     use classmesh_video::monitoring_scheduler::MonitoringSourceId;
     use quinn::Endpoint;
@@ -599,6 +742,7 @@ mod authenticated_quic_tests {
     use crate::ui_shell::TeacherInteractionUiAction;
 
     type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
+    const TEACHER: PrincipalId = PrincipalId([8; 32]);
     const STUDENT: PrincipalId = PrincipalId([7; 32]);
     const SESSION: u64 = 55;
     const SOURCE: MonitoringSourceId = MonitoringSourceId(7);
@@ -627,6 +771,21 @@ mod authenticated_quic_tests {
         let client_cert = CertificateDer::from(client_identity.cert);
         let client_key = PrivatePkcs8KeyDer::from(client_identity.signing_key.serialize_der());
 
+        let teacher_fingerprint =
+            CredentialFingerprint(Sha256::digest(client_cert.as_ref()).into());
+        let mut enrolled_teachers = AuthorizationStore::default();
+        enrolled_teachers
+            .upsert(Principal {
+                id: TEACHER,
+                kind: PrincipalKind::Teacher,
+                enabled: true,
+                permissions: BTreeSet::from([Permission::SendTeacherMessage]),
+                credentials: BTreeMap::from([(
+                    teacher_fingerprint,
+                    CredentialRecord::active(teacher_fingerprint, 100),
+                )]),
+            })
+            .map_err(|error| format!("{error:?}"))?;
         let mut client_roots = RootCertStore::empty();
         client_roots.add(client_cert.clone())?;
         let verifier = WebPkiClientVerifier::builder_with_provider(
@@ -673,20 +832,58 @@ mod authenticated_quic_tests {
             let mut channel = ControlChannel::accept(&conn, DEFAULT_IO_TIMEOUT)
                 .await
                 .map_err(|e| e.to_string())?;
-            server_hello(
+            let (_, peer) = server_hello_enrolled(
+                &conn,
                 &mut channel,
                 &ServerHelloConfig {
                     local_version: VERSION,
                     local_capabilities: negotiated,
                     control_session_id: SESSION,
                 },
+                &enrolled_teachers,
+                150,
             )
             .await
             .map_err(|e| e.to_string())?;
+            assert_eq!(peer.identity.principal_id(), TEACHER);
+            let mut guard = AuthenticatedControlGuard::new(peer.identity, SESSION, VERSION, 1);
             let first = channel.receive().await.map_err(|e| e.to_string())?;
+            assert!(
+                matches!(
+                    dispatch_privileged_command(&mut guard, &enrolled_teachers, &first, 150),
+                    Ok(PrivilegedControlCommand::TeacherInteraction(_))
+                ),
+                "first command must pass the enrolled Service command dispatcher"
+            );
+            assert!(
+                matches!(
+                    dispatch_privileged_command(&mut guard, &enrolled_teachers, &first, 150),
+                    Err(PrivilegedDispatchError::Authorization(
+                        CommandAuthorizationError::NonIncreasingSequence { .. }
+                    ))
+                ),
+                "a replay must be refused before execution"
+            );
             // Do not reply until the second outbound command arrives. This
             // forces a single in-flight verified receive while send proceeds.
             let second = channel.receive().await.map_err(|e| e.to_string())?;
+            assert!(matches!(
+                dispatch_privileged_command(&mut guard, &enrolled_teachers, &second, 150),
+                Ok(PrivilegedControlCommand::TeacherInteraction(_))
+            ));
+            let mut unpermitted =
+                AuthenticatedControlGuard::new(peer.identity, SESSION, VERSION, 1);
+            assert!(matches!(
+                dispatch_privileged_command(
+                    &mut unpermitted,
+                    &AuthorizationStore::default(),
+                    &first,
+                    150
+                ),
+                Err(PrivilegedDispatchError::Authorization(
+                    CommandAuthorizationError::Unauthorized { .. }
+                ))
+            ));
             channel
                 .send(&ControlEnvelope {
                     control_session_id: SESSION,
@@ -854,7 +1051,7 @@ mod authenticated_quic_tests {
         let (server, server_conn, first, second) = server_task.await??;
         assert_eq!(
             (first.sequence, first.request_id, first.control_session_id),
-            (1, 1, SESSION)
+            (2, 1, SESSION)
         );
         assert_eq!(
             (
@@ -862,7 +1059,7 @@ mod authenticated_quic_tests {
                 second.request_id,
                 second.control_session_id
             ),
-            (2, 2, SESSION)
+            (3, 2, SESSION)
         );
         assert!(matches!(
             first.payload,

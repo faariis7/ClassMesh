@@ -1,3 +1,20 @@
+## Live Teacher runtime implementation
+
+The shared duplex path admits an explicitly enrolled M2 control route without
+inventing presentation identifiers, independently rechecks StudentDevice
+authorization, and keeps liveness and commands on the same post-Hello sequence
+ledger. The native UI launcher can take that route without preexisting media
+and rejects an untrusted Student before returning a bridge. The protected
+binary entry point still exits 3 while its configuration and signed roster
+producer remain unapproved. The existing lab Teacher grant supports explicit
+SendTeacherMessage after the existing verified enrollment checks.
+
+The Draft [#776](https://github.com/faariis7/ClassMesh/pull/776) evidence
+distinguishes endpoint integration tests from actual SCM/Worker execution.
+[#688](https://github.com/faariis7/ClassMesh/issues/688) remains the acceptance
+tracker. M3 physical rendering and M4 real reconnect require the protected M2
+workflow and the corresponding device evidence.
+
 ## Unified RC follow-up — 2026-11-25
 
 [Draft PR #776](https://github.com/faariis7/ClassMesh/pull/776) holds the exact

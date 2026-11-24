@@ -77,6 +77,15 @@ Identity is installed before authorization/config generation. These two fresh
 TEMP workspaces keep that sequence while respecting the authorizer's new-directory
 requirement. They are disposable staging files, not an authorized ProgramData installation.
 
+## Explicit Message permission for approved M2 qualification
+
+After validating the Teacher CSR/result and the independent lab root, add
+`--allow-teacher-message` to `classmesh-student-authorize-teacher` when the
+operator approved that exact Teacher for the Message exercise. Use the owned
+Student authorization stage. The flag adds only `SendTeacherMessage` to the
+existing pair and cannot replace a previously enrolled Teacher. Keep the issuer
+and Teacher roster authorization decisions separate.
+
 ## Native tests, ownership and cleanup
 
 Run the real integration tests in an otherwise idle Windows lab session:

@@ -1,3 +1,14 @@
+## Live Teacher handoff
+
+Use the current [#776](https://github.com/faariis7/ClassMesh/pull/776) head and
+the isolated test setup in the existing QUIC and Windows qualification paths.
+Read [ADR-0009](decisions/0009-teacher-roster-trust.md) for the exact authority
+decision. Teacher command capability now works without a playback binding at
+the native bridge and sends heartbeat and action frames on one sequence ledger.
+The Service/SCM lane owns the approved signed-image run. The Teacher owner owns
+the approved roster verifier and connector. Keep lab Message permission
+explicit and retain the real interactive confirmation requirement.
+
 ## Unified RC follow-up — 2026-11-25
 
 Resume from [#776](https://github.com/faariis7/ClassMesh/pull/776) and refresh

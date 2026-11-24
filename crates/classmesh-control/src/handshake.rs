@@ -17,6 +17,9 @@ use crate::{ControlHello, NegotiatedHello, NegotiationError, negotiate_hello};
 
 const HELLO_REQUEST_ID: u64 = 1;
 const FIRST_SEQUENCE: u64 = 1;
+
+/// First sequence available to either peer after Hello / HelloAck.
+pub const FIRST_POST_HELLO_SEQUENCE: u64 = FIRST_SEQUENCE + 1;
 const REJECT_INCOMPATIBLE_PROTOCOL: i32 = 1;
 const REJECT_INVALID_IDENTITY: i32 = 4;
 

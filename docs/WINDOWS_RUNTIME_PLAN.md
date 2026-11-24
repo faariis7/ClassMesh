@@ -1,3 +1,19 @@
+## Teacher command runtime preflight
+
+The production Windows application requires an approved issuer and verified
+roster/configuration producer. [ADR-0009](decisions/0009-teacher-roster-trust.md)
+records the required contract and the separate disposable SCM approval.
+The native launcher accepts an already enrolled QUIC route for M2 command
+control before a presentation is active.
+
+For the isolated, approved Message exercise, stage a Student authorization file
+and use the existing signed Teacher enrollment flow. Pass
+`--allow-teacher-message` to `classmesh-student-authorize-teacher` for the
+specific verified Teacher that may issue the harmless Message. The flag is
+explicit and adds one capability after issuer, role and CSR binding checks.
+Service still enforces `SendTeacherMessage`, current enrollment and exact
+Worker ownership. A GUI dispatch or QUIC write never indicates Completed.
+
 ## M2 protected acceptance — current candidate
 
 1. The security/trust owner approves the independently sourced enrollment CA
@@ -11,8 +27,9 @@
    for the signed CSR/result path and preflight the protected CNG-backed
    identities. The candidate's `classmesh-student-authorize-teacher` verifies
    an explicit operator root, chain, Teacher role, CSR binding and leaf before
-   writing the Student grant. That grant is limited to `ViewInteractive` and
-   `ControlInput`. It does not supply Teacher-side roster authority.
+   writing the Student grant. That grant defaults to `ViewInteractive` and
+   `ControlInput`. The Message exercise requires the explicit permission above.
+   The Student grant does not supply Teacher-side roster authority.
 3. After the roster contract is approved, the Teacher owner must wire a
    verified startup producer into the existing authenticated GUI launcher.
    Verify permitted and denied startup with scoped lab fixtures: missing,
