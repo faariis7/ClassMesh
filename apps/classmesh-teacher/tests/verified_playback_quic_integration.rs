@@ -8,7 +8,7 @@ use classmesh_control::ControlHello;
 use classmesh_control::client_session::{
     ClientControlSession, connect_client_session_with_retries,
 };
-use classmesh_control::handshake::{ServerHelloConfig, server_hello};
+use classmesh_control::handshake::{FIRST_POST_HELLO_SEQUENCE, ServerHelloConfig, server_hello};
 use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::quic::{
     ControlChannel, DEFAULT_IO_TIMEOUT, accept, client_config_with_roots,
@@ -148,7 +148,7 @@ fn binding() -> TeacherPlaybackBinding {
 fn report() -> ControlEnvelope {
     ControlEnvelope {
         control_session_id: CONTROL_SESSION,
-        sequence: 2,
+        sequence: FIRST_POST_HELLO_SEQUENCE,
         request_id: 0,
         protocol_version: Some(WireVersion { major: 0, minor: 8 }),
         payload: Some(control_envelope::Payload::ReceiverPlaybackDiagnostic(
@@ -291,7 +291,6 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
             media: 1,
         },
     ));
-    other.sequence = 1;
     pair.server_channel.send(&other).await?;
     let event = owner
         .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
@@ -311,7 +310,9 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
     }
     assert_eq!(owner.visible(SOURCE, now), None);
 
-    pair.server_channel.send(&report()).await?;
+    let mut playback_report = report();
+    playback_report.sequence = other.sequence + 1;
+    pair.server_channel.send(&playback_report).await?;
     let event = owner
         .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
         .await
