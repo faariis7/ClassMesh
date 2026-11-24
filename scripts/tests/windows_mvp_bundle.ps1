@@ -136,6 +136,17 @@ try {
             Reject { Test-MvpBundle (Join-Path $alias 'bundle') (Context) $pin } 'reparse point.*ancestry'
         } finally { [IO.Directory]::Delete($alias) }
     }
+    Check 'Teacher smoke launches the owned executable with explicit offline mode' {
+        . (Join-Path (Join-Path $PSScriptRoot '..') 'phase11f4-teacher-ui-smoke.ps1') -Mode Help
+        function Start-Process {
+            param([string]$FilePath, [string[]]$ArgumentList, [switch]$PassThru)
+            Assert-True ($FilePath -ceq 'classmesh-teacher-ui.exe') 'wrong Teacher image'
+            Assert-True ($ArgumentList.Count -eq 1 -and $ArgumentList[0] -ceq '--offline') 'missing explicit offline mode'
+            Assert-True $PassThru 'the launch must return its owned process'
+            'owned Teacher process'
+        }
+        Assert-True ((Start-OwnedTeacherSmokeProcess 'classmesh-teacher-ui.exe') -ceq 'owned Teacher process') 'owned process missing'
+    }
     Check 'Teacher smoke requires confirmation of owned process exit' {
         . (Join-Path (Join-Path $PSScriptRoot '..') 'phase11f4-teacher-ui-smoke.ps1') -Mode Help
         $ownedProcess = [pscustomobject]@{ HasExited = $false; KillCalled = $false }

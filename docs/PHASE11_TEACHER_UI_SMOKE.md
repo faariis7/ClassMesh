@@ -1,5 +1,9 @@
 # Phase 11F4 Teacher UI Windows Smoke
 
+The current package smoke launches the exact Teacher executable with
+`--offline` and checks its responsive window in the interactive session.
+Connected startup remains a separate protected M2 acceptance step.
+
 ## Scope
 
 This check verifies the delivered Windows Teacher UI artifact only. It does **not** qualify media transport, multicast, classroom scale, adaptive networking, or any other open physical gate.

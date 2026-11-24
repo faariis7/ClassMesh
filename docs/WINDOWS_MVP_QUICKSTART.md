@@ -53,6 +53,9 @@ $ci = @{
 
 ## التشخيص وتشغيل Teacher
 
+يشغّل الخياران `Smoke` و`Launch` واجهة Teacher التشخيصية باستخدام `--offline`.
+تشغيل Teacher المتصل يحتاج تهيئة الهوية والتحقق المعتمد من الـRoster.
+
 ```powershell
 & "$bundle\windows-mvp-launch.ps1" -Mode Diagnose -BundleDir $bundle @ci
 & "$bundle\windows-mvp-launch.ps1" -Mode Smoke -BundleDir $bundle @ci

@@ -90,7 +90,7 @@ Smoke mode:
   - requires an interactive Windows user session (Session 0 is rejected);
   - verifies the exact artifact SHA-256 before launch;
   - checks the installed x64 Visual C++ Redistributable against the bundle's MSVC toolset version;
-  - starts classmesh-teacher-ui.exe and requires a responsive ClassMesh Teacher window in the same interactive session;
+  - starts classmesh-teacher-ui.exe --offline and requires a responsive ClassMesh Teacher window in the same interactive session;
   - writes launch-smoke-evidence.json only after the window check passes;
   - does NOT mark visual/accessibility review complete;
   - does NOT qualify any Phase 4/6/7/8/9/10 physical media or transport gate.
@@ -150,6 +150,11 @@ function Validate-Bundle {
     Write-Host "minimum_vc_runtime_version=$($index.minimum_vc_runtime_version)"
     Write-Host "visual_accessibility_reviewed=undetermined"
     $index
+}
+
+function Start-OwnedTeacherSmokeProcess {
+    param([Parameter(Mandatory = $true)][string]$ExecutablePath)
+    Start-Process -FilePath $ExecutablePath -ArgumentList '--offline' -PassThru
 }
 
 function Stop-OwnedTeacherSmokeProcess {
@@ -236,7 +241,7 @@ switch ($Mode) {
         $process = $null
         $smokeSucceeded = $false
         try {
-            $process = Start-Process -FilePath $exeItem.FullName -PassThru
+            $process = Start-OwnedTeacherSmokeProcess $exeItem.FullName
             Start-Sleep -Seconds $StartupSeconds
             $process.Refresh()
 
@@ -270,7 +275,7 @@ switch ($Mode) {
                 left_running = [bool]$LeaveRunning
                 visual_accessibility_reviewed = $null
                 physical_media_transport_qualified = $null
-                note = "Launch smoke only. Visual/accessibility acceptance and unrelated physical qualification remain separate."
+                note = "Offline Teacher UI launch smoke. Visual/accessibility acceptance and physical qualification remain separate."
             }
             if ($LeaveRunning) {
                 $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $evidencePath -Encoding utf8
