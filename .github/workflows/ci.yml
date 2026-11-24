@@ -168,7 +168,7 @@ jobs:
           name: classmesh-async-h264-qualification-windows-x64
           path: async-h264-bundle/
           if-no-files-found: error
-          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
+          retention-days: ${{ github.event_name == 'pull_request' && 30 || 60 }}
 
       - name: Build network impairment proxy
         run: cargo build --locked -p classmesh-lab --bin classmesh-network-impairment-proxy --release
@@ -268,7 +268,7 @@ jobs:
           if ($errors.Count -gt 0) { throw ($errors | Out-String) }
 
       - name: Build Phase 7 multicast probe
-        run: cargo build --locked -p classmesh-lab --bin classmesh-multicast-probe --release
+        run: cargo build --locked -p classmesh-lab --bin classmesh-multicast-probe --example multicast_delivery --release
 
       - name: Build Phase 6F interactive qualification client
         run: cargo build --locked -p classmesh-lab --bin classmesh-interactive-qualification --release
@@ -531,6 +531,13 @@ jobs:
           Copy-Item target/release/classmesh-multicast-probe.exe phase7-multicast-probe-bundle/
           Copy-Item docs/PHASE7_MULTICAST_PROBE.md phase7-multicast-probe-bundle/
           Copy-Item docs/PHASE7_MULTICAST_PROBE_RESULTS.md phase7-multicast-probe-bundle/
+          Copy-Item target/release/examples/multicast_delivery.exe phase7-multicast-probe-bundle/
+          Copy-Item tools/classmesh-lab/scripts/multicast_delivery.ps1 phase7-multicast-probe-bundle/
+          Copy-Item tools/classmesh-lab/scripts/multicast_delivery.py phase7-multicast-probe-bundle/
+          Copy-Item tools/classmesh-lab/docs/MULTICAST_DELIVERY_DIAGNOSTIC.md phase7-multicast-probe-bundle/
+          git rev-parse HEAD | Set-Content phase7-multicast-probe-bundle/source-revision.txt
+          Get-FileHash -Algorithm SHA256 target/release/examples/multicast_delivery.exe |
+            Select-Object -ExpandProperty Hash | Set-Content phase7-multicast-probe-bundle/multicast_delivery.exe.sha256
 
       - name: Upload Phase 7 multicast probe bundle
         uses: actions/upload-artifact@v4
@@ -538,7 +545,7 @@ jobs:
           name: classmesh-phase7-multicast-probe-windows-x64
           path: phase7-multicast-probe-bundle/
           if-no-files-found: error
-          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
+          retention-days: ${{ github.event_name == 'pull_request' && 30 || 60 }}
 
       - name: Stage Phase 7H qualification bundle
         shell: pwsh
@@ -730,7 +737,7 @@ jobs:
             windows-mvp-output/fuzz-Cargo.lock
             windows-mvp-output/release-candidate.json
           if-no-files-found: error
-          retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
+          retention-days: ${{ github.event_name == 'pull_request' && 30 || 60 }}
 
       - name: Stage Phase 12B4 system-action qualification bundle
         shell: pwsh

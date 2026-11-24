@@ -1,3 +1,30 @@
+## Unified RC follow-up — 2026-11-25
+
+[Draft PR #776](https://github.com/faariis7/ClassMesh/pull/776) holds the exact
+candidate SHA, validation and artifact links. The 2026-11-18 results below apply
+to the earlier baseline only.
+
+- The root lockfile moves to `url 2.5.9` for RUSTSEC-2026-0592. Its required
+  `form_urlencoded 1.2.3` is the only related resolution change. See
+  [current dependency audit notes](RUST_DEPENDENCY_AUDIT.md).
+- The #777 commit is integrated by ancestry. The dispatch boundary keeps a
+  committed slot after the caller leaves, rejects overlap across transports,
+  verifies the current exact Worker and its confirmed key, and accepts a
+  terminal result only on that binding. Matching clear/Stop uses ordered Worker
+  IPC. On IPC loss or missing terminal after 15 seconds, the Service revokes
+  the exact Worker binding, disconnects its pipe and requests termination
+  before releasing the dispatch slot. The watchdog retains the process handle
+  until exit is observed, so recovery cannot run a replacement concurrently.
+  The 1-second pre-commit cancellation window is separate.
+- M2 still needs independently approved roster rules and trusted enrollment;
+  the shipped Teacher entry point offers offline diagnostics. The authorized
+  command workflow and actual Student render are unmeasured on this candidate.
+- The unsigned x64 package and lab artifacts have 30-day PR retention. A
+  candidate package may be validated and used for offline diagnostics. Protected
+  installation, native physical GPU and two-host multicast remain separate
+  acceptance gates. Historical main CodeQL alerts #1–#5 stay open pending main
+  integration/review. The remediations from #772 remain in this branch.
+
 ## Unified release candidate — 2026-11-18
 
 Branch `integration/classmesh-unified-release-candidate`, Draft stacked on #771.

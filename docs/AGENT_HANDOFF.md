@@ -1,3 +1,18 @@
+## Unified RC follow-up — 2026-11-25
+
+Resume from [#776](https://github.com/faariis7/ClassMesh/pull/776) and refresh
+its live SHA and checks. #777 is the Service/SCM source. Continue integration
+work on #776 and keep the source branches intact. The committed start timeout,
+Worker fence and exact key lease are in the Service dispatch loop. Targeted native
+regressions use `cargo test --locked -p classmesh-service presentation`.
+
+The x64 qualification package is unsigned; record source SHA, attempt and hashes
+before using it. Use the [Windows runtime](WINDOWS_RUNTIME_PLAN.md),
+[M3 hardware](M3_ASYNC_H264_HARDWARE_QUALIFICATION.md) and
+[dependency audit](RUST_DEPENDENCY_AUDIT.md) guides. Leave #688 open until the
+authorized physical/runtime evidence is recorded. Independent trust and release
+sign-off remain with the corresponding owners.
+
 # ClassMesh Agent Handoff
 
 ## ASTRA WORK HANDOFF — 2026-10-31 create-only release signing

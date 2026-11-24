@@ -33,7 +33,7 @@ fn requested_action() -> LaunchAction {
 
 fn print_help() {
     println!("Usage: classmesh-teacher-ui [--offline | --help | --version]");
-    println!("Without provisioned Teacher identity, startup fails closed.");
+    println!("Live mode requires provisioned Teacher identity and approved roster verification.");
     println!("--offline explicitly starts the disconnected diagnostic console.");
 }
 
@@ -46,7 +46,7 @@ fn main() -> eframe::Result<()> {
     match requested_action() {
         LaunchAction::Ui => {
             eprintln!(
-                "Teacher identity not provisioned; refusing live startup (use --offline for diagnostics)"
+                "Live Teacher startup is unavailable pending approved roster verification and identity configuration (use --offline for diagnostics)"
             );
             std::process::exit(3);
         }

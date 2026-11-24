@@ -1,3 +1,22 @@
+## Unified RC follow-up — 2026-11-25
+
+The single release-integration branch remains [Draft PR #776](https://github.com/faariis7/ClassMesh/pull/776),
+using #771 as its base. Track the installed product workflow under [#688](https://github.com/faariis7/ClassMesh/issues/688).
+The 2026-11-18 checkpoint below describes its historical source revision and evidence.
+
+| Priority | Work | Completion evidence or required input |
+| --- | --- | --- |
+| 1 | Lockfile repair and Service #777 integration | Root/fuzz audit, exact-head hosted Windows/Security and the Service lifecycle regression on VM1 |
+| 2 | Verify release artifact and qualification-tool availability | Download same-head x64 package, independently verify inventory, provenance and checksums, and run VM runtime preflight |
+| 3 | Protected M2 acceptance | Apply the [approved trust and operator procedure](WINDOWS_RUNTIME_PLAN.md). The trust owner must approve the roster contract and verification inputs before Teacher live startup can be wired |
+| 4 | Physical M3 and network acceptance | Run the [x64 lab sequence](M3_ASYNC_H264_HARDWARE_QUALIFICATION.md) on the target adapter/driver and two physical hosts |
+| 5 | Production go/no-go | Independent security and release owners approve the signed images, protected installation, real M2/M3 evidence, and rollback |
+
+In-scope software evidence, VM runs, physical qualification and trusted
+deployment each have their own gate. Classroom scale and soak remain separately
+tracked by #288. Optional Phase 12 administrative features, other roadmap
+milestones and commercial enhancements remain outside this candidate.
+
 ## Unified release candidate — 2026-11-18
 
 Branch `integration/classmesh-unified-release-candidate`, Draft stacked on #771.

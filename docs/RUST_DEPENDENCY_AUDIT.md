@@ -1,3 +1,21 @@
+## Unified RC refresh — 2026-11-25
+
+Upstream [RUSTSEC-2026-0592](https://rustsec.org/advisories/RUSTSEC-2026-0592.html)
+identifies `url 2.5.8` as vulnerable and `2.5.9` as the first fixed release.
+`cargo tree --locked --target all -i url` traces it through `webbrowser 1.2.7`,
+`egui-winit 0.32.3`, `eframe 0.32.3` and `classmesh-teacher`. Cargo requires
+`form_urlencoded >=1.2.3` for this update. The fuzz lockfile stays unchanged.
+
+Against [RustSec database 1d328b6b](https://github.com/RustSec/advisory-db/commit/1d328b6bb9f2f350bf65c1c81ab68781cb9e018a),
+cargo-audit 0.23.0 returned exit 1 on the earlier root lockfile and exit 0 on
+both updated candidate lockfiles (489 root and 187 fuzz dependencies).
+The root scan retains four unmaintained notices, with no upstream fixed
+versions listed. `ttf-parser 0.25.1` is on the Teacher font path.
+`zbus_names 4.3.5`, `zvariant 5.15.1` and `zvariant_derive 5.15.1`
+come through the Linux accessibility/AT-SPI path. Replacing those parent
+stacks needs independent functional and accessibility qualification. No
+warning was suppressed. Use the latest hosted exact-head audits for release evidence.
+
 # Rust dependency audit
 
 The [Rust dependency audit workflow](../.github/workflows/rust-dependency-audit.yml)

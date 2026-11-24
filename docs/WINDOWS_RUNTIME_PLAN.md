@@ -1,3 +1,31 @@
+## M2 protected acceptance — current candidate
+
+1. The security/trust owner approves the independently sourced enrollment CA
+   and image signer pins, and defines the signed roster contract: canonical
+   signed bytes, issuer/key lookup from protected configuration, allowed
+   signature scheme and rotation, time/revocation rules, and exact bindings
+   for the Teacher and listed StudentDevice identities. The current metadata
+   diagnostic provides no signed-envelope contract; valid-looking metadata
+   still returns `MissingApprovedVerifier`.
+2. Use the existing [enrollment tools](../tools/classmesh-lab/WINDOWS_LAB_CA.md)
+   for the signed CSR/result path and preflight the protected CNG-backed
+   identities. The candidate's `classmesh-student-authorize-teacher` verifies
+   an explicit operator root, chain, Teacher role, CSR binding and leaf before
+   writing the Student grant. That grant is limited to `ViewInteractive` and
+   `ControlInput`. It does not supply Teacher-side roster authority.
+3. After the roster contract is approved, the Teacher owner must wire a
+   verified startup producer into the existing authenticated GUI launcher.
+   Verify permitted and denied startup with scoped lab fixtures: missing,
+   wrong-root, tampered, expired or revoked roster, wrong Teacher, and
+   unlisted StudentDevice. A provisioned CNG identity alone cannot make
+   the current Teacher executable start connected.
+4. The authorized lab operator verifies exact signed Service/Worker images
+   and protected paths, then follows the disposable SCM and ACK procedure
+   below. Record a real ordinary-account GUI command through authenticated
+   QUIC and the Service-owned Worker, with correlated `Completed`. Exercise
+   unauthorized and replay denial, Stop, disconnect and revocation, then
+   verify removal of test-owned state and processes.
+
 ## Unified RC physical trust qualification (2026-11-18)
 
 Software compilation/tests do not supply an approved root, signer, roster verifier

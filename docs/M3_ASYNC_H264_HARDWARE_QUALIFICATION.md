@@ -1,3 +1,35 @@
+## Physical Windows x64 qualification sequence
+
+1. Use two physical Windows 11 x64 PCs on the target wired VLAN. Record OS
+   build, NIC/interface, vendor GPU/driver and display topology on both
+   hosts. Validate the exact x64 candidate with the
+   [Windows package guide](WINDOWS_MVP_QUICKSTART.md). The authenticated
+   product test also requires the [approved M2 setup](WINDOWS_RUNTIME_PLAN.md).
+2. Run the inventory below on each GPU, then the separate async lab decode
+   and present cases. Record adapter LUID and transform CLSID, negotiated
+   format, frame output and HRESULTs. Keep async decoding qualification-only.
+3. In the authenticated product session, present a moving lab-only source.
+   Run Unicast and Multicast independently. Record the matching start
+   request/terminal result, capture/encode and receive/decode/present
+   counters, replay denial, key-epoch rotation, and changing nonblank Student
+   output. Repeat with controlled packet loss and observe bounded queues,
+   NACK/keyframe recovery and fresh decodable output.
+4. Run the [two-host multicast diagnostic](../tools/classmesh-lab/docs/MULTICAST_DELIVERY_DIAGNOSTIC.md)
+   on the chosen adapters and comparison path. Preserve the per-direction
+   NIC capture/counter and Worker delivery correlation. The signed product
+   run supplies authentication and playback evidence beyond that diagnostic.
+5. Stop and restart the same test scenario, switch display modes,
+   minimize/restore, interrupt the network, and exercise a controlled vendor
+   device-loss/reset case. Record whether old frames, keys and processes
+   retired, whether fresh output resumed, and the failure stage for any
+   unsupported path. Retain per-stage logs, exit codes, source and executable
+   hashes, and queue/resource measurements. Treat unmeasured paths as open.
+6. Close only test-owned UI and Worker sessions, stop the approved disposable
+   Service, retire keys and capture ownership, and remove only run-owned
+   fixtures under the [Windows runtime cleanup procedure](WINDOWS_RUNTIME_PLAN.md).
+   Use approved signed rollback with the protected policy epoch intact if an
+   installed qualification step requires reverting.
+
 ## Unified RC gate — 2026-11-18
 
 Use the exact unified Draft candidate and its locked graph (`cargo build --locked`).
@@ -20,7 +52,7 @@ Download `classmesh-async-h264-qualification-windows-x64` from the Windows Build
 ```powershell
 git rev-parse HEAD
 rustup target add x86_64-pc-windows-msvc
-cargo build --release --target x86_64-pc-windows-msvc -p classmesh-lab --bin classmesh-async-h264-qualify
+cargo build --locked --release --target x86_64-pc-windows-msvc -p classmesh-lab --bin classmesh-async-h264-qualify
 $exe = (Resolve-Path '.\target\x86_64-pc-windows-msvc\release\classmesh-async-h264-qualify.exe').Path
 # With the downloaded bundle, instead set $exe to the bundled executable's full path.
 ```
