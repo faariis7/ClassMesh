@@ -179,3 +179,10 @@ Service developer next steps, outside this PR:
 MVP #688 M2 as a whole, real SCM/LocalSystem operation, authenticated remote
 Teacher/Worker behavior, signing/production CA trust, security review and physical
 qualification remain separate gates. Successful enrollment does not close them.
+
+## Teacher Live Mode provisioning
+
+Use the independently verified Teacher and Student outputs to prepare the
+[protected Teacher policy](WINDOWS_TEACHER_LIVE.md). The roster signer is a
+separate ephemeral development authority. The enrollment CA signs machine
+credentials and the Student grant remains a separate checked operation.

@@ -1,47 +1,13 @@
-## Teacher command runtime preflight
+## Protected Teacher startup on Windows
 
-The production Windows application requires an approved issuer and verified
-roster/configuration producer. [ADR-0009](decisions/0009-teacher-roster-trust.md)
-records the required contract and the separate disposable SCM approval.
-The native launcher accepts an already enrolled QUIC route for M2 command
-control before a presentation is active.
-
-For the isolated, approved Message exercise, stage a Student authorization file
-and use the existing signed Teacher enrollment flow. Pass
-`--allow-teacher-message` to `classmesh-student-authorize-teacher` for the
-specific verified Teacher that may issue the harmless Message. The flag is
-explicit and adds one capability after issuer, role and CSR binding checks.
-Service still enforces `SendTeacherMessage`, current enrollment and exact
-Worker ownership. A GUI dispatch or QUIC write never indicates Completed.
-
-## M2 protected acceptance — current candidate
-
-1. The security/trust owner approves the independently sourced enrollment CA
-   and image signer pins, and defines the signed roster contract: canonical
-   signed bytes, issuer/key lookup from protected configuration, allowed
-   signature scheme and rotation, time/revocation rules, and exact bindings
-   for the Teacher and listed StudentDevice identities. The current metadata
-   diagnostic provides no signed-envelope contract; valid-looking metadata
-   still returns `MissingApprovedVerifier`.
-2. Use the existing [enrollment tools](../tools/classmesh-lab/WINDOWS_LAB_CA.md)
-   for the signed CSR/result path and preflight the protected CNG-backed
-   identities. The candidate's `classmesh-student-authorize-teacher` verifies
-   an explicit operator root, chain, Teacher role, CSR binding and leaf before
-   writing the Student grant. That grant defaults to `ViewInteractive` and
-   `ControlInput`. The Message exercise requires the explicit permission above.
-   The Student grant does not supply Teacher-side roster authority.
-3. After the roster contract is approved, the Teacher owner must wire a
-   verified startup producer into the existing authenticated GUI launcher.
-   Verify permitted and denied startup with scoped lab fixtures: missing,
-   wrong-root, tampered, expired or revoked roster, wrong Teacher, and
-   unlisted StudentDevice. A provisioned CNG identity alone cannot make
-   the current Teacher executable start connected.
-4. The authorized lab operator verifies exact signed Service/Worker images
-   and protected paths, then follows the disposable SCM and ACK procedure
-   below. Record a real ordinary-account GUI command through authenticated
-   QUIC and the Service-owned Worker, with correlated `Completed`. Exercise
-   unauthorized and replay denial, Stop, disconnect and revocation, then
-   verify removal of test-owned state and processes.
+[ADR-0009](decisions/0009-teacher-roster-trust.md) defines the signed roster,
+protected issuer, Registry checkpoint and freshness contract. The
+[Teacher native qualification procedure](../tools/classmesh-lab/WINDOWS_TEACHER_LIVE.md)
+covers isolated fixture generation, enrollment, read-only candidate verification,
+protected publication, ordinary-account `--check-live`, CLI/GUI negative outcomes,
+explicit Message grant and operator acceptance. The control session can be
+established before video. A verified startup probe is not a Worker result.
+Test only with independently approved image signatures and temporary SCM scope.
 
 ## Unified RC physical trust qualification (2026-11-18)
 

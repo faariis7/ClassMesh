@@ -558,10 +558,10 @@ fn teacher_authorization_requires_proven_issuer_and_role_before_grant() {
     let scratch = Scratch::new();
     let root = &scratch.0;
 
-    let (student_request, _student, _student_key) =
+    let (student_request, student, _student_key) =
         request(root, "student-device", "student_for_grant");
     let student_result = root.join("student-for-grant.pb");
-    issue(&lab, &student_request, &student_result, "student-device");
+    let student_enrollment = issue(&lab, &student_request, &student_result, "student-device");
 
     // Staging creates a zero-privilege StudentDevice without touching
     // ProgramData; all subsequent grants target ONLY this owned temp file.
@@ -595,6 +595,68 @@ fn teacher_authorization_requires_proven_issuer_and_role_before_grant() {
     let approved_path = root.join("teacher-for-grant.pb");
     let approved = issue(&lab, &teacher_request, &approved_path, "teacher");
     let correct_ca = lab.cert();
+
+    // The new production policy preflight must consume the existing real
+    // enrollment, bind the precise CNG key, and reject a forged signed roster.
+    // The plan command never opens the installed HKLM namespace for writing.
+    let identity_path = root.join("teacher-live-identity.json");
+    success(
+        INSTALL,
+        &install_args(
+            &teacher_request,
+            &approved_path,
+            &correct_ca,
+            &identity_path,
+            "teacher",
+        ),
+    );
+    let fixture_dir = root.join("live-roster-lab");
+    success(
+        env!("CARGO_BIN_EXE_classmesh-teacher-roster-lab"),
+        &[
+            "fixture",
+            text(&fixture_dir),
+            &hex(&teacher.principal_id),
+            &hex(&student.principal_id),
+        ],
+    );
+    let public: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture_dir.join("public-policy.json")).unwrap()).unwrap();
+    let mut policy = serde_json::json!({
+        "version": 1, "issuer": public["issuer"], "organization": public["organization"],
+        "keys": [{ "id": public["key_id"], "sec1": public["sec1"], "revoked": false }],
+        "roster": fs::read(fixture_dir.join("roster.cose")).unwrap(),
+        "roster_payload_sha256": public["roster_payload_sha256"],
+        "refreshed_at_ms": public["refreshed_at_ms"], "max_age_ms": public["max_age_ms"],
+        "max_lifetime_ms": public["max_lifetime_ms"], "revoked_principals": [],
+        "teacher_principal": teacher.principal_id, "teacher_leaf_sha256": approved.credential_fingerprint_sha256,
+        "teacher_enrollment_ca_der": fs::read(&correct_ca).unwrap(),
+        "machine_identity": fs::read(&identity_path).unwrap(),
+        "student": {
+            "principal": student.principal_id,
+            "leaf_sha256": student_enrollment.credential_fingerprint_sha256,
+            "address": "127.0.0.1:44991", "server_name": "classmesh.local"
+        }
+    });
+    let plan = env!("CARGO_BIN_EXE_classmesh-teacher-policy");
+    let policy_path = root.join("teacher-policy.json");
+    fs::write(&policy_path, serde_json::to_vec(&policy).unwrap()).unwrap();
+    let output = success(plan, &["plan", "2", text(&policy_path)]);
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("candidate=verified epoch=2 writes=none")
+    );
+    let valid_roster = policy["roster"].clone();
+    policy["roster"] = serde_json::json!(fs::read(fixture_dir.join("forged.cose")).unwrap());
+    fs::write(&policy_path, serde_json::to_vec(&policy).unwrap()).unwrap();
+    let rejected = run(plan, &["plan", "2", text(&policy_path)]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("Signature"));
+    policy["roster"] = valid_roster;
+    policy["teacher_leaf_sha256"] = serde_json::json!(vec![0; 32]);
+    fs::write(&policy_path, serde_json::to_vec(&policy).unwrap()).unwrap();
+    let rejected = run(plan, &["plan", "2", text(&policy_path)]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("leaf pin"));
 
     let authorized = |req: &Path, result: &Path, ca: &Path| {
         run(

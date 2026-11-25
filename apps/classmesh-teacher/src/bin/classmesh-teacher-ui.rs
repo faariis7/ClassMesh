@@ -4,6 +4,7 @@ use std::ffi::OsString;
 enum LaunchAction {
     Ui,
     Offline,
+    CheckLive,
     Help,
     Version,
 }
@@ -15,6 +16,7 @@ fn parse_launch_action(args: &[OsString]) -> Result<LaunchAction, &'static str> 
         [] => Ok(LaunchAction::Ui),
         [flag] => match flag.to_str() {
             Some("--offline") => Ok(LaunchAction::Offline),
+            Some("--check-live") => Ok(LaunchAction::CheckLive),
             Some("--help" | "-h") => Ok(LaunchAction::Help),
             Some("--version" | "-V") => Ok(LaunchAction::Version),
             _ => Err("unsupported Teacher UI argument"),
@@ -32,8 +34,11 @@ fn requested_action() -> LaunchAction {
 }
 
 fn print_help() {
-    println!("Usage: classmesh-teacher-ui [--offline | --help | --version]");
+    println!("Usage: classmesh-teacher-ui [--offline | --check-live | --help | --version]");
     println!("Live mode requires provisioned Teacher identity and approved roster verification.");
+    println!(
+        "--check-live verifies protected configuration and enrolled QUIC without opening a window."
+    );
     println!("--offline explicitly starts the disconnected diagnostic console.");
 }
 
@@ -44,11 +49,14 @@ fn print_version() {
 #[cfg(windows)]
 fn main() -> eframe::Result<()> {
     match requested_action() {
-        LaunchAction::Ui => {
-            eprintln!(
-                "Live Teacher startup is unavailable pending approved roster verification and identity configuration (use --offline for diagnostics)"
-            );
-            std::process::exit(3);
+        action @ (LaunchAction::Ui | LaunchAction::CheckLive) => {
+            if let Err(error) = classmesh_teacher::connected_ui_launcher::run_installed_teacher(
+                action == LaunchAction::CheckLive,
+            ) {
+                eprintln!("Teacher Live Mode denied: {error} (use --offline for diagnostics)");
+                std::process::exit(3);
+            }
+            Ok(())
         }
         LaunchAction::Offline => classmesh_teacher::ui_egui::run_teacher_ui(),
         LaunchAction::Help => {
@@ -65,7 +73,7 @@ fn main() -> eframe::Result<()> {
 #[cfg(not(windows))]
 fn main() {
     match requested_action() {
-        LaunchAction::Ui | LaunchAction::Offline => {
+        LaunchAction::Ui | LaunchAction::Offline | LaunchAction::CheckLive => {
             eprintln!("classmesh-teacher-ui is available on Windows only");
             std::process::exit(1);
         }
@@ -117,6 +125,11 @@ mod tests {
     #[test]
     fn unsupported_and_multiple_flags_fail_closed() {
         assert!(parse_launch_action(&args(&["--unknown"])).is_err());
+        assert!(parse_launch_action(&args(&["--offline", "--check-live"])).is_err());
+        assert_eq!(
+            parse_launch_action(&args(&["--check-live"])),
+            Ok(LaunchAction::CheckLive)
+        );
         assert!(parse_launch_action(&args(&["--help", "--version"])).is_err());
         assert!(parse_launch_action(&args(&["--"])).is_err());
     }

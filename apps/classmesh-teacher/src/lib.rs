@@ -847,3 +847,6 @@ mod tests {
         assert_eq!(directive, TeacherVideoEngineDirective::Keyframe(request));
     }
 }
+
+#[cfg(windows)]
+pub mod trusted_startup;

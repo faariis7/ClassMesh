@@ -28,7 +28,14 @@ mod power;
 pub mod program_data_known_folder;
 #[cfg(windows)]
 pub mod protected_app_bootstrap;
-#[cfg(all(windows, any(test, feature = "experimental-trusted-policy")))]
+#[cfg(all(
+    windows,
+    any(
+        test,
+        feature = "experimental-trusted-policy",
+        feature = "trusted-teacher-policy"
+    )
+))]
 mod registry_epoch;
 #[cfg(all(windows, test))]
 mod retained_policy_reader;
@@ -44,6 +51,8 @@ mod shared_ancestor_acl;
 mod system_volume;
 #[cfg(windows)]
 mod teacher_interaction;
+#[cfg(all(windows, feature = "trusted-teacher-policy"))]
+pub mod teacher_policy;
 #[cfg(windows)]
 mod telemetry_pipe;
 #[cfg(windows)]

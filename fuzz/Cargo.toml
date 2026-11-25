@@ -8,12 +8,20 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
+classmesh-security = { path = "../crates/classmesh-security" }
 libfuzzer-sys = "0.4.13"
 classmesh-control = { path = "../crates/classmesh-control" }
 
 [[bin]]
 name = "control_frame"
 path = "fuzz_targets/control_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "teacher_roster"
+path = "fuzz_targets/teacher_roster.rs"
 test = false
 doc = false
 bench = false

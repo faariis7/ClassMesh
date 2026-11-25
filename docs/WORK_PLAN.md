@@ -1,16 +1,11 @@
-## Live Teacher runtime — current #776 iteration
+## Trusted Teacher startup — ADR-0009
 
-The Teacher command stream starts after the Hello sequence, publishes liveness
-heartbeats on the same stream and can bootstrap M2 control before a
-presentation exists. Use the [proposed roster trust decision](decisions/0009-teacher-roster-trust.md)
-to obtain the issuer, organization, signed evidence, protected freshness policy
-and CNG access contract. Then wire verified enrollment and the approved
-connector into the Windows Teacher entry point.
-
-Run the authorized Service/Worker Message acceptance before full M3 and M4.
-The operator must confirm the visible Message and record a genuine correlated
-Completed, unauthorized/replay denial, key and Worker retirement, and cleanup.
-Use the unified x64 artifact and existing signing/SCM guides for M5.
+The roster format, issuer, protected startup and Windows entry point are implemented.
+Run protected M2 with the exact signed release images and an approved disposable lab.
+Record ordinary Teacher startup, authorized visible Message confirmation, correlated
+Completed, revocation, replay denial and cleanup. Advance M3/M4 only with actual
+qualified control and physical rendering/recovery evidence. See the
+[Teacher lab procedure](../tools/classmesh-lab/WINDOWS_TEACHER_LIVE.md).
 
 ## Unified RC follow-up — 2026-11-25
 
@@ -22,7 +17,7 @@ The 2026-11-18 checkpoint below describes its historical source revision and evi
 | --- | --- | --- |
 | 1 | Lockfile repair and Service #777 integration | Root/fuzz audit, exact-head hosted Windows/Security and the Service lifecycle regression on VM1 |
 | 2 | Verify release artifact and qualification-tool availability | Download same-head x64 package, independently verify inventory, provenance and checksums, and run VM runtime preflight |
-| 3 | Protected M2 acceptance | Apply the [approved trust and operator procedure](WINDOWS_RUNTIME_PLAN.md). The trust owner must approve the roster contract and verification inputs before Teacher live startup can be wired |
+| 3 | Protected M2 acceptance | Apply the [approved trust and operator procedure](WINDOWS_RUNTIME_PLAN.md). Provide approved issuer, enrolled inputs and signed Service/Worker images for the implemented startup |
 | 4 | Physical M3 and network acceptance | Run the [x64 lab sequence](M3_ASYNC_H264_HARDWARE_QUALIFICATION.md) on the target adapter/driver and two physical hosts |
 | 5 | Production go/no-go | Independent security and release owners approve the signed images, protected installation, real M2/M3 evidence, and rollback |
 

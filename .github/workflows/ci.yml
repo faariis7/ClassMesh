@@ -285,6 +285,9 @@ jobs:
       - name: Build Student Teacher authorization tool
         run: cargo build --locked -p classmesh-lab --bin classmesh-student-authorize-teacher --release
 
+      - name: Build Teacher roster and policy lab tools
+        run: cargo build --locked -p classmesh-lab --bin classmesh-teacher-roster-lab --bin classmesh-teacher-policy --release
+
       - name: Validate Phase 6F tool help
         shell: pwsh
         run: |
@@ -503,6 +506,28 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'pull_request' && 7 || 60 }}
 
+      - name: Verify unprovisioned Teacher executable remains closed
+        shell: pwsh
+        run: |
+          if (Test-Path HKLM:\SOFTWARE\ClassMesh-Teacher-Policy-v1) { throw 'Hosted runner is unexpectedly provisioned' }
+          $teacher = '.\target\release\classmesh-teacher-ui.exe'
+          if (-not (Test-Path $teacher)) { throw 'Teacher executable missing' }
+          $previousNativeBehavior = $PSNativeCommandUseErrorActionPreference
+          $PSNativeCommandUseErrorActionPreference = $false
+          try {
+            foreach ($mode in 'default', 'probe') {
+              $flags = @()
+              if ($mode -eq 'probe') { $flags = @('--check-live') }
+              $output = & $teacher @flags 2>&1
+              if ($LASTEXITCODE -ne 3 -or ($output -join ' ') -notmatch 'installed Teacher policy unavailable') {
+                throw "Teacher startup gate returned unexpected result: $LASTEXITCODE $output"
+              }
+            }
+          } finally {
+            $PSNativeCommandUseErrorActionPreference = $previousNativeBehavior
+          }
+          $global:LASTEXITCODE = 0
+
       - name: Stage Phase 6F qualification bundle
         shell: pwsh
         run: |
@@ -512,6 +537,10 @@ jobs:
           Copy-Item target/release/classmesh-enrollment-install.exe phase6f-bundle/
           Copy-Item target/release/classmesh-enrollment-authority.exe phase6f-bundle/
           Copy-Item target/release/classmesh-student-authorize-teacher.exe phase6f-bundle/
+          Copy-Item target/release/classmesh-teacher-roster-lab.exe phase6f-bundle/
+          Copy-Item target/release/classmesh-teacher-policy.exe phase6f-bundle/
+          Copy-Item docs/decisions/0009-teacher-roster-trust.md phase6f-bundle/
+          Copy-Item tools/classmesh-lab/WINDOWS_TEACHER_LIVE.md phase6f-bundle/
           Copy-Item scripts/phase6f-two-pc.ps1 phase6f-bundle/
           Copy-Item docs/PHASE6F_TWO_PC_QUALIFICATION.md phase6f-bundle/
           Copy-Item docs/PHASE6F_TWO_PC_RESULTS.md phase6f-bundle/

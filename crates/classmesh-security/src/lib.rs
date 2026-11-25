@@ -12,6 +12,7 @@ pub mod persistence;
 pub mod policy_blob_recovery;
 pub mod policy_blob_stage;
 pub mod policy_epoch;
+pub mod teacher_roster;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 

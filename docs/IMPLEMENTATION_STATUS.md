@@ -1,19 +1,13 @@
-## Live Teacher runtime implementation
+## Trusted Teacher runtime implementation
 
-The shared duplex path admits an explicitly enrolled M2 control route without
-inventing presentation identifiers, independently rechecks StudentDevice
-authorization, and keeps liveness and commands on the same post-Hello sequence
-ledger. The native UI launcher can take that route without preexisting media
-and rejects an untrusted Student before returning a bridge. The protected
-binary entry point still exits 3 while its configuration and signed roster
-producer remain unapproved. The existing lab Teacher grant supports explicit
-SendTeacherMessage after the existing verified enrollment checks.
-
-The Draft [#776](https://github.com/faariis7/ClassMesh/pull/776) evidence
-distinguishes endpoint integration tests from actual SCM/Worker execution.
-[#688](https://github.com/faariis7/ClassMesh/issues/688) remains the acceptance
-tracker. M3 physical rendering and M4 real reconnect require the protected M2
-workflow and the corresponding device evidence.
+The actual Windows binary now prepares a protected, versioned signed roster,
+checks the anchored epoch and CNG enrollment, and establishes one enrolled
+QUIC session with the selected roster StudentDevice. Startup with unprovisioned
+trust denies with exit 3. CLI probe and native GUI use the same startup. The
+shared duplex path retires the connection on policy change, stale freshness,
+certificate expiry or revoked inputs. Protected SCM, Worker human confirmation,
+physical Student rendering and recovery remain acceptance gates outside hosted CI.
+[ADR-0009](decisions/0009-teacher-roster-trust.md)
 
 ## Unified RC follow-up — 2026-11-25
 
@@ -33,9 +27,8 @@ to the earlier baseline only.
   before releasing the dispatch slot. The watchdog retains the process handle
   until exit is observed, so recovery cannot run a replacement concurrently.
   The 1-second pre-commit cancellation window is separate.
-- M2 still needs independently approved roster rules and trusted enrollment;
-  the shipped Teacher entry point offers offline diagnostics. The authorized
-  command workflow and actual Student render are unmeasured on this candidate.
+- Protected M2 requires independently approved enrollment and exact signed images.
+  The authorized interactive command workflow and Student render remain qualification gates.
 - The unsigned x64 package and lab artifacts have 30-day PR retention. A
   candidate package may be validated and used for offline diagnostics. Protected
   installation, native physical GPU and two-host multicast remain separate

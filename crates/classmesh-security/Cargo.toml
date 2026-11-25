@@ -12,6 +12,8 @@ getrandom = "0.4"
 sframe = "=2.0.0"
 zeroize = "1.8"
 ring = "0.17"
+coset = "0.4.2"
+minicbor = { version = "2.2.1", features = ["alloc"] }
 
 [lints]
 workspace = true

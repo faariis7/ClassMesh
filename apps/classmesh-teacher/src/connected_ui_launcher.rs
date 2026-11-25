@@ -233,42 +233,53 @@ fn start_native_runtime(
     authorization: LiveAuthorizationStore,
     dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()> + Send + 'static,
 ) -> std::io::Result<(TeacherUiControlBridge, EnrolledTeacherRuntimeThread)> {
+    start_runtime_thread(move |event_tx, action_rx| {
+        // The synchronous caller already rejected invalid authority; no
+        // Tokio runtime or transport exists before that check.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(TeacherConnectedPlaybackError::RuntimeInitialization)?;
+        match route {
+            NativeTeacherRoute::Playback(mut owner) => {
+                runtime.block_on(drive_authenticated_teacher_duplex(
+                    &mut owner,
+                    session,
+                    &authorization,
+                    event_tx,
+                    action_rx,
+                    dispatch,
+                    (unix_now_ms, Instant::now),
+                ))
+            }
+            NativeTeacherRoute::Control(route) => {
+                runtime.block_on(drive_authenticated_teacher_control(
+                    route,
+                    session,
+                    &authorization,
+                    event_tx,
+                    action_rx,
+                    dispatch,
+                    (unix_now_ms, Instant::now),
+                ))
+            }
+        }
+    })
+}
+
+fn start_runtime_thread(
+    run: impl FnOnce(
+        std::sync::mpsc::SyncSender<crate::ui_egui::TeacherUiControlEvent>,
+        std::sync::mpsc::Receiver<crate::ui_shell::TeacherUiAction>,
+    ) -> Result<(), TeacherConnectedPlaybackError>
+    + Send
+    + 'static,
+) -> std::io::Result<(TeacherUiControlBridge, EnrolledTeacherRuntimeThread)> {
     let (event_tx, event_rx) = sync_channel(UI_EVENT_CAPACITY);
     let (action_tx, action_rx) = sync_channel(UI_ACTION_CAPACITY);
     let runtime_thread = thread::Builder::new()
         .name("classmesh-teacher-enrolled-quic".to_owned())
-        .spawn(move || {
-            // The synchronous caller already rejected invalid authority; no
-            // Tokio runtime or transport exists before that check.
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(TeacherConnectedPlaybackError::RuntimeInitialization)?;
-            match route {
-                NativeTeacherRoute::Playback(mut owner) => {
-                    runtime.block_on(drive_authenticated_teacher_duplex(
-                        &mut owner,
-                        session,
-                        &authorization,
-                        event_tx,
-                        action_rx,
-                        dispatch,
-                        (unix_now_ms, Instant::now),
-                    ))
-                }
-                NativeTeacherRoute::Control(route) => {
-                    runtime.block_on(drive_authenticated_teacher_control(
-                        route,
-                        session,
-                        &authorization,
-                        event_tx,
-                        action_rx,
-                        dispatch,
-                        (unix_now_ms, Instant::now),
-                    ))
-                }
-            }
-        })?;
+        .spawn(move || run(event_tx, action_rx))?;
     Ok((
         TeacherUiControlBridge::new(event_rx, action_tx),
         runtime_thread,
@@ -368,6 +379,56 @@ pub fn run_teacher_ui_with_enrolled_control(
     )
     .map_err(EnrolledTeacherUiLaunchError::ThreadSpawn)?;
     run_native_window(bridge, runtime_thread)
+}
+
+/// Installed Live Mode and the read-only startup probe share the same
+/// protected producer and preflight. Both preserve the same QUIC runtime.
+pub fn run_installed_teacher(check_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::trusted_startup::{PreparedTeacher, prepare_installed_teacher};
+
+    let PreparedTeacher {
+        runtime,
+        endpoint,
+        session,
+        route,
+        authorization,
+        clock,
+    } = prepare_installed_teacher().map_err(|error| -> Box<dyn std::error::Error> { error })?;
+    preflight_control_route(route, &session, &authorization)
+        .map_err(EnrolledTeacherUiLaunchError::UntrustedStartup)?;
+    if clock() == u64::MAX {
+        return Err(
+            "protected Teacher policy changed or expired before the native launcher".into(),
+        );
+    }
+    if check_only {
+        session
+            .connection
+            .close(0u32.into(), b"Teacher startup probe complete");
+        runtime.block_on(async {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(3), endpoint.wait_idle()).await;
+        });
+        println!("Teacher protected roster, CNG identity and enrolled QUIC session verified");
+        return Ok(());
+    }
+
+    let (bridge, thread) = start_runtime_thread(move |events, actions| {
+        let result = runtime.block_on(drive_authenticated_teacher_control(
+            route,
+            session,
+            &authorization,
+            events,
+            actions,
+            |_| ControlFlow::Continue(()),
+            (clock, Instant::now),
+        ));
+        drop(endpoint);
+        result
+    })
+    .map_err(EnrolledTeacherUiLaunchError::ThreadSpawn)?;
+    run_native_window(bridge, thread)?;
+    Ok(())
 }
 
 fn run_native_window(

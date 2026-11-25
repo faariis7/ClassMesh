@@ -54,7 +54,11 @@ $ci = @{
 ## التشخيص وتشغيل Teacher
 
 يشغّل الخياران `Smoke` و`Launch` واجهة Teacher التشخيصية باستخدام `--offline`.
-تشغيل Teacher المتصل يحتاج تهيئة الهوية والتحقق المعتمد من الـRoster. راجع\n[إجراءات التأهيل المحمي لـM2](https://github.com/faariis7/ClassMesh/blob/integration/classmesh-unified-release-candidate/docs/WINDOWS_RUNTIME_PLAN.md) لمتطلبات التوقيع وتسجيل الخدمة واختبار الأمر.
+يشغّل فتح `classmesh-teacher-ui.exe` دون خيارات الوضع الحي بعد التحقق من
+الهوية وRoster الموقّع وخادم الطالب. استخدم `--check-live` للتحقق من التهيئة
+والاتصال بحساب Windows عادي دون فتح نافذة أو إرسال أمر. عند غياب السياسة المحمية
+أو رفضها يظهر سبب الرفض ويرجع البرنامج برمز 3. راجع
+[إجراءات التأهيل المحمي لـM2](https://github.com/faariis7/ClassMesh/blob/integration/classmesh-unified-release-candidate/tools/classmesh-lab/WINDOWS_TEACHER_LIVE.md).
 
 ```powershell
 & "$bundle\windows-mvp-launch.ps1" -Mode Diagnose -BundleDir $bundle @ci
