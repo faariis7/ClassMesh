@@ -231,6 +231,7 @@ pub(crate) struct PreparedTeacher {
     pub(crate) session: ClientControlSession,
     pub(crate) route: TeacherControlRoute,
     pub(crate) authorization: LiveAuthorizationStore,
+    pub(crate) display_name: String,
     pub(crate) clock: Box<dyn Fn() -> u64 + Send>,
 }
 
@@ -287,6 +288,7 @@ pub(crate) fn prepare_installed_teacher() -> StartupResult<PreparedTeacher> {
         session,
         route,
         authorization: validated.authorization,
+        display_name: validated.target.server_name,
         clock,
     })
 }

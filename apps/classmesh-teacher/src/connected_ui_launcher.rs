@@ -22,7 +22,7 @@ use crate::connected_runtime::{
     drive_authenticated_teacher_duplex,
 };
 use crate::receiver_playback_session::TeacherPlaybackSessionOwner;
-use crate::ui_egui::{self, TeacherUiControlBridge};
+use crate::ui_egui::{self, InstalledMessageTarget, TeacherUiControlBridge};
 
 /// This represents the one owned QUIC runtime thread, not a second receive
 /// thread. Only the post-Hello stream's single receiver consumes control frames.
@@ -359,7 +359,7 @@ pub fn run_teacher_ui_with_enrolled_session(
     let (bridge, runtime_thread) =
         start_enrolled_teacher_ui_runtime(owner, session, authorization, dispatch)
             .map_err(EnrolledTeacherUiLaunchError::ThreadSpawn)?;
-    run_native_window(bridge, runtime_thread)
+    run_native_window(bridge, runtime_thread, None)
 }
 
 /// Launch the actual Windows Teacher window for an independently authorized M2 route.
@@ -378,7 +378,7 @@ pub fn run_teacher_ui_with_enrolled_control(
         dispatch,
     )
     .map_err(EnrolledTeacherUiLaunchError::ThreadSpawn)?;
-    run_native_window(bridge, runtime_thread)
+    run_native_window(bridge, runtime_thread, None)
 }
 
 /// Installed Live Mode and the read-only startup probe share the same
@@ -392,6 +392,7 @@ pub fn run_installed_teacher(check_only: bool) -> Result<(), Box<dyn std::error:
         session,
         route,
         authorization,
+        display_name,
         clock,
     } = prepare_installed_teacher().map_err(|error| -> Box<dyn std::error::Error> { error })?;
     preflight_control_route(route, &session, &authorization)
@@ -413,6 +414,11 @@ pub fn run_installed_teacher(check_only: bool) -> Result<(), Box<dyn std::error:
         return Ok(());
     }
 
+    let target = InstalledMessageTarget {
+        source: route.source_id(),
+        session: route.control_session_id(),
+        display_name,
+    };
     let (bridge, thread) = start_runtime_thread(move |events, actions| {
         let result = runtime.block_on(drive_authenticated_teacher_control(
             route,
@@ -427,15 +433,16 @@ pub fn run_installed_teacher(check_only: bool) -> Result<(), Box<dyn std::error:
         result
     })
     .map_err(EnrolledTeacherUiLaunchError::ThreadSpawn)?;
-    run_native_window(bridge, thread)?;
+    run_native_window(bridge, thread, Some(target))?;
     Ok(())
 }
 
 fn run_native_window(
     bridge: TeacherUiControlBridge,
     runtime_thread: EnrolledTeacherRuntimeThread,
+    target: Option<InstalledMessageTarget>,
 ) -> Result<(), EnrolledTeacherUiLaunchError> {
-    let window = ui_egui::run_teacher_ui_with_control_bridge(bridge);
+    let window = ui_egui::run_teacher_window(bridge, target);
     // run_native returned: its app/bridge (and thus its final action sender)
     // was dropped. Join before reporting native launch success.
     let control = runtime_thread

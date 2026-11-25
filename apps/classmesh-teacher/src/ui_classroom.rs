@@ -40,6 +40,7 @@ pub fn show_classroom(
     shell: &mut TeacherUiShellState,
     classroom: &mut TeacherClassroomViewModel,
     monitoring: &TeacherMonitoringGridViewModel,
+    authenticated_target: Option<MonitoringSourceId>,
 ) {
     let rows = classroom.rows();
     let tiles = monitoring.tiles(classroom);
@@ -52,7 +53,13 @@ pub fn show_classroom(
     match classroom_layout(ui.available_width()) {
         ClassroomLayout::SideBySide => {
             ui.columns(2, |columns| {
-                device_list(&mut columns[0], &rows, &mut requested_message, true);
+                device_list(
+                    &mut columns[0],
+                    &rows,
+                    &mut requested_message,
+                    true,
+                    authenticated_target,
+                );
                 monitoring_grid(
                     &mut columns[1],
                     &tiles,
@@ -68,7 +75,13 @@ pub fn show_classroom(
             egui::ScrollArea::vertical()
                 .id_salt("classmesh_classroom_stacked")
                 .show(ui, |ui| {
-                    device_list(ui, &rows, &mut requested_message, false);
+                    device_list(
+                        ui,
+                        &rows,
+                        &mut requested_message,
+                        false,
+                        authenticated_target,
+                    );
                     ui.separator();
                     monitoring_grid(ui, &tiles, &names, &mut requested_message, false);
                 });
@@ -87,6 +100,7 @@ fn device_list(
     rows: &[ClassroomDeviceRow],
     requested_message: &mut Option<TeacherUiMessage>,
     scroll: bool,
+    authenticated_target: Option<MonitoringSourceId>,
 ) {
     ui.heading("Devices");
     ui.label(format!("{} enrolled", rows.len()));
@@ -103,9 +117,11 @@ fn device_list(
     if scroll {
         egui::ScrollArea::vertical()
             .id_salt("classmesh_device_list")
-            .show(ui, |ui| device_rows(ui, rows, requested_message));
+            .show(ui, |ui| {
+                device_rows(ui, rows, requested_message, authenticated_target)
+            });
     } else {
-        device_rows(ui, rows, requested_message);
+        device_rows(ui, rows, requested_message, authenticated_target);
     }
 }
 
@@ -113,6 +129,7 @@ fn device_rows(
     ui: &mut egui::Ui,
     rows: &[ClassroomDeviceRow],
     requested_message: &mut Option<TeacherUiMessage>,
+    authenticated_target: Option<MonitoringSourceId>,
 ) {
     for row in rows {
         let label = format!(
@@ -126,7 +143,9 @@ fn device_rows(
         if response.clicked() {
             *requested_message = Some(TeacherUiMessage::SelectDevice(Some(row.source_id)));
         }
-        if !row.health.service_ready || !row.health.worker_ready {
+        if authenticated_target == Some(row.source_id) {
+            ui.small("Authenticated control · Worker readiness unverified");
+        } else if !row.health.service_ready || !row.health.worker_ready {
             ui.small(format!(
                 "Service: {} · Worker: {}",
                 readiness_label(row.health.service_ready),
