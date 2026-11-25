@@ -15,7 +15,7 @@ use windows_sys::Win32::System::Registry::*;
 const RECORD_LEN: usize = 48;
 pub(crate) const TEACHER_SCOPE: &str = "ClassMesh-Teacher-Policy-v1";
 const TEACHER_DATA: &str = "TeacherStartupPolicy";
-#[cfg(any(test, feature = "trusted-teacher-policy"))]
+#[cfg(feature = "trusted-teacher-policy")]
 pub(crate) const TEACHER_DATA_MAX: usize = 256 * 1024;
 
 fn teacher_scope(scope: &str) -> bool {
@@ -431,7 +431,7 @@ impl RegistryAnchor {
 }
 /// A read-only, fixed HKLM Teacher namespace. No writes, flushes, environment
 /// paths, files or legacy fallback belong in ordinary-account startup.
-#[cfg(any(test, feature = "trusted-teacher-policy"))]
+#[cfg(feature = "trusted-teacher-policy")]
 pub(crate) fn read_teacher(scope: &str) -> io::Result<([u8; RECORD_LEN], Vec<u8>)> {
     if !teacher_scope(scope) {
         return Err(denied());
@@ -473,7 +473,7 @@ pub(crate) fn read_teacher(scope: &str) -> io::Result<([u8; RECORD_LEN], Vec<u8>
 
 /// Reopen the fixed namespace on each liveness or privileged-send check so a
 /// missing/replaced key is visible. The snapshot itself needs no repeated allocation.
-#[cfg(any(test, feature = "trusted-teacher-policy"))]
+#[cfg(feature = "trusted-teacher-policy")]
 pub(crate) fn teacher_checkpoint(scope: &str) -> io::Result<[u8; RECORD_LEN]> {
     if !teacher_scope(scope) {
         return Err(denied());
@@ -484,7 +484,7 @@ pub(crate) fn teacher_checkpoint(scope: &str) -> io::Result<[u8; RECORD_LEN]> {
     read_record(&key)
 }
 
-#[cfg(any(test, feature = "trusted-teacher-policy"))]
+#[cfg(feature = "trusted-teacher-policy")]
 pub(crate) fn publish_teacher(
     scope: &str,
     epoch: u64,
