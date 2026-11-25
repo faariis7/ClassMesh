@@ -1,11 +1,17 @@
 ## Trusted Teacher startup — ADR-0009
 
 The roster format, issuer, protected startup and Windows entry point are implemented.
+Student Live enrollment issues a leaf for an explicit authority-approved DNS
+name or IP. Use the same name in protected Teacher policy.
 Run protected M2 with the exact signed release images and an approved disposable lab.
 Record ordinary Teacher startup, authorized visible Message confirmation, correlated
 Completed, revocation, replay denial and cleanup. Advance M3/M4 only with actual
 qualified control and physical rendering/recovery evidence. See the
 [Teacher lab procedure](../tools/classmesh-lab/WINDOWS_TEACHER_LIVE.md).
+
+The 2026-11-25 lab attempt reached the VM1 password-expiry screen. A signed-in
+ordinary account and a recoverable pre-run baseline are required before
+provisioning. Interactive M2–M5 acceptance remains open.
 
 ## Unified RC follow-up — 2026-11-25
 

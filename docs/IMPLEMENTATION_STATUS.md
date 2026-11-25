@@ -9,6 +9,13 @@ certificate expiry or revoked inputs. Protected SCM, Worker human confirmation,
 physical Student rendering and recovery remain acceptance gates outside hosted CI.
 [ADR-0009](decisions/0009-teacher-roster-trust.md)
 
+The Student enrollment CLI now lets the authority issue the exact endpoint SAN
+required by Teacher's enrolled TLS configuration. A real portable loopback
+QUIC regression reproduced the rejection of the former SAN-free certificate
+and verifies approved DNS and IP names plus rejection of a CSR-supplied
+unapproved name. VM1 guest access was blocked at the Windows password-expiry
+screen, before protected provisioning or application execution.
+
 ## Unified RC follow-up — 2026-11-25
 
 [Draft PR #776](https://github.com/faariis7/ClassMesh/pull/776) holds the exact

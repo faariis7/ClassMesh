@@ -9,6 +9,12 @@ The test uses two signed-in Windows PCs on the same wired LAN:
 
 The same machines also run the synthetic UDP vs QUIC Datagram benchmark introduced in PR #29.
 
+For the installed MVP, qualify the authenticated Teacher and Student control
+session first. Use the authority-approved Student certificate name in protected
+Teacher policy. Record two distinct nonblank frames from the actual Student
+window and verify Stop and restart with the synchronous decoder.
+[Teacher and Worker acceptance](../tools/classmesh-lab/WINDOWS_TEACHER_LIVE.md)
+
 ## Required CI artifacts
 
 Prefer the combined `classmesh-phase4-qualification-windows-x64` artifact when it is available. It contains the qualification executables, PowerShell runner, runbook, results template, and visual latency source.

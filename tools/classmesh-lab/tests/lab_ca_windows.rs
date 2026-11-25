@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use classmesh_control::enrollment::{ENROLLMENT_MIN_VERSION, validate_enrollment_result_binding};
@@ -13,7 +14,9 @@ use classmesh_protocol::control_wire::{EnrollmentRequest, EnrollmentResult};
 use classmesh_security::{PrincipalId, PrincipalKind, persistence::DurableAuthorizationState};
 use prost::Message;
 use rcgen::{CertificateSigningRequestParams, Issuer};
-use rustls::pki_types::{CertificateDer, CertificateSigningRequestDer};
+use rustls::RootCertStore;
+use rustls::client::{WebPkiServerVerifier, danger::ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, CertificateSigningRequestDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
 
 const CA: &str = env!("CARGO_BIN_EXE_classmesh-lab-ca");
@@ -21,6 +24,7 @@ const REQUEST: &str = env!("CARGO_BIN_EXE_classmesh-enrollment-request");
 const AUTHORITY: &str = env!("CARGO_BIN_EXE_classmesh-enrollment-authority");
 const INSTALL: &str = env!("CARGO_BIN_EXE_classmesh-enrollment-install");
 const STAGE: &str = env!("CARGO_BIN_EXE_classmesh-student-authorization-init");
+const STUDENT_SERVER_NAME: &str = "classmesh.local";
 
 fn hex(data: &[u8]) -> String {
     data.iter().map(|b| format!("{b:02x}")).collect()
@@ -131,23 +135,26 @@ fn request(root: &Path, role: &str, label: &str) -> (PathBuf, EnrollmentRequest,
     (path, req, DeviceKey(key))
 }
 fn issue(lab: &Lab, req: &Path, output: &Path, role: &str) -> EnrollmentResult {
-    success(
-        AUTHORITY,
-        &[
-            "--role",
-            role,
-            "--request",
-            text(req),
-            "--ca-cert",
-            text(&lab.cert()),
-            "--ca-key-name",
-            &lab.key(),
-            "--output",
-            text(output),
-            "--lifetime-hours",
-            "1",
-        ],
-    );
+    let ca = lab.cert();
+    let key = lab.key();
+    let mut args = vec![
+        "--role",
+        role,
+        "--request",
+        text(req),
+        "--ca-cert",
+        text(&ca),
+        "--ca-key-name",
+        &key,
+        "--output",
+        text(output),
+        "--lifetime-hours",
+        "1",
+    ];
+    if role == "student-device" {
+        args.extend(["--student-server-name", STUDENT_SERVER_NAME]);
+    }
+    success(AUTHORITY, &args);
     EnrollmentResult::decode(fs::read(output).unwrap().as_slice()).unwrap()
 }
 fn install_args<'a>(
@@ -257,6 +264,27 @@ fn student_cycle_reloads_real_identity_and_rejects_untrusted_results() {
     let (request_path, req, _student_key) = request(root, "student-device", "student");
     let result_path = root.join("approved.pb");
     let approved = issue(&lab, &request_path, &result_path, "student-device");
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(fs::read(lab.cert()).unwrap()))
+        .unwrap();
+    let verifier = WebPkiServerVerifier::builder_with_provider(
+        Arc::new(roots),
+        Arc::new(rustls::crypto::ring::default_provider()),
+    )
+    .build()
+    .unwrap();
+    let leaf = CertificateDer::from(approved.certificate_chain_der[0].as_slice());
+    for (name, should_verify) in [(STUDENT_SERVER_NAME, true), ("other.classmesh", false)] {
+        let result = verifier.verify_server_cert(
+            &leaf,
+            &[],
+            &ServerName::try_from(name).unwrap(),
+            &[],
+            UnixTime::now(),
+        );
+        assert_eq!(result.is_ok(), should_verify, "{name}: {result:?}");
+    }
     let principal: [u8; 32] = req.principal_id.clone().try_into().unwrap();
     let csr_hash: [u8; 32] = Sha256::digest(&req.pkcs10_csr_der).into();
     validate_enrollment_result_binding(ENROLLMENT_MIN_VERSION, &principal, &csr_hash, &approved)
@@ -635,7 +663,7 @@ fn teacher_authorization_requires_proven_issuer_and_role_before_grant() {
         "student": {
             "principal": student.principal_id,
             "leaf_sha256": student_enrollment.credential_fingerprint_sha256,
-            "address": "127.0.0.1:44991", "server_name": "classmesh.local"
+            "address": "127.0.0.1:44991", "server_name": STUDENT_SERVER_NAME
         }
     });
     let plan = env!("CARGO_BIN_EXE_classmesh-teacher-policy");

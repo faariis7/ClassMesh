@@ -194,8 +194,14 @@ jobs:
       - name: Test opt-in trusted Service config parser
         run: cargo test --locked -p classmesh-service --features experimental-trusted-policy trusted_config_parser_matches_existing_version_one_contract
 
-      - name: Build opt-in trusted policy Service
-        run: cargo build --locked -p classmesh-service --features experimental-trusted-policy
+      - name: Stage opt-in protected Service and provisioner for lab qualification
+        shell: pwsh
+        run: |
+          cargo build --locked --release -p classmesh-service -p classmesh-win32 --features classmesh-service/experimental-trusted-policy,classmesh-win32/experimental-trusted-policy --bin classmesh-service --bin classmesh-trusted-provision
+          if ($LASTEXITCODE -ne 0) { throw 'Protected lab binaries failed to build' }
+          New-Item -ItemType Directory -Path phase6f-bundle/protected-lab | Out-Null
+          Copy-Item target/release/classmesh-service.exe phase6f-bundle/protected-lab/
+          Copy-Item target/release/classmesh-trusted-provision.exe phase6f-bundle/protected-lab/
 
       - name: Build Phase 12B4 Service qualification binary
         shell: pwsh
@@ -279,8 +285,8 @@ jobs:
       - name: Build approved Teacher enrollment installer
         run: cargo build --locked -p classmesh-lab --bin classmesh-enrollment-install --release
 
-      - name: Build offline Teacher enrollment authority
-        run: cargo build --locked -p classmesh-lab --bin classmesh-enrollment-authority --release
+      - name: Build offline enrollment authority and lab staging tools
+        run: cargo build --locked -p classmesh-lab --bin classmesh-enrollment-authority --bin classmesh-lab-ca --bin classmesh-student-authorization-init --release
 
       - name: Build Student Teacher authorization tool
         run: cargo build --locked -p classmesh-lab --bin classmesh-student-authorize-teacher --release
@@ -531,11 +537,12 @@ jobs:
       - name: Stage Phase 6F qualification bundle
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path phase6f-bundle -Force | Out-Null
           Copy-Item target/release/classmesh-interactive-qualification.exe phase6f-bundle/
           Copy-Item target/release/classmesh-enrollment-request.exe phase6f-bundle/
           Copy-Item target/release/classmesh-enrollment-install.exe phase6f-bundle/
           Copy-Item target/release/classmesh-enrollment-authority.exe phase6f-bundle/
+          Copy-Item target/release/classmesh-lab-ca.exe phase6f-bundle/
+          Copy-Item target/release/classmesh-student-authorization-init.exe phase6f-bundle/
           Copy-Item target/release/classmesh-student-authorize-teacher.exe phase6f-bundle/
           Copy-Item target/release/classmesh-teacher-roster-lab.exe phase6f-bundle/
           Copy-Item target/release/classmesh-teacher-policy.exe phase6f-bundle/
@@ -544,6 +551,24 @@ jobs:
           Copy-Item scripts/phase6f-two-pc.ps1 phase6f-bundle/
           Copy-Item docs/PHASE6F_TWO_PC_QUALIFICATION.md phase6f-bundle/
           Copy-Item docs/PHASE6F_TWO_PC_RESULTS.md phase6f-bundle/
+          Copy-Item tools/classmesh-lab/WINDOWS_LAB_CA.md phase6f-bundle/
+          $bundle = (Resolve-Path phase6f-bundle).Path
+          $revision = (git rev-parse HEAD)
+          if ($LASTEXITCODE -ne 0 -or $revision -cnotmatch '^[0-9a-f]{40}$') { throw 'Invalid lab checkout revision' }
+          $files = [ordered]@{}
+          Get-ChildItem -LiteralPath $bundle -Recurse -File | Sort-Object FullName | ForEach-Object {
+            $relative = [IO.Path]::GetRelativePath($bundle, $_.FullName).Replace('\', '/')
+            $files[$relative] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-Output "phase6f_sha256=$($files[$relative]) file=$relative"
+          }
+          [ordered]@{
+            source_revision = $revision
+            github_run_id = $env:GITHUB_RUN_ID
+            github_run_attempt = $env:GITHUB_RUN_ATTEMPT
+            lab_only = $true
+            protected_service_features = @('experimental-trusted-policy')
+            files_sha256 = $files
+          } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8NoBOM phase6f-bundle/source-and-checksums.json
 
       - name: Upload Phase 6F qualification bundle
         uses: actions/upload-artifact@v4

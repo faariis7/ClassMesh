@@ -9,6 +9,12 @@ explicit Message grant and operator acceptance. The control session can be
 established before video. A verified startup probe is not a Worker result.
 Test only with independently approved image signatures and temporary SCM scope.
 
+Issue the Student leaf with `--student-server-name <DNS-or-IP>` from the
+approved endpoint and use that value as the protected Teacher
+`student.server_name`. Capture native Authenticode results, rollback scope,
+existing protected resources and the ordinary interactive session before
+SCM Apply. An expired Windows sign-in blocks that inventory and qualification.
+
 ## Unified RC physical trust qualification (2026-11-18)
 
 Software compilation/tests do not supply an approved root, signer, roster verifier

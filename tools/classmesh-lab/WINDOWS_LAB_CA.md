@@ -43,7 +43,7 @@ New-Item -ItemType Directory -Path $work -ErrorAction Stop
 $request = Join-Path $work 'student-request.pb'
 $result = Join-Path $work 'student-approved.pb'
 & "$bin\classmesh-enrollment-request.exe" --role student-device --display-name VM1-Lab --output $request
-& "$bin\classmesh-enrollment-authority.exe" --role student-device --request $request --ca-cert $ca --ca-key-name $caContainerName --output $result --lifetime-hours 1
+& "$bin\classmesh-enrollment-authority.exe" --role student-device --request $request --ca-cert $ca --ca-key-name $caContainerName --output $result --lifetime-hours 1 --student-server-name 127.0.0.1
 $identity = Join-Path $work 'machine-identity.json'
 & "$bin\classmesh-enrollment-install.exe" --role student-device --request $request --result $result --trust-root $ca --identity-output $identity
 $stage = Join-Path $env:TEMP ('ClassMesh-Student-Stage-' + [Guid]::NewGuid().ToString('N'))
@@ -54,6 +54,15 @@ Check `$LASTEXITCODE` after each executable before advancing. The automated
 native test below performs these checks and guarantees its owned cleanup.
 Teacher remains the default role in the existing request/authority/installer;
 StudentDevice requires explicit opt-in on all three.
+
+For Live Mode, the authority must approve the exact DNS name or IP address the
+Teacher will verify. Use that value for `--student-server-name` and the
+protected Teacher policy's `student.server_name`. The authority writes one
+subject alternative name from this approval and discards any names requested
+by the CSR. The example approves loopback for co-located lab testing. A
+separate Student host needs its own approved endpoint. Reissue earlier Student
+certificates without the required SAN and use the new leaf fingerprint in the
+protected configuration.
 
 The stager now **requires `--trust-root`** (repeatable, at most 16). This intentional
 fail-closed tightening prevents an EnrollmentResult from establishing trust in

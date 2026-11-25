@@ -3,9 +3,9 @@ use std::time::{Duration, SystemTime};
 use classmesh_security::PrincipalId;
 use rcgen::{
     CertificateSigningRequestParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyUsagePurpose,
-    SigningKey,
+    SanType, SigningKey,
 };
-use rustls::pki_types::{CertificateDer, CertificateSigningRequestDer};
+use rustls::pki_types::{CertificateDer, CertificateSigningRequestDer, ServerName};
 use sha2::{Digest, Sha256};
 
 use crate::enrollment::SHA256_BYTES;
@@ -27,8 +27,16 @@ pub struct IssuedCertificate {
 pub enum X509IssuanceError {
     Policy(CertificateIssuanceError),
     InvalidCsr,
+    InvalidServerName,
     InvalidTimestamp,
     SigningFailed(String),
+}
+
+pub struct EnrollmentCertificateRequest<'a> {
+    pub principal_id: PrincipalId,
+    pub csr_der: &'a [u8],
+    pub approval: EnrollmentApproval,
+    pub approved_server_name: Option<ServerName<'a>>,
 }
 
 /// Issues a ClassMesh end-entity certificate from an already approved PKCS#10 CSR.
@@ -36,16 +44,20 @@ pub enum X509IssuanceError {
 /// The issuance policy first binds the exact CSR bytes to the approved stable
 /// PrincipalId and verifies PKCS#10 proof-of-possession. The authority then
 /// overrides security-sensitive certificate properties instead of trusting CSR
-/// requests for CA/basic-constraints or key-usage privileges.
+/// requests for CA/basic-constraints, key-usage privileges or server identities.
 pub fn issue_certificate<S: SigningKey>(
     policy: CertificateIssuancePolicy,
     now_unix_ms: u64,
-    principal_id: PrincipalId,
-    csr_der: &[u8],
-    approval: EnrollmentApproval,
+    enrollment: EnrollmentCertificateRequest<'_>,
     validity: CertificateValidity,
     issuer: &Issuer<'_, S>,
 ) -> Result<IssuedCertificate, X509IssuanceError> {
+    let EnrollmentCertificateRequest {
+        principal_id,
+        csr_der,
+        approval,
+        approved_server_name,
+    } = enrollment;
     policy
         .validate(now_unix_ms, principal_id, csr_der, approval, validity)
         .map_err(X509IssuanceError::Policy)?;
@@ -54,6 +66,17 @@ pub fn issue_certificate<S: SigningKey>(
     let mut request = CertificateSigningRequestParams::from_der(&csr_der)
         .map_err(|_| X509IssuanceError::InvalidCsr)?;
 
+    request.params.subject_alt_names = match approved_server_name {
+        Some(ServerName::DnsName(name)) => vec![SanType::DnsName(
+            name.as_ref()
+                .trim_end_matches('.')
+                .try_into()
+                .map_err(|_| X509IssuanceError::InvalidServerName)?,
+        )],
+        Some(ServerName::IpAddress(address)) => vec![SanType::IpAddress(address.into())],
+        Some(_) => return Err(X509IssuanceError::InvalidServerName),
+        None => Vec::new(),
+    };
     request.params.not_before = unix_ms_to_system_time(validity.not_before_unix_ms)?.into();
     request.params.not_after = unix_ms_to_system_time(validity.not_after_unix_ms)?.into();
     request.params.is_ca = IsCa::NoCa;
@@ -88,9 +111,17 @@ fn unix_ms_to_system_time(unix_ms: u64) -> Result<SystemTime, X509IssuanceError>
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use quinn::Endpoint;
     use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, DnType, KeyPair};
+    use rustls::RootCertStore;
+    use rustls::pki_types::PrivatePkcs8KeyDer;
+    use rustls::server::WebPkiClientVerifier;
+    use rustls::sign::{CertifiedKey, SingleCertAndKey};
 
     use super::*;
+    use crate::quic::{accept, connect, enrolled_client_config, enrolled_server_config};
 
     fn principal(value: u8) -> PrincipalId {
         PrincipalId([value; 32])
@@ -142,9 +173,12 @@ mod tests {
         let issued = issue_certificate(
             policy(),
             1_000_000,
-            principal(7),
-            &csr,
-            approval(&csr),
+            EnrollmentCertificateRequest {
+                principal_id: principal(7),
+                csr_der: &csr,
+                approval: approval(&csr),
+                approved_server_name: None,
+            },
             validity,
             &authority(),
         )
@@ -172,9 +206,12 @@ mod tests {
             issue_certificate(
                 policy(),
                 1_000_000,
-                principal(8),
-                &csr,
-                approval(&csr),
+                EnrollmentCertificateRequest {
+                    principal_id: principal(8),
+                    csr_der: &csr,
+                    approval: approval(&csr),
+                    approved_server_name: None,
+                },
                 validity,
                 &authority(),
             ),
@@ -182,5 +219,124 @@ mod tests {
                 CertificateIssuanceError::PrincipalBindingMismatch
             ))
         );
+    }
+
+    #[tokio::test]
+    async fn student_enrollment_supports_authority_approved_quic_server_names() {
+        let issuer = authority();
+        let mut roots = RootCertStore::empty();
+        roots.add(issuer.der().clone()).expect("enrollment root");
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let client_verifier =
+            WebPkiClientVerifier::builder_with_provider(Arc::new(roots.clone()), provider.clone())
+                .build()
+                .expect("enrolled Teacher verifier");
+        let now = u64::try_from(
+            SystemTime::UNIX_EPOCH
+                .elapsed()
+                .expect("test time")
+                .as_millis(),
+        )
+        .expect("test Unix time");
+        let validity = CertificateValidity {
+            not_before_unix_ms: now,
+            not_after_unix_ms: now + 3_600_000,
+        };
+        let teacher_key = KeyPair::generate().expect("Teacher key");
+        let teacher_csr = CertificateParams::new(Vec::<String>::new())
+            .expect("Teacher CSR params")
+            .serialize_request(&teacher_key)
+            .expect("Teacher CSR");
+        let teacher_csr = teacher_csr.der().as_ref();
+        let teacher_cert = issue_certificate(
+            policy(),
+            now,
+            EnrollmentCertificateRequest {
+                principal_id: principal(7),
+                csr_der: teacher_csr,
+                approval: approval(teacher_csr),
+                approved_server_name: None,
+            },
+            validity,
+            &issuer,
+        )
+        .expect("Teacher enrollment");
+        let teacher_signer = CertifiedKey::from_der(
+            vec![teacher_cert.certificate_der],
+            PrivatePkcs8KeyDer::from(teacher_key.serialize_der()).into(),
+            &provider,
+        )
+        .expect("Teacher signer");
+        let listen = "127.0.0.1:0".parse().expect("loopback address");
+        let mut teacher = Endpoint::client(listen).expect("Teacher QUIC endpoint");
+        teacher.set_default_client_config(
+            enrolled_client_config(roots, Arc::new(SingleCertAndKey::from(teacher_signer)))
+                .expect("enrolled Teacher TLS config"),
+        );
+
+        for (approved_name, requested_names) in [
+            ("student.classmesh", Vec::new()),
+            ("127.0.0.1", vec!["unapproved.classmesh".to_owned()]),
+        ] {
+            let student_key = KeyPair::generate().expect("Student key");
+            let student_csr = CertificateParams::new(requested_names)
+                .expect("Student CSR params")
+                .serialize_request(&student_key)
+                .expect("Student CSR");
+            let student_csr = student_csr.der().as_ref();
+            let student_approval = EnrollmentApproval {
+                principal_id: principal(8),
+                csr_sha256: Sha256::digest(student_csr).into(),
+            };
+            let student_cert = issue_certificate(
+                policy(),
+                now,
+                EnrollmentCertificateRequest {
+                    principal_id: principal(8),
+                    csr_der: student_csr,
+                    approval: student_approval,
+                    approved_server_name: Some(
+                        ServerName::try_from(approved_name).expect("approved Student name"),
+                    ),
+                },
+                validity,
+                &issuer,
+            )
+            .expect("Student enrollment");
+            let student = Endpoint::server(
+                enrolled_server_config(
+                    vec![student_cert.certificate_der],
+                    PrivatePkcs8KeyDer::from(student_key.serialize_der()).into(),
+                    client_verifier.clone(),
+                )
+                .expect("enrolled Student TLS config"),
+                listen,
+            )
+            .expect("Student QUIC endpoint");
+            let address = student.local_addr().expect("Student address");
+            let (teacher_peer, student_peer) =
+                tokio::join!(connect(&teacher, address, approved_name), accept(&student));
+            assert!(
+                teacher_peer.is_ok(),
+                "Teacher rejected the enrolled Student at {approved_name}: {:?}",
+                teacher_peer.err()
+            );
+            let student_peer = student_peer.expect("Student accepts the enrolled Teacher");
+            assert!(student_peer.peer_identity().is_some());
+            student_peer.close(0_u32.into(), b"enrollment verified");
+
+            let (teacher_peer, student_peer) = tokio::join!(
+                connect(&teacher, address, "unapproved.classmesh"),
+                accept(&student)
+            );
+            let rejected = teacher_peer.expect_err("unapproved name must fail TLS");
+            assert!(
+                rejected
+                    .to_string()
+                    .contains("certificate not valid for name"),
+                "{rejected}"
+            );
+            assert!(student_peer.is_err());
+        }
     }
 }

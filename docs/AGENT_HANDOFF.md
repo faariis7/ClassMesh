@@ -7,6 +7,12 @@ Service, publish protected Windows state or approve a production signer outside
 an explicit owner-approved scope. See the
 [Teacher lab procedure](../tools/classmesh-lab/WINDOWS_TEACHER_LIVE.md).
 
+VM1 paused before protected provisioning at the expired-password screen.
+After the account owner signs in, capture the ordinary account and elevated
+inventory and verify recovery before any write. Match the independently
+reviewed signed-image hashes and signer pin. When issuing the Student leaf, use
+`--student-server-name` with the exact protected Teacher target name.
+
 ## Unified RC follow-up — 2026-11-25
 
 Resume from [#776](https://github.com/faariis7/ClassMesh/pull/776) and refresh
