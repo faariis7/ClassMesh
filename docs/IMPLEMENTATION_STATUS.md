@@ -13,8 +13,12 @@ The Student enrollment CLI now lets the authority issue the exact endpoint SAN
 required by Teacher's enrolled TLS configuration. A real portable loopback
 QUIC regression reproduced the rejection of the former SAN-free certificate
 and verifies approved DNS and IP names plus rejection of a CSR-supplied
-unapproved name. VM1 guest access was blocked at the Windows password-expiry
-screen, before protected provisioning or application execution.
+unapproved name. The 2026-11-26 VM1 run verified all 13 signed images natively
+and installed protected Teacher and Student policy. The packaged Teacher
+executable reached enrolled mTLS/QUIC Hello and Student verification, then
+rejected Live Mode with exit 3 at `NotNegotiated`. The Worker launched in
+Session 1 but did not establish authenticated IPC. See the
+[measured run record](WINDOWS_RUNTIME_PLAN.md#protected-vm1-run--2026-11-26).
 
 ## Unified RC follow-up — 2026-11-25
 

@@ -36,6 +36,10 @@ foreach ($case in $cases) {
 
 # Regression contract: reject all low-privilege mutation rights, not only the Write alias.
 $source = Get-Content -LiteralPath $script -Raw
+$createMarker = 'New-Service -Name $serviceName -BinaryPathName $bin -StartupType Manual'
+if (-not $source.Contains($createMarker) -or $source.Contains('& sc.exe create $serviceName')) {
+    throw 'SCM registration must preserve literal image-path quotes on Windows PowerShell 5.1'
+}
 foreach ($right in @('WriteData','AppendData','WriteAttributes','WriteExtendedAttributes','Delete','DeleteSubdirectoriesAndFiles','ChangePermissions','TakeOwnership')) {
     if ($source -notmatch [regex]::Escape("::$right")) { throw "SCM ACL gate missing mutation right: $right" }
 }
@@ -44,7 +48,7 @@ if ($source -notmatch 'Assert-ProtectedFile \$ServiceExe \$ExpectedServiceSha256
 
 # Both pinned executables must be checked again after startup verification and before SCM creation.
 $verifyAt = $source.IndexOf('& $TrustedProvisionExe --verify-startup')
-$createAt = $source.IndexOf('& sc.exe create $serviceName')
+$createAt = $source.IndexOf($createMarker)
 if ($verifyAt -lt 0 -or $createAt -le $verifyAt) { throw 'SCM verification/create sequence missing' }
 $window = $source.Substring($verifyAt, $createAt - $verifyAt)
 foreach ($check in @('Assert-ProtectedFile $ServiceExe $ExpectedServiceSha256', 'Assert-ProtectedFile $TrustedProvisionExe $ExpectedProvisionSha256')) {
@@ -77,7 +81,6 @@ if ($startAt -lt 0 -or $runtimeAt -le $startAt -or $successAt -le $runtimeAt) {
 'PASS: SCM runtime image path/hash fail-closed contract'
 
 # Registered SCM configuration must be checked before the first service start.
-$createAt = $source.IndexOf('& sc.exe create $serviceName')
 $registeredAt = $source.IndexOf('$registered = Get-CimInstance Win32_Service')
 $startAt = $source.IndexOf('Start-Service -Name $serviceName')
 if ($registeredAt -le $createAt -or $startAt -le $registeredAt) {
@@ -149,7 +152,6 @@ foreach ($needle in @('StartName', 'StartMode', 'PathName.Trim()', '$expectedCom
     if (-not $cleanupWindow.Contains($needle)) { throw "SCM cleanup ownership guard missing: $needle" }
 }
 $pinAt = $source.IndexOf('$expectedCommand = $bin')
-$createAt = $source.IndexOf('& sc.exe create $serviceName')
 if ($pinAt -lt 0 -or $pinAt -ge $createAt) { throw 'Cleanup identity must be pinned before SCM creation' }
 'PASS: SCM cleanup refuses changed service registration before stop/delete'
 

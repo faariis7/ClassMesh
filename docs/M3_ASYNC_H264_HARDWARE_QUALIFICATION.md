@@ -1,5 +1,10 @@
 ## Physical Windows x64 qualification sequence
 
+The 2026-11-26 protected VM1 run stopped at the ordinary Worker's IPC token
+check. No authenticated presentation or visible Student frames were measured.
+Keep the synchronous receiver for the first presentation qualification.
+[Protected VM1 run record](WINDOWS_RUNTIME_PLAN.md#protected-vm1-run--2026-11-26)
+
 1. Use two physical Windows 11 x64 PCs on the target wired VLAN. Record OS
    build, NIC/interface, vendor GPU/driver and display topology on both
    hosts. Validate the exact x64 candidate with the

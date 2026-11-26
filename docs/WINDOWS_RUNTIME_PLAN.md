@@ -13,7 +13,55 @@ Issue the Student leaf with `--student-server-name <DNS-or-IP>` from the
 approved endpoint and use that value as the protected Teacher
 `student.server_name`. Capture native Authenticode results, rollback scope,
 existing protected resources and the ordinary interactive session before
-SCM Apply. An expired Windows sign-in blocks that inventory and qualification.
+SCM Apply.
+
+## Protected VM1 run — 2026-11-26
+
+Signed image source `353c38a89c461429c493e2ddffe0b3428e12404c`, Windows 11
+24H2 ARM64 with x64 emulation, ordinary Teacher in Session 1. The signed ZIP
+SHA-256 was `8b16d4c1979029aee4029a5a5cbeb8b2c2dc78c03fc219b28f5dc8329ac20952`.
+The [artifact integrity review](https://github.com/faariis7/ClassMesh/pull/776#pullrequestreview-6069185984)
+and [custody and recovery review](https://github.com/faariis7/ClassMesh/pull/776#pullrequestreview-6069711087)
+cover the disposable scope. Recovery snapshot `42F98268-4829-4D26-9C86-EA074D69A3F3`
+was verified before provisioning and after cleanup.
+
+- All 13 exact binaries were native Authenticode `Valid` with signer
+  `DE9A7C005CD4C989E548CB65C207345FB9720059` under temporary `CurrentUser\Root`
+  trust. The isolated NTFS volume held the installation. Teacher and
+  StudentDevice used distinct non-exportable CNG keys, a run-owned enrollment
+  CA and a separate ES256 roster authority. Plan preceded Service epoch 1 and
+  Teacher epoch 2 publication. `SendTeacherMessage` was the only lab grant.
+- Under Windows PowerShell 5.1, `sc.exe create` dropped the image-path quotes
+  and the guard halted before start. `New-Service -BinaryPathName` stored the
+  expected quoted path. Four guarded runs then reached pinned LocalSystem
+  Service in Session 0. The last PID was `10044`.
+- `classmesh-teacher-ui.exe --check-live` ran against `127.0.0.1:5151` as a
+  non-elevated Session 1 user. The `NotNegotiated` rejection occurs after
+  verified roster, enrolled mTLS, QUIC Hello and the Student identity check.
+  The probe and the normal GUI invocation both exited 3. The Service launched
+  eight Worker processes in Session 1 after unlock in the traced window.
+  No authenticated Worker or visible Message was observed. M2 `Completed`,
+  unauthorized command denial, replay and revocation were unmeasured on this
+  protected route.
+- The ordinary Session 1 probe received Win32 error 5 opening the live
+  LocalSystem Service with both `PROCESS_QUERY_LIMITED_INFORMATION` and that
+  right plus `PROCESS_SYNCHRONIZE`. For a live same-account child, the original
+  mask opened the process but a zero-time wait failed with error 5. The
+  corrected mask returned `WAIT_TIMEOUT` and the subsequent SID check still
+  denied the child. The focused Worker tests went from 3/4 to 4/4 on VM1.
+  The remaining positive regression must prove the exact live LocalSystem
+  pipe server from the ordinary Worker without broadening process or token
+  rights. Then rebuild, independently review and pin the matching images,
+  and rerun guarded M2 with a human Student operator.
+- M3 rendering remains unmeasured. M4 evidence covers real lock/unlock,
+  repeated Service start/stop and final Worker disappearance. Authenticated
+  recovery and revocation remain open. M5 evidence covers protected staging,
+  provisioning, guarded registration and teardown. Fresh-machine package
+  installation, repair and a connected start remain open.
+- Cleanup verified at `2026-11-26T07:15:32Z`. The disposable SCM registration,
+  Worker processes, UDP listener, two protected policy anchors, enrollment CNG
+  keys, enrollment CA key, exact signing certificates, owned VHD and staging
+  paths were absent. The recovery snapshot remains available.
 
 ## Unified RC physical trust qualification (2026-11-18)
 
@@ -37,8 +85,7 @@ starts or installs Service/Worker. A GUI human-click command must additionally
 reach correlated Worker `Completed` in that same approved trust/session topology.
 Record exact source/image hashes, SCM LocalSystem PID/session, ordinary Teacher
 token/session, Worker incarnation, correlated request/result, unauthorized/replay
-rejections, key clear, Stop/restart and no surviving test-owned processes. A missing
-roster verifier remains an explicit blocker; never add an allow path to obtain PASS.
+rejections, key clear, Stop/restart and no surviving test-owned processes.
 The disposable SCM script's `-Mode Plan` is safe preparation; `-Mode Run` remains
 a separate approved, exclusive lab operation. No VM2 or persistent policy changes.
 

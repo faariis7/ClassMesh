@@ -7,11 +7,13 @@ Service, publish protected Windows state or approve a production signer outside
 an explicit owner-approved scope. See the
 [Teacher lab procedure](../tools/classmesh-lab/WINDOWS_TEACHER_LIVE.md).
 
-VM1 paused before protected provisioning at the expired-password screen.
-After the account owner signs in, capture the ordinary account and elevated
-inventory and verify recovery before any write. Match the independently
-reviewed signed-image hashes and signer pin. When issuing the Student leaf, use
-`--student-server-name` with the exact protected Teacher target name.
+VM1 cleanup was verified on 2026-11-26. The exact signed `353c38a8` images
+reached protected LocalSystem Service and enrolled Teacher QUIC. The next
+runtime regression is a positive Service-token check by the ordinary Worker
+in Session 1. The native probe returned Win32 error 5 opening the exact
+Service process. Keep Session 0, pipe PID, liveness and LocalSystem checks
+when correcting that path. See the
+[VM1 run record](WINDOWS_RUNTIME_PLAN.md#protected-vm1-run--2026-11-26).
 
 ## Unified RC follow-up — 2026-11-25
 

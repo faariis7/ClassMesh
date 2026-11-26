@@ -12,7 +12,7 @@ foreach ($needle in $required) {
         throw "FAIL: installed Service can spawn unpinned Worker executable: missing $needle"
     }
 }
-$createAt = $source.IndexOf('& sc.exe create $serviceName')
+$createAt = $source.IndexOf('New-Service -Name $serviceName -BinaryPathName $bin -StartupType Manual')
 $startAt = $source.IndexOf('Start-Service -Name $serviceName')
 $workerChecks = @([regex]::Matches($source,'Assert-ProtectedFile \$workerPath \$ExpectedWorkerSha256') | ForEach-Object { $_.Index })
 if ($createAt -lt 0 -or $startAt -le $createAt -or $workerChecks.Count -lt 3 -or

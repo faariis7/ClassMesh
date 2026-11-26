@@ -11,7 +11,8 @@ use windows_sys::Win32::Security::{
     TOKEN_USER, TokenUser, WinLocalSystemSid,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
+    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    WaitForSingleObject,
 };
 
 struct Handle(HANDLE);
@@ -32,7 +33,13 @@ pub(crate) fn require_local_system(pid: u32) -> io::Result<()> {
         ));
     }
     // SAFETY: read-only query of the kernel process object.
-    let process = Handle(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) });
+    let process = Handle(unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    });
     if process.0.is_null() {
         return Err(io::Error::last_os_error());
     }
@@ -115,12 +122,9 @@ mod tests {
         let result = super::require_local_system(child.id());
         let _ = child.kill();
         let _ = child.wait();
-        assert_eq!(
-            result
-                .expect_err("interactive child must not be trusted as Service")
-                .kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
+        let error = result.expect_err("interactive child must not be trusted as Service");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "pipe server is not LocalSystem");
     }
 
     #[test]

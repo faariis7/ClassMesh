@@ -57,7 +57,8 @@ $policy = [ordered]@{
         server_name = $ApprovedStudentServerName
     }
 }
-$policy | ConvertTo-Json -Depth 7 | Set-Content -Encoding utf8NoBOM .\teacher-policy.json
+$policyPath = Join-Path (Get-Location).Path 'teacher-policy.json'
+[IO.File]::WriteAllText($policyPath, ($policy | ConvertTo-Json -Depth 7 -Compress), [Text.UTF8Encoding]::new($false))
 .\classmesh-teacher-policy.exe plan $profile.epoch .\teacher-policy.json
 ```
 
@@ -72,6 +73,13 @@ SCM acceptance, the Service build also requires `experimental-trusted-policy`.
 Verify the signed SHA-256 and independent signer pin for the exact executable
 set before the guarded Apply step. Keep proof of VM restorability, the initial
 machine inventory, the run-owned resource list and measured cleanup.
+
+If `--check-live` reports `NotNegotiated` after protected provisioning, confirm
+whether the exact interactive Worker authenticated to Service and published
+its command capabilities. On VM1 the ordinary Worker could not open the
+LocalSystem process for its token check and Teacher failed closed. Capture the
+SCM PID, Worker PID/session and native error before teardown. A connected GUI
+and actual Student confirmation are still required. [VM1 run record](../../docs/WINDOWS_RUNTIME_PLAN.md#protected-vm1-run--2026-11-26)
 
 ## Expiry, revocation and recovery
 

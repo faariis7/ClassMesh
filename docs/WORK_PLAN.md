@@ -9,9 +9,13 @@ Completed, revocation, replay denial and cleanup. Advance M3/M4 only with actual
 qualified control and physical rendering/recovery evidence. See the
 [Teacher lab procedure](../tools/classmesh-lab/WINDOWS_TEACHER_LIVE.md).
 
-The 2026-11-25 lab attempt reached the VM1 password-expiry screen. A signed-in
-ordinary account and a recoverable pre-run baseline are required before
-provisioning. Interactive M2–M5 acceptance remains open.
+On 2026-11-26, VM1 ran the signed `353c38a8` Service under SCM as LocalSystem
+and reached Teacher's command capability preflight over enrolled QUIC. The
+ordinary Worker could not open the Service process to verify its token. Keep
+M2 open until the exact protected Service and ordinary Worker authenticate
+and a human acknowledgment produces a correlated `Completed`. The
+[VM1 run record](WINDOWS_RUNTIME_PLAN.md#protected-vm1-run--2026-11-26) lists
+the measured results, cleanup, and next regression.
 
 ## Unified RC follow-up — 2026-11-25
 
