@@ -8,7 +8,7 @@ use classmesh_control::ControlHello;
 use classmesh_control::client_session::{
     ClientControlSession, connect_client_session_with_retries,
 };
-use classmesh_control::handshake::{ServerHelloConfig, server_hello};
+use classmesh_control::handshake::{FIRST_POST_HELLO_SEQUENCE, ServerHelloConfig, server_hello};
 use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::quic::{
     ControlChannel, DEFAULT_IO_TIMEOUT, accept, client_config_with_roots,
@@ -148,7 +148,7 @@ fn binding() -> TeacherPlaybackBinding {
 fn report() -> ControlEnvelope {
     ControlEnvelope {
         control_session_id: CONTROL_SESSION,
-        sequence: 2,
+        sequence: FIRST_POST_HELLO_SEQUENCE,
         request_id: 0,
         protocol_version: Some(WireVersion { major: 0, minor: 8 }),
         payload: Some(control_envelope::Payload::ReceiverPlaybackDiagnostic(
@@ -291,7 +291,6 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
             media: 1,
         },
     ));
-    other.sequence = 1;
     pair.server_channel.send(&other).await?;
     let event = owner
         .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
@@ -311,7 +310,9 @@ async fn single_owner_dispatches_non_playback_without_dropping_next_verified_rep
     }
     assert_eq!(owner.visible(SOURCE, now), None);
 
-    pair.server_channel.send(&report()).await?;
+    let mut playback_report = report();
+    playback_report.sequence = other.sequence + 1;
+    pair.server_channel.send(&playback_report).await?;
     let event = owner
         .receive_next(&mut pair.client, &pair.live_auth, || 150, || now)
         .await
@@ -529,6 +530,36 @@ async fn native_enrolled_ui_owner_closes_without_a_gui_and_denies_replaced_sessi
         "native window disappearance must stop the authenticated owner: {exit:?}"
     );
 
+    use classmesh_teacher::connected_command::TeacherControlRoute;
+    use classmesh_teacher::connected_ui_launcher::start_enrolled_teacher_control_ui_runtime;
+
+    let control = pair_with_capabilities(BTreeSet::from([Capability::TeacherMessage])).await?;
+    let route = TeacherControlRoute::new(STUDENT, SOURCE, CONTROL_SESSION)
+        .map_err(|error| format!("{error:?}"))?;
+    let (bridge, runtime) = start_enrolled_teacher_control_ui_runtime(
+        route,
+        control.client,
+        control.live_auth,
+        |_| ControlFlow::Continue(()),
+    )?;
+    drop(bridge);
+    assert!(matches!(
+        runtime.join().expect("control thread must not panic"),
+        Err(TeacherConnectedPlaybackError::ActionChannelClosed)
+            | Err(TeacherConnectedPlaybackError::WindowDisconnected)
+    ));
+
+    let untrusted = pair_with_capabilities(BTreeSet::from([Capability::TeacherMessage])).await?;
+    let denied = start_enrolled_teacher_control_ui_runtime(
+        route,
+        untrusted.client,
+        LiveAuthorizationStore::new(AuthorizationStore::default()),
+        |_| ControlFlow::Continue(()),
+    );
+    assert!(
+        matches!(denied, Err(ref error) if error.kind() == std::io::ErrorKind::PermissionDenied)
+    );
+
     // An old trusted roster binding must not bootstrap the UI through a
     // different Hello session or reuse another connection's authority.
     let second_pair = pair().await?;
@@ -646,12 +677,13 @@ async fn continuous_teacher_runtime_requires_verified_report_before_window_authe
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authenticated_m2_command_can_start_without_m3_playback_diagnostics() -> TestResult {
     use classmesh_protocol::control_wire::{
-        Heartbeat, TeacherInteractionRequest, TeacherMessage, teacher_interaction_request,
+        Heartbeat, HeartbeatAck, TeacherInteractionRequest, TeacherMessage,
+        teacher_interaction_request,
     };
+    use classmesh_teacher::connected_command::TeacherControlRoute;
     use classmesh_teacher::connected_runtime::{
-        TeacherDuplexDispatch, drive_authenticated_teacher_duplex,
+        TeacherDuplexDispatch, drive_authenticated_teacher_control,
     };
-    use classmesh_teacher::receiver_playback_session::TeacherPlaybackSessionOwner;
     use classmesh_teacher::ui_egui::TeacherUiControlEvent;
     use classmesh_teacher::ui_shell::{TeacherInteractionUiAction, TeacherUiAction};
     use std::ops::ControlFlow;
@@ -668,14 +700,13 @@ async fn authenticated_m2_command_can_start_without_m3_playback_diagnostics() ->
         client,
         live_auth,
     } = pair;
-    let owner = TeacherPlaybackSessionOwner::new(STUDENT, SOURCE, binding())
+    let route = TeacherControlRoute::new(STUDENT, SOURCE, CONTROL_SESSION)
         .map_err(|error| format!("{error:?}"))?;
     let (event_tx, event_rx) = sync_channel(8);
     let (action_tx, action_rx) = sync_channel(4);
     let runtime = tokio::spawn(async move {
-        let mut owner = owner;
-        drive_authenticated_teacher_duplex(
-            &mut owner,
+        drive_authenticated_teacher_control(
+            route,
             client,
             &live_auth,
             event_tx,
@@ -708,6 +739,27 @@ async fn authenticated_m2_command_can_start_without_m3_playback_diagnostics() ->
         "trusted M2 control should bootstrap without a fake M3 frame"
     );
 
+    // A real Service does not send spontaneous idle traffic. It acknowledges
+    // a Teacher heartbeat, on the same monotonically sequenced QUIC stream.
+    let heartbeat = timeout(Duration::from_secs(4), server_channel.receive()).await??;
+    assert_eq!(heartbeat.sequence, 2, "Hello already used sequence 1");
+    assert!(
+        matches!(heartbeat.payload, Some(control_envelope::Payload::Heartbeat(ref beat))
+        if beat.control_session_id == CONTROL_SESSION)
+    );
+    server_channel
+        .send(&ControlEnvelope {
+            control_session_id: CONTROL_SESSION,
+            sequence: 2,
+            request_id: 0,
+            protocol_version: Some(WireVersion { major: 0, minor: 8 }),
+            payload: Some(control_envelope::Payload::HeartbeatAck(HeartbeatAck {
+                heartbeat_sequence: heartbeat.sequence,
+                monotonic_time_us: 30,
+            })),
+        })
+        .await?;
+
     action_tx.send(TeacherUiAction::TeacherInteraction(
         TeacherInteractionUiAction {
             source_id: SOURCE,
@@ -722,6 +774,11 @@ async fn authenticated_m2_command_can_start_without_m3_playback_diagnostics() ->
         },
     ))?;
     let request = timeout(Duration::from_secs(3), server_channel.receive()).await??;
+    assert_eq!(request.sequence, 3, "heartbeat must share command sequence");
+    assert_eq!(
+        request.request_id, 1,
+        "heartbeat must not consume command request IDs"
+    );
     assert!(
         matches!(
             request.payload,

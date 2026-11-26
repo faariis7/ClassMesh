@@ -179,9 +179,10 @@ mod windows_service_app {
         FileTransferDispatchOutcome, FileTransferDispatchPayload, FileTransferOutboundPayload,
         FileTransferPullOwner, FocusedMediaDispatchChannels, FocusedMediaFeedback,
         FocusedMediaReconfigure, FocusedMediaStart, InputAvailability, InputDispatchChannels,
-        PresentationDispatchChannels, PresentationFeedbackBus, PresentationKeyInstallDispatch,
-        PresentationMulticastStartDispatch, PresentationUnicastStartDispatch, SystemActionDispatch,
-        SystemActionDispatchChannels, SystemActionDispatchOutcome, TeacherInteractionDispatch,
+        MediaStartCommit, PresentationDispatchChannels, PresentationFeedbackBus,
+        PresentationKeyInstallDispatch, PresentationMulticastStartDispatch,
+        PresentationUnicastStartDispatch, SystemActionDispatch, SystemActionDispatchChannels,
+        SystemActionDispatchOutcome, TeacherInteractionDispatch,
         TeacherInteractionDispatchChannels, TeacherInteractionDispatchOutcome,
         WorkerCapabilityState,
     };
@@ -346,20 +347,87 @@ mod windows_service_app {
         }
     }
 
+    // The normal dispatch timeout covers queueing. Once committed, the Worker
+    // must reach a terminal result or have its authenticated binding retired.
+    const PRESENTATION_WORKER_TERMINAL_TIMEOUT: Duration = Duration::from_secs(15);
+
+    fn presentation_start_failure(worker_current: bool, elapsed: Duration) -> Option<&'static str> {
+        if !worker_current {
+            return Some("control.presentation.worker_exited");
+        }
+        if elapsed >= PRESENTATION_WORKER_TERMINAL_TIMEOUT {
+            return Some("control.presentation.worker_start_unresponsive");
+        }
+        None
+    }
+
+    fn admit_presentation_start(
+        slot_busy: bool,
+        commit: &MediaStartCommit,
+        reply: &tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) -> Result<(), &'static str> {
+        if slot_busy {
+            return Err("control.presentation.worker_busy");
+        }
+        if reply.is_closed() || !commit.try_commit() {
+            return Err("control.presentation.start_cancelled");
+        }
+        Ok(())
+    }
+
+    fn live_presentation_start_worker(
+        confirmed: Option<(
+            PresentationKeyInstallBinding,
+            ReceiverTelemetryCurrentWorker,
+        )>,
+        requested: PresentationKeyInstallBinding,
+        current: Option<ReceiverTelemetryCurrentWorker>,
+    ) -> Result<ReceiverTelemetryCurrentWorker, &'static str> {
+        let worker = current.ok_or("control.presentation.worker_unavailable")?;
+        if confirmed != Some((requested, worker)) {
+            return Err("control.presentation.worker_key_not_installed");
+        }
+        Ok(worker)
+    }
+
+    #[derive(Debug)]
+    struct CommittedPresentationStart {
+        worker: ReceiverTelemetryCurrentWorker,
+        committed_at: Instant,
+        reply_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+    }
+
+    impl CommittedPresentationStart {
+        fn fail_if_unresolved(
+            &self,
+            live_worker: Option<ReceiverTelemetryCurrentWorker>,
+            now: Instant,
+            fence: impl FnOnce(ReceiverTelemetryCurrentWorker),
+        ) -> Option<&'static str> {
+            let reason = presentation_start_failure(
+                live_worker == Some(self.worker),
+                now.saturating_duration_since(self.committed_at),
+            )?;
+            fence(self.worker);
+            Some(reason)
+        }
+
+        fn reply(self, result: Result<(), String>) {
+            let _ = self.reply_tx.send(result);
+        }
+    }
+
     #[derive(Debug)]
     struct PendingPresentationMulticastStart {
-        expected_process_id: u32,
-        expected_session_id: u32,
         start: ServicePresentationMulticastStart,
         key_binding: PresentationKeyInstallBinding,
-        expected_worker_generation: u64,
-        reply_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+        committed: CommittedPresentationStart,
     }
 
     impl PendingPresentationMulticastStart {
         fn matches(&self, result: &WorkerPresentationMulticastStartResult) -> bool {
-            result.process_id == self.expected_process_id
-                && result.session_id == self.expected_session_id
+            result.process_id == self.committed.worker.process_id
+                && result.session_id == self.committed.worker.session_id
                 && result.control_session_id == self.start.control_session_id
                 && result.request_id == self.start.request_id
                 && result.presentation_id == self.start.presentation_id
@@ -375,18 +443,15 @@ mod windows_service_app {
 
     #[derive(Debug)]
     struct PendingPresentationUnicastStart {
-        expected_process_id: u32,
-        expected_session_id: u32,
         start: ServicePresentationUnicastStart,
         key_binding: PresentationKeyInstallBinding,
-        expected_worker_generation: u64,
-        reply_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+        committed: CommittedPresentationStart,
     }
 
     impl PendingPresentationUnicastStart {
         fn matches(&self, result: &WorkerPresentationUnicastStartResult) -> bool {
-            result.process_id == self.expected_process_id
-                && result.session_id == self.expected_session_id
+            result.process_id == self.committed.worker.process_id
+                && result.session_id == self.committed.worker.session_id
                 && result.control_session_id == self.start.control_session_id
                 && result.request_id == self.start.request_id
                 && result.presentation_id == self.start.presentation_id
@@ -490,7 +555,7 @@ mod windows_service_app {
                     return self.apply_restart_decision(decision);
                 }
             };
-            let mut pipe = match NamedPipeServer::create_for_user(&pipe_name, &user_sid) {
+            let mut pipe = match NamedPipeServer::create_worker_pipe(&pipe_name, &user_sid) {
                 Ok(pipe) => pipe,
                 Err(error) => {
                     eprintln!(
@@ -516,7 +581,11 @@ mod windows_service_app {
                         return self.apply_restart_decision(decision);
                     }
 
-                    if let Err(error) = authenticate_worker(&pipe, process_id, session) {
+                    if let Err(error) = process
+                        .send_service_identity(&pipe)
+                        .map_err(|error| error.to_string())
+                        .and_then(|()| authenticate_worker(&pipe, process_id, session))
+                    {
                         eprintln!(
                             "Worker IPC handshake failed for pid {process_id}, session {}: {error}",
                             session.0
@@ -704,6 +773,27 @@ mod windows_service_app {
             }
         }
 
+        fn fence_presentation_worker(&mut self, expected: ReceiverTelemetryCurrentWorker) {
+            let Some(process) = self.process.as_mut().filter(|process| {
+                self.generation == expected.worker_generation
+                    && process.process_id() == expected.process_id
+                    && process.session_id() == expected.session_id
+            }) else {
+                return;
+            };
+            self.capabilities.clear();
+            if let Some(mut pipe) = self.pipe.take()
+                && let Err(error) = pipe.disconnect()
+            {
+                eprintln!("ClassMesh Service could not disconnect retired Worker IPC: {error}");
+            }
+            if let Err(error) = process.terminate(1) {
+                eprintln!(
+                    "ClassMesh Service could not terminate retired Presentation Worker: {error}"
+                );
+            }
+        }
+
         fn stop_any(&mut self) {
             self.pending_restart = None;
             let session = self
@@ -770,14 +860,6 @@ mod windows_service_app {
 
         fn current_process_id(&self) -> Option<u32> {
             self.process.as_ref().map(SessionProcess::process_id)
-        }
-
-        fn is_running_worker(&self, process_id: u32, session_id: u32) -> bool {
-            self.process.as_ref().is_some_and(|process| {
-                process.process_id() == process_id
-                    && process.session_id() == session_id
-                    && process.is_running().unwrap_or(false)
-            })
         }
 
         /// The Worker is still the OS-observed peer that passed the pipe
@@ -932,47 +1014,37 @@ mod windows_service_app {
         }
 
         fn send_presentation_multicast_start(
-            &self,
+            &mut self,
             start: ServicePresentationMulticastStart,
-        ) -> Result<(u32, u32), String> {
-            let process = self
-                .process
-                .as_ref()
-                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
-            if !process.is_running().map_err(|error| {
-                format!("Worker presentation multicast liveness probe failed: {error}")
-            })? {
-                return Err(
-                    "interactive Worker exited before presentation multicast start".to_owned(),
-                );
+            worker: ReceiverTelemetryCurrentWorker,
+        ) -> Result<(), String> {
+            if self.current_authenticated_receiver_worker() != Some(worker) {
+                return Err("authenticated Worker IPC changed before Presentation start".to_owned());
             }
-            let pipe = self.pipe.as_ref().ok_or_else(|| {
-                "Worker IPC pipe is unavailable for presentation multicast start".to_owned()
-            })?;
-            send_presentation_multicast_start(pipe, start)?;
-            Ok((process.process_id(), process.session_id()))
+            let pipe = self.pipe.as_ref().expect("authenticated Worker has a pipe");
+            if let Err(error) = send_presentation_multicast_start(pipe, start) {
+                // The peer may have received part of the frame before the write failed.
+                self.fence_presentation_worker(worker);
+                return Err(error);
+            }
+            Ok(())
         }
 
         fn send_presentation_unicast_start(
-            &self,
+            &mut self,
             start: ServicePresentationUnicastStart,
-        ) -> Result<(u32, u32), String> {
-            let process = self
-                .process
-                .as_ref()
-                .ok_or_else(|| "no interactive Worker is running".to_owned())?;
-            if !process.is_running().map_err(|error| {
-                format!("Worker presentation unicast liveness probe failed: {error}")
-            })? {
-                return Err(
-                    "interactive Worker exited before presentation unicast start".to_owned(),
-                );
+            worker: ReceiverTelemetryCurrentWorker,
+        ) -> Result<(), String> {
+            if self.current_authenticated_receiver_worker() != Some(worker) {
+                return Err("authenticated Worker IPC changed before Presentation start".to_owned());
             }
-            let pipe = self.pipe.as_ref().ok_or_else(|| {
-                "Worker IPC pipe is unavailable for presentation unicast start".to_owned()
-            })?;
-            send_presentation_unicast_start(pipe, start)?;
-            Ok((process.process_id(), process.session_id()))
+            let pipe = self.pipe.as_ref().expect("authenticated Worker has a pipe");
+            if let Err(error) = send_presentation_unicast_start(pipe, start) {
+                // The peer may have received part of the frame before the write failed.
+                self.fence_presentation_worker(worker);
+                return Err(error);
+            }
+            Ok(())
         }
 
         fn send_clipboard_read(
@@ -2363,6 +2435,7 @@ mod windows_service_app {
         let mut clipboard_correlation = ClipboardReadCorrelation::default();
         let clipboard_clock = Instant::now();
         let mut pending_file_pull: Option<PendingFilePull> = None;
+        let mut confirmed_presentation_worker_key = None;
         let mut pending_presentation_key_install: Option<PendingPresentationKeyInstall> = None;
         let mut pending_presentation_multicast_start: Option<PendingPresentationMulticastStart> =
             None;
@@ -2768,6 +2841,11 @@ mod windows_service_app {
             }
 
             while let Ok(binding) = presentation_key_clear_rx.try_recv() {
+                if confirmed_presentation_worker_key
+                    .is_some_and(|(confirmed, _)| confirmed == binding)
+                {
+                    confirmed_presentation_worker_key = None;
+                }
                 // A revoked protected grant must also retire the corresponding
                 // in-process telemetry lifetime; stale clear is exact-match.
                 receiver_telemetry_runtime.revoke_matching_key(key_from_confirmed_grant(binding));
@@ -2782,39 +2860,51 @@ mod windows_service_app {
                             .send(Err("control.presentation.key_cleared".to_owned()));
                     },
                 );
-                if pending_presentation_multicast_start
+                let start_worker = pending_presentation_multicast_start
                     .as_ref()
-                    .is_some_and(|pending| pending.matches_key_binding(binding))
-                    && let Some(pending) = pending_presentation_multicast_start.take()
-                {
-                    let _ = pending
-                        .reply_tx
-                        .send(Err("control.presentation.key_cleared".to_owned()));
-                }
-                if pending_presentation_unicast_start
-                    .as_ref()
-                    .is_some_and(|pending| pending.matches_key_binding(binding))
-                    && let Some(pending) = pending_presentation_unicast_start.take()
-                {
-                    let _ = pending
-                        .reply_tx
-                        .send(Err("control.presentation.key_cleared".to_owned()));
-                }
+                    .filter(|pending| pending.matches_key_binding(binding))
+                    .map(|pending| pending.committed.worker)
+                    .or_else(|| {
+                        pending_presentation_unicast_start
+                            .as_ref()
+                            .filter(|pending| pending.matches_key_binding(binding))
+                            .map(|pending| pending.committed.worker)
+                    });
                 if let Err(error) = workers.clear_presentation_key(binding) {
                     eprintln!("ClassMesh Service presentation-key lifecycle clear failed: {error}");
+                    if let Some(worker) = start_worker {
+                        workers.fence_presentation_worker(worker);
+                    }
                 }
+                retire_matching_pending(
+                    &mut pending_presentation_multicast_start,
+                    |pending| pending.matches_key_binding(binding),
+                    |pending| {
+                        pending
+                            .committed
+                            .reply(Err("control.presentation.key_cleared".to_owned()))
+                    },
+                );
+                retire_matching_pending(
+                    &mut pending_presentation_unicast_start,
+                    |pending| pending.matches_key_binding(binding),
+                    |pending| {
+                        pending
+                            .committed
+                            .reply(Err("control.presentation.key_cleared".to_owned()))
+                    },
+                );
             }
 
             if pending_presentation_key_install
                 .as_ref()
                 .is_some_and(|pending| pending.reply_tx.is_closed())
                 && let Some(pending) = pending_presentation_key_install.take()
+                && let Err(error) = workers.clear_presentation_key(pending.binding)
             {
-                if let Err(error) = workers.clear_presentation_key(pending.binding) {
-                    eprintln!(
-                        "ClassMesh Service could not clear abandoned Worker presentation key: {error}"
-                    );
-                }
+                eprintln!(
+                    "ClassMesh Service could not clear abandoned Worker presentation key: {error}"
+                );
             }
 
             while let Ok(result) = worker_presentation_key_result_rx.try_recv() {
@@ -2830,10 +2920,14 @@ mod windows_service_app {
                     );
                     continue;
                 }
-                if !workers
-                    .is_running_worker(pending.expected_process_id, pending.expected_session_id)
-                    || workers.generation != pending.expected_worker_generation
-                {
+                let Some(peer) = workers
+                    .current_authenticated_receiver_worker()
+                    .filter(|worker| {
+                        worker.process_id == pending.expected_process_id
+                            && worker.session_id == pending.expected_session_id
+                            && worker.worker_generation == pending.expected_worker_generation
+                    })
+                else {
                     let pending = pending_presentation_key_install
                         .take()
                         .expect("pending install presence checked");
@@ -2841,7 +2935,7 @@ mod windows_service_app {
                         .reply_tx
                         .send(Err("control.presentation.worker_exited".to_owned()));
                     continue;
-                }
+                };
 
                 let pending = pending_presentation_key_install
                     .take()
@@ -2851,19 +2945,23 @@ mod windows_service_app {
                         // The existing pending authorized key-grant and Worker
                         // install ACK matched. Only an OS-authenticated current
                         // Worker incarnation can confirm telemetry ownership.
-                        if let Some(peer) = workers.current_authenticated_receiver_worker()
-                            && peer.worker_generation == pending.expected_worker_generation
+                        confirmed_presentation_worker_key = Some((pending.binding, peer));
+                        if let Err(error) = receiver_telemetry_runtime
+                            .confirm_key_installed(key_from_confirmed_grant(pending.binding), peer)
                         {
-                            if let Err(error) = receiver_telemetry_runtime.confirm_key_installed(
-                                key_from_confirmed_grant(pending.binding),
-                                peer,
-                            ) {
-                                eprintln!(
-                                    "ClassMesh Phase10 receiver key admission stayed disabled: {error:?}"
-                                );
+                            eprintln!(
+                                "ClassMesh Phase10 receiver key admission stayed disabled: {error:?}"
+                            );
+                        }
+                        if pending.reply_tx.send(Ok(pending.binding)).is_err() {
+                            confirmed_presentation_worker_key = None;
+                            receiver_telemetry_runtime
+                                .revoke_matching_key(key_from_confirmed_grant(pending.binding));
+                            if let Err(error) = workers.clear_presentation_key(pending.binding) {
+                                eprintln!("ClassMesh Service abandoned key clear failed: {error}");
+                                workers.fence_presentation_worker(peer);
                             }
                         }
-                        let _ = pending.reply_tx.send(Ok(pending.binding));
                     }
                     WorkerPresentationKeyInstallStatus::Rejected => {
                         let _ = pending
@@ -2883,6 +2981,7 @@ mod windows_service_app {
                 // Named-pipe writes can fail after partial delivery. Retire
                 // stale telemetry authority BEFORE attempting a new key
                 // install, not only after a successful write/Worker ACK.
+                confirmed_presentation_worker_key = None;
                 receiver_telemetry_runtime.key_install_started();
                 match workers.send_presentation_key_install(dispatch.install) {
                     Ok((process_id, session_id, binding)) => {
@@ -2903,46 +3002,6 @@ mod windows_service_app {
                 }
             }
 
-            if pending_presentation_multicast_start
-                .as_ref()
-                .is_some_and(|pending| pending.reply_tx.is_closed())
-            {
-                pending_presentation_multicast_start = None;
-            }
-
-            if pending_presentation_multicast_start
-                .as_ref()
-                .is_some_and(|pending| {
-                    !workers
-                        .is_running_worker(pending.expected_process_id, pending.expected_session_id)
-                })
-                && let Some(pending) = pending_presentation_multicast_start.take()
-            {
-                let _ = pending
-                    .reply_tx
-                    .send(Err("control.presentation.worker_exited".to_owned()));
-            }
-
-            if pending_presentation_unicast_start
-                .as_ref()
-                .is_some_and(|pending| pending.reply_tx.is_closed())
-            {
-                pending_presentation_unicast_start = None;
-            }
-
-            if pending_presentation_unicast_start
-                .as_ref()
-                .is_some_and(|pending| {
-                    !workers
-                        .is_running_worker(pending.expected_process_id, pending.expected_session_id)
-                })
-                && let Some(pending) = pending_presentation_unicast_start.take()
-            {
-                let _ = pending
-                    .reply_tx
-                    .send(Err("control.presentation.worker_exited".to_owned()));
-            }
-
             while let Ok(result) = worker_presentation_multicast_result_rx.try_recv() {
                 let Some(pending) = pending_presentation_multicast_start.as_ref() else {
                     eprintln!(
@@ -2956,91 +3015,45 @@ mod windows_service_app {
                     );
                     continue;
                 }
-                if !workers
-                    .is_running_worker(pending.expected_process_id, pending.expected_session_id)
-                    || workers.generation != pending.expected_worker_generation
-                {
-                    let pending = pending_presentation_multicast_start
-                        .take()
-                        .expect("pending multicast start presence checked");
-                    let _ = pending
-                        .reply_tx
-                        .send(Err("control.presentation.worker_exited".to_owned()));
+                let Some(peer) = workers
+                    .current_authenticated_receiver_worker()
+                    .filter(|worker| *worker == pending.committed.worker)
+                else {
+                    // The recovery path fences an IPC-disconnected incarnation
+                    // before any replacement start can be admitted.
                     continue;
-                }
+                };
 
                 let pending = pending_presentation_multicast_start
                     .take()
                     .expect("pending multicast start presence checked");
                 match result.status {
                     WorkerPresentationMulticastStartStatus::Started => {
-                        if let Some(peer) = workers.current_authenticated_receiver_worker()
-                            && peer.worker_generation == pending.expected_worker_generation
-                        {
-                            match receiver_telemetry_runtime.activate_correlated_start(
-                                multicast_start_identity(pending.start, peer, pending.key_binding),
-                                peer,
-                                multicast_ack(result),
-                            ) {
-                                Ok(binding) => {
-                                    if let Err(error) = workers.offer_receiver_telemetry(
-                                        binding,
-                                        &mut native_receiver_telemetry,
-                                    ) {
-                                        eprintln!(
-                                            "ClassMesh Phase10 multicast diagnostic pipe unavailable: {error}"
-                                        );
-                                    }
+                        match receiver_telemetry_runtime.activate_correlated_start(
+                            multicast_start_identity(pending.start, peer, pending.key_binding),
+                            peer,
+                            multicast_ack(result),
+                        ) {
+                            Ok(binding) => {
+                                if let Err(error) = workers.offer_receiver_telemetry(
+                                    binding,
+                                    &mut native_receiver_telemetry,
+                                ) {
+                                    eprintln!(
+                                        "ClassMesh Phase10 multicast diagnostic pipe unavailable: {error}"
+                                    );
                                 }
-                                Err(error) => eprintln!(
-                                    "ClassMesh Phase10 multicast receiver admission stayed disabled: {error:?}"
-                                ),
                             }
+                            Err(error) => eprintln!(
+                                "ClassMesh Phase10 multicast receiver admission stayed disabled: {error:?}"
+                            ),
                         }
-                        let _ = pending.reply_tx.send(Ok(()));
+                        pending.committed.reply(Ok(()));
                     }
                     WorkerPresentationMulticastStartStatus::Rejected => {
-                        let _ = pending
-                            .reply_tx
-                            .send(Err("control.presentation.worker_rejected".to_owned()));
-                    }
-                }
-            }
-
-            while let Ok(dispatch) = presentation_multicast_start_rx.try_recv() {
-                if pending_presentation_multicast_start.is_some()
-                    || pending_presentation_unicast_start.is_some()
-                {
-                    let _ = dispatch
-                        .reply_tx
-                        .send(Err("control.presentation.worker_busy".to_owned()));
-                    continue;
-                }
-                if !dispatch.commit.try_commit() {
-                    let _ = dispatch
-                        .reply_tx
-                        .send(Err("control.presentation.start_cancelled".to_owned()));
-                    continue;
-                }
-                match workers.send_presentation_multicast_start(dispatch.start) {
-                    Ok((process_id, session_id)) => {
-                        pending_presentation_multicast_start =
-                            Some(PendingPresentationMulticastStart {
-                                expected_process_id: process_id,
-                                expected_session_id: session_id,
-                                expected_worker_generation: workers.generation,
-                                key_binding: dispatch.key_binding,
-                                start: dispatch.start,
-                                reply_tx: dispatch.reply_tx,
-                            });
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "ClassMesh Service presentation-multicast dispatch failed: {error}"
-                        );
-                        let _ = dispatch
-                            .reply_tx
-                            .send(Err("control.presentation.worker_unavailable".to_owned()));
+                        pending
+                            .committed
+                            .reply(Err("control.presentation.worker_rejected".to_owned()));
                     }
                 }
             }
@@ -3058,82 +3071,166 @@ mod windows_service_app {
                     );
                     continue;
                 }
-                if !workers
-                    .is_running_worker(pending.expected_process_id, pending.expected_session_id)
-                    || workers.generation != pending.expected_worker_generation
-                {
-                    let pending = pending_presentation_unicast_start
-                        .take()
-                        .expect("pending unicast start presence checked");
-                    let _ = pending
-                        .reply_tx
-                        .send(Err("control.presentation.worker_exited".to_owned()));
+                let Some(peer) = workers
+                    .current_authenticated_receiver_worker()
+                    .filter(|worker| *worker == pending.committed.worker)
+                else {
+                    // The recovery path fences an IPC-disconnected incarnation
+                    // before any replacement start can be admitted.
                     continue;
-                }
+                };
 
                 let pending = pending_presentation_unicast_start
                     .take()
                     .expect("pending unicast start presence checked");
                 match result.status {
                     WorkerPresentationUnicastStartStatus::Started => {
-                        if let Some(peer) = workers.current_authenticated_receiver_worker()
-                            && peer.worker_generation == pending.expected_worker_generation
-                        {
-                            match receiver_telemetry_runtime.activate_correlated_start(
-                                unicast_start_identity(pending.start, peer, pending.key_binding),
-                                peer,
-                                unicast_ack(result),
-                            ) {
-                                Ok(binding) => {
-                                    if let Err(error) = workers.offer_receiver_telemetry(
-                                        binding,
-                                        &mut native_receiver_telemetry,
-                                    ) {
-                                        eprintln!(
-                                            "ClassMesh Phase10 unicast diagnostic pipe unavailable: {error}"
-                                        );
-                                    }
+                        match receiver_telemetry_runtime.activate_correlated_start(
+                            unicast_start_identity(pending.start, peer, pending.key_binding),
+                            peer,
+                            unicast_ack(result),
+                        ) {
+                            Ok(binding) => {
+                                if let Err(error) = workers.offer_receiver_telemetry(
+                                    binding,
+                                    &mut native_receiver_telemetry,
+                                ) {
+                                    eprintln!(
+                                        "ClassMesh Phase10 unicast diagnostic pipe unavailable: {error}"
+                                    );
                                 }
-                                Err(error) => eprintln!(
-                                    "ClassMesh Phase10 unicast receiver admission stayed disabled: {error:?}"
-                                ),
                             }
+                            Err(error) => eprintln!(
+                                "ClassMesh Phase10 unicast receiver admission stayed disabled: {error:?}"
+                            ),
                         }
-                        let _ = pending.reply_tx.send(Ok(()));
+                        pending.committed.reply(Ok(()));
                     }
                     WorkerPresentationUnicastStartStatus::Rejected => {
-                        let _ = pending
+                        pending
+                            .committed
+                            .reply(Err("control.presentation.worker_rejected".to_owned()));
+                    }
+                }
+            }
+
+            // A vanished caller is never a reason to free a committed slot.
+            // A live Worker with no terminal result is fenced before we fail it;
+            // the watchdog cannot relaunch until the owned process has exited.
+            if let Some(reason) =
+                pending_presentation_multicast_start
+                    .as_ref()
+                    .and_then(|pending| {
+                        pending.committed.fail_if_unresolved(
+                            workers.current_authenticated_receiver_worker(),
+                            Instant::now(),
+                            |worker| workers.fence_presentation_worker(worker),
+                        )
+                    })
+            {
+                receiver_telemetry_runtime.worker_changed();
+                pending_presentation_multicast_start
+                    .take()
+                    .expect("failure requires a pending start")
+                    .committed
+                    .reply(Err(reason.to_owned()));
+            }
+
+            if let Some(reason) = pending_presentation_unicast_start
+                .as_ref()
+                .and_then(|pending| {
+                    pending.committed.fail_if_unresolved(
+                        workers.current_authenticated_receiver_worker(),
+                        Instant::now(),
+                        |worker| workers.fence_presentation_worker(worker),
+                    )
+                })
+            {
+                receiver_telemetry_runtime.worker_changed();
+                pending_presentation_unicast_start
+                    .take()
+                    .expect("failure requires a pending start")
+                    .committed
+                    .reply(Err(reason.to_owned()));
+            }
+
+            while let Ok(dispatch) = presentation_multicast_start_rx.try_recv() {
+                if let Err(reason) = admit_presentation_start(
+                    pending_presentation_multicast_start.is_some()
+                        || pending_presentation_unicast_start.is_some(),
+                    &dispatch.commit,
+                    &dispatch.reply_tx,
+                ) {
+                    let _ = dispatch.reply_tx.send(Err(reason.to_owned()));
+                    continue;
+                }
+                let worker = match live_presentation_start_worker(
+                    confirmed_presentation_worker_key,
+                    dispatch.key_binding,
+                    workers.current_authenticated_receiver_worker(),
+                ) {
+                    Ok(worker) => worker,
+                    Err(reason) => {
+                        let _ = dispatch.reply_tx.send(Err(reason.to_owned()));
+                        continue;
+                    }
+                };
+                match workers.send_presentation_multicast_start(dispatch.start, worker) {
+                    Ok(()) => {
+                        pending_presentation_multicast_start =
+                            Some(PendingPresentationMulticastStart {
+                                key_binding: dispatch.key_binding,
+                                start: dispatch.start,
+                                committed: CommittedPresentationStart {
+                                    worker,
+                                    committed_at: Instant::now(),
+                                    reply_tx: dispatch.reply_tx,
+                                },
+                            });
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "ClassMesh Service presentation-multicast dispatch failed: {error}"
+                        );
+                        let _ = dispatch
                             .reply_tx
-                            .send(Err("control.presentation.worker_rejected".to_owned()));
+                            .send(Err("control.presentation.worker_unavailable".to_owned()));
                     }
                 }
             }
 
             while let Ok(dispatch) = presentation_unicast_start_rx.try_recv() {
-                if pending_presentation_multicast_start.is_some()
-                    || pending_presentation_unicast_start.is_some()
-                {
-                    let _ = dispatch
-                        .reply_tx
-                        .send(Err("control.presentation.worker_busy".to_owned()));
+                if let Err(reason) = admit_presentation_start(
+                    pending_presentation_multicast_start.is_some()
+                        || pending_presentation_unicast_start.is_some(),
+                    &dispatch.commit,
+                    &dispatch.reply_tx,
+                ) {
+                    let _ = dispatch.reply_tx.send(Err(reason.to_owned()));
                     continue;
                 }
-                if !dispatch.commit.try_commit() {
-                    let _ = dispatch
-                        .reply_tx
-                        .send(Err("control.presentation.start_cancelled".to_owned()));
-                    continue;
-                }
-                match workers.send_presentation_unicast_start(dispatch.start) {
-                    Ok((process_id, session_id)) => {
+                let worker = match live_presentation_start_worker(
+                    confirmed_presentation_worker_key,
+                    dispatch.key_binding,
+                    workers.current_authenticated_receiver_worker(),
+                ) {
+                    Ok(worker) => worker,
+                    Err(reason) => {
+                        let _ = dispatch.reply_tx.send(Err(reason.to_owned()));
+                        continue;
+                    }
+                };
+                match workers.send_presentation_unicast_start(dispatch.start, worker) {
+                    Ok(()) => {
                         pending_presentation_unicast_start =
                             Some(PendingPresentationUnicastStart {
-                                expected_process_id: process_id,
-                                expected_session_id: session_id,
-                                expected_worker_generation: workers.generation,
                                 key_binding: dispatch.key_binding,
                                 start: dispatch.start,
-                                reply_tx: dispatch.reply_tx,
+                                committed: CommittedPresentationStart {
+                                    worker,
+                                    committed_at: Instant::now(),
+                                    reply_tx: dispatch.reply_tx,
+                                },
                             });
                     }
                     Err(error) => {
@@ -3396,6 +3493,7 @@ mod windows_service_app {
                             &mut pending_teacher_interaction,
                             true,
                         );
+                        confirmed_presentation_worker_key = None;
                         receiver_telemetry_runtime.worker_changed();
                         retire_presentation_on_worker_change(
                             &mut pending_presentation_key_install,
@@ -3410,18 +3508,18 @@ mod windows_service_app {
                             &mut pending_presentation_multicast_start,
                             true,
                             |pending| {
-                                let _ = pending
-                                    .reply_tx
-                                    .send(Err("control.presentation.worker_restarted".to_owned()));
+                                pending
+                                    .committed
+                                    .reply(Err("control.presentation.worker_restarted".to_owned()))
                             },
                         );
                         retire_presentation_on_worker_change(
                             &mut pending_presentation_unicast_start,
                             true,
                             |pending| {
-                                let _ = pending
-                                    .reply_tx
-                                    .send(Err("control.presentation.worker_restarted".to_owned()));
+                                pending
+                                    .committed
+                                    .reply(Err("control.presentation.worker_restarted".to_owned()))
                             },
                         );
                     }
@@ -3441,6 +3539,7 @@ mod windows_service_app {
                     event,
                 );
                 if !matches!(event, WorkerManagerEvent::None) {
+                    confirmed_presentation_worker_key = None;
                     receiver_telemetry_runtime.worker_changed();
                     if let Some(pending) = pending_presentation_key_install.take() {
                         let _ = pending
@@ -3448,14 +3547,14 @@ mod windows_service_app {
                             .send(Err("control.presentation.worker_restarted".to_owned()));
                     }
                     if let Some(pending) = pending_presentation_multicast_start.take() {
-                        let _ = pending
-                            .reply_tx
-                            .send(Err("control.presentation.worker_restarted".to_owned()));
+                        pending
+                            .committed
+                            .reply(Err("control.presentation.worker_restarted".to_owned()));
                     }
                     if let Some(pending) = pending_presentation_unicast_start.take() {
-                        let _ = pending
-                            .reply_tx
-                            .send(Err("control.presentation.worker_restarted".to_owned()));
+                        pending
+                            .committed
+                            .reply(Err("control.presentation.worker_restarted".to_owned()));
                     }
                 }
                 if matches!(event, WorkerManagerEvent::Running(_)) {
@@ -3680,10 +3779,10 @@ mod windows_service_app {
         matches: impl FnOnce(&T) -> bool,
         cancel: impl FnOnce(T),
     ) {
-        if pending.as_ref().is_some_and(matches) {
-            if let Some(operation) = pending.take() {
-                cancel(operation);
-            }
+        if pending.as_ref().is_some_and(matches)
+            && let Some(operation) = pending.take()
+        {
+            cancel(operation);
         }
     }
 
@@ -3692,10 +3791,8 @@ mod windows_service_app {
         worker_changed: bool,
         cancel: impl FnOnce(T),
     ) {
-        if worker_changed {
-            if let Some(operation) = pending.take() {
-                cancel(operation);
-            }
+        if worker_changed && let Some(operation) = pending.take() {
+            cancel(operation);
         }
     }
 
@@ -4224,9 +4321,6 @@ mod windows_service_app {
             let start = multicast_start();
             let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
             let pending = PendingPresentationMulticastStart {
-                expected_process_id: 42,
-                expected_session_id: 7,
-                expected_worker_generation: 2,
                 key_binding: PresentationKeyInstallBinding {
                     control_session_id: start.control_session_id,
                     request_id: 999,
@@ -4235,7 +4329,7 @@ mod windows_service_app {
                     epoch: 77,
                 },
                 start,
-                reply_tx,
+                committed: committed_start(reply_tx),
             };
             let exact = WorkerPresentationMulticastStartResult {
                 process_id: 42,
@@ -4269,13 +4363,123 @@ mod windows_service_app {
         }
 
         #[test]
+        fn presentation_committed_start_without_terminal_result_requests_worker_recovery() {
+            let just_before_deadline =
+                PRESENTATION_WORKER_TERMINAL_TIMEOUT - Duration::from_millis(1);
+            assert_eq!(presentation_start_failure(true, just_before_deadline), None);
+            assert_eq!(
+                presentation_start_failure(true, PRESENTATION_WORKER_TERMINAL_TIMEOUT),
+                Some("control.presentation.worker_start_unresponsive")
+            );
+            assert_eq!(
+                presentation_start_failure(false, Duration::ZERO),
+                Some("control.presentation.worker_exited")
+            );
+        }
+
+        fn committed_start(
+            reply_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+        ) -> CommittedPresentationStart {
+            CommittedPresentationStart {
+                worker: ReceiverTelemetryCurrentWorker {
+                    process_id: 42,
+                    session_id: 7,
+                    worker_generation: 2,
+                },
+                committed_at: Instant::now(),
+                reply_tx,
+            }
+        }
+
+        #[test]
+        fn presentation_dispatch_rejects_abandoned_queued_and_overlapping_starts() {
+            let commit = MediaStartCommit::pending();
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            assert_eq!(
+                admit_presentation_start(true, &commit, &reply_tx),
+                Err("control.presentation.worker_busy")
+            );
+            drop(reply_rx);
+            assert_eq!(
+                admit_presentation_start(false, &commit, &reply_tx),
+                Err("control.presentation.start_cancelled")
+            );
+            assert!(commit.try_commit(), "dispatch must not have committed");
+        }
+
+        #[test]
+        fn presentation_dispatch_rejects_cleared_replaced_and_old_incarnation_keys() {
+            let worker = committed_start(tokio::sync::oneshot::channel().0).worker;
+            let key = PresentationKeyInstallBinding {
+                control_session_id: 77,
+                request_id: 99,
+                presentation_id: 55,
+                stream_id: 7,
+                epoch: 8,
+            };
+            let current = Some(worker);
+            assert_eq!(
+                live_presentation_start_worker(Some((key, worker)), key, current),
+                Ok(worker)
+            );
+            assert_eq!(
+                live_presentation_start_worker(None, key, current),
+                Err("control.presentation.worker_key_not_installed")
+            );
+            let replaced = PresentationKeyInstallBinding {
+                epoch: key.epoch + 1,
+                ..key
+            };
+            assert_eq!(
+                live_presentation_start_worker(Some((replaced, worker)), key, current),
+                Err("control.presentation.worker_key_not_installed")
+            );
+            let new_worker = ReceiverTelemetryCurrentWorker {
+                worker_generation: worker.worker_generation + 1,
+                ..worker
+            };
+            assert_eq!(
+                live_presentation_start_worker(Some((key, worker)), key, Some(new_worker)),
+                Err("control.presentation.worker_key_not_installed")
+            );
+        }
+
+        #[test]
+        fn presentation_committed_slot_survives_reply_close_and_fences_missing_terminal() {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            let pending = committed_start(reply_tx);
+            drop(reply_rx);
+            let worker = pending.worker;
+            let now = pending.committed_at;
+            assert_eq!(
+                pending.fail_if_unresolved(Some(worker), now, |_| panic!("healthy Worker")),
+                None
+            );
+
+            let mut fenced = None;
+            assert_eq!(
+                pending.fail_if_unresolved(
+                    Some(worker),
+                    now + PRESENTATION_WORKER_TERMINAL_TIMEOUT,
+                    |old| fenced = Some(old)
+                ),
+                Some("control.presentation.worker_start_unresponsive")
+            );
+            assert_eq!(fenced, Some(worker));
+
+            fenced = None;
+            assert_eq!(
+                pending.fail_if_unresolved(None, now, |old| fenced = Some(old)),
+                Some("control.presentation.worker_exited")
+            );
+            assert_eq!(fenced, Some(worker));
+        }
+
+        #[test]
         fn pending_multicast_start_is_invalidated_by_exact_key_lifecycle_binding() {
             let start = multicast_start();
             let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
             let pending = PendingPresentationMulticastStart {
-                expected_process_id: 42,
-                expected_session_id: 7,
-                expected_worker_generation: 2,
                 key_binding: PresentationKeyInstallBinding {
                     control_session_id: start.control_session_id,
                     request_id: 999,
@@ -4284,7 +4488,7 @@ mod windows_service_app {
                     epoch: 77,
                 },
                 start,
-                reply_tx,
+                committed: committed_start(reply_tx),
             };
             let exact_media_binding = PresentationKeyInstallBinding {
                 control_session_id: start.control_session_id,
@@ -4346,12 +4550,9 @@ mod windows_service_app {
             };
             let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
             let pending = PendingPresentationUnicastStart {
-                expected_process_id: 42,
-                expected_session_id: 7,
-                expected_worker_generation: 2,
                 start,
                 key_binding,
-                reply_tx,
+                committed: committed_start(reply_tx),
             };
             assert!(pending.matches_key_binding(key_binding));
             assert!(!pending.matches_key_binding(PresentationKeyInstallBinding {

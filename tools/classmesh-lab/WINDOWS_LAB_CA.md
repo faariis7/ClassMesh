@@ -43,7 +43,7 @@ New-Item -ItemType Directory -Path $work -ErrorAction Stop
 $request = Join-Path $work 'student-request.pb'
 $result = Join-Path $work 'student-approved.pb'
 & "$bin\classmesh-enrollment-request.exe" --role student-device --display-name VM1-Lab --output $request
-& "$bin\classmesh-enrollment-authority.exe" --role student-device --request $request --ca-cert $ca --ca-key-name $caContainerName --output $result --lifetime-hours 1
+& "$bin\classmesh-enrollment-authority.exe" --role student-device --request $request --ca-cert $ca --ca-key-name $caContainerName --output $result --lifetime-hours 1 --student-server-name 127.0.0.1
 $identity = Join-Path $work 'machine-identity.json'
 & "$bin\classmesh-enrollment-install.exe" --role student-device --request $request --result $result --trust-root $ca --identity-output $identity
 $stage = Join-Path $env:TEMP ('ClassMesh-Student-Stage-' + [Guid]::NewGuid().ToString('N'))
@@ -54,6 +54,15 @@ Check `$LASTEXITCODE` after each executable before advancing. The automated
 native test below performs these checks and guarantees its owned cleanup.
 Teacher remains the default role in the existing request/authority/installer;
 StudentDevice requires explicit opt-in on all three.
+
+For Live Mode, the authority must approve the exact DNS name or IP address the
+Teacher will verify. Use that value for `--student-server-name` and the
+protected Teacher policy's `student.server_name`. The authority writes one
+subject alternative name from this approval and discards any names requested
+by the CSR. The example approves loopback for co-located lab testing. A
+separate Student host needs its own approved endpoint. Reissue earlier Student
+certificates without the required SAN and use the new leaf fingerprint in the
+protected configuration.
 
 The stager now **requires `--trust-root`** (repeatable, at most 16). This intentional
 fail-closed tightening prevents an EnrollmentResult from establishing trust in
@@ -76,6 +85,15 @@ The successful output consists of:
 Identity is installed before authorization/config generation. These two fresh
 TEMP workspaces keep that sequence while respecting the authorizer's new-directory
 requirement. They are disposable staging files, not an authorized ProgramData installation.
+
+## Explicit Message permission for approved M2 qualification
+
+After validating the Teacher CSR/result and the independent lab root, add
+`--allow-teacher-message` to `classmesh-student-authorize-teacher` when the
+operator approved that exact Teacher for the Message exercise. Use the owned
+Student authorization stage. The flag adds only `SendTeacherMessage` to the
+existing pair and cannot replace a previously enrolled Teacher. Keep the issuer
+and Teacher roster authorization decisions separate.
 
 ## Native tests, ownership and cleanup
 
@@ -170,3 +188,10 @@ Service developer next steps, outside this PR:
 MVP #688 M2 as a whole, real SCM/LocalSystem operation, authenticated remote
 Teacher/Worker behavior, signing/production CA trust, security review and physical
 qualification remain separate gates. Successful enrollment does not close them.
+
+## Teacher Live Mode provisioning
+
+Use the independently verified Teacher and Student outputs to prepare the
+[protected Teacher policy](WINDOWS_TEACHER_LIVE.md). The roster signer is a
+separate ephemeral development authority. The enrollment CA signs machine
+credentials and the Student grant remains a separate checked operation.

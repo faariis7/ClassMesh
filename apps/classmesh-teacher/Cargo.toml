@@ -16,12 +16,20 @@ classmesh-windows-runtime = { path = "../../crates/classmesh-windows-runtime" }
 quinn = "0.11.12"
 
 [target.'cfg(windows)'.dependencies]
+classmesh-identity-win = { path = "../../crates/classmesh-identity-win" }
+classmesh-win32 = { path = "../../crates/classmesh-win32", features = ["trusted-teacher-policy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10.9"
+x509-parser = "0.18"
 classmesh-capture-win = { path = "../../crates/classmesh-capture-win" }
 classmesh-worker = { path = "../classmesh-worker" }
 eframe = { version = "=0.32.3", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
-tokio = { version = "1", features = ["macros", "rt", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "time"] }
 
 [dev-dependencies]
+ring = "0.17"
 rcgen = { version = "0.14", features = ["x509-parser"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 sha2 = "0.10.9"

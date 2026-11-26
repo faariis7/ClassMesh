@@ -10,12 +10,13 @@ use windows_sys::Win32::Foundation::{
     WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::{
-    CopySid, GetLengthSid, GetTokenInformation, IsValidSid, TOKEN_USER, TokenUser,
+    CopySid, GetLengthSid, GetTokenInformation, IsValidSid, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::System::RemoteDesktop::WTSQueryUserToken;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, GetCurrentProcess,
-    PROCESS_INFORMATION, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+    OpenProcessToken, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    STARTUPINFOW, TerminateProcess, WaitForSingleObject,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +84,42 @@ impl SessionProcess {
     #[must_use]
     pub const fn session_id(&self) -> u32 {
         self.session_id
+    }
+
+    /// Send read-only kernel references to this Service to the exact live
+    /// Worker, using the connected primary pipe. An arbitrary client never
+    /// receives a process or token handle.
+    pub fn send_service_identity(&self, pipe: &crate::NamedPipeServer) -> std::io::Result<()> {
+        if !pipe.is_primary_worker_pipe()
+            || !self
+                .matches_live_pipe_peer(&pipe.peer().map_err(std::io::Error::other)?)
+                .map_err(std::io::Error::other)?
+        {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        let current = unsafe { GetCurrentProcess() };
+        let token = current_query_token().map_err(std::io::Error::other)?;
+        let mut proof = [0; 20];
+        proof[..4].copy_from_slice(&crate::named_pipe::SERVICE_IDENTITY_MAGIC);
+        for (slot, (handle, access)) in proof[4..].as_chunks_mut::<8>().0.iter_mut().zip([
+            (
+                current,
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            ),
+            (token.0, TOKEN_QUERY),
+        ]) {
+            let mut remote = null_mut();
+            // SAFETY: the target is the retained launched process HANDLE and
+            // can receive only the stated rights. The output belongs to its
+            // handle table and is released by the Worker or on its termination.
+            if unsafe { DuplicateHandle(current, handle, self.process, &mut remote, access, 0, 0) }
+                == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            slot.copy_from_slice(&(remote as usize as u64).to_le_bytes());
+        }
+        pipe.write_all(&proof).map_err(std::io::Error::other)
     }
 
     /// Accept an OS-reported pipe peer only while the exact launched Worker
@@ -166,8 +203,24 @@ pub fn session_user_sid(session_id: u32) -> Result<Vec<u8>, LaunchError> {
     if unsafe { WTSQueryUserToken(session_id, &mut user_token) } == 0 {
         return Err(last_error("WTSQueryUserToken"));
     }
-    let token_guard = HandleGuard(user_token);
+    token_user_sid(&HandleGuard(user_token))
+}
 
+fn current_query_token() -> Result<HandleGuard, LaunchError> {
+    let mut token = null_mut();
+    // SAFETY: a process pseudo-handle and a valid writable output pointer.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(last_error("OpenProcessToken(TOKEN_QUERY)"));
+    }
+    Ok(HandleGuard(token))
+}
+
+#[cfg(test)]
+pub(crate) fn current_user_sid() -> Result<Vec<u8>, LaunchError> {
+    token_user_sid(&current_query_token()?)
+}
+
+fn token_user_sid(token_guard: &HandleGuard) -> Result<Vec<u8>, LaunchError> {
     let mut required = 0_u32;
     // SAFETY: the first query intentionally passes no output buffer so Windows reports the size.
     unsafe {

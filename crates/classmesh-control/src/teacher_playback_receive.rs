@@ -12,7 +12,7 @@ use classmesh_protocol::{Capability, ControlRole};
 use classmesh_security::{PrincipalId, PrincipalKind};
 
 use crate::client_session::ClientControlSession;
-use crate::handshake::EstablishedControlSession;
+use crate::handshake::{EstablishedControlSession, FIRST_POST_HELLO_SEQUENCE};
 use crate::live_authorization::{LiveAuthorizationError, LiveAuthorizationStore};
 use crate::peer_identity::{PeerIdentityError, authenticated_peer_identity};
 use crate::quic::{ControlReceiveHalf, ControlTransportError};
@@ -100,7 +100,7 @@ impl TeacherControlSequenceGuard {
         Ok(admitted)
     }
 
-    /// Reject duplicate, zero or regressing envelope sequence numbers before
+    /// Reject pre-Hello, duplicate or regressing envelope sequence numbers before
     /// passing a verified message to the owning dispatcher.
     pub fn admit(
         &mut self,
@@ -114,7 +114,9 @@ impl TeacherControlSequenceGuard {
             return Err(AuthenticatedTeacherReceiveError::GuardSessionMismatch);
         }
         let sequence = message.envelope.sequence;
-        if sequence == 0 || self.last_sequence.is_some_and(|last| sequence <= last) {
+        if sequence < FIRST_POST_HELLO_SEQUENCE
+            || self.last_sequence.is_some_and(|last| sequence <= last)
+        {
             return Err(AuthenticatedTeacherReceiveError::ReplayedSequence);
         }
         self.bound_session_id = Some(session_id);
@@ -218,10 +220,10 @@ async fn receive_authenticated_teacher_control_over(
     // Heartbeat repeats the session identifier inside its payload. A valid
     // outer envelope must not launder a heartbeat from another session into
     // the owning dispatcher, even on an authenticated QUIC connection.
-    if let Some(control_envelope::Payload::Heartbeat(heartbeat)) = &envelope.payload {
-        if heartbeat.control_session_id != envelope.control_session_id {
-            return Err(AuthenticatedTeacherReceiveError::InnerSessionMismatch);
-        }
+    if let Some(control_envelope::Payload::Heartbeat(heartbeat)) = &envelope.payload
+        && heartbeat.control_session_id != envelope.control_session_id
+    {
+        return Err(AuthenticatedTeacherReceiveError::InnerSessionMismatch);
     }
     let is_playback = matches!(
         envelope.payload,
@@ -457,6 +459,28 @@ mod tests {
             client,
             authorization: LiveAuthorizationStore::new(authorization),
         })
+    }
+
+    #[test]
+    fn first_verified_payload_cannot_reuse_the_hello_sequence() {
+        let mut guard = TeacherControlSequenceGuard::default();
+        let mut old = report(55);
+        old.sequence = 1;
+        assert!(matches!(
+            guard.admit(AuthenticatedTeacherControlMessage {
+                envelope: old,
+                is_playback: true
+            }),
+            Err(AuthenticatedTeacherReceiveError::ReplayedSequence)
+        ));
+        assert!(
+            guard
+                .admit(AuthenticatedTeacherControlMessage {
+                    envelope: report(55),
+                    is_playback: true
+                })
+                .is_ok()
+        );
     }
 
     fn report(session: u64) -> ControlEnvelope {

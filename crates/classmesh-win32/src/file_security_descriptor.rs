@@ -98,7 +98,11 @@ pub(crate) fn read_allowed_descriptor(file: &File) -> io::Result<DescriptorSnaps
 
 /// # Safety
 /// The caller must retain a valid registry key with READ_CONTROL for this call.
-#[cfg(any(test, feature = "experimental-trusted-policy"))]
+#[cfg(any(
+    test,
+    feature = "experimental-trusted-policy",
+    feature = "trusted-teacher-policy"
+))]
 pub(crate) unsafe fn read_allowed_registry_descriptor(
     key: windows_sys::Win32::System::Registry::HKEY,
 ) -> io::Result<DescriptorSnapshot> {
@@ -108,7 +112,7 @@ pub(crate) unsafe fn read_allowed_registry_descriptor(
     )
 }
 
-fn read_allowed_object_descriptor(
+pub(crate) fn read_allowed_object_descriptor(
     handle: windows_sys::Win32::Foundation::HANDLE,
     object_type: windows_sys::Win32::Security::Authorization::SE_OBJECT_TYPE,
 ) -> io::Result<DescriptorSnapshot> {

@@ -13,6 +13,7 @@ required-features = ["experimental-trusted-policy"]
 
 [features]
 default = []
+trusted-teacher-policy = ["dep:classmesh-security"]
 experimental-trusted-policy = ["dep:classmesh-security", "dep:classmesh-identity-win", "dep:serde", "dep:serde_json", "dep:sha2", "dep:rustls"]
 
 [dependencies]

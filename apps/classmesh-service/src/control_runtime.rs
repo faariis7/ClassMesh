@@ -678,7 +678,7 @@ const MEDIA_START_CANCELLED: u8 = 2;
 pub(crate) struct MediaStartCommit(Arc<AtomicU8>);
 
 impl MediaStartCommit {
-    fn pending() -> Self {
+    pub(crate) fn pending() -> Self {
         Self(Arc::new(AtomicU8::new(MEDIA_START_PENDING)))
     }
 
@@ -1573,10 +1573,10 @@ impl ControlRuntime {
         if let Some(stop_tx) = self.stop_tx.take() {
             let _ = stop_tx.send(());
         }
-        if let Some(thread) = self.thread.take() {
-            if thread.join().is_err() {
-                eprintln!("ClassMesh control runtime thread panicked during shutdown");
-            }
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            eprintln!("ClassMesh control runtime thread panicked during shutdown");
         }
     }
 }
@@ -1830,6 +1830,20 @@ async fn await_presentation_start(
             .await
             .unwrap_or_else(|_| Err("control.presentation.start_reply_dropped".to_owned())),
         Err(_) => Err("control.presentation.start_cancelled".to_owned()),
+    }
+}
+
+async fn await_live_presentation_start(
+    connection: &quinn::Connection,
+    commit: MediaStartCommit,
+    reply_rx: &mut oneshot::Receiver<Result<(), String>>,
+) -> Result<(), String> {
+    tokio::select! {
+        result = await_presentation_start(commit.clone(), reply_rx) => result,
+        _ = connection.closed() => {
+            commit.cancel();
+            Err("control.presentation.start_disconnected".to_owned())
+        }
     }
 }
 
@@ -2379,7 +2393,8 @@ async fn run_established_session(
                                                             },
                                                         ) {
                                                         Ok(()) => {
-                                                            await_presentation_start(
+                                                            await_live_presentation_start(
+                                                                connection,
                                                                 commit,
                                                                 &mut reply_rx,
                                                             )
@@ -2423,8 +2438,12 @@ async fn run_established_session(
                                                 },
                                             ) {
                                                 Ok(()) => {
-                                                    await_presentation_start(commit, &mut reply_rx)
-                                                        .await
+                                                    await_live_presentation_start(
+                                                        connection,
+                                                        commit,
+                                                        &mut reply_rx,
+                                                    )
+                                                    .await
                                                 }
                                                 Err(mpsc::TrySendError::Full(_)) => {
                                                     Err("control.presentation.start_backpressure"
@@ -4659,6 +4678,54 @@ mod tests {
                 WireMediaTransport::Webrtc as i32,
             ]
         );
+    }
+
+    #[test]
+    fn presentation_start_uncommitted_timeout_cancels_late_worker_commit() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test Tokio runtime");
+        runtime.block_on(async {
+            let commit = MediaStartCommit::pending();
+            let (reply_tx, mut reply_rx) = oneshot::channel();
+            let result = await_presentation_start(commit.clone(), &mut reply_rx).await;
+            assert_eq!(result, Err("control.presentation.start_timeout".to_owned()));
+            assert!(
+                !commit.try_commit(),
+                "late worker must not commit a timed-out start"
+            );
+            drop(reply_tx);
+        });
+    }
+
+    #[test]
+    fn presentation_start_committed_before_timeout_waits_for_late_worker_result() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test Tokio runtime");
+        runtime.block_on(async {
+            let commit = MediaStartCommit::pending();
+            let (reply_tx, mut reply_rx) = oneshot::channel();
+            assert!(commit.try_commit());
+            let mut result = std::pin::pin!(await_presentation_start(commit, &mut reply_rx));
+            std::future::poll_fn(|cx| {
+                assert!(result.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+
+            // Keep the reply pending while the deadline passes.
+            tokio::select! {
+                biased;
+                outcome = &mut result => panic!("committed start resolved before reply: {outcome:?}"),
+                () = tokio::time::sleep(PRESENTATION_START_TIMEOUT) => {}
+            }
+
+            reply_tx.send(Ok(())).expect("reply receiver must remain alive");
+            assert_eq!(result.await, Ok(()));
+        });
     }
 
     #[test]

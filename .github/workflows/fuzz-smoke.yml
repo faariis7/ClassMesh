@@ -6,6 +6,7 @@ on:
       - "fuzz/**"
       - ".github/workflows/fuzz-smoke.yml"
       - "crates/classmesh-control/src/framing.rs"
+      - "crates/classmesh-security/src/teacher_roster.rs"
   workflow_dispatch:
 
 permissions:
@@ -28,3 +29,9 @@ jobs:
       - name: Bounded fuzz smoke
         working-directory: fuzz
         run: cargo +nightly fuzz run control_frame -- -runs=1000
+      - name: Build Teacher roster fuzz target
+        working-directory: fuzz
+        run: cargo +nightly fuzz build teacher_roster
+      - name: Bounded Teacher roster fuzz smoke
+        working-directory: fuzz
+        run: cargo +nightly fuzz run teacher_roster -- -runs=1000

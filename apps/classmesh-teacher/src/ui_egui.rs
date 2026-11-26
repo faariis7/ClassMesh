@@ -3,6 +3,11 @@ use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::Instant;
 
+use classmesh_core::{
+    MediaState,
+    presence::{DeviceHealth, PresenceState},
+};
+
 use classmesh_control::client_session::ClientControlSession;
 use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::teacher_playback_receive::AuthenticatedTeacherControlMessage;
@@ -11,7 +16,9 @@ use classmesh_protocol::control_wire::{ControlEnvelope, TeacherInteractionState}
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
 
 use crate::classroom_grid::{MonitoringGridViewConfig, TeacherMonitoringGridViewModel};
-use crate::classroom_view::{ClassroomViewConfig, TeacherClassroomViewModel};
+use crate::classroom_view::{
+    ClassroomDeviceSnapshot, ClassroomViewConfig, TeacherClassroomViewModel,
+};
 use crate::device_diagnostics::{
     DeviceDiagnosticsConfig, DeviceDiagnosticsError, DeviceDiagnosticsSnapshot,
     DeviceDiagnosticsView, TeacherDeviceDiagnosticsViewModel,
@@ -40,8 +47,8 @@ use crate::ui_focus::show_focus;
 use crate::ui_presentation::show_presentation;
 use crate::ui_shell::{
     TeacherInteractionUiContext, TeacherInteractionUiRequest, TeacherUiAction, TeacherUiMessage,
-    TeacherUiSection, TeacherUiShellState, prepare_teacher_interaction_ui_action,
-    validate_teacher_interaction_ui_action,
+    TeacherUiSection, TeacherUiShellState, prepare_teacher_interaction_for_target,
+    validate_teacher_interaction_for_target,
 };
 
 // A delayed duplicate write or an out-of-order Accepted must not erase a
@@ -272,6 +279,12 @@ impl TeacherUiControlBridge {
 }
 
 #[derive(Debug)]
+pub(crate) struct InstalledMessageTarget {
+    pub(crate) source: MonitoringSourceId,
+    pub(crate) session: u64,
+    pub(crate) display_name: String,
+}
+
 pub struct TeacherEguiShell {
     shell: TeacherUiShellState,
     classroom: TeacherClassroomViewModel,
@@ -287,6 +300,7 @@ pub struct TeacherEguiShell {
     teacher_interaction_draft: TeacherInteractionDraft,
     pending_action: Option<TeacherUiAction>,
     control_bridge: Option<TeacherUiControlBridge>,
+    installed_message_target: Option<InstalledMessageTarget>,
     command_status: BTreeMap<u64, (u64, Option<TeacherInteractionState>)>,
 }
 
@@ -314,6 +328,7 @@ impl Default for TeacherEguiShell {
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
             control_bridge: None,
+            installed_message_target: None,
             command_status: BTreeMap::new(),
         }
     }
@@ -345,6 +360,7 @@ impl TeacherEguiShell {
             teacher_interaction_draft: TeacherInteractionDraft::default(),
             pending_action: None,
             control_bridge: None,
+            installed_message_target: None,
             command_status: BTreeMap::new(),
         }
     }
@@ -375,10 +391,10 @@ impl TeacherEguiShell {
         {
             return;
         }
-        if let Some((session, status)) = self.command_status.get_mut(&request_id) {
-            if *session == control_session_id {
-                *status = advance_command_status(*status, state);
-            }
+        if let Some((session, status)) = self.command_status.get_mut(&request_id)
+            && *session == control_session_id
+        {
+            *status = advance_command_status(*status, state);
         }
     }
 
@@ -418,7 +434,7 @@ impl TeacherEguiShell {
                     }
                 }
                 Ok(TeacherUiControlEvent::Authenticated(context)) => {
-                    if context.control_session_id == 0 {
+                    if context.control_session_id == 0 || !self.admit_installed_target(&context) {
                         self.clear_teacher_interaction_context();
                     } else {
                         self.set_teacher_interaction_context(context);
@@ -511,6 +527,41 @@ impl TeacherEguiShell {
         }
     }
 
+    fn admit_installed_target(&mut self, context: &TeacherInteractionUiContext) -> bool {
+        let Some(target) = &self.installed_message_target else {
+            return true;
+        };
+        if (target.source, target.session) != (context.source_id, context.control_session_id) {
+            return false;
+        }
+        let first_observation = self.teacher_interaction_context.is_none();
+        if first_observation {
+            let added = self.classroom.upsert(ClassroomDeviceSnapshot {
+                source_id: target.source,
+                display_name: target.display_name.clone(),
+                health: DeviceHealth {
+                    presence: PresenceState::Online,
+                    media: MediaState::Idle,
+                    service_ready: false,
+                    worker_ready: false,
+                },
+                quality_tier: None,
+                thumbnail_available: false,
+                interactive_active: false,
+            });
+            if added.is_err() || self.classroom.select(Some(target.source)).is_err() {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn installed_message_route(&self) -> Option<(MonitoringSourceId, u64)> {
+        self.installed_message_target
+            .as_ref()
+            .map(|target| (target.source, target.session))
+    }
+
     pub fn set_teacher_interaction_context(&mut self, context: TeacherInteractionUiContext) {
         if self
             .teacher_interaction_context
@@ -553,6 +604,9 @@ impl TeacherEguiShell {
     }
 
     pub fn clear_teacher_interaction_context(&mut self) {
+        if let Some(target) = &self.installed_message_target {
+            self.classroom.remove(target.source);
+        }
         // Retire any intent queued under the old authenticated session.
         // A new offline ResumeThumbnail click can still be queued afterward.
         if self.teacher_interaction_context.is_some()
@@ -814,16 +868,17 @@ impl TeacherEguiShell {
     #[must_use]
     pub fn take_pending_action(&mut self) -> Option<TeacherUiAction> {
         let action = self.pending_action.take()?;
-        if let TeacherUiAction::Focus(focus) = &action {
-            if !self.focus_action_still_current(*focus) {
-                return None;
-            }
+        if let TeacherUiAction::Focus(focus) = &action
+            && !self.focus_action_still_current(*focus)
+        {
+            return None;
         }
         if let TeacherUiAction::TeacherInteraction(interaction) = &action {
-            validate_teacher_interaction_ui_action(
+            validate_teacher_interaction_for_target(
                 interaction,
                 &self.classroom,
                 self.teacher_interaction_context.as_ref(),
+                self.installed_message_route(),
             )
             .ok()?;
         }
@@ -909,11 +964,12 @@ impl TeacherEguiShell {
         let Some(source_id) = self.classroom.selected() else {
             return;
         };
-        let Ok(action) = prepare_teacher_interaction_ui_action(
+        let Ok(action) = prepare_teacher_interaction_for_target(
             source_id,
             request,
             &self.classroom,
             self.teacher_interaction_context.as_ref(),
+            self.installed_message_route(),
         ) else {
             return;
         };
@@ -992,27 +1048,39 @@ impl TeacherEguiShell {
     fn section_body(&mut self, ui: &mut egui::Ui) {
         match self.shell.active_section() {
             TeacherUiSection::Classroom => {
-                show_classroom(ui, &mut self.shell, &mut self.classroom, &self.monitoring)
+                let target = self.installed_message_route().map(|(source, _)| source);
+                show_classroom(
+                    ui,
+                    &mut self.shell,
+                    &mut self.classroom,
+                    &self.monitoring,
+                    target,
+                )
             }
             TeacherUiSection::Focus => {
                 if let Some(message) =
                     show_focus(ui, &self.classroom, self.pending_action.is_some())
+                    && let Some(action) = self.shell.handle(message)
                 {
-                    if let Some(action) = self.shell.handle(message) {
-                        self.queue_action(action);
-                    }
+                    self.queue_action(action);
                 }
             }
             TeacherUiSection::Presentation => {
                 if let Some(message) =
                     show_presentation(ui, self.presentation, self.pending_action.is_some())
+                    && let Some(action) = self.shell.handle(message)
                 {
-                    if let Some(action) = self.shell.handle(message) {
-                        self.queue_action(action);
-                    }
+                    self.queue_action(action);
                 }
             }
             TeacherUiSection::DeviceActions => {
+                if self.installed_message_target.is_some()
+                    && self.teacher_interaction_context.is_some()
+                {
+                    ui.small(
+                        "The Student Service verifies Worker readiness when you send a message.",
+                    );
+                }
                 if let Some(request) = show_device_actions(
                     ui,
                     self.classroom.selected(),
@@ -1040,13 +1108,9 @@ impl TeacherEguiShell {
                         egui::Button::new("Receive staged file"),
                     )
                     .clicked()
+                    && let Some(candidate) = self.staged_file_candidate
                 {
-                    if let Some(candidate) = self.staged_file_candidate {
-                        self.queue_file_pull_request(
-                            candidate.transfer_id,
-                            candidate.opaque_source_id,
-                        );
-                    }
+                    self.queue_file_pull_request(candidate.transfer_id, candidate.opaque_source_id);
                 }
             }
             TeacherUiSection::Diagnostics => {
@@ -1068,10 +1132,9 @@ impl TeacherEguiShell {
                     playback,
                     &mut self.diagnostics_draft,
                     self.pending_action.is_some(),
-                ) {
-                    if let Some(action) = self.shell.handle(message) {
-                        self.queue_action(action);
-                    }
+                ) && let Some(action) = self.shell.handle(message)
+                {
+                    self.queue_action(action);
                 }
             }
         }
@@ -1169,11 +1232,21 @@ fn teacher_native_options() -> eframe::NativeOptions {
 /// caller must own the session producer and command consumer for the lifetime
 /// of this window; the UI never constructs or impersonates a live session.
 pub fn run_teacher_ui_with_control_bridge(bridge: TeacherUiControlBridge) -> eframe::Result<()> {
+    run_teacher_window(bridge, None)
+}
+
+pub(crate) fn run_teacher_window(
+    bridge: TeacherUiControlBridge,
+    target: Option<InstalledMessageTarget>,
+) -> eframe::Result<()> {
     eframe::run_native(
         APP_TITLE,
         teacher_native_options(),
         Box::new(move |_creation_context| {
-            let mut app = TeacherEguiShell::default();
+            let mut app = TeacherEguiShell {
+                installed_message_target: target,
+                ..Default::default()
+            };
             app.attach_control_bridge(bridge);
             Ok(Box::new(app))
         }),
@@ -1329,6 +1402,55 @@ mod tests {
         app.poll_control_bridge();
         assert!(app.teacher_interaction_context.is_none());
         assert!(app.control_bridge.is_none());
+    }
+
+    #[test]
+    fn installed_message_target_enters_the_classroom_only_for_its_live_session() {
+        let (event_tx, event_rx) = std::sync::mpsc::sync_channel(4);
+        let (action_tx, action_rx) = std::sync::mpsc::sync_channel(2);
+        let mut app = TeacherEguiShell {
+            installed_message_target: Some(InstalledMessageTarget {
+                source: MonitoringSourceId(7),
+                session: 77,
+                display_name: "student.classmesh.local".into(),
+            }),
+            ..Default::default()
+        };
+        app.attach_control_bridge(TeacherUiControlBridge::new(event_rx, action_tx));
+        assert!(app.classroom.is_empty());
+
+        let good = interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+        let mut wrong = good.clone();
+        wrong.control_session_id += 1;
+        event_tx
+            .send(TeacherUiControlEvent::Authenticated(wrong))
+            .unwrap();
+        app.poll_control_bridge();
+        assert!(app.classroom.is_empty());
+        assert!(app.teacher_interaction_context.is_none());
+
+        event_tx
+            .send(TeacherUiControlEvent::Authenticated(good))
+            .unwrap();
+        app.poll_control_bridge();
+        assert_eq!(app.classroom.selected(), Some(MonitoringSourceId(7)));
+        let rows = app.classroom.rows();
+        assert_eq!(rows[0].display_name, "student.classmesh.local");
+        assert!(!rows[0].health.worker_ready);
+        app.queue_teacher_interaction_request(TeacherInteractionUiRequest::Message(
+            "M2 lab".into(),
+        ));
+        app.poll_control_bridge();
+        assert!(
+            matches!(action_rx.try_recv(), Ok(TeacherUiAction::TeacherInteraction(action)) if action.control_session_id == 77)
+        );
+
+        app.queue_teacher_interaction_request(TeacherInteractionUiRequest::Message("Stale".into()));
+        drop(event_tx);
+        app.poll_control_bridge();
+        assert!(app.classroom.is_empty());
+        assert!(app.take_pending_action().is_none());
+        assert!(action_rx.try_recv().is_err());
     }
 
     #[test]

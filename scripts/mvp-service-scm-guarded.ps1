@@ -119,12 +119,12 @@ try {
     Assert-ProtectedFile $workerPath $ExpectedWorkerSha256
     $bin = '"' + (Get-Item -LiteralPath $ServiceExe).FullName + '"'
     $expectedCommand = $bin
-    $output = & sc.exe create $serviceName 'binPath=' $bin 'start=' 'demand' 'type=' 'own' 'obj=' 'LocalSystem' 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "SCM create failed: $($output -join ' | ')" }
+    # The PowerShell 5.1 native argument bridge strips the literal quotes
+    # from sc.exe's binPath value. Pass the complete command to SCM directly.
+    New-Service -Name $serviceName -BinaryPathName $bin -StartupType Manual -ErrorAction Stop | Out-Null
     $created = $true
     # Bind the SCM configuration to the reviewed executable before the first start.
-    # A successful sc.exe create alone does not establish the installed image path
-    # or the LocalSystem account. Fail closed and let finally remove our service.
+    # Reject an unexpected installed image path or account before starting LocalSystem.
     $registered = Get-CimInstance Win32_Service -Filter "Name='ClassMeshService'"
     if ($null -eq $registered -or
         $registered.StartName -notin @('LocalSystem','NT AUTHORITY\\SYSTEM') -or

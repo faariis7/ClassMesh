@@ -7,6 +7,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+classmesh-security = { path = "../../crates/classmesh-security" }
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
 bytes = "1"
 getrandom = "0.3"
 classmesh-core = { path = "../../crates/classmesh-core" }
@@ -23,9 +26,10 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"]
 
 [target.'cfg(windows)'.dependencies]
 x509-parser = "0.18"
+classmesh-teacher = { path = "../../apps/classmesh-teacher" }
+classmesh-win32 = { path = "../../crates/classmesh-win32", features = ["trusted-teacher-policy"] }
 classmesh-control = { path = "../../crates/classmesh-control" }
 classmesh-identity-win = { path = "../../crates/classmesh-identity-win" }
-classmesh-security = { path = "../../crates/classmesh-security" }
 
 [target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
 classmesh-codec-win = { path = "../../crates/classmesh-codec-win" }
@@ -41,7 +45,6 @@ windows = { version = "0.61.3", features = [
 ] }
 
 [dev-dependencies]
-classmesh-security = { path = "../../crates/classmesh-security" }
 classmesh-windows-runtime = { path = "../../crates/classmesh-windows-runtime" }
 classmesh-worker = { path = "../../apps/classmesh-worker" }
 

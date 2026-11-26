@@ -1,3 +1,182 @@
+## Trusted Teacher runtime implementation
+
+The actual Windows binary now prepares a protected, versioned signed roster,
+checks the anchored epoch and CNG enrollment, and establishes one enrolled
+QUIC session with the selected roster StudentDevice. Startup with unprovisioned
+trust denies with exit 3. CLI probe and native GUI use the same startup. The
+shared duplex path retires the connection on policy change, stale freshness,
+certificate expiry or revoked inputs. Protected SCM, Worker human confirmation,
+physical Student rendering and recovery remain acceptance gates outside hosted CI.
+[ADR-0009](decisions/0009-teacher-roster-trust.md)
+
+The Student enrollment CLI now lets the authority issue the exact endpoint SAN
+required by Teacher's enrolled TLS configuration. A real portable loopback
+QUIC regression reproduced the rejection of the former SAN-free certificate
+and verifies approved DNS and IP names plus rejection of a CSR-supplied
+unapproved name. The 2026-11-26 VM1 run verified all 13 signed images natively
+and installed protected Teacher and Student policy. The packaged Teacher
+executable reached enrolled mTLS/QUIC Hello and Student verification, then
+rejected Live Mode with exit 3 at `NotNegotiated`. The Worker launched in
+Session 1 but did not establish authenticated IPC. See the
+[measured run record](WINDOWS_RUNTIME_PLAN.md#protected-vm1-run--2026-11-26).
+
+The native Worker follow-up replaces the direct ordinary-user process/token
+open with restricted handles delegated to the exact launched Worker. The
+Worker verifies a SYSTEM-owned primary pipe, kernel Session 0 and PID,
+process liveness and the Service token's LocalSystem SID before publishing
+capabilities. A native ordinary Session 1 test reads the pipe descriptor and
+rejects an unauthorized endpoint. The protected positive path and genuine
+Message receipt require the next exact-asset-approved VM1 run.
+
+## Unified RC follow-up — 2026-11-25
+
+[Draft PR #776](https://github.com/faariis7/ClassMesh/pull/776) holds the exact
+candidate SHA, validation and artifact links. The 2026-11-18 results below apply
+to the earlier baseline only.
+
+- The root lockfile moves to `url 2.5.9` for RUSTSEC-2026-0592. Its required
+  `form_urlencoded 1.2.3` is the only related resolution change. See
+  [current dependency audit notes](RUST_DEPENDENCY_AUDIT.md).
+- The #777 commit is integrated by ancestry. The dispatch boundary keeps a
+  committed slot after the caller leaves, rejects overlap across transports,
+  verifies the current exact Worker and its confirmed key, and accepts a
+  terminal result only on that binding. Matching clear/Stop uses ordered Worker
+  IPC. On IPC loss or missing terminal after 15 seconds, the Service revokes
+  the exact Worker binding, disconnects its pipe and requests termination
+  before releasing the dispatch slot. The watchdog retains the process handle
+  until exit is observed, so recovery cannot run a replacement concurrently.
+  The 1-second pre-commit cancellation window is separate.
+- Protected M2 requires independently approved enrollment and exact signed images.
+  The authorized interactive command workflow and Student render remain qualification gates.
+- The unsigned x64 package and lab artifacts have 30-day PR retention. A
+  candidate package may be validated and used for offline diagnostics. Protected
+  installation, native physical GPU and two-host multicast remain separate
+  acceptance gates. Historical main CodeQL alerts #1–#5 stay open pending main
+  integration/review. The remediations from #772 remain in this branch.
+
+## Unified release candidate — 2026-11-18
+
+Branch `integration/classmesh-unified-release-candidate`, Draft stacked on #771.
+Candidate SHA, current check URLs, native logs and artifact checksums are recorded
+in the Draft PR evidence section; source-PR results never qualify this candidate.
+
+### Integrated provenance
+
+- #771 `11233f8236d15fa36aefab1ebb559997d412eed5` is the M3 baseline,
+  including #772 `71efba19` and #775 `d33d6b72` by ancestry.
+- Merge #773 `9a4373a2cc75d44c8b24b693ec14fbdcb0c4e5b1`: only the missing
+  `a2368353`, `6ffe2d5a`, `9a4373a2` commits above shared base `49fdd990`.
+  Retains Service #761/#764 revocation and exact pending-install cancellation;
+  #763 `2426ca65` changes are consolidated in #773, not duplicated by history.
+- Cherry-pick #774 `a3a56ef0`, `0c972966`, `4bd9441d` with `-x` trailers;
+  no unrelated-history merge. `git range-diff` confirms source patches;
+  workflow conflicts preserve multicast checks plus Cargo-JSON test discovery.
+- Merge current main `19a472e5`, retaining #696 `34a3826d` unified Windows
+  packaging and engineering instructions, absent from the older M3 base.
+- RC-specific changes: one equivalent heartbeat let-chain for new MSRV Clippy;
+  committed root/fuzz lockfiles, locked CI and dependency inventory/provenance.
+  No new protocol, trust authority, allow path, feature activation or crypto downgrade.
+
+### Release checklist and evidence rules
+
+- [x] One reversible unified branch; source branches unchanged; no main merge.
+- [x] Software boundaries retained: deny-only bounded roster screening; exact
+  Worker/session revocation; bounded starts and cancellation; authenticated IPC;
+  authenticated SFrame before H.264, replay/rotation and bounded recovery queues.
+- [x] All source heads refreshed and hosted source CI/Security verified before import.
+- [ ] Exact final SHA: macOS fmt, Clippy, workspace/doc tests, correlation and audit.
+- [ ] Exact final SHA: VM1 native workspace, Service/Worker/Teacher/Identity,
+  ACL/v12, trusted-policy, protected loopback, Clippy, native guards/build/bundle.
+- [ ] Exact final SHA: Portable Rust, Windows Build including Rust 1.88 tests,
+  CodeQL analysis AND alert gate, Gitleaks, root/fuzz RustSec and fuzz smoke.
+- [ ] Download same-head Windows x64 package; validate fixed executables/index,
+  record ZIP/index/executable SHA-256 and source/CI metadata; inspect for secrets.
+- [ ] Independent security-owner and release-owner review, trust approval,
+  physical GPU/two-host qualification and authorized deployment decision.
+
+Unchecked boxes are release gates, not claims of failed implementation. The Draft
+PR carries live measured outcomes to avoid self-referential SHA edits and stale
+CI claims in source. VM1 is Windows 11 ARM64, not physical x64. Hosted x64 tests,
+VM tests, implemented code and production approval are separate statuses.
+
+### Measured candidate validation
+
+The unified candidate has passed macOS ARM64 Rust 1.100 stable and Rust 1.88
+workspace/doc tests (1,333 each), rustfmt, workspace Clippy with warnings denied,
+6 multicast correlation regressions, Cargo artifact selection fixtures, 28 package
+and 30 diagnostic regressions. Root/fuzz audits use cargo-audit 0.23.0 and database
+`233155b4025b854c68a4b199c0e32d7fd53291a2`: zero blocking vulnerabilities, no ignores;
+four visible root maintenance notices remain. Reviewed #774 external dependency
+versions are retained; only local workspace dependency edges are reconciled.
+
+VM1 Windows 11 ARM64 / Rust 1.99 native validation is split by required privileges:
+1,749 top-level workspace tests passed as the ordinary account; 49 tests needing
+machine CNG keys, protected test ACL/Registry/volume access or symlink fixtures
+passed in a narrowly filtered elevated rerun. This covers all 1,798 top-level
+workspace tests, with no ignored tests or unresolved failures. Child-process
+results are kept in logs rather than double-counted. Ordinary-user Clippy and
+trusted-policy Clippy, Service config parser, protected unicast/multicast loopback
+(replay, forged high ID, epoch rotation), and native application builds passed.
+The initial OS permission failures are retained as harness evidence, not presented
+as code regressions or hidden by skips. No Service was installed and no persistent
+trust/SCM setting was changed. VM1 is not physical x64 qualification.
+
+The final immutable SHA, same-SHA reruns, hosted outcomes, CodeQL scan ref/tree,
+artifact URLs and ZIP/index/executable checksums are the live evidence record in
+[Draft PR #776](https://github.com/faariis7/ClassMesh/pull/776). These prose counts
+alone never qualify a later commit: exact-head Actions and native evidence remain
+mandatory. Hosted x64 stable/MSRV builds and package validation are independent
+of VM1; no unsigned bundle is commercially trusted or approved for installation.
+
+### Security disposition and external owners
+
+Main CodeQL alerts #1–#5 remain OPEN, verified through GitHub on 2026-11-18.
+#1 nonce buffer was filled with OS randomness before use and failed on entropy
+error; #772 uses explicit `ring::rand::generate`. #2 was a test-only zero fallback,
+now replaced by live-proof replay denial. #3–#5 unchecked descriptor/ACE/SID typed
+reads are bounded/aligned by #772, with native negative regressions. They are
+remediated on this candidate, not dismissed on main. Final CodeQL must find no
+candidate alerts. Independent security review is still required; automated scans
+and this integration review do not grant that approval.
+
+| Gate | Accountable role | Required evidence |
+| --- | --- | --- |
+| M2 trust and real Completed | Security/trust owner + Service/Teacher owners | Approved CA/root, image signer, enrollment, roster issuer/verifier; LocalSystem to ordinary Teacher to Worker Completed; unauthorized/replay rejection and cleanup (#688) |
+| M3 GPU/presentation | Media/GPU owner + physical lab operator | Windows x64 D3D11 H.264, authenticated changing nonblank Student output, Stop/restart/recovery/device loss/minimize/restore |
+| Multicast target network | Network owner + two-host lab operator | Two physical x64 hosts/VLAN, selected sender/receiver NIC counters, attributed packets and Worker delivery |
+| Independent security/release approval | Security reviewer + release owner | Alert disposition, dependency maintenance notices, signing/installer/rollback approval |
+
+Roles are required owners, not an assertion that a named person has accepted.
+
+### Installation and rollback
+
+Use the existing [Windows package guide](WINDOWS_MVP_QUICKSTART.md) to download,
+verify ZIP SHA-256 from trusted CI, expand into a fresh local private directory,
+and Validate with independently recorded source/run/attempt/index pins. Package
+`0.0.1` is an unsigned RC: Windows 11 x64 is the qualification target, Rust 1.88+
+plus MSVC/Windows SDK is required for source builds, and the x64 VC++ runtime
+must satisfy each executable's generated bundle index. Preflight the actual
+machine; compilation does not prove runtime availability. Both lockfiles are the
+dependency inventory; toolchain/image versions must accompany any rebuild.
+
+Do not install Service or enroll trust from this task. An approved deployment
+requires protected paths/ACLs, approved Authenticode images, independently enrolled
+trust/roster authority, actual LocalSystem lifecycle and verified previous signed
+artifacts. Keep async H.264 confined to the qualification lab.
+
+For this noninstalled package, close only its own Teacher process, retain evidence,
+and remove only the newly created extraction/report directories. Roll back code
+by selecting the prior reviewed SHA on a new branch (no source-branch resets).
+For a future installed release, the Service/installer owner must stop the approved
+Service, retire Worker/session/key state, invoke the approved signed rollback
+transaction and recheck exact image pins, policy epoch, ordinary-account denial
+and authorized Completed. Never copy old policy files, lower an antirollback epoch,
+change trusted signers or assume an older EXE alone is an authorized rollback.
+
+Recommendation remains **NO-GO for production** until all independent/physical
+and exact-candidate validation gates are satisfied. Software RC review may proceed
+once the exact-head checks and artifacts are verified in the Draft PR.
+
 ## M3 final multicast integration candidate — 2026-11-18
 
 PR #771 combines the existing protected M3/decoder recovery, #769 bounded
@@ -24,6 +203,17 @@ nonblank Student HWND/D3D11 frames through Stop/restart/device loss and
 minimize/restore, independent security sign-off, and the protected M2 trust
 roots/signers plus authorized LocalSystem-to-Teacher-to-Worker flow (#688).
 VM1 ARM64 and synthetic ciphertext-consumer counts do not satisfy those gates.
+
+## RustSec / CI candidate — PR #774 (2026-11-18)
+
+PR #774 raises the workspace MSRV to Rust 1.88 to consume published fixes for
+the `quick-xml` and `time` advisories, retains the fixed `p256` crypto graph,
+and resolves the Phase 10 test executable through Cargo JSON. Local Rust 1.88
+workspace tests and the upgraded-graph audit pass; exact-head hosted results
+are recorded on the PR. Windows CI now tests the full workspace on 1.88 in
+addition to its existing stable checks. See [the dependency report](RUST_DEPENDENCY_AUDIT.md)
+for the measured backport comparison, compiler compatibility, and evidence limits.
+This tooling/toolchain candidate does not close any physical or production gate.
 
 **Phase 13 create-only signed manifest producer (2026-10-31):** Isolated branch `codex/phase13-release-signing` adds an operator-owned RSA-2048+ code-signing certificate producer for fixed Service/Worker metadata. VM1 RED missing signer and GREEN signed output/independent verification, duplicate and zero-sequence negatives pass. Production certificate, Authenticode signing, protected pin enrollment, installer and release rollback remain open.
 

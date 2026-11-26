@@ -13,6 +13,14 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Registry::*;
 
 const RECORD_LEN: usize = 48;
+pub(crate) const TEACHER_SCOPE: &str = "ClassMesh-Teacher-Policy-v1";
+const TEACHER_DATA: &str = "TeacherStartupPolicy";
+#[cfg(feature = "trusted-teacher-policy")]
+pub(crate) const TEACHER_DATA_MAX: usize = 256 * 1024;
+
+fn teacher_scope(scope: &str) -> bool {
+    scope == TEACHER_SCOPE || (cfg!(test) && scope.starts_with("ClassMesh-anchor-probe-teacher-"))
+}
 const ACCESS: u32 = KEY_QUERY_VALUE | KEY_SET_VALUE | 0x0002_0000 | KEY_WOW64_64KEY;
 
 struct Key(HKEY);
@@ -120,7 +128,7 @@ fn no_link(key: &Key) -> io::Result<()> {
     }
     Ok(())
 }
-fn attest(key: &Key, shared_parent: bool) -> io::Result<()> {
+fn attest(key: &Key, shared_parent: bool, teacher_reader: bool) -> io::Result<()> {
     no_link(key)?;
     // Safety: the owned key includes READ_CONTROL and remains retained.
     let descriptor =
@@ -156,6 +164,7 @@ fn attest(key: &Key, shared_parent: bool) -> io::Result<()> {
             // an explicit protected ACL, so none of these ACEs are inherited.
             "S-1-3-0" if shared_parent && entry.flags & 0x02 != 0 => {}
             _ if shared_parent && mask & !KEY_READ == 0 => {}
+            "S-1-5-32-545" if teacher_reader && mask & !KEY_READ == 0 => {}
             _ => return Err(denied()),
         }
         if !shared_parent && entry.flags != 0 {
@@ -168,7 +177,13 @@ fn attest(key: &Key, shared_parent: bool) -> io::Result<()> {
     Ok(())
 }
 fn machine_parent(scope: &str) -> io::Result<Key> {
-    if scope != "ClassMesh-Policy-v2" && !scope.starts_with("ClassMesh-anchor-probe-")
+    open_machine_parent(scope, KEY_CREATE_SUB_KEY)
+}
+
+fn open_machine_parent(scope: &str, extra_access: u32) -> io::Result<Key> {
+    if scope != "ClassMesh-Policy-v2"
+        && !teacher_scope(scope)
+        && !scope.starts_with("ClassMesh-anchor-probe-")
         || scope.len() > 100
         || !scope
             .bytes()
@@ -179,9 +194,9 @@ fn machine_parent(scope: &str) -> io::Result<Key> {
     let parent = open(
         HKEY_LOCAL_MACHINE,
         "SOFTWARE",
-        KEY_READ | KEY_CREATE_SUB_KEY | KEY_WOW64_64KEY,
+        KEY_READ | extra_access | KEY_WOW64_64KEY,
     )?;
-    attest(&parent, true)?;
+    attest(&parent, true, false)?;
     Ok(parent)
 }
 fn read_record(key: &Key) -> io::Result<[u8; RECORD_LEN]> {
@@ -209,26 +224,24 @@ fn read_record(key: &Key) -> io::Result<[u8; RECORD_LEN]> {
 }
 fn write_record(key: &Key, record: &[u8; RECORD_LEN]) -> io::Result<()> {
     epoch(record)?;
-    let name = wide("CommittedPolicy");
-    // Safety: live fixed-size record and retained transaction-bound key.
-    status(unsafe {
-        RegSetValueExW(
-            key.0,
-            name.as_ptr(),
-            0,
-            REG_BINARY,
-            record.as_ptr(),
-            RECORD_LEN as u32,
-        )
-    })
+    write_binary(key, "CommittedPolicy", record)
+}
+
+fn write_binary(key: &Key, name: &str, bytes: &[u8]) -> io::Result<()> {
+    let name = wide(name);
+    let len = u32::try_from(bytes.len()).map_err(|_| denied())?;
+    // Safety: live buffer and retained transaction-bound key.
+    status(unsafe { RegSetValueExW(key.0, name.as_ptr(), 0, REG_BINARY, bytes.as_ptr(), len) })
 }
 
 pub(crate) struct RegistryAnchor {
     key: Key,
+    teacher_reader: bool,
 }
 impl RegistryAnchor {
     /// A fresh installer must not seed startup inputs that would activate an
     /// earlier committed policy. Probe without flushing or adopting a key.
+    #[cfg(any(test, feature = "experimental-trusted-policy"))]
     pub(crate) fn require_absent(scope: &str) -> io::Result<()> {
         let parent = machine_parent(scope)?;
         match open(parent.0, scope, KEY_READ | KEY_WOW64_64KEY) {
@@ -236,12 +249,28 @@ impl RegistryAnchor {
             _ => Err(denied()),
         }
     }
+    #[cfg(any(test, feature = "experimental-trusted-policy"))]
     pub(crate) fn create(scope: &str, record: &[u8; RECORD_LEN]) -> io::Result<Self> {
+        Self::create_bound(scope, record, None)
+    }
+
+    fn create_bound(
+        scope: &str,
+        record: &[u8; RECORD_LEN],
+        teacher: Option<&[u8]>,
+    ) -> io::Result<Self> {
         epoch(record)?;
+        if teacher.is_some() != teacher_scope(scope) {
+            return Err(denied());
+        }
         let parent = machine_parent(scope)?;
         let tx = transaction()?;
         let mut descriptor = Descriptor(std::ptr::null_mut());
-        let sddl = wide("O:BAG:BAD:P(A;;KA;;;SY)(A;;KA;;;BA)");
+        let sddl = wide(if teacher.is_some() {
+            "O:BAG:BAD:P(A;;KA;;;SY)(A;;KA;;;BA)(A;;KR;;;BU)"
+        } else {
+            "O:BAG:BAD:P(A;;KA;;;SY)(A;;KA;;;BA)"
+        });
         // Safety: fixed SDDL, initialized allocation output; owned until create returns.
         if unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -285,12 +314,16 @@ impl RegistryAnchor {
         if disposition != REG_CREATED_NEW_KEY {
             return Err(denied());
         }
-        attest(&key, false)?;
+        attest(&key, false, teacher.is_some())?;
+        if let Some(data) = teacher {
+            write_binary(&key, TEACHER_DATA, data)?;
+        }
         write_record(&key, record)?;
         commit(&tx)?;
         drop(key);
         let anchor = Self {
             key: open(parent.0, scope, ACCESS)?,
+            teacher_reader: teacher_scope(scope),
         };
         anchor.flush_exact(record)?;
         Ok(anchor)
@@ -299,6 +332,7 @@ impl RegistryAnchor {
         let parent = machine_parent(scope)?;
         let anchor = Self {
             key: open(parent.0, scope, ACCESS)?,
+            teacher_reader: teacher_scope(scope),
         };
         let record = anchor.read()?;
         // A prior process may have died after KTM commit but before flushing.
@@ -307,11 +341,12 @@ impl RegistryAnchor {
         Ok(anchor)
     }
     pub(crate) fn read(&self) -> io::Result<[u8; RECORD_LEN]> {
-        attest(&self.key, false)?;
+        attest(&self.key, false, self.teacher_reader)?;
         read_record(&self.key)
     }
     /// Acquisition-time candidate only. The callback must only parse and must
     /// not publish; its value is released after commit/flush/exact readback.
+    #[cfg(any(test, feature = "experimental-trusted-policy"))]
     pub(crate) fn with_record<T>(
         &self,
         parse: impl FnOnce(&[u8; RECORD_LEN]) -> io::Result<T>,
@@ -385,6 +420,7 @@ impl RegistryAnchor {
             previous: *expected,
         })
     }
+    #[cfg(any(test, feature = "experimental-trusted-policy"))]
     pub(crate) fn advance(
         &self,
         expected: &[u8; RECORD_LEN],
@@ -393,6 +429,89 @@ impl RegistryAnchor {
         self.begin(expected)?.commit(next)
     }
 }
+/// A read-only, fixed HKLM Teacher namespace. No writes, flushes, environment
+/// paths, files or legacy fallback belong in ordinary-account startup.
+#[cfg(feature = "trusted-teacher-policy")]
+pub(crate) fn read_teacher(scope: &str) -> io::Result<([u8; RECORD_LEN], Vec<u8>)> {
+    if !teacher_scope(scope) {
+        return Err(denied());
+    }
+    let parent = open_machine_parent(scope, 0)?;
+    let key = open(parent.0, scope, KEY_READ | KEY_WOW64_64KEY)?;
+    attest(&key, false, true)?;
+    let before = read_record(&key)?;
+    let name = wide(TEACHER_DATA);
+    let mut bytes = vec![0; TEACHER_DATA_MAX + 1];
+    let mut size = bytes.len() as u32;
+    let mut kind = 0;
+    // Safety: live bounded buffer and retained non-predefined key.
+    status(unsafe {
+        RegQueryValueExW(
+            key.0,
+            name.as_ptr(),
+            std::ptr::null(),
+            &raw mut kind,
+            bytes.as_mut_ptr(),
+            &raw mut size,
+        )
+    })?;
+    if kind != REG_BINARY || size == 0 || size as usize > TEACHER_DATA_MAX {
+        return Err(denied());
+    }
+    bytes.truncate(size as usize);
+    if read_record(&key)? != before {
+        return Err(denied());
+    }
+    let expected =
+        classmesh_security::policy_epoch::encode_bound_policy_checkpoint(epoch(&before)?, &bytes)
+            .map_err(|_| denied())?;
+    if expected != before {
+        return Err(denied());
+    }
+    Ok((before, bytes))
+}
+
+/// Reopen the fixed namespace on each liveness or privileged-send check so a
+/// missing/replaced key is visible. The snapshot itself needs no repeated allocation.
+#[cfg(feature = "trusted-teacher-policy")]
+pub(crate) fn teacher_checkpoint(scope: &str) -> io::Result<[u8; RECORD_LEN]> {
+    if !teacher_scope(scope) {
+        return Err(denied());
+    }
+    let parent = open_machine_parent(scope, 0)?;
+    let key = open(parent.0, scope, KEY_READ | KEY_WOW64_64KEY)?;
+    attest(&key, false, true)?;
+    read_record(&key)
+}
+
+#[cfg(feature = "trusted-teacher-policy")]
+pub(crate) fn publish_teacher(
+    scope: &str,
+    epoch: u64,
+    bytes: &[u8],
+    create: bool,
+) -> io::Result<()> {
+    if !teacher_scope(scope) || bytes.is_empty() || bytes.len() > TEACHER_DATA_MAX {
+        return Err(denied());
+    }
+    let next = classmesh_security::policy_epoch::encode_bound_policy_checkpoint(epoch, bytes)
+        .map_err(|_| denied())?;
+    if create {
+        RegistryAnchor::create_bound(scope, &next, Some(bytes))?;
+    } else {
+        let anchor = RegistryAnchor::open(scope)?;
+        let current = anchor.read()?;
+        let update = anchor.begin(&current)?;
+        write_binary(&update.key, TEACHER_DATA, bytes)?;
+        update.commit(&next)?;
+    }
+    let (observed, _) = read_teacher(scope)?;
+    if observed != next {
+        return Err(denied());
+    }
+    Ok(())
+}
+
 struct PendingAdvance<'a> {
     anchor: &'a RegistryAnchor,
     key: Key,

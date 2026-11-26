@@ -78,10 +78,10 @@ fn recover_committed_policy_inner(
     if epoch == 0 {
         return Err(BoundPolicyError::InvalidEpoch);
     }
-    if let Some(trusted) = trusted_epoch {
-        if trusted == 0 || trusted != epoch {
-            return Err(BoundPolicyError::EpochMismatch);
-        }
+    if let Some(trusted) = trusted_epoch
+        && (trusted == 0 || trusted != epoch)
+    {
+        return Err(BoundPolicyError::EpochMismatch);
     }
     let file = open_qualified_blob(epoch).map_err(|_| BoundPolicyError::Unreadable)?;
     verify_bound_policy_checkpoint(record.as_slice(), file, maximum_policy_bytes)

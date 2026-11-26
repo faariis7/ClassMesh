@@ -126,6 +126,16 @@ pub fn prepare_teacher_interaction_ui_action(
     classroom: &TeacherClassroomViewModel,
     context: Option<&TeacherInteractionUiContext>,
 ) -> Result<TeacherInteractionUiAction, TeacherInteractionUiActionError> {
+    prepare_teacher_interaction_for_target(source_id, request, classroom, context, None)
+}
+
+pub(crate) fn prepare_teacher_interaction_for_target(
+    source_id: MonitoringSourceId,
+    request: TeacherInteractionUiRequest,
+    classroom: &TeacherClassroomViewModel,
+    context: Option<&TeacherInteractionUiContext>,
+    message_target: Option<(MonitoringSourceId, u64)>,
+) -> Result<TeacherInteractionUiAction, TeacherInteractionUiActionError> {
     let request = match request {
         TeacherInteractionUiRequest::Message(text) => TeacherInteractionRequest {
             action: Some(teacher_interaction_request::Action::Message(
@@ -156,7 +166,7 @@ pub fn prepare_teacher_interaction_ui_action(
         control_session_id: context.control_session_id,
         request,
     };
-    validate_teacher_interaction_ui_action(&action, classroom, Some(context))?;
+    validate_teacher_interaction_for_target(&action, classroom, Some(context), message_target)?;
     Ok(action)
 }
 
@@ -178,6 +188,17 @@ pub fn validate_teacher_interaction_ui_action(
     action: &TeacherInteractionUiAction,
     classroom: &TeacherClassroomViewModel,
     context: Option<&TeacherInteractionUiContext>,
+) -> Result<(), TeacherInteractionUiActionError> {
+    validate_teacher_interaction_for_target(action, classroom, context, None)
+}
+
+/// A verified live control-only peer may receive a Message without a GUI
+/// health snapshot. Service still authorizes the exact Worker before execution.
+pub(crate) fn validate_teacher_interaction_for_target(
+    action: &TeacherInteractionUiAction,
+    classroom: &TeacherClassroomViewModel,
+    context: Option<&TeacherInteractionUiContext>,
+    message_target: Option<(MonitoringSourceId, u64)>,
 ) -> Result<(), TeacherInteractionUiActionError> {
     let selected = classroom.selected();
     if selected != Some(action.source_id) {
@@ -203,7 +224,12 @@ pub fn validate_teacher_interaction_ui_action(
             actual: context.control_session_id,
         });
     }
-    if !selected_device_ready(classroom, action.source_id) {
+    let control_message = message_target == Some((action.source_id, action.control_session_id))
+        && matches!(
+            action.request.action,
+            Some(teacher_interaction_request::Action::Message(_))
+        );
+    if !control_message && !selected_device_ready(classroom, action.source_id) {
         return Err(TeacherInteractionUiActionError::DeviceNotReady);
     }
 
@@ -1239,5 +1265,79 @@ mod tests {
         assert_eq!(presence_label(row.health.presence), "Online");
         assert_eq!(media_label(row.health.media), "Recovering");
         assert_eq!(quality_label(row.quality_tier), "Medium");
+    }
+
+    #[test]
+    fn exact_live_message_target_does_not_require_unproven_worker_readiness() {
+        use crate::classroom_view::{ClassroomDeviceSnapshot, ClassroomViewConfig};
+        use classmesh_core::presence::DeviceHealth;
+
+        let source = MonitoringSourceId(7);
+        let mut classroom = TeacherClassroomViewModel::new(ClassroomViewConfig::default()).unwrap();
+        classroom
+            .upsert(ClassroomDeviceSnapshot {
+                source_id: source,
+                display_name: "Connected Student".into(),
+                health: DeviceHealth {
+                    presence: PresenceState::Online,
+                    media: MediaState::Idle,
+                    service_ready: false,
+                    worker_ready: false,
+                },
+                quality_tier: None,
+                thumbnail_available: false,
+                interactive_active: false,
+            })
+            .unwrap();
+        classroom.select(Some(source)).unwrap();
+        let context = TeacherInteractionUiContext {
+            source_id: source,
+            control_session_id: 91,
+            version: classmesh_protocol::PROTOCOL_VERSION,
+            capabilities: BTreeSet::from([Capability::TeacherMessage, Capability::OpenTarget]),
+        };
+        let message = || TeacherInteractionUiRequest::Message("ClassMesh test".into());
+        assert_eq!(
+            prepare_teacher_interaction_ui_action(source, message(), &classroom, Some(&context)),
+            Err(TeacherInteractionUiActionError::DeviceNotReady)
+        );
+        let action = prepare_teacher_interaction_for_target(
+            source,
+            message(),
+            &classroom,
+            Some(&context),
+            Some((source, 91)),
+        )
+        .unwrap();
+        assert_eq!(action.control_session_id, 91);
+        assert_eq!(
+            validate_teacher_interaction_for_target(
+                &action,
+                &classroom,
+                Some(&context),
+                Some((source, 92))
+            ),
+            Err(TeacherInteractionUiActionError::DeviceNotReady)
+        );
+        assert_eq!(
+            prepare_teacher_interaction_for_target(
+                source,
+                TeacherInteractionUiRequest::HttpsUrl("https://example.com".into()),
+                &classroom,
+                Some(&context),
+                Some((source, 91))
+            ),
+            Err(TeacherInteractionUiActionError::DeviceNotReady)
+        );
+        classroom.select(None).unwrap();
+        assert!(matches!(
+            validate_teacher_interaction_for_target(
+                &action,
+                &classroom,
+                Some(&context),
+                Some((source, 91))
+            ),
+            Err(TeacherInteractionUiActionError::SelectionChanged { .. })
+        ));
     }
 }

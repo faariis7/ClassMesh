@@ -73,7 +73,7 @@ fn decode_id(value: &str) -> Result<PrincipalId, AuditIntentEncodingError> {
         return Err(AuditIntentEncodingError::InvalidIntent);
     }
     let mut result = [0u8; 32];
-    for (i, pair) in bytes.chunks_exact(2).enumerate() {
+    for (i, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
         result[i] = (hex_digit(pair[0])? << 4) | hex_digit(pair[1])?;
     }
     Ok(PrincipalId(result))

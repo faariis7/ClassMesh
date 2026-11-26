@@ -4,15 +4,16 @@
 use std::io;
 use std::mem::size_of;
 use std::ptr::null_mut;
+use std::time::Duration;
+
+use classmesh_win32::NamedPipeClient;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
 use windows_sys::Win32::Security::{
-    CreateWellKnownSid, EqualSid, GetTokenInformation, SECURITY_MAX_SID_SIZE, TOKEN_QUERY,
-    TOKEN_USER, TokenUser, WinLocalSystemSid,
+    CreateWellKnownSid, EqualSid, GetTokenInformation, SECURITY_MAX_SID_SIZE, TOKEN_USER,
+    TokenUser, WinLocalSystemSid,
 };
-use windows_sys::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
-};
+use windows_sys::Win32::System::Threading::{GetProcessId, WaitForSingleObject};
 
 struct Handle(HANDLE);
 impl Drop for Handle {
@@ -24,34 +25,89 @@ impl Drop for Handle {
     }
 }
 
-pub(crate) fn require_local_system(pid: u32) -> io::Result<()> {
+pub(crate) struct VerifiedService {
+    process: Handle,
+    token: Handle,
+    pid: u32,
+}
+
+impl VerifiedService {
+    pub(crate) const fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub(crate) fn authenticate(pipe: &NamedPipeClient) -> io::Result<Self> {
+        let pid = observed_service_pid(pipe)?;
+        let [process, token] = pipe.read_service_identity(Duration::from_secs(5))?;
+        // Reject invalid and pseudo handles before assuming ownership. Only
+        // the SYSTEM-owned primary endpoint can send this fixed bootstrap.
+        if process == token
+            || [process, token]
+                .iter()
+                .any(|&raw| !(4..=isize::MAX as u64).contains(&raw))
+        {
+            return Err(denied("invalid Service proof handles"));
+        }
+        let service = Self {
+            process: Handle(process as usize as HANDLE),
+            token: Handle(token as usize as HANDLE),
+            pid,
+        };
+        service.recheck(pipe)?;
+        Ok(service)
+    }
+
+    pub(crate) fn recheck(&self, pipe: &NamedPipeClient) -> io::Result<()> {
+        if observed_service_pid(pipe)? != self.pid {
+            return Err(denied("Worker IPC server process changed during handshake"));
+        }
+        // SAFETY: the owned, query-only process handle is valid for this call.
+        if unsafe { GetProcessId(self.process.0) } != self.pid {
+            return Err(denied(
+                "Service proof does not match the kernel pipe server PID",
+            ));
+        }
+        require_live(&self.process)?;
+        require_local_system_token(&self.token)
+    }
+}
+
+fn observed_service_pid(pipe: &NamedPipeClient) -> io::Result<u32> {
+    verify_service_session(pipe.server_session_id().map_err(io::Error::other)?)?;
+    let pid = pipe.server_process_id().map_err(io::Error::other)?;
     if pid == 0 || pid == std::process::id() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "invalid pipe server PID",
+        return Err(denied("invalid pipe server PID"));
+    }
+    Ok(pid)
+}
+
+fn verify_service_session(session: u32) -> io::Result<()> {
+    if session != 0 {
+        return Err(denied(
+            "Worker IPC server is not running in Windows Session 0",
         ));
     }
-    // SAFETY: read-only query of the kernel process object.
-    let process = Handle(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) });
-    if process.0.is_null() {
-        return Err(io::Error::last_os_error());
-    }
+    Ok(())
+}
+
+fn denied(reason: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, reason)
+}
+
+fn require_live(process: &Handle) -> io::Result<()> {
     // A terminated process may return STILL_ACTIVE (259) as its actual exit
     // code. Query the process object's signaled state instead of interpreting
     // its exit code as proof of liveness; zero timeout never blocks Worker.
     // SAFETY: process is a valid owned process handle, queried without waiting.
     if unsafe { WaitForSingleObject(process.0, 0) } != WAIT_TIMEOUT {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+        return Err(denied(
             "pipe server process exited or liveness is unverified",
         ));
     }
-    let mut raw_token = null_mut();
-    // SAFETY: process handle is live and raw_token is writable.
-    if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut raw_token) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let token = Handle(raw_token);
+    Ok(())
+}
+
+fn require_local_system_token(token: &Handle) -> io::Result<()> {
     let mut required = 0u32;
     // SAFETY: size query intentionally passes no buffer.
     unsafe { GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut required) };
@@ -93,16 +149,47 @@ pub(crate) fn require_local_system(pid: u32) -> io::Result<()> {
     }
     // SAFETY: both SIDs originate from Windows APIs and their buffers are alive.
     if unsafe { EqualSid(user.User.Sid, system_sid.as_mut_ptr().cast()) } == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "pipe server is not LocalSystem",
-        ));
+        return Err(denied("pipe server is not LocalSystem"));
     }
     Ok(())
 }
 
 #[cfg(test)]
+fn require_local_system(pid: u32) -> io::Result<()> {
+    use windows_sys::Win32::Security::TOKEN_QUERY;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
+    if pid == 0 || pid == std::process::id() {
+        return Err(denied("invalid pipe server PID"));
+    }
+    let process = Handle(unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        )
+    });
+    if process.0.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    require_live(&process)?;
+    let mut token = null_mut();
+    if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    require_local_system_token(&Handle(token))
+}
+
+#[cfg(test)]
 mod tests {
+    #[test]
+    fn accepts_only_session_zero_for_the_pipe_server() {
+        assert!(super::verify_service_session(0).is_ok());
+        assert!(super::verify_service_session(1).is_err());
+        assert!(super::verify_service_session(u32::MAX).is_err());
+    }
+
     #[test]
     fn reject_foreign_interactive_user_process() {
         // A real OS process token, not a mocked SID: the child inherits the
@@ -115,12 +202,9 @@ mod tests {
         let result = super::require_local_system(child.id());
         let _ = child.kill();
         let _ = child.wait();
-        assert_eq!(
-            result
-                .expect_err("interactive child must not be trusted as Service")
-                .kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
+        let error = result.expect_err("interactive child must not be trusted as Service");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "pipe server is not LocalSystem");
     }
 
     #[test]

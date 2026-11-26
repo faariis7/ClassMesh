@@ -11,11 +11,11 @@ use std::ops::ControlFlow;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
-use classmesh_control::client_session::ClientControlSession;
 use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::teacher_playback_receive::{
     TeacherControlSequenceGuard, receive_guarded_authenticated_teacher_control_on_split,
 };
+use classmesh_control::{DEFAULT_HEARTBEAT_INTERVAL, client_session::ClientControlSession};
 use classmesh_protocol::{
     Capability, ControlRole,
     control_wire::{
@@ -25,7 +25,7 @@ use classmesh_protocol::{
 };
 
 use crate::connected_command::{
-    QueuedTeacherUiAction, TeacherCommandSendError, TeacherCommandSender,
+    QueuedTeacherUiAction, TeacherCommandSendError, TeacherCommandSender, TeacherControlRoute,
     next_queued_teacher_ui_action, verify_current_student,
 };
 use crate::receiver_playback_session::{
@@ -235,22 +235,100 @@ pub async fn drive_authenticated_teacher_duplex(
     authorization: &LiveAuthorizationStore,
     events: SyncSender<TeacherUiControlEvent>,
     actions: Receiver<TeacherUiAction>,
+    dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()>,
+    clocks: (impl Fn() -> u64, impl Fn() -> Instant),
+) -> Result<(), TeacherConnectedPlaybackError> {
+    run_teacher_session(
+        (TeacherControlRoute::from(&*owner), Some(owner)),
+        session,
+        authorization,
+        events,
+        actions,
+        dispatch,
+        clocks,
+    )
+    .await
+}
+
+/// Drive the same authenticated command runtime without an active presentation.
+/// A trusted provisioning caller supplies the expected route and enrolled session.
+pub async fn drive_authenticated_teacher_control(
+    route: TeacherControlRoute,
+    session: ClientControlSession,
+    authorization: &LiveAuthorizationStore,
+    events: SyncSender<TeacherUiControlEvent>,
+    actions: Receiver<TeacherUiAction>,
+    dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()>,
+    clocks: (impl Fn() -> u64, impl Fn() -> Instant),
+) -> Result<(), TeacherConnectedPlaybackError> {
+    run_teacher_session(
+        (route, None),
+        session,
+        authorization,
+        events,
+        actions,
+        dispatch,
+        clocks,
+    )
+    .await
+}
+
+async fn run_teacher_session(
+    (route, mut playback): (
+        TeacherControlRoute,
+        Option<&mut TeacherPlaybackSessionOwner>,
+    ),
+    session: ClientControlSession,
+    authorization: &LiveAuthorizationStore,
+    events: SyncSender<TeacherUiControlEvent>,
+    actions: Receiver<TeacherUiAction>,
+    dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()>,
+    clocks: (impl Fn() -> u64, impl Fn() -> Instant),
+) -> Result<(), TeacherConnectedPlaybackError> {
+    let connection = session.connection.clone();
+    let result = run_teacher_session_inner(
+        (route, playback.as_deref_mut()),
+        session,
+        authorization,
+        events,
+        actions,
+        dispatch,
+        clocks,
+    )
+    .await;
+    connection.close(0u32.into(), b"Teacher control session retired");
+    if let Some(owner) = playback {
+        owner.retire_exact(owner.source_id(), owner.binding());
+    }
+    result
+}
+
+async fn run_teacher_session_inner(
+    (route, mut playback): (
+        TeacherControlRoute,
+        Option<&mut TeacherPlaybackSessionOwner>,
+    ),
+    session: ClientControlSession,
+    authorization: &LiveAuthorizationStore,
+    events: SyncSender<TeacherUiControlEvent>,
+    actions: Receiver<TeacherUiAction>,
     mut dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()>,
     clocks: (impl Fn() -> u64, impl Fn() -> Instant),
 ) -> Result<(), TeacherConnectedPlaybackError> {
-    let binding = owner.binding();
-    if !owner.is_active() {
+    let control_session_id = route.control_session_id();
+    if !route.is_active() {
         return Err(TeacherConnectedPlaybackError::Receive(Box::new(
             TeacherPlaybackSessionError::Retired,
         )));
     }
-    if session.established.control_session_id != binding.control_session_id {
+    if session.established.control_session_id != control_session_id {
         return Err(TeacherConnectedPlaybackError::SessionMismatch);
     }
     let negotiated = &session.established.negotiated;
-    let can_playback = negotiated
-        .capabilities
-        .contains(&Capability::ReceiverPlaybackDiagnostics);
+    let can_playback = playback.is_some()
+        && negotiated
+            .capabilities
+            .contains(&Capability::ReceiverPlaybackDiagnostics);
     let can_command = teacher_interaction::teacher_message_available(
         negotiated.version,
         &negotiated.capabilities,
@@ -266,8 +344,8 @@ pub async fn drive_authenticated_teacher_duplex(
         return Err(TeacherConnectedPlaybackError::NotNegotiated);
     }
     let context = TeacherInteractionUiContext {
-        source_id: owner.source_id(),
-        control_session_id: binding.control_session_id,
+        source_id: route.source_id(),
+        control_session_id,
         version: negotiated.version,
         capabilities: negotiated.capabilities.clone(),
     };
@@ -277,25 +355,17 @@ pub async fn drive_authenticated_teacher_duplex(
     // roster *before* publishing any interactive GUI authority. Every later
     // command revalidates that authority in TeacherCommandSender.
     if can_command {
-        if let Err(error) =
-            verify_current_student(owner, &session.connection, authorization, (clocks.0)())
-        {
-            owner.retire_exact(owner.source_id(), binding);
-            session
-                .connection
-                .close(0u32.into(), b"Teacher control peer untrusted");
-            return Err(TeacherConnectedPlaybackError::Command(error));
-        }
-        if let Err(error) = send_window_event(
+        verify_current_student(
+            route.expected_student(),
+            &session.connection,
+            authorization,
+            (clocks.0)(),
+        )
+        .map_err(TeacherConnectedPlaybackError::Command)?;
+        send_window_event(
             &events,
             TeacherUiControlEvent::Authenticated(context.clone()),
-        ) {
-            owner.retire_exact(owner.source_id(), binding);
-            session
-                .connection
-                .close(0u32.into(), b"Teacher UI backpressure");
-            return Err(error);
-        }
+        )?;
     }
     let mut split = session.into_split();
     let mut reader_guard = TeacherControlSequenceGuard::default();
@@ -303,6 +373,12 @@ pub async fn drive_authenticated_teacher_duplex(
     let mut pending_results = PendingTeacherResults::default();
     let mut tick = tokio::time::interval(Duration::from_millis(15));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let started = (clocks.1)();
+    let mut heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + DEFAULT_HEARTBEAT_INTERVAL,
+        DEFAULT_HEARTBEAT_INTERVAL,
+    );
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut playback_bootstrapped = false;
 
     loop {
@@ -313,7 +389,7 @@ pub async fn drive_authenticated_teacher_duplex(
             &split.established,
             &mut split.receiver,
             authorization,
-            owner.expected_student(),
+            route.expected_student(),
             &clocks.0,
             &mut reader_guard,
         );
@@ -322,36 +398,40 @@ pub async fn drive_authenticated_teacher_duplex(
             tokio::select! {
                 biased;
                 frame = &mut incoming => break frame,
+                _ = heartbeat.tick() => {
+                    let elapsed = (clocks.1)().saturating_duration_since(started);
+                    let time_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+                    command_sender.send_heartbeat_on_split(
+                        route, (&split.connection, &split.established), &mut split.sender,
+                        authorization, time_us, &clocks.0,
+                    ).await.map_err(TeacherConnectedPlaybackError::Command)?;
+                }
                 _ = tick.tick() => {
                     match next_queued_teacher_ui_action(&actions) {
                         QueuedTeacherUiAction::Empty => {}
                         QueuedTeacherUiAction::Closed => {
-                            owner.retire_exact(owner.source_id(), binding);
-                            split.connection.close(0u32.into(), b"Teacher UI action channel closed");
+
                             return Err(TeacherConnectedPlaybackError::ActionChannelClosed);
                         }
                         QueuedTeacherUiAction::Local(local) => {
                             if dispatch(TeacherDuplexDispatch::LocalAction(local)).is_break() {
-                                owner.retire_exact(owner.source_id(), binding);
-                                split.connection.close(0u32.into(), b"Teacher runtime dispatcher completed");
+
                                 return Ok(());
                             }
                         }
                         QueuedTeacherUiAction::Interaction(action) => {
                             if !can_command {
-                                owner.retire_exact(owner.source_id(), binding);
-                                split.connection.close(0u32.into(), b"Teacher unverified UI command");
+
                                 return Err(TeacherConnectedPlaybackError::NotBootstrapped);
                             }
                             // Refuse before writing: every transmitted request must
                             // retain a correlation slot for its real Worker ACK.
                             if !pending_results.can_send() {
-                                owner.retire_exact(owner.source_id(), binding);
-                                split.connection.close(0u32.into(), b"Teacher pending results exhausted");
+
                                 return Err(TeacherConnectedPlaybackError::NotBootstrapped);
                             }
-                            match command_sender.send_on_split(
-                                owner,
+                            match command_sender.send_control_on_split(
+                                route,
                                 (&split.connection, &split.established),
                                 &mut split.sender,
                                 authorization,
@@ -362,25 +442,22 @@ pub async fn drive_authenticated_teacher_duplex(
                                     let kind = teacher_interaction::validate_request(&action.request)
                                         .map_err(|_| TeacherConnectedPlaybackError::NotBootstrapped)?;
                                     if !pending_results.record(request_id, kind) {
-                                        owner.retire_exact(owner.source_id(), binding);
-                                        split.connection.close(0u32.into(), b"Teacher pending results exhausted");
+
                                         return Err(TeacherConnectedPlaybackError::NotBootstrapped);
                                     }
                                     send_window_event(&events, TeacherUiControlEvent::CommandWritten {
-                                        control_session_id: binding.control_session_id,
+                                        control_session_id,
                                         request_id,
                                     })?;
                                     // This is only successful transmission. Service
                                     // authorization and ACK must arrive separately.
                                     if dispatch(TeacherDuplexDispatch::CommandWritten(request_id)).is_break() {
-                                        owner.retire_exact(owner.source_id(), binding);
-                                        split.connection.close(0u32.into(), b"Teacher runtime dispatcher completed");
+
                                         return Ok(());
                                     }
                                 }
                                 Err(error) => {
-                                    owner.retire_exact(owner.source_id(), binding);
-                                    split.connection.close(0u32.into(), b"Teacher command send rejected");
+
                                     return Err(TeacherConnectedPlaybackError::Command(error));
                                 }
                             }
@@ -394,35 +471,31 @@ pub async fn drive_authenticated_teacher_duplex(
         let verified = match received {
             Ok(verified) => verified,
             Err(error) => {
-                owner.retire_exact(owner.source_id(), binding);
-                split
-                    .connection
-                    .close(0u32.into(), b"Teacher authenticated receive failed");
                 return Err(TeacherConnectedPlaybackError::Receive(Box::new(
                     TeacherPlaybackSessionError::Receive(error),
                 )));
             }
         };
-        let event = owner
-            .accept_guarded_verified(verified, (clocks.1)())
-            .map_err(|error| TeacherConnectedPlaybackError::Receive(Box::new(error)))?;
+        let event = match playback.as_deref_mut() {
+            Some(owner) => owner
+                .accept_guarded_verified(verified, (clocks.1)())
+                .map_err(|error| TeacherConnectedPlaybackError::Receive(Box::new(error)))?,
+            None if verified.receiver_playback().is_some() => continue,
+            None => TeacherPlaybackSessionEvent::OtherControl(verified.into_envelope()),
+        };
         match event {
             TeacherPlaybackSessionEvent::OtherControl(envelope) => {
-                if let Some(state) = pending_results.verify(&envelope, binding.control_session_id) {
+                if let Some(state) = pending_results.verify(&envelope, control_session_id) {
                     send_window_event(
                         &events,
                         TeacherUiControlEvent::CommandResult {
-                            control_session_id: binding.control_session_id,
+                            control_session_id,
                             request_id: envelope.request_id,
                             state,
                         },
                     )?;
                 }
                 if dispatch(TeacherDuplexDispatch::OtherControl(envelope)).is_break() {
-                    owner.retire_exact(owner.source_id(), binding);
-                    split
-                        .connection
-                        .close(0u32.into(), b"Teacher runtime dispatcher completed");
                     return Ok(());
                 }
             }
@@ -431,9 +504,13 @@ pub async fn drive_authenticated_teacher_duplex(
                 received_at,
                 ..
             } => {
+                let binding = playback
+                    .as_deref()
+                    .expect("playback event requires its owner")
+                    .binding();
                 let ui_event = if playback_bootstrapped {
                     TeacherUiControlEvent::VerifiedPlayback {
-                        source_id: owner.source_id(),
+                        source_id: route.source_id(),
                         verified,
                         received_at,
                     }
@@ -441,18 +518,12 @@ pub async fn drive_authenticated_teacher_duplex(
                     TeacherUiControlEvent::VerifiedBootstrap {
                         context: context.clone(),
                         binding,
-                        source_id: owner.source_id(),
+                        source_id: route.source_id(),
                         verified,
                         received_at,
                     }
                 };
-                if let Err(error) = send_window_event(&events, ui_event) {
-                    owner.retire_exact(owner.source_id(), binding);
-                    split
-                        .connection
-                        .close(0u32.into(), b"Teacher UI backpressure");
-                    return Err(error);
-                }
+                send_window_event(&events, ui_event)?;
                 playback_bootstrapped = true;
             }
         }

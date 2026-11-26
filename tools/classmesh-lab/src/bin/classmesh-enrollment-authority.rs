@@ -15,14 +15,14 @@ mod windows_app {
     use classmesh_control::issuance::{
         CertificateIssuancePolicy, CertificateValidity, EnrollmentApproval,
     };
-    use classmesh_control::x509_issuance::issue_certificate;
+    use classmesh_control::x509_issuance::{EnrollmentCertificateRequest, issue_certificate};
     use classmesh_identity_win::{CngMachineKey, CngRcgenSigningKey};
     use classmesh_lab::enrollment_cli_role::EnrollmentCliRole;
     use classmesh_protocol::control_wire::{EnrollmentRequest, EnrollmentResult, PrincipalRole};
     use classmesh_security::PrincipalId;
     use prost::Message;
     use rcgen::Issuer;
-    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::{CertificateDer, ServerName};
     use sha2::{Digest, Sha256};
 
     type AppResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -40,17 +40,22 @@ mod windows_app {
         ca_key_name: String,
         output: PathBuf,
         lifetime_hours: u64,
+        student_server_name: Option<ServerName<'static>>,
     }
 
     impl Config {
         fn parse() -> Result<Self, String> {
-            let mut args = std::env::args().skip(1);
+            Self::parse_args(std::env::args().skip(1))
+        }
+
+        fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Self, String> {
             let mut role = EnrollmentCliRole::Teacher;
             let mut request = None;
             let mut ca_cert = None;
             let mut ca_key_name = None;
             let mut output = None;
             let mut lifetime_hours = DEFAULT_LIFETIME_HOURS;
+            let mut student_server_name = None;
 
             while let Some(arg) = args.next() {
                 let mut value = || {
@@ -63,6 +68,16 @@ mod windows_app {
                     "--ca-cert" => ca_cert = Some(PathBuf::from(value()?)),
                     "--ca-key-name" => ca_key_name = Some(value()?),
                     "--output" => output = Some(PathBuf::from(value()?)),
+                    "--student-server-name" => {
+                        if student_server_name.is_some() {
+                            return Err("--student-server-name must appear once".to_owned());
+                        }
+                        student_server_name =
+                            Some(ServerName::try_from(value()?).map_err(|_| {
+                                "--student-server-name must be a valid DNS name or IP address"
+                                    .to_owned()
+                            })?);
+                    }
                     "--lifetime-hours" => {
                         lifetime_hours = value()?
                             .parse()
@@ -76,6 +91,9 @@ mod windows_app {
             if lifetime_hours == 0 || lifetime_hours > MAX_LIFETIME_HOURS {
                 return Err(format!("--lifetime-hours must be 1..={MAX_LIFETIME_HOURS}"));
             }
+            if student_server_name.is_some() && !matches!(role, EnrollmentCliRole::StudentDevice) {
+                return Err("--student-server-name requires --role student-device".to_owned());
+            }
 
             Ok(Self {
                 role,
@@ -88,6 +106,7 @@ mod windows_app {
                 output: output
                     .ok_or_else(|| format!("--output is required\n\n{}", Self::usage()))?,
                 lifetime_hours,
+                student_server_name,
             })
         }
 
@@ -99,7 +118,7 @@ Required:\n\
   --ca-key-name <machine CNG key name>\n\
   --output <approved-result.pb>\n\n\
 Optional:\n\
-  --lifetime-hours <1..168>   default: 24\n\n\
+  --lifetime-hours <1..168>   default: 24\n  --student-server-name <DNS-or-IP>   operator-approved endpoint for Student Live Mode\n\n\
 The CA private key must already exist as a non-exportable machine-scoped CNG key.\n\
 The selected role must explicitly match the request. Default role: Teacher."
         }
@@ -208,9 +227,12 @@ The selected role must explicitly match the request. Default role: Teacher."
                 allowed_clock_skew_ms: 60_000,
             },
             now_unix_ms,
-            principal_id,
-            &request.pkcs10_csr_der,
-            approval,
+            EnrollmentCertificateRequest {
+                principal_id,
+                csr_der: &request.pkcs10_csr_der,
+                approval,
+                approved_server_name: config.student_server_name.clone(),
+            },
             CertificateValidity {
                 not_before_unix_ms: now_unix_ms,
                 not_after_unix_ms,
@@ -243,6 +265,9 @@ The selected role must explicitly match the request. Default role: Teacher."
 
         println!("enrollment_result=approved");
         println!("enrollment_role={}", config.role.common_name_label());
+        if let Some(server_name) = config.student_server_name {
+            println!("student_server_name={}", server_name.to_str());
+        }
         println!("principal_id={}", hex(&principal_id.0));
         println!(
             "credential_fingerprint_sha256={}",
@@ -252,6 +277,70 @@ The selected role must explicitly match the request. Default role: Teacher."
         println!("result={}", config.output.display());
         println!("authority_private_key_exported=false");
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::Config;
+
+        fn parse(extra: &[&str]) -> Result<Config, String> {
+            Config::parse_args(
+                [
+                    "--request",
+                    "request.pb",
+                    "--ca-cert",
+                    "ca.der",
+                    "--ca-key-name",
+                    "Lab CA",
+                    "--output",
+                    "issued.pb",
+                ]
+                .into_iter()
+                .chain(extra.iter().copied())
+                .map(str::to_owned),
+            )
+        }
+
+        #[test]
+        fn student_server_name_requires_explicit_student_role_and_valid_endpoint() {
+            for endpoint in ["student.classmesh", "127.0.0.1", "::1"] {
+                let config = parse(&[
+                    "--role",
+                    "student-device",
+                    "--student-server-name",
+                    endpoint,
+                ])
+                .expect("approved Student endpoint");
+                assert_eq!(config.student_server_name.unwrap().to_str(), endpoint);
+                assert!(parse(&["--student-server-name", endpoint]).is_err());
+            }
+            for bad in [
+                "*.classmesh",
+                "student.classmesh:4433",
+                "https://student.classmesh",
+            ] {
+                assert!(
+                    parse(&["--role", "student-device", "--student-server-name", bad]).is_err()
+                );
+            }
+            assert!(
+                parse(&[
+                    "--role",
+                    "student-device",
+                    "--student-server-name",
+                    "student.classmesh",
+                    "--student-server-name",
+                    "other.classmesh",
+                ])
+                .is_err()
+            );
+            assert!(
+                parse(&[])
+                    .expect("Teacher CLI")
+                    .student_server_name
+                    .is_none()
+            );
+        }
     }
 }
 

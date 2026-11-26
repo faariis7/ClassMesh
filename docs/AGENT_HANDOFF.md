@@ -1,3 +1,35 @@
+## Trusted Teacher startup handoff
+
+Resume from the unified Draft PR #776. The Windows executable and read-only
+probe use the exact same authenticated producer. The independent signer and
+candidate policy tools ship in the Phase 6F lab artifact. Do not register
+Service, publish protected Windows state or approve a production signer outside
+an explicit owner-approved scope. See the
+[Teacher lab procedure](../tools/classmesh-lab/WINDOWS_TEACHER_LIVE.md).
+
+VM1 cleanup was verified on 2026-11-26. The exact signed `353c38a8` images
+reached protected LocalSystem Service and enrolled Teacher QUIC. The next
+runtime regression is a positive Service-token check by the ordinary Worker
+in Session 1. The native probe returned Win32 error 5 opening the exact
+Service process. Keep Session 0, pipe PID, liveness and LocalSystem checks
+when correcting that path. See the
+[VM1 run record](WINDOWS_RUNTIME_PLAN.md#protected-vm1-run--2026-11-26).
+
+## Unified RC follow-up — 2026-11-25
+
+Resume from [#776](https://github.com/faariis7/ClassMesh/pull/776) and refresh
+its live SHA and checks. #777 is the Service/SCM source. Continue integration
+work on #776 and keep the source branches intact. The committed start timeout,
+Worker fence and exact key lease are in the Service dispatch loop. Targeted native
+regressions use `cargo test --locked -p classmesh-service presentation`.
+
+The x64 qualification package is unsigned; record source SHA, attempt and hashes
+before using it. Use the [Windows runtime](WINDOWS_RUNTIME_PLAN.md),
+[M3 hardware](M3_ASYNC_H264_HARDWARE_QUALIFICATION.md) and
+[dependency audit](RUST_DEPENDENCY_AUDIT.md) guides. Leave #688 open until the
+authorized physical/runtime evidence is recorded. Independent trust and release
+sign-off remain with the corresponding owners.
+
 # ClassMesh Agent Handoff
 
 ## ASTRA WORK HANDOFF — 2026-10-31 create-only release signing

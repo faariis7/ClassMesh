@@ -1,3 +1,13 @@
+## Unified RC gate — 2026-11-18
+
+Use one exact candidate SHA and `cargo build --locked` on both physical Windows
+x64 hosts. The network owner executes the existing two-host commands below for
+256-byte and 8192-byte frames on target and comparison adapters, retaining NIC
+counter/packet attribution and Worker-consumer totals. Synthetic ciphertext delivery
+does not establish SFrame open, decode or presentation: pair it with the approved
+authenticated Student production run. VM loopback is diagnostic only. Do not
+change persistent firewall/SCM/trust policy to obtain a passing result.
+
 # Protected multicast delivery on Windows
 
 Run the existing synthetic multicast lab as Teacher and Student on two Windows
@@ -11,7 +21,11 @@ for join/leave checks.
 
 ## Prepare both hosts
 
-Build the same revision on both hosts from developer PowerShell. Use an isolated
+Download `classmesh-phase7-multicast-probe-windows-x64` from the matching
+Windows Build run. On both hosts, check `source-revision.txt` against the
+candidate SHA and compare `multicast_delivery.exe` to the SHA-256 included
+with the artifact. Use the bundled executable, runner and analyzer, or build
+from the exact revision as shown below. Use an isolated
 lab route and the existing lab firewall allowance for inbound UDP on Student.
 Install [TShark](https://www.wireshark.org/download.html) for offline decoding of
 Pktmon captures. Run NIC capture in an elevated English-language Windows
@@ -19,11 +33,12 @@ PowerShell on each host. The runner checks that Pktmon is idle with no filters
 before it starts.
 
 ```powershell
-cargo build -p classmesh-lab --example multicast_delivery
+cargo build --locked -p classmesh-lab --example multicast_delivery
 rustc -vV
 git rev-parse HEAD
 $lab = (Resolve-Path '.\target\debug\examples\multicast_delivery.exe').Path
 $runner = '.\tools\classmesh-lab\scripts\multicast_delivery.ps1'
+# For the extracted CI bundle, set $lab and $runner to its two matching files.
 Get-FileHash $lab
 Get-NetIPAddress -AddressFamily IPv4 | Format-Table InterfaceAlias, InterfaceIndex, IPAddress
 Get-NetAdapter | Format-Table Name, ifIndex, InterfaceDescription, MacAddress, LinkSpeed
@@ -93,6 +108,7 @@ for an application-only or one-sided report.
 $tx = '.\teacher-84731'
 $rx = '.\student-84731'
 $analysis = '.\tools\classmesh-lab\scripts\multicast_delivery.py'
+# For the extracted CI bundle, use its adjacent multicast_delivery.py.
 $txCount = Get-Content -LiteralPath "$tx\outbound.count"
 $rxCount = Get-Content -LiteralPath "$rx\inbound.count"
 $report = python $analysis "$tx\sender.tsv" "$rx\receiver.tsv" --outbound "$tx\outbound.tsv" --outbound-count $txCount --inbound "$rx\inbound.tsv" --inbound-count $rxCount --scope two-host-lab --redact-network

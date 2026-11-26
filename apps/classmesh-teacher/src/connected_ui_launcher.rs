@@ -16,11 +16,13 @@ use classmesh_control::client_session::ClientControlSession;
 use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_protocol::{Capability, ControlRole, teacher_interaction};
 
+use crate::connected_command::{TeacherControlRoute, verify_current_student};
 use crate::connected_runtime::{
-    TeacherConnectedPlaybackError, TeacherDuplexDispatch, drive_authenticated_teacher_duplex,
+    TeacherConnectedPlaybackError, TeacherDuplexDispatch, drive_authenticated_teacher_control,
+    drive_authenticated_teacher_duplex,
 };
 use crate::receiver_playback_session::TeacherPlaybackSessionOwner;
-use crate::ui_egui::{self, TeacherUiControlBridge};
+use crate::ui_egui::{self, InstalledMessageTarget, TeacherUiControlBridge};
 
 /// This represents the one owned QUIC runtime thread, not a second receive
 /// thread. Only the post-Hello stream's single receiver consumes control frames.
@@ -158,36 +160,126 @@ pub fn start_enrolled_teacher_ui_runtime(
     authorization: LiveAuthorizationStore,
     dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()> + Send + 'static,
 ) -> std::io::Result<(TeacherUiControlBridge, EnrolledTeacherRuntimeThread)> {
-    // Reject invalid authority synchronously: callers must never receive a live
-    // GUI bridge/thread handle for a session that cannot be used.
-    preflight_enrolled_session(&owner, &session).map_err(|error| {
-        std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!("Teacher enrolled startup rejected: {error:?}"),
-        )
-    })?;
+    preflight_enrolled_session(&owner, &session).map_err(startup_permission_denied)?;
+    start_native_runtime(
+        NativeTeacherRoute::Playback(Box::new(owner)),
+        session,
+        authorization,
+        dispatch,
+    )
+}
+
+/// Start the native control bridge with approved route inputs before playback exists.
+pub fn start_enrolled_teacher_control_ui_runtime(
+    route: TeacherControlRoute,
+    session: ClientControlSession,
+    authorization: LiveAuthorizationStore,
+    dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()> + Send + 'static,
+) -> std::io::Result<(TeacherUiControlBridge, EnrolledTeacherRuntimeThread)> {
+    preflight_control_route(route, &session, &authorization).map_err(startup_permission_denied)?;
+    start_native_runtime(
+        NativeTeacherRoute::Control(route),
+        session,
+        authorization,
+        dispatch,
+    )
+}
+
+fn preflight_control_route(
+    route: TeacherControlRoute,
+    session: &ClientControlSession,
+    authorization: &LiveAuthorizationStore,
+) -> Result<(), TeacherConnectedPlaybackError> {
+    let negotiated = &session.established.negotiated;
+    validate_enrolled_startup(
+        route.is_active(),
+        route.control_session_id(),
+        session.established.control_session_id,
+        u32::from(negotiated.version.major),
+        u32::from(negotiated.version.minor),
+        teacher_interaction::teacher_message_available(
+            negotiated.version,
+            &negotiated.capabilities,
+        ) || teacher_interaction::open_target_available(
+            negotiated.version,
+            &negotiated.capabilities,
+        ),
+        negotiated.role == ControlRole::Teacher,
+    )?;
+    verify_current_student(
+        route.expected_student(),
+        &session.connection,
+        authorization,
+        unix_now_ms(),
+    )
+    .map_err(TeacherConnectedPlaybackError::Command)
+}
+
+fn startup_permission_denied(error: TeacherConnectedPlaybackError) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!("Teacher enrolled startup rejected: {error:?}"),
+    )
+}
+
+enum NativeTeacherRoute {
+    Control(TeacherControlRoute),
+    Playback(Box<TeacherPlaybackSessionOwner>),
+}
+
+fn start_native_runtime(
+    route: NativeTeacherRoute,
+    session: ClientControlSession,
+    authorization: LiveAuthorizationStore,
+    dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()> + Send + 'static,
+) -> std::io::Result<(TeacherUiControlBridge, EnrolledTeacherRuntimeThread)> {
+    start_runtime_thread(move |event_tx, action_rx| {
+        // The synchronous caller already rejected invalid authority; no
+        // Tokio runtime or transport exists before that check.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(TeacherConnectedPlaybackError::RuntimeInitialization)?;
+        match route {
+            NativeTeacherRoute::Playback(mut owner) => {
+                runtime.block_on(drive_authenticated_teacher_duplex(
+                    &mut owner,
+                    session,
+                    &authorization,
+                    event_tx,
+                    action_rx,
+                    dispatch,
+                    (unix_now_ms, Instant::now),
+                ))
+            }
+            NativeTeacherRoute::Control(route) => {
+                runtime.block_on(drive_authenticated_teacher_control(
+                    route,
+                    session,
+                    &authorization,
+                    event_tx,
+                    action_rx,
+                    dispatch,
+                    (unix_now_ms, Instant::now),
+                ))
+            }
+        }
+    })
+}
+
+fn start_runtime_thread(
+    run: impl FnOnce(
+        std::sync::mpsc::SyncSender<crate::ui_egui::TeacherUiControlEvent>,
+        std::sync::mpsc::Receiver<crate::ui_shell::TeacherUiAction>,
+    ) -> Result<(), TeacherConnectedPlaybackError>
+    + Send
+    + 'static,
+) -> std::io::Result<(TeacherUiControlBridge, EnrolledTeacherRuntimeThread)> {
     let (event_tx, event_rx) = sync_channel(UI_EVENT_CAPACITY);
     let (action_tx, action_rx) = sync_channel(UI_ACTION_CAPACITY);
     let runtime_thread = thread::Builder::new()
         .name("classmesh-teacher-enrolled-quic".to_owned())
-        .spawn(move || {
-            // The synchronous caller already rejected invalid authority; no
-            // Tokio runtime or transport exists before that check.
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(TeacherConnectedPlaybackError::RuntimeInitialization)?;
-            let mut owner = owner;
-            runtime.block_on(drive_authenticated_teacher_duplex(
-                &mut owner,
-                session,
-                &authorization,
-                event_tx,
-                action_rx,
-                dispatch,
-                (unix_now_ms, Instant::now),
-            ))
-        })?;
+        .spawn(move || run(event_tx, action_rx))?;
     Ok((
         TeacherUiControlBridge::new(event_rx, action_tx),
         runtime_thread,
@@ -267,7 +359,96 @@ pub fn run_teacher_ui_with_enrolled_session(
     let (bridge, runtime_thread) =
         start_enrolled_teacher_ui_runtime(owner, session, authorization, dispatch)
             .map_err(EnrolledTeacherUiLaunchError::ThreadSpawn)?;
-    let window = ui_egui::run_teacher_ui_with_control_bridge(bridge);
+    run_native_window(bridge, runtime_thread, None)
+}
+
+/// Launch the actual Windows Teacher window for an independently authorized M2 route.
+pub fn run_teacher_ui_with_enrolled_control(
+    route: TeacherControlRoute,
+    session: ClientControlSession,
+    authorization: LiveAuthorizationStore,
+    dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()> + Send + 'static,
+) -> Result<(), EnrolledTeacherUiLaunchError> {
+    preflight_control_route(route, &session, &authorization)
+        .map_err(EnrolledTeacherUiLaunchError::UntrustedStartup)?;
+    let (bridge, runtime_thread) = start_native_runtime(
+        NativeTeacherRoute::Control(route),
+        session,
+        authorization,
+        dispatch,
+    )
+    .map_err(EnrolledTeacherUiLaunchError::ThreadSpawn)?;
+    run_native_window(bridge, runtime_thread, None)
+}
+
+/// Installed Live Mode and the read-only startup probe share the same
+/// protected producer and preflight. Both preserve the same QUIC runtime.
+pub fn run_installed_teacher(check_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::trusted_startup::{PreparedTeacher, prepare_installed_teacher};
+
+    let PreparedTeacher {
+        runtime,
+        endpoint,
+        session,
+        route,
+        authorization,
+        display_name,
+        clock,
+    } = prepare_installed_teacher().map_err(|error| -> Box<dyn std::error::Error> { error })?;
+    preflight_control_route(route, &session, &authorization)
+        .map_err(EnrolledTeacherUiLaunchError::UntrustedStartup)?;
+    if clock() == u64::MAX {
+        return Err(
+            "protected Teacher policy changed or expired before the native launcher".into(),
+        );
+    }
+    if check_only {
+        let negotiated = &session.established.negotiated;
+        let teacher_message = teacher_interaction::teacher_message_available(
+            negotiated.version,
+            &negotiated.capabilities,
+        );
+        session
+            .connection
+            .close(0u32.into(), b"Teacher startup probe complete");
+        runtime.block_on(async {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(3), endpoint.wait_idle()).await;
+        });
+        println!("Teacher protected roster, CNG identity and enrolled QUIC session verified");
+        println!("TeacherMessage negotiated: {teacher_message}");
+        return Ok(());
+    }
+
+    let target = InstalledMessageTarget {
+        source: route.source_id(),
+        session: route.control_session_id(),
+        display_name,
+    };
+    let (bridge, thread) = start_runtime_thread(move |events, actions| {
+        let result = runtime.block_on(drive_authenticated_teacher_control(
+            route,
+            session,
+            &authorization,
+            events,
+            actions,
+            |_| ControlFlow::Continue(()),
+            (clock, Instant::now),
+        ));
+        drop(endpoint);
+        result
+    })
+    .map_err(EnrolledTeacherUiLaunchError::ThreadSpawn)?;
+    run_native_window(bridge, thread, Some(target))?;
+    Ok(())
+}
+
+fn run_native_window(
+    bridge: TeacherUiControlBridge,
+    runtime_thread: EnrolledTeacherRuntimeThread,
+    target: Option<InstalledMessageTarget>,
+) -> Result<(), EnrolledTeacherUiLaunchError> {
+    let window = ui_egui::run_teacher_window(bridge, target);
     // run_native returned: its app/bridge (and thus its final action sender)
     // was dropped. Join before reporting native launch success.
     let control = runtime_thread
