@@ -63,6 +63,45 @@ was verified before provisioning and after cleanup.
   keys, enrollment CA key, exact signing certificates, owned VHD and staging
   paths were absent. The recovery snapshot remains available.
 
+### Worker authentication acceptance on the next signed candidate
+
+The Service owns the sole primary named-pipe server instance as `LocalSystem`.
+Its DACL grants the selected user client I/O and descriptor read; only SYSTEM
+can create instances or control the descriptor. The Service checks the
+connected client's PID and session against the retained live Worker process
+handle before sending a fixed pre-Hello proof. It delegates a Service process
+handle with limited query and synchronize access and a primary token handle
+with `TOKEN_QUERY`, only into that Worker. The Worker reads the connected
+pipe's owner and DACL, checks the kernel server PID and Session 0 against the
+delegated process, checks that process is still alive, and reads `TokenUser`
+from the delegated token. It repeats the PID, session, liveness and SID checks
+after `ServiceReady`. The two handles close before the Worker starts dispatch.
+Neither the Service process nor its token security descriptor is changed. A
+mismatched old Worker or Service fails the local bootstrap, so deploy a
+matching pair. The QUIC wire protocol is unchanged.
+
+Under the approved guarded SCM window, record the exact signed Service,
+Worker and Teacher hashes and the Service Session 0 PID. Trigger an
+interactive Worker launch and use the ordinary Teacher session to run:
+
+```powershell
+$result = @(& $ApprovedTeacherUi --check-live 2>&1)
+if ($LASTEXITCODE -ne 0 -or $result -cnotcontains 'TeacherMessage negotiated: true') {
+    throw ('Native enrolled Worker qualification failed: ' + ($result -join ' '))
+}
+$result
+```
+
+This is the positive native regression with the actual LocalSystem Service.
+Capture the Worker PID, its Service parent and ordinary session. The Service
+advertises `TeacherMessage` only after the live Worker handshake; broad
+authorization still cannot be inferred from capability negotiation. Repeat
+before Worker authentication and expect the Teacher command capability to be
+absent, then perform the real Message and capture its correlated `Completed`
+after the authorized operator acknowledges it. Use the documented guarded
+teardown and verify cleanup. The positive result requires exact-asset review
+and a new VM run.
+
 ## Unified RC physical trust qualification (2026-11-18)
 
 Software compilation/tests do not supply an approved root, signer, roster verifier

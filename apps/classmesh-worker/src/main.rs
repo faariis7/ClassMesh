@@ -324,22 +324,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let pipe_name = parse_pipe_name(&args)?;
-    let pipe = NamedPipeClient::connect(&pipe_name, Duration::from_secs(5))?;
-    // Bind the handshake to the OS-observed pipe server before sending Worker
-    // identity. A ServiceReady payload alone is not peer authentication.
-    let primary_service_pid = pipe.server_process_id()?;
-    if primary_service_pid == 0 || primary_service_pid == std::process::id() {
-        return Err("invalid Worker IPC server process identity".into());
-    }
-    // A Service-owned pipe must originate in Windows Session 0. Reject a
-    // same-user Session 1 pipe before disclosing WorkerHello. This is only
-    // an additional OS-level boundary, not LocalSystem token authentication.
-    if pipe.server_session_id()? != 0 {
-        return Err("Worker IPC server is not running in Windows Session 0".into());
-    }
-    // Never disclose WorkerHello to a Session 0 process without a kernel-verified
-    // LocalSystem token. The pipe PID is OS-reported, not supplied by the peer.
-    service_token::require_local_system(primary_service_pid)?;
+    let pipe = NamedPipeClient::connect_worker(&pipe_name, Duration::from_secs(5))?;
+    let service = service_token::VerifiedService::authenticate(&pipe)?;
+    let primary_service_pid = service.pid();
     let hello = IpcFrame::worker_hello(std::process::id(), actual_session)
         .encode()
         .map_err(ipc_frame_error)?;
@@ -353,17 +340,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Fail closed if the native pipe server identity changes during handshake.
-    // This is continuity checking, not proof of a LocalSystem Service token.
-    if pipe.server_session_id()? != 0 {
-        return Err("Worker IPC server session changed during handshake".into());
-    }
-    if pipe.server_process_id()? != primary_service_pid {
-        return Err("Worker IPC server process changed during handshake".into());
-    }
-    service_token::require_local_system(primary_service_pid)?;
+    service.recheck(&pipe)?;
+    drop(service);
     eprintln!(
-        "ClassMesh Worker IPC ServiceReady received; Session 0/PID and LocalSystem token checked (SCM registration and policy authorization unverified)"
+        "ClassMesh Worker IPC ServiceReady received; protected pipe, live Session 0 PID and LocalSystem token verified"
     );
     let (event_tx, event_rx) = mpsc::sync_channel(WORKER_IPC_EVENT_QUEUE_CAPACITY);
     let reader_pipe = pipe.try_clone()?;

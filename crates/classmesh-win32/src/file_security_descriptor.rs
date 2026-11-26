@@ -112,7 +112,7 @@ pub(crate) unsafe fn read_allowed_registry_descriptor(
     )
 }
 
-fn read_allowed_object_descriptor(
+pub(crate) fn read_allowed_object_descriptor(
     handle: windows_sys::Win32::Foundation::HANDLE,
     object_type: windows_sys::Win32::Security::Authorization::SE_OBJECT_TYPE,
 ) -> io::Result<DescriptorSnapshot> {

@@ -20,6 +20,14 @@ rejected Live Mode with exit 3 at `NotNegotiated`. The Worker launched in
 Session 1 but did not establish authenticated IPC. See the
 [measured run record](WINDOWS_RUNTIME_PLAN.md#protected-vm1-run--2026-11-26).
 
+The native Worker follow-up replaces the direct ordinary-user process/token
+open with restricted handles delegated to the exact launched Worker. The
+Worker verifies a SYSTEM-owned primary pipe, kernel Session 0 and PID,
+process liveness and the Service token's LocalSystem SID before publishing
+capabilities. A native ordinary Session 1 test reads the pipe descriptor and
+rejects an unauthorized endpoint. The protected positive path and genuine
+Message receipt require the next exact-asset-approved VM1 run.
+
 ## Unified RC follow-up — 2026-11-25
 
 [Draft PR #776](https://github.com/faariis7/ClassMesh/pull/776) holds the exact

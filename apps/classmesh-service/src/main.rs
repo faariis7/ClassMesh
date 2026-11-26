@@ -555,7 +555,7 @@ mod windows_service_app {
                     return self.apply_restart_decision(decision);
                 }
             };
-            let mut pipe = match NamedPipeServer::create_for_user(&pipe_name, &user_sid) {
+            let mut pipe = match NamedPipeServer::create_worker_pipe(&pipe_name, &user_sid) {
                 Ok(pipe) => pipe,
                 Err(error) => {
                     eprintln!(
@@ -581,7 +581,11 @@ mod windows_service_app {
                         return self.apply_restart_decision(decision);
                     }
 
-                    if let Err(error) = authenticate_worker(&pipe, process_id, session) {
+                    if let Err(error) = process
+                        .send_service_identity(&pipe)
+                        .map_err(|error| error.to_string())
+                        .and_then(|()| authenticate_worker(&pipe, process_id, session))
+                    {
                         eprintln!(
                             "Worker IPC handshake failed for pid {process_id}, session {}: {error}",
                             session.0

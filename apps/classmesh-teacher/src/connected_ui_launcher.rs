@@ -403,6 +403,11 @@ pub fn run_installed_teacher(check_only: bool) -> Result<(), Box<dyn std::error:
         );
     }
     if check_only {
+        let negotiated = &session.established.negotiated;
+        let teacher_message = teacher_interaction::teacher_message_available(
+            negotiated.version,
+            &negotiated.capabilities,
+        );
         session
             .connection
             .close(0u32.into(), b"Teacher startup probe complete");
@@ -411,6 +416,7 @@ pub fn run_installed_teacher(check_only: bool) -> Result<(), Box<dyn std::error:
                 tokio::time::timeout(std::time::Duration::from_secs(3), endpoint.wait_idle()).await;
         });
         println!("Teacher protected roster, CNG identity and enrolled QUIC session verified");
+        println!("TeacherMessage negotiated: {teacher_message}");
         return Ok(());
     }
 

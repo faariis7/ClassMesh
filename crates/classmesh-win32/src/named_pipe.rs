@@ -18,17 +18,19 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CreateWellKnownSid, GetLengthSid,
     InitializeAcl, InitializeSecurityDescriptor, IsValidSid, SECURITY_ATTRIBUTES,
-    SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE, SetSecurityDescriptorDacl, WinLocalSystemSid,
+    SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE, SetSecurityDescriptorDacl,
+    SetSecurityDescriptorOwner, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE,
-    OPEN_EXISTING, PIPE_ACCESS_DUPLEX, PIPE_ACCESS_INBOUND, ReadFile, WriteFile,
+    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ,
+    FILE_GENERIC_WRITE, FILE_SHARE_NONE, FILE_WRITE_DATA, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+    PIPE_ACCESS_INBOUND, ReadFile, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
     GetNamedPipeClientSessionId, GetNamedPipeServerProcessId, GetNamedPipeServerSessionId,
-    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, PeekNamedPipe,
 };
 use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentProcess, WaitForSingleObject};
 
@@ -36,6 +38,9 @@ const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 const PIPE_DEFAULT_TIMEOUT_MS: u32 = 5_000;
 const MAX_REJECTED_PEERS: u8 = 8;
+const WORKER_PIPE_ACCESS: u32 = FILE_GENERIC_READ | FILE_WRITE_DATA;
+const SERVICE_PIPE_ACCESS: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE;
+pub(crate) const SERVICE_IDENTITY_MAGIC: [u8; 4] = *b"CMS1";
 const TELEMETRY_FRAME_BYTES: usize = 136;
 const TELEMETRY_READ_LIMIT: usize = TELEMETRY_FRAME_BYTES * 4;
 const TELEMETRY_IO_MAX_MILLIS: u128 = 250;
@@ -123,6 +128,7 @@ impl SensitivePipeAdmission {
 pub struct NamedPipeServer {
     handle: HANDLE,
     overlapped: bool,
+    primary_worker: bool,
 }
 
 // The HANDLE is uniquely owned by this wrapper and Windows permits pipe I/O from another thread.
@@ -134,6 +140,18 @@ impl NamedPipeServer {
             name,
             user_sid,
             PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            false,
+        )
+    }
+
+    /// Creates the primary Worker pipe. Only LocalSystem may own or create
+    /// server instances; the targeted user's ACE allows client I/O only.
+    pub fn create_worker_pipe(name: &str, user_sid: &[u8]) -> Result<Self, PipeError> {
+        Self::create_for_user_mode(
+            name,
+            user_sid,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            true,
         )
     }
 
@@ -148,6 +166,7 @@ impl NamedPipeServer {
             name,
             user_sid,
             PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+            false,
         )
     }
 
@@ -161,6 +180,7 @@ impl NamedPipeServer {
             name,
             user_sid,
             PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+            false,
         )
     }
 
@@ -168,6 +188,7 @@ impl NamedPipeServer {
         name: &str,
         user_sid: &[u8],
         open_mode: u32,
+        protected_worker: bool,
     ) -> Result<Self, PipeError> {
         let full_name = normalize_pipe_name(name);
         let wide_name = wide_null(OsStr::new(&full_name));
@@ -224,14 +245,18 @@ impl NamedPipeServer {
         if unsafe { InitializeAcl(acl, acl_len, ACL_REVISION) } == 0 {
             return Err(last_error("InitializeAcl"));
         }
-        let access_mask = GENERIC_READ | GENERIC_WRITE;
+        let (user_access, system_access) = if protected_worker {
+            (WORKER_PIPE_ACCESS, SERVICE_PIPE_ACCESS)
+        } else {
+            (GENERIC_READ | GENERIC_WRITE, GENERIC_READ | GENERIC_WRITE)
+        };
         // SAFETY: acl is initialized and user_sid is a valid SID kept alive through pipe creation.
         if unsafe {
             AddAccessAllowedAceEx(
                 acl,
                 ACL_REVISION,
                 0,
-                access_mask,
+                user_access,
                 user_sid.as_ptr().cast_mut().cast(),
             )
         } == 0
@@ -244,7 +269,7 @@ impl NamedPipeServer {
                 acl,
                 ACL_REVISION,
                 0,
-                access_mask,
+                system_access,
                 system_sid.as_mut_ptr().cast(),
             )
         } == 0
@@ -276,6 +301,18 @@ impl NamedPipeServer {
         {
             return Err(last_error("SetSecurityDescriptorDacl"));
         }
+        // SAFETY: the descriptor and well-known SID remain live through CreateNamedPipeW.
+        if protected_worker
+            && unsafe {
+                SetSecurityDescriptorOwner(
+                    (&raw mut descriptor).cast(),
+                    system_sid.as_mut_ptr().cast(),
+                    0,
+                )
+            } == 0
+        {
+            return Err(last_error("SetSecurityDescriptorOwner(LocalSystem)"));
+        }
 
         let attributes = SECURITY_ATTRIBUTES {
             nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())
@@ -306,7 +343,12 @@ impl NamedPipeServer {
         Ok(Self {
             handle,
             overlapped: open_mode & FILE_FLAG_OVERLAPPED != 0,
+            primary_worker: protected_worker,
         })
+    }
+
+    pub(crate) const fn is_primary_worker_pipe(&self) -> bool {
+        self.primary_worker
     }
 
     /// Waits for the exact Worker process launched by the Service. Unexpected local clients are
@@ -334,6 +376,7 @@ impl NamedPipeServer {
         duplicate_pipe_handle(self.handle).map(|handle| Self {
             handle,
             overlapped: self.overlapped,
+            primary_worker: self.primary_worker,
         })
     }
 
@@ -497,7 +540,7 @@ impl NamedPipeServer {
         }
     }
 
-    fn peer(&self) -> Result<PipePeer, PipeError> {
+    pub(crate) fn peer(&self) -> Result<PipePeer, PipeError> {
         let mut process_id = 0_u32;
         let mut session_id = 0_u32;
         // SAFETY: both output pointers are valid for one u32 and the handle is connected.
@@ -537,6 +580,24 @@ unsafe impl Send for NamedPipeClient {}
 
 impl NamedPipeClient {
     pub fn connect(name: &str, timeout: Duration) -> Result<Self, PipeError> {
+        Self::connect_with(name, timeout, GENERIC_READ | GENERIC_WRITE, 0)
+    }
+
+    pub fn connect_worker(name: &str, timeout: Duration) -> Result<Self, PipeError> {
+        Self::connect_with(
+            name,
+            timeout,
+            WORKER_PIPE_ACCESS,
+            SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+        )
+    }
+
+    fn connect_with(
+        name: &str,
+        timeout: Duration,
+        access: u32,
+        flags: u32,
+    ) -> Result<Self, PipeError> {
         let full_name = normalize_pipe_name(name);
         let wide_name = wide_null(OsStr::new(&full_name));
         let deadline = Instant::now()
@@ -548,11 +609,11 @@ impl NamedPipeClient {
             let handle = unsafe {
                 CreateFileW(
                     wide_name.as_ptr(),
-                    GENERIC_READ | GENERIC_WRITE,
+                    access,
                     FILE_SHARE_NONE,
                     null(),
                     OPEN_EXISTING,
-                    0,
+                    flags,
                     null_mut(),
                 )
             };
@@ -578,6 +639,76 @@ impl NamedPipeClient {
             }
             thread::sleep(Duration::from_millis(25));
         }
+    }
+
+    fn require_protected_service_pipe(&self) -> std::io::Result<()> {
+        use crate::file_security_descriptor::read_allowed_object_descriptor;
+        use windows_sys::Win32::Security::Authorization::SE_KERNEL_OBJECT;
+
+        let descriptor = read_allowed_object_descriptor(self.handle, SE_KERNEL_OBJECT)?;
+        let [first, second] = descriptor.entries.as_slice() else {
+            return Err(untrusted_service_pipe());
+        };
+        let (system, worker) = if first.sid == "S-1-5-18" {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        if descriptor.owner != "S-1-5-18"
+            || system.sid != "S-1-5-18"
+            || worker.sid == "S-1-5-18"
+            || system.flags != 0
+            || worker.flags != 0
+            || system.mask != SERVICE_PIPE_ACCESS
+            || worker.mask != WORKER_PIPE_ACCESS
+        {
+            return Err(untrusted_service_pipe());
+        }
+        Ok(())
+    }
+
+    /// Read the fixed, pre-Hello Service proof after checking the security of
+    /// this connected endpoint. The caller checks the observed pipe PID/session.
+    pub fn read_service_identity(&self, timeout: Duration) -> std::io::Result<[u64; 2]> {
+        self.require_protected_service_pipe()?;
+        let now = Instant::now();
+        let deadline = now.checked_add(timeout).unwrap_or(now);
+        let mut proof = [0; 20];
+        loop {
+            let mut available = 0;
+            // SAFETY: a valid pipe and writable output; no data or other outputs requested.
+            if unsafe {
+                PeekNamedPipe(
+                    self.handle,
+                    null_mut(),
+                    0,
+                    null_mut(),
+                    &mut available,
+                    null_mut(),
+                )
+            } == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            if available >= proof.len() as u32 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        // The bootstrap is the only reader at this point and PeekNamedPipe
+        // measured the full proof. A concurrent close yields an error or EOF.
+        if self.read(&mut proof).map_err(std::io::Error::other)? != proof.len()
+            || proof[..4] != SERVICE_IDENTITY_MAGIC
+        {
+            return Err(untrusted_service_pipe());
+        }
+        Ok([
+            u64::from_le_bytes(proof[4..12].try_into().expect("fixed handle width")),
+            u64::from_le_bytes(proof[12..20].try_into().expect("fixed handle width")),
+        ])
     }
 
     /// One-shot, write-only overlapped diagnostics connection. The expected
@@ -728,6 +859,13 @@ impl Drop for NamedPipeClient {
             self.handle = null_mut();
         }
     }
+}
+
+fn untrusted_service_pipe() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "Worker pipe owner or DACL is not the protected Service descriptor",
+    )
 }
 
 #[must_use]
@@ -996,5 +1134,29 @@ mod tests {
         let name = worker_pipe_name(0x1234, 7, 9);
         assert_eq!(name, "ClassMesh-00001234-00000007-0000000000000009");
         assert!(normalize_pipe_name(&name).starts_with(r"\\.\pipe\ClassMesh-"));
+    }
+
+    #[test]
+    fn ordinary_pipe_cannot_supply_service_handles() {
+        use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+
+        let pid = unsafe { GetCurrentProcessId() };
+        let session = crate::current_session_id().expect("current session");
+        let sid = crate::session_process::current_user_sid().expect("current token SID");
+        let name = worker_pipe_name(pid, session, 101);
+        let _server = NamedPipeServer::create_for_user(&name, &sid).expect("local ordinary pipe");
+        let client = NamedPipeClient::connect_worker(&name, Duration::from_secs(1))
+            .expect("connect to same-user pipe");
+
+        let descriptor = crate::file_security_descriptor::read_allowed_object_descriptor(
+            client.handle,
+            windows_sys::Win32::Security::Authorization::SE_KERNEL_OBJECT,
+        )
+        .expect("ordinary Worker has READ_CONTROL on its connected pipe");
+        assert_eq!(descriptor.entries.len(), 2);
+        assert_eq!(
+            client.require_protected_service_pipe().unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
     }
 }

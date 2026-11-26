@@ -15,7 +15,10 @@ ordinary Worker could not open the Service process to verify its token. Keep
 M2 open until the exact protected Service and ordinary Worker authenticate
 and a human acknowledgment produces a correlated `Completed`. The
 [VM1 run record](WINDOWS_RUNTIME_PLAN.md#protected-vm1-run--2026-11-26) lists
-the measured results, cleanup, and next regression.
+the measured results, cleanup, and next regression. The follow-up supplies
+limited, query-only Service identity handles to the exact launched Worker
+through the SYSTEM-owned primary pipe. The next guarded VM1 run must verify
+`TeacherMessage negotiated: true` on the matching signed candidate.
 
 ## Unified RC follow-up — 2026-11-25
 
