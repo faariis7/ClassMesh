@@ -7,8 +7,12 @@ pub mod connected_runtime;
 pub mod connected_ui_launcher;
 pub mod device_diagnostics;
 pub mod focus_view;
+#[cfg(windows)]
+mod installed_presentation;
 pub mod monitoring;
 pub mod monitoring_promotion;
+#[cfg(any(windows, test))]
+mod presentation_control;
 pub mod presentation_view;
 pub mod receiver_playback_diagnostics;
 pub mod receiver_playback_session;
@@ -274,6 +278,29 @@ impl TeacherVideoEngineLifecycle {
             .process_frame(meta, frame, coordinator, authorization)
             .map_err(TeacherVideoEngineApplyError::from)
             .map_err(Into::into)
+    }
+
+    pub(crate) fn reset_capture_pipeline(&mut self) {
+        if let Some(active) = &mut self.active {
+            active.runtime.reset_pipeline();
+        }
+    }
+
+    pub(crate) fn process_frame_if_current(
+        &mut self,
+        meta: CapturedFrameMeta,
+        frame: DxgiFrame,
+        coordinator: &mut GroupMediaCoordinator,
+        authorization: &AuthorizationStore,
+        is_current: impl FnOnce() -> bool,
+    ) -> Result<(), TeacherVideoEngineLifecycleError> {
+        self.active
+            .as_mut()
+            .ok_or(TeacherVideoEngineLifecycleError::NoActiveRuntime)?
+            .runtime
+            .process_frame_if_current(meta, frame, coordinator, authorization, is_current)
+            .map_err(TeacherVideoEngineApplyError::from)?;
+        Ok(())
     }
 
     pub fn stop(

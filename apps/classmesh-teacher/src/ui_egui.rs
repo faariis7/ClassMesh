@@ -182,6 +182,10 @@ pub enum TeacherUiControlEvent {
         request_id: u64,
         state: TeacherInteractionState,
     },
+    Presentation {
+        control_session_id: u64,
+        outcome: Result<PresentationRuntimeSnapshot, String>,
+    },
     Disconnected,
 }
 
@@ -290,6 +294,7 @@ pub struct TeacherEguiShell {
     classroom: TeacherClassroomViewModel,
     monitoring: TeacherMonitoringGridViewModel,
     presentation: PresentationViewState,
+    presentation_error: Option<String>,
     diagnostics_model: TeacherDeviceDiagnosticsViewModel,
     diagnostics: Option<DeviceDiagnosticsView>,
     playback: Option<TeacherPlaybackUiProjection>,
@@ -315,6 +320,7 @@ impl Default for TeacherEguiShell {
             presentation: TeacherPresentationViewModel::state(
                 PresentationRuntimeSnapshot::default(),
             ),
+            presentation_error: None,
             diagnostics_model: TeacherDeviceDiagnosticsViewModel::new(
                 DeviceDiagnosticsConfig::default(),
             )
@@ -347,6 +353,7 @@ impl TeacherEguiShell {
             presentation: TeacherPresentationViewModel::state(
                 PresentationRuntimeSnapshot::default(),
             ),
+            presentation_error: None,
             diagnostics_model: TeacherDeviceDiagnosticsViewModel::new(
                 DeviceDiagnosticsConfig::default(),
             )
@@ -485,6 +492,24 @@ impl TeacherEguiShell {
                 }) => {
                     self.apply_command_result(control_session_id, request_id, state);
                 }
+                Ok(TeacherUiControlEvent::Presentation {
+                    control_session_id,
+                    outcome,
+                }) => {
+                    if self
+                        .teacher_interaction_context
+                        .as_ref()
+                        .is_some_and(|context| context.control_session_id == control_session_id)
+                    {
+                        match outcome {
+                            Ok(snapshot) => {
+                                self.presentation_error = None;
+                                self.set_presentation_snapshot(snapshot);
+                            }
+                            Err(error) => self.presentation_error = Some(error),
+                        }
+                    }
+                }
                 Ok(TeacherUiControlEvent::Disconnected) => {
                     self.pending_action = None;
                     self.disconnect_preserving_command_history();
@@ -598,6 +623,8 @@ impl TeacherEguiShell {
     // A lost QUIC connection is not a Worker failure or completion. Preserve
     // the last observed results for diagnosis, while revoking all live authority.
     fn disconnect_preserving_command_history(&mut self) {
+        self.set_presentation_snapshot(PresentationRuntimeSnapshot::default());
+        self.presentation_error = None;
         let history = std::mem::take(&mut self.command_status);
         self.clear_teacher_interaction_context();
         self.command_status = history;
@@ -1066,6 +1093,9 @@ impl TeacherEguiShell {
                 }
             }
             TeacherUiSection::Presentation => {
+                if let Some(error) = &self.presentation_error {
+                    ui.label(error);
+                }
                 if let Some(message) =
                     show_presentation(ui, self.presentation, self.pending_action.is_some())
                     && let Some(action) = self.shell.handle(message)

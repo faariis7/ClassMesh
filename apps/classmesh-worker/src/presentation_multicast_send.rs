@@ -427,7 +427,24 @@ impl PresentationMulticastSendRuntime {
         coordinator: &mut GroupMediaCoordinator,
         authorization: &AuthorizationStore,
     ) -> Result<PresentationMulticastSendStep, PresentationMulticastSendRuntimeError> {
+        Ok(self
+            .process_frame_if_current(meta, frame, coordinator, authorization, || true)?
+            .expect("always-current sender processes the frame"))
+    }
+
+    /// Revalidate after potentially slow native encoding and before releasing packets.
+    pub fn process_frame_if_current(
+        &mut self,
+        meta: CapturedFrameMeta,
+        frame: DxgiFrame,
+        coordinator: &mut GroupMediaCoordinator,
+        authorization: &AuthorizationStore,
+        is_current: impl FnOnce() -> bool,
+    ) -> Result<Option<PresentationMulticastSendStep>, PresentationMulticastSendRuntimeError> {
         let encoded_outputs = self.fanout.process_frame(meta, frame)?;
+        if !is_current() {
+            return Ok(None);
+        }
         let delivery = match self.sink.take_next_decodable(self.fanout.distributor_mut()) {
             Some(frame) => Some(self.sender.try_send_shared_h264_frame(
                 coordinator,
@@ -440,12 +457,12 @@ impl PresentationMulticastSendRuntime {
         let unicast_deliveries =
             self.unicast
                 .drain(self.fanout.distributor_mut(), coordinator, authorization)?;
-        Ok(PresentationMulticastSendStep {
+        Ok(Some(PresentationMulticastSendStep {
             encoded_outputs,
             sent,
             backpressure_drop,
             unicast_deliveries,
-        })
+        }))
     }
 }
 

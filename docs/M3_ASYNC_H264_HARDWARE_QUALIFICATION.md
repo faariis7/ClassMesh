@@ -1,5 +1,8 @@
 ## Physical Windows x64 qualification sequence
 
+For the installed Teacher and production synchronous receiver, use the
+[protected presentation procedure](M3_INSTALLED_PRESENTATION_QUALIFICATION.md).
+
 The 2026-11-26 protected VM1 run stopped at the ordinary Worker's IPC token
 check. No authenticated presentation or visible Student frames were measured.
 Keep the synchronous receiver for the first presentation qualification.
