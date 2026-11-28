@@ -202,6 +202,8 @@ mod windows_service_app {
     enum RuntimeEvent {
         Stop,
         Session(SessionEvent),
+        Sleep,
+        Wake,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -2222,6 +2224,18 @@ mod windows_service_app {
                     }
                     ServiceControlHandlerResult::NoError
                 }
+                ServiceControl::PowerEvent(windows_service::service::PowerEventParam::Suspend) => {
+                    let _ = handler_tx.send(RuntimeEvent::Sleep);
+                    ServiceControlHandlerResult::NoError
+                }
+                ServiceControl::PowerEvent(
+                    windows_service::service::PowerEventParam::ResumeAutomatic
+                    | windows_service::service::PowerEventParam::ResumeSuspend
+                    | windows_service::service::PowerEventParam::ResumeCritical,
+                ) => {
+                    let _ = handler_tx.send(RuntimeEvent::Wake);
+                    ServiceControlHandlerResult::NoError
+                }
                 ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
                 _ => ServiceControlHandlerResult::NotImplemented,
             }
@@ -2804,6 +2818,13 @@ mod windows_service_app {
                         .try_send(TeacherInteractionDispatchOutcome::Cancelled);
                     continue;
                 }
+                if InputAvailability::load(input_availability.as_ref()) != InputAvailability::Ready
+                {
+                    let _ = dispatch
+                        .reply_tx
+                        .try_send(TeacherInteractionDispatchOutcome::WorkerUnavailable);
+                    continue;
+                }
                 if pending_teacher_interaction.is_some() {
                     let _ = dispatch
                         .reply_tx
@@ -2900,11 +2921,20 @@ mod windows_service_app {
                 .as_ref()
                 .is_some_and(|pending| pending.reply_tx.is_closed())
                 && let Some(pending) = pending_presentation_key_install.take()
+                && let Some(worker) =
+                    workers
+                        .current_authenticated_receiver_worker()
+                        .filter(|worker| {
+                            worker.process_id == pending.expected_process_id
+                                && worker.session_id == pending.expected_session_id
+                                && worker.worker_generation == pending.expected_worker_generation
+                        })
                 && let Err(error) = workers.clear_presentation_key(pending.binding)
             {
                 eprintln!(
                     "ClassMesh Service could not clear abandoned Worker presentation key: {error}"
                 );
+                workers.fence_presentation_worker(worker);
             }
 
             while let Ok(result) = worker_presentation_key_result_rx.try_recv() {
@@ -2972,6 +3002,16 @@ mod windows_service_app {
             }
 
             while let Ok(dispatch) = presentation_key_install_rx.try_recv() {
+                if dispatch.reply_tx.is_closed() {
+                    continue;
+                }
+                if InputAvailability::load(input_availability.as_ref()) != InputAvailability::Ready
+                {
+                    let _ = dispatch
+                        .reply_tx
+                        .send(Err("control.presentation.worker_unavailable".to_owned()));
+                    continue;
+                }
                 if pending_presentation_key_install.is_some() {
                     let _ = dispatch
                         .reply_tx
@@ -3477,6 +3517,24 @@ mod windows_service_app {
 
             match event_rx.recv_timeout(Duration::from_millis(5)) {
                 Ok(RuntimeEvent::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Ok(RuntimeEvent::Sleep) => {
+                    let action = supervisor.suspend_for_sleep();
+                    handle_supervisor_action(
+                        action,
+                        &mut supervisor,
+                        &mut workers,
+                        input_availability.as_ref(),
+                    );
+                }
+                Ok(RuntimeEvent::Wake) => {
+                    let action = supervisor.resume_after_sleep();
+                    handle_supervisor_action(
+                        action,
+                        &mut supervisor,
+                        &mut workers,
+                        input_availability.as_ref(),
+                    );
+                }
                 Ok(RuntimeEvent::Session(event)) => {
                     let prior_worker = workers.current_authenticated_receiver_worker();
                     let action = supervisor.on_event(event);
@@ -3563,7 +3621,12 @@ mod windows_service_app {
                     focused_clear_attempts = 0;
                     next_media_reconfigure_attempt = Instant::now();
                 }
-                handle_worker_event(event, &mut supervisor, input_availability.as_ref());
+                handle_worker_event(
+                    event,
+                    &mut supervisor,
+                    &mut workers,
+                    input_availability.as_ref(),
+                );
                 // Poll every 250ms from the Service's monotonic clock, even
                 // when no new Worker telemetry bytes are available. This
                 // does not activate a telemetry pipe or authorize a report.
@@ -3646,7 +3709,8 @@ mod windows_service_app {
             current_state: ServiceState::Running,
             controls_accepted: ServiceControlAccept::STOP
                 | ServiceControlAccept::SHUTDOWN
-                | ServiceControlAccept::SESSION_CHANGE,
+                | ServiceControlAccept::SESSION_CHANGE
+                | ServiceControlAccept::POWER_EVENT,
             exit_code: ServiceExitCode::Win32(0),
             checkpoint: 0,
             wait_hint: Duration::default(),
@@ -3737,7 +3801,7 @@ mod windows_service_app {
             SupervisorAction::LaunchWorker(session) => {
                 InputAvailability::Starting.store(input_availability);
                 let event = workers.launch(session);
-                handle_worker_event(event, supervisor, input_availability);
+                handle_worker_event(event, supervisor, workers, input_availability);
             }
             SupervisorAction::StopWorker(session) => {
                 InputAvailability::Unavailable.store(input_availability);
@@ -3745,8 +3809,7 @@ mod windows_service_app {
                 supervisor.mark_worker_stopped(session);
             }
             SupervisorAction::SuspendMedia(session) => {
-                InputAvailability::Suspended.store(input_availability);
-                let _ = workers.send_control(session, IpcControlCommand::SuspendMedia);
+                suspend_worker_media(session, workers, input_availability);
             }
             SupervisorAction::ResumeMedia(session) => {
                 let resumed = workers
@@ -3755,6 +3818,11 @@ mod windows_service_app {
                 let availability = if resumed {
                     InputAvailability::Ready
                 } else {
+                    if let Some(worker) = workers.current_authenticated_receiver_worker()
+                        && worker.session_id == session.0
+                    {
+                        workers.fence_presentation_worker(worker);
+                    }
                     InputAvailability::Unavailable
                 };
                 availability.store(input_availability);
@@ -3766,7 +3834,7 @@ mod windows_service_app {
                 InputAvailability::Starting.store(input_availability);
                 workers.stop(old_session);
                 let event = workers.launch(new_session);
-                handle_worker_event(event, supervisor, input_availability);
+                handle_worker_event(event, supervisor, workers, input_availability);
             }
         }
     }
@@ -3827,15 +3895,40 @@ mod windows_service_app {
         }
     }
 
+    fn suspend_worker_media(
+        session: SessionId,
+        workers: &mut WorkerManager,
+        input_availability: &AtomicU8,
+    ) {
+        InputAvailability::Suspended.store(input_availability);
+        workers.capabilities.retire_media();
+        if workers
+            .send_control(session, IpcControlCommand::SuspendMedia)
+            .is_err()
+            && let Some(worker) = workers.current_authenticated_receiver_worker()
+            && worker.session_id == session.0
+        {
+            workers.fence_presentation_worker(worker);
+        }
+    }
+
     fn handle_worker_event(
         event: WorkerManagerEvent,
         supervisor: &mut SessionSupervisor,
+        workers: &mut WorkerManager,
         input_availability: &AtomicU8,
     ) {
         match event {
             WorkerManagerEvent::Running(session) => {
-                supervisor.mark_worker_running(session);
-                InputAvailability::Ready.store(input_availability);
+                if supervisor.mark_worker_running(session)
+                    == SupervisorAction::SuspendMedia(session)
+                {
+                    suspend_worker_media(session, workers, input_availability);
+                } else if supervisor.worker_state()
+                    == classmesh_windows_runtime::WorkerState::Running(session)
+                {
+                    InputAvailability::Ready.store(input_availability);
+                }
             }
             WorkerManagerEvent::RestartScheduled(session) => {
                 InputAvailability::Starting.store(input_availability);

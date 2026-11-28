@@ -93,7 +93,7 @@ fn status_text(status: PresentationUiStatus) -> &'static str {
         PresentationUiStatus::Sending => "Sending protected video to the Student.",
         PresentationUiStatus::RecoveringCapture => "Recovering Teacher screen capture.",
         PresentationUiStatus::Stopping => "Stopping the presentation and waiting for cleanup.",
-        PresentationUiStatus::Disconnected => "Student disconnected. Reopen Teacher to reconnect.",
+        PresentationUiStatus::Disconnected => "Student disconnected. See the connection status.",
     }
 }
 

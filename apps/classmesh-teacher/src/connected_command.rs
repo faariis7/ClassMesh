@@ -544,6 +544,34 @@ impl TeacherCommandSender {
     }
 }
 
+#[cfg(test)]
+mod installed_action_tests {
+    use super::*;
+    use crate::ui_shell::TeacherPresentationUiAction;
+
+    #[test]
+    fn reconnect_discards_queued_actions_even_when_service_reuses_the_wire_session_id() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        let start = TeacherUiAction::Presentation(TeacherPresentationUiAction::Start);
+        tx.try_send(TeacherUiAction::for_connection(1, start.clone()))
+            .unwrap();
+        tx.try_send(start.clone()).unwrap();
+        tx.try_send(TeacherUiAction::for_connection(2, start.clone()))
+            .unwrap();
+        assert!(matches!(
+            next_installed_action(&rx, 2),
+            QueuedTeacherUiAction::Empty
+        ));
+        assert!(matches!(
+            next_installed_action(&rx, 2),
+            QueuedTeacherUiAction::Empty
+        ));
+        assert!(
+            matches!(next_installed_action(&rx, 2), QueuedTeacherUiAction::Local(action) if action == start)
+        );
+    }
+}
+
 /// A one-shot, non-blocking transfer from the native UI's bounded action
 /// mailbox to the authenticated session's *existing* QUIC owner. Non-network
 /// actions are returned unchanged for the central dispatcher; no second
@@ -554,6 +582,27 @@ pub enum QueuedTeacherUiAction {
     Closed,
     Local(TeacherUiAction),
     Interaction(TeacherInteractionUiAction),
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn next_installed_action(
+    actions: &Receiver<TeacherUiAction>,
+    generation: u64,
+) -> QueuedTeacherUiAction {
+    match actions.try_recv() {
+        Ok(TeacherUiAction::Installed {
+            generation: owner,
+            action,
+        }) if owner == generation => match *action {
+            TeacherUiAction::TeacherInteraction(action) => {
+                QueuedTeacherUiAction::Interaction(action)
+            }
+            TeacherUiAction::Installed { .. } => QueuedTeacherUiAction::Empty,
+            action => QueuedTeacherUiAction::Local(action),
+        },
+        Ok(_) | Err(TryRecvError::Empty) => QueuedTeacherUiAction::Empty,
+        Err(TryRecvError::Disconnected) => QueuedTeacherUiAction::Closed,
+    }
 }
 
 pub fn next_queued_teacher_ui_action(actions: &Receiver<TeacherUiAction>) -> QueuedTeacherUiAction {

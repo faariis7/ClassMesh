@@ -265,6 +265,11 @@ pub enum TeacherUiAction {
     Diagnostics(TeacherDiagnosticsUiAction),
     TeacherInteraction(TeacherInteractionUiAction),
     FilePull(TeacherFilePullAction),
+    #[cfg(any(windows, test))]
+    Installed {
+        generation: u64,
+        action: Box<TeacherUiAction>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +279,14 @@ pub enum TeacherUiClassroomActionError {
 }
 
 impl TeacherUiAction {
+    #[cfg(any(windows, test))]
+    pub(crate) fn for_connection(generation: u64, action: Self) -> Self {
+        Self::Installed {
+            generation,
+            action: Box::new(action),
+        }
+    }
+
     pub fn apply_to_classroom(
         self,
         classroom: &mut TeacherClassroomViewModel,
@@ -282,6 +295,8 @@ impl TeacherUiAction {
             Self::SelectDevice(source_id) => classroom
                 .select(source_id)
                 .map_err(TeacherUiClassroomActionError::Classroom),
+            #[cfg(any(windows, test))]
+            Self::Installed { .. } => Err(TeacherUiClassroomActionError::NotClassroomAction),
             Self::Focus(_)
             | Self::Presentation(_)
             | Self::Diagnostics(_)

@@ -384,28 +384,34 @@ pub fn run_teacher_ui_with_enrolled_control(
 /// Installed Live Mode and the read-only startup probe share the same
 /// protected producer and preflight. Both preserve the same QUIC runtime.
 pub fn run_installed_teacher(check_only: bool) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::connected_runtime::drive_installed_teacher_control;
-    use crate::installed_presentation::{InstalledPresentation, PresentationRoute};
-    use crate::trusted_startup::{PreparedTeacher, prepare_installed_teacher};
+    use crate::installed_recovery::run_installed_recovery;
+    use crate::trusted_startup::InstalledTeacherStartup;
+    use classmesh_control::quic::DEFAULT_RECONNECT_POLICY;
 
-    let PreparedTeacher {
-        runtime,
-        endpoint,
-        session,
-        route,
-        authorization,
-        display_name,
-        clock,
-        presentation,
-    } = prepare_installed_teacher().map_err(|error| -> Box<dyn std::error::Error> { error })?;
-    preflight_control_route(route, &session, &authorization)
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let startup =
+        InstalledTeacherStartup::open().map_err(|error| -> Box<dyn std::error::Error> { error })?;
+    let prepared = runtime
+        .block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                startup.connect(DEFAULT_RECONNECT_POLICY),
+            )
+            .await?
+        })
+        .map_err(|error| -> Box<dyn std::error::Error> { error })?;
+    preflight_control_route(prepared.route, &prepared.session, &prepared.authorization)
         .map_err(EnrolledTeacherUiLaunchError::UntrustedStartup)?;
-    if clock() == u64::MAX {
+    if (prepared.clock)() == u64::MAX {
         return Err(
             "protected Teacher policy changed or expired before the native launcher".into(),
         );
     }
     if check_only {
+        let session = prepared.session;
+        let endpoint = prepared.endpoint;
         let negotiated = &session.established.negotiated;
         let teacher_message = teacher_interaction::teacher_message_available(
             negotiated.version,
@@ -424,29 +430,23 @@ pub fn run_installed_teacher(check_only: bool) -> Result<(), Box<dyn std::error:
     }
 
     let target = InstalledMessageTarget {
-        source: route.source_id(),
-        session: route.control_session_id(),
-        display_name,
+        source: prepared.route.source_id(),
+        session: prepared.route.control_session_id(),
+        display_name: prepared.display_name.clone(),
     };
-    let presentation = InstalledPresentation::new(
-        presentation,
-        PresentationRoute {
-            route,
-            authorization: std::sync::Arc::new(authorization),
-            clock,
-        },
-    );
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancellation = std::sync::Arc::clone(&shutdown);
     let (bridge, thread) = start_runtime_thread(move |events, actions| {
-        let result = runtime.block_on(drive_installed_teacher_control(
-            presentation,
-            session,
+        runtime.block_on(run_installed_recovery(
+            startup,
+            prepared,
             events,
             actions,
-        ));
-        drop(endpoint);
-        result
+            cancellation,
+        ))
     })
     .map_err(EnrolledTeacherUiLaunchError::ThreadSpawn)?;
+    let bridge = bridge.cancel_on_drop(shutdown);
     run_native_window(bridge, thread, Some(target))?;
     Ok(())
 }

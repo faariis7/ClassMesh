@@ -1,3 +1,14 @@
+## Installed Teacher recovery implementation
+
+Installed Teacher reauthenticates after recoverable transport loss. Local
+connection generations fence queued UI actions. The protected checkpoint is
+pinned for the GUI lifetime and is revalidated during recovery. Worker and
+media-lifetime retirement close the previous presentation route; suspend
+drops receiver sockets and the old key. Hosted tests cover the state, control
+and error paths. Native protected execution, physical GPU rendering and
+repeated-cycle resource measurements remain open on this revision. See the
+[M4 runtime qualification](M4_RUNTIME_RECOVERY_QUALIFICATION.md).
+
 ## Trusted Teacher runtime implementation
 
 The actual Windows binary now prepares a protected, versioned signed roster,

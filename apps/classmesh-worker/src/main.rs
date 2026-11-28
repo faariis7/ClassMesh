@@ -510,6 +510,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match next_event {
             Ok(WorkerEvent::Control(command)) => match command {
                 classmesh_windows_runtime::ipc::IpcControlCommand::SuspendMedia => {
+                    group_media_keys.suspend_presentation();
+                    presentation_multicast = None;
+                    presentation_unicast = None;
+                    presentation_decode = None;
+                    native_telemetry_sender = None;
+                    presentation_keyframe_request_retry.reset();
+                    presentation_assembly_keyframe_retry.reset();
+                    presentation_silence.reset();
+                    presentation_delivery_telemetry.reset();
                     release_tracked_input(&mut input_injector);
                     capture = None;
                     encoder_benchmark = None;
@@ -525,6 +534,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 classmesh_windows_runtime::ipc::IpcControlCommand::ResumeMedia => {
                     // A release attempted during lock/secure-desktop may have been blocked.
                     // Retry once the interactive desktop is active again before accepting input.
+                    group_media_keys.resume_presentation();
                     release_tracked_input(&mut input_injector);
                     capture_restart.clear();
                     encoder_cache_query_pending = false;

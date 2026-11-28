@@ -28,7 +28,8 @@ use classmesh_control::handshake::{
 use classmesh_control::live_authorization::LiveAuthorizationStore;
 use classmesh_control::presentation_state::{PresentationOwnership, PresentationOwnershipError};
 use classmesh_control::quic::{
-    ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT, enrolled_server_config_with_resolver,
+    ControlChannel, ControlTransportError, DEFAULT_IO_TIMEOUT, SERVICE_RECONNECT_CODE,
+    enrolled_server_config_with_resolver,
 };
 use classmesh_control::receiver_playback_diagnostic_wire::build_after_authorized_teacher;
 use classmesh_control::receiver_telemetry_service_runtime::{
@@ -885,6 +886,7 @@ struct WorkerCapabilitySnapshot {
 #[derive(Debug, Default)]
 pub(crate) struct WorkerCapabilityState {
     snapshot: Mutex<WorkerCapabilitySnapshot>,
+    media_epoch: AtomicU64,
 }
 
 const WORKER_CAP_DXGI_CAPTURE: u8 = 1 << 0;
@@ -892,6 +894,24 @@ const WORKER_CAP_H264_HARDWARE_ENCODE: u8 = 1 << 1;
 const WORKER_CAP_TELEMETRY_GRANT_V11: u8 = 1 << 2;
 
 impl WorkerCapabilityState {
+    fn generation(&self) -> Option<u64> {
+        let snapshot = self.lock_snapshot();
+        (snapshot.generation != 0).then_some(snapshot.generation)
+    }
+
+    fn media_epoch(&self) -> u64 {
+        self.media_epoch.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn retire_media(&self) {
+        self.media_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn teacher_route_retired(&self, worker: Option<u64>, epoch: Option<u64>) -> bool {
+        worker.is_some_and(|expected| self.generation() != Some(expected))
+            || epoch.is_some_and(|expected| self.media_epoch() != expected)
+    }
+
     pub(crate) fn activate(&self, generation: u64, process_id: u32, session_id: u32) {
         let mut snapshot = self.lock_snapshot();
         *snapshot = WorkerCapabilitySnapshot {
@@ -1641,7 +1661,7 @@ async fn run_listener(
     loop {
         tokio::select! {
             _ = &mut stop_rx => {
-                endpoint.close(0_u32.into(), b"service stopping");
+                endpoint.close(SERVICE_RECONNECT_CODE.into(), b"service stopping");
                 endpoint.wait_idle().await;
                 break;
             }
@@ -1675,6 +1695,7 @@ async fn run_listener(
                     };
 
                     let session_id = next_session_id(&session_ids);
+                    let admitted_worker = worker_capabilities.generation();
                     let hello_config = ServerHelloConfig {
                         local_version: PROTOCOL_VERSION,
                         local_capabilities: service_hello_capabilities(
@@ -1733,6 +1754,11 @@ async fn run_listener(
                                 connection.close(0_u32.into(), b"enrolled peer no longer authorized");
                                 return;
                             }
+                            if session.negotiated.role == classmesh_protocol::ControlRole::Teacher
+                                && admitted_worker != worker_capabilities.generation() {
+                                connection.close(SERVICE_RECONNECT_CODE.into(), b"Student Worker changed during Hello");
+                                return;
+                            }
                             eprintln!(
                                 "ClassMesh enrolled control session {} established",
                                 peer.control_session_id
@@ -1753,6 +1779,7 @@ async fn run_listener(
                                     presentation_dispatch: &presentation_dispatch,
                                     presentation_feedback: &presentation_feedback,
                                     worker_capabilities: worker_capabilities.as_ref(),
+                                    admitted_worker,
                                     presentation: &presentation,
                                     multicast_interface,
                                 },
@@ -1798,6 +1825,7 @@ struct EstablishedSessionRuntime<'a> {
     presentation_dispatch: &'a PresentationDispatchChannels,
     presentation_feedback: &'a PresentationFeedbackBus,
     worker_capabilities: &'a WorkerCapabilityState,
+    admitted_worker: Option<u64>,
     presentation: &'a PresentationDispatchState,
     multicast_interface: Option<Ipv4Addr>,
 }
@@ -1866,6 +1894,7 @@ async fn run_established_session(
         presentation_dispatch,
         presentation_feedback,
         worker_capabilities,
+        admitted_worker,
         presentation,
         multicast_interface,
     } = runtime;
@@ -1906,10 +1935,32 @@ async fn run_established_session(
     });
     let _receive_pump = ReceivePumpGuard(receive_pump);
     let mut pending_teacher_terminal: Option<PendingTeacherTerminal> = None;
+    let mut presentation_epoch = None;
+    let mut worker_tick = tokio::time::interval(Duration::from_millis(250));
+    worker_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let teacher = session.negotiated.role == classmesh_protocol::ControlRole::Teacher;
+    let retire_route = |epoch| {
+        if teacher && worker_capabilities.teacher_route_retired(admitted_worker, epoch) {
+            connection.close(
+                SERVICE_RECONNECT_CODE.into(),
+                b"Student Worker or presentation lifetime retired",
+            );
+            true
+        } else {
+            false
+        }
+    };
 
     loop {
+        if retire_route(presentation_epoch) {
+            return;
+        }
         let mut envelope = tokio::select! {
+            _ = worker_tick.tick(), if teacher => continue,
             terminal = wait_teacher_terminal_or_expiry(&mut pending_teacher_terminal) => {
+                if retire_route(presentation_epoch) {
+                    return;
+                }
                 let Some(pending) = pending_teacher_terminal.take() else {
                     continue;
                 };
@@ -2167,6 +2218,9 @@ async fn run_established_session(
                 continue;
             }
         };
+        if retire_route(presentation_epoch) {
+            return;
+        }
         last_inbound_at = Instant::now();
 
         // One canonical Service-owned authorization store. Re-sample on
@@ -2882,12 +2936,11 @@ async fn run_established_session(
                     }
                 }
 
-                let installed_binding = match tokio::time::timeout(
-                    PRESENTATION_KEY_INSTALL_TIMEOUT,
-                    &mut reply_rx,
-                )
-                .await
-                {
+                let key_result = tokio::select! {
+                    _ = connection.closed() => return,
+                    result = tokio::time::timeout(PRESENTATION_KEY_INSTALL_TIMEOUT, &mut reply_rx) => result,
+                };
+                let installed_binding = match key_result {
                     Ok(Ok(Ok(binding))) if binding == expected_binding => binding,
                     Ok(Ok(Ok(_))) => {
                         eprintln!(
@@ -2897,6 +2950,9 @@ async fn run_established_session(
                         return;
                     }
                     Ok(Ok(Err(code))) => {
+                        if retire_route(presentation_epoch) {
+                            return;
+                        }
                         eprintln!("ClassMesh presentation key rejected: {code}");
                         connection.close(0_u32.into(), b"presentation key worker rejected");
                         return;
@@ -2985,12 +3041,30 @@ async fn run_established_session(
                     &envelope,
                     now_unix_ms,
                 ) {
-                    Ok(PrivilegedControlCommand::PresentationStart(start)) => presentation.start(
-                        peer.identity.principal_id(),
-                        session.control_session_id,
-                        start.presentation_id,
-                        start.stream_id,
-                    ),
+                    Ok(PrivilegedControlCommand::PresentationStart(start)) => {
+                        let epoch = worker_capabilities.media_epoch();
+                        if InputAvailability::load(input.channels.availability.as_ref())
+                            != InputAvailability::Ready
+                        {
+                            PresentationStatus {
+                                presentation_id: start.presentation_id,
+                                stream_id: start.stream_id,
+                                state: WirePresentationState::Rejected as i32,
+                                diagnostic: "control.presentation.worker_unavailable".to_owned(),
+                            }
+                        } else {
+                            let status = presentation.start(
+                                peer.identity.principal_id(),
+                                session.control_session_id,
+                                start.presentation_id,
+                                start.stream_id,
+                            );
+                            if status.state == WirePresentationState::Starting as i32 {
+                                presentation_epoch = Some(epoch);
+                            }
+                            status
+                        }
+                    }
                     Ok(PrivilegedControlCommand::PresentationStop(stop)) => presentation.stop(
                         peer.identity.principal_id(),
                         session.control_session_id,
@@ -3014,6 +3088,7 @@ async fn run_established_session(
                 };
 
                 if status.state == WirePresentationState::Stopped as i32 {
+                    presentation_epoch = None;
                     installed_presentation_key = None;
                     worker_key_lease.clear_now();
                 }
@@ -5268,6 +5343,20 @@ mod tests {
         assert_eq!(cleanup_rx.try_recv(), Ok(()));
         assert_eq!(input.owner.load(Ordering::Acquire), 0);
         assert!(input.try_acquire_owner(42));
+    }
+
+    #[test]
+    fn teacher_route_retires_on_worker_replacement_or_media_suspension_only_when_bound() {
+        let state = WorkerCapabilityState::default();
+        state.activate(10, 53, 1);
+        let worker = state.generation();
+        let epoch = state.media_epoch();
+        assert!(!state.teacher_route_retired(worker, Some(epoch)));
+        state.retire_media();
+        assert!(state.teacher_route_retired(worker, Some(epoch)));
+        assert!(!state.teacher_route_retired(worker, None));
+        state.activate(11, 53, 1);
+        assert!(state.teacher_route_retired(worker, None));
     }
 
     #[test]

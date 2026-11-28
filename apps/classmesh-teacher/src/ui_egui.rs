@@ -187,6 +187,9 @@ pub enum TeacherUiControlEvent {
         update: PresentationUpdate,
     },
     Disconnected,
+    InstalledConnected(u64, TeacherInteractionUiContext),
+    Recovering,
+    RecoveryFailed(&'static str),
 }
 
 impl TeacherUiControlEvent {
@@ -270,6 +273,7 @@ pub async fn pump_authenticated_playback_once(
 pub struct TeacherUiControlBridge {
     events: Receiver<TeacherUiControlEvent>,
     actions: SyncSender<TeacherUiAction>,
+    shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl TeacherUiControlBridge {
@@ -278,7 +282,29 @@ impl TeacherUiControlBridge {
         events: Receiver<TeacherUiControlEvent>,
         actions: SyncSender<TeacherUiAction>,
     ) -> Self {
-        Self { events, actions }
+        Self {
+            events,
+            actions,
+            shutdown: None,
+        }
+    }
+}
+
+impl TeacherUiControlBridge {
+    pub(crate) fn cancel_on_drop(
+        mut self,
+        signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.shutdown = Some(signal);
+        self
+    }
+}
+
+impl Drop for TeacherUiControlBridge {
+    fn drop(&mut self) {
+        if let Some(signal) = &self.shutdown {
+            signal.store(true, std::sync::atomic::Ordering::Release);
+        }
     }
 }
 
@@ -306,6 +332,8 @@ pub struct TeacherEguiShell {
     pending_action: Option<TeacherUiAction>,
     control_bridge: Option<TeacherUiControlBridge>,
     installed_message_target: Option<InstalledMessageTarget>,
+    installed_generation: u64,
+    recovery_status: Option<&'static str>,
     command_status: BTreeMap<u64, (u64, Option<TeacherInteractionState>)>,
 }
 
@@ -335,6 +363,8 @@ impl Default for TeacherEguiShell {
             pending_action: None,
             control_bridge: None,
             installed_message_target: None,
+            installed_generation: 0,
+            recovery_status: None,
             command_status: BTreeMap::new(),
         }
     }
@@ -368,6 +398,8 @@ impl TeacherEguiShell {
             pending_action: None,
             control_bridge: None,
             installed_message_target: None,
+            installed_generation: 0,
+            recovery_status: None,
             command_status: BTreeMap::new(),
         }
     }
@@ -447,6 +479,19 @@ impl TeacherEguiShell {
                         self.set_teacher_interaction_context(context);
                     }
                 }
+                Ok(TeacherUiControlEvent::InstalledConnected(generation, context)) => {
+                    self.admit_installed_connection(generation, context);
+                }
+                Ok(TeacherUiControlEvent::Recovering) => {
+                    self.pending_action = None;
+                    self.disconnect_preserving_command_history();
+                    self.recovery_status = Some("Student disconnected. Reconnecting…");
+                }
+                Ok(TeacherUiControlEvent::RecoveryFailed(message)) => {
+                    self.pending_action = None;
+                    self.disconnect_preserving_command_history();
+                    self.recovery_status = Some(message);
+                }
                 Ok(TeacherUiControlEvent::PlaybackBound { source_id, binding }) => {
                     // A new binding alone cannot show any counters. Reject it
                     // unless the current authenticated session and capability
@@ -518,15 +563,24 @@ impl TeacherEguiShell {
             return;
         }
         if let Some(action) = self.take_pending_action() {
-            let result = self
-                .control_bridge
-                .as_ref()
-                .map(|bridge| bridge.actions.try_send(action));
+            let result = self.control_bridge.as_ref().map(|bridge| {
+                if self.installed_generation != 0 {
+                    bridge.actions.try_send(TeacherUiAction::for_connection(
+                        self.installed_generation,
+                        action,
+                    ))
+                } else {
+                    bridge.actions.try_send(action)
+                }
+            });
             match result {
                 Some(Err(TrySendError::Full(action))) => {
                     // Backpressure is not delivery. Retry only while the same
                     // authenticated session remains bound; never claim success.
-                    self.pending_action = Some(action);
+                    self.pending_action = Some(match action {
+                        TeacherUiAction::Installed { action, .. } => *action,
+                        action => action,
+                    });
                 }
                 Some(Err(TrySendError::Disconnected(_))) => {
                     self.pending_action = None;
@@ -535,6 +589,28 @@ impl TeacherEguiShell {
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn admit_installed_connection(
+        &mut self,
+        generation: u64,
+        context: TeacherInteractionUiContext,
+    ) {
+        let Some(target) = &mut self.installed_message_target else {
+            return;
+        };
+        if generation <= self.installed_generation
+            || context.control_session_id == 0
+            || target.source != context.source_id
+        {
+            return;
+        }
+        target.session = context.control_session_id;
+        if self.admit_installed_target(&context) {
+            self.set_teacher_interaction_context(context);
+            self.installed_generation = generation;
+            self.recovery_status = None;
         }
     }
 
@@ -1234,9 +1310,9 @@ impl eframe::App for TeacherEguiShell {
         });
 
         egui::TopBottomPanel::bottom("classmesh_teacher_connection_status").show(ctx, |ui| {
-            ui.small(control_connection_label(
-                self.teacher_interaction_context.as_ref(),
-            ));
+            ui.small(self.recovery_status.unwrap_or_else(|| {
+                control_connection_label(self.teacher_interaction_context.as_ref())
+            }));
             for (&request_id, &(session_id, state)) in self.command_status.iter().rev().take(3) {
                 ui.small(command_evidence_label(
                     session_id,
@@ -2247,6 +2323,44 @@ mod tests {
                 },
             )),
         }
+    }
+
+    #[test]
+    fn installed_reconnect_admits_fresh_generation_even_when_wire_id_restarts() {
+        let context = interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        let (actions, _rx) = std::sync::mpsc::sync_channel(4);
+        let mut app = TeacherEguiShell {
+            installed_message_target: Some(InstalledMessageTarget {
+                source: context.source_id,
+                session: context.control_session_id,
+                display_name: "Student".into(),
+            }),
+            ..Default::default()
+        };
+        app.attach_control_bridge(TeacherUiControlBridge::new(rx, actions));
+        tx.try_send(TeacherUiControlEvent::InstalledConnected(
+            1,
+            context.clone(),
+        ))
+        .unwrap();
+        app.poll_control_bridge();
+        assert_eq!(app.installed_generation, 1);
+        tx.try_send(TeacherUiControlEvent::Recovering).unwrap();
+        tx.try_send(TeacherUiControlEvent::InstalledConnected(
+            1,
+            context.clone(),
+        ))
+        .unwrap();
+        app.poll_control_bridge();
+        assert!(app.teacher_interaction_context.is_none());
+        assert!(app.recovery_status.is_some());
+        tx.try_send(TeacherUiControlEvent::InstalledConnected(2, context))
+            .unwrap();
+        app.poll_control_bridge();
+        assert_eq!(app.installed_generation, 2);
+        assert!(app.teacher_interaction_context.is_some());
+        assert!(app.recovery_status.is_none());
     }
 
     #[test]

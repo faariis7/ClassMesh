@@ -1,3 +1,12 @@
+## Installed Teacher M4 recovery
+
+The M4 branch stacks on the exact M3 candidate in Draft #778. It adds bounded,
+policy-checked installed reconnect, Worker transition retirement and power-aware
+media suspension. Keep protected M2 on Draft #776. Use the
+[M4 runtime qualification](M4_RUNTIME_RECOVERY_QUALIFICATION.md) to measure
+native Service/Worker recovery, fresh keys and physical output for both
+transports before accepting M4 under #688.
+
 ## Trusted Teacher startup — ADR-0009
 
 The roster format, issuer, protected startup and Windows entry point are implemented.

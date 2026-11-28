@@ -12,8 +12,9 @@ use classmesh_control::{
     ControlHello,
     client_session::{ClientControlSession, connect_client_session_with_retries},
     live_authorization::LiveAuthorizationStore,
-    quic::{DEFAULT_IO_TIMEOUT, DEFAULT_RECONNECT_POLICY, enrolled_client_config},
+    quic::{DEFAULT_IO_TIMEOUT, enrolled_client_config},
 };
+use classmesh_core::recovery::RecoveryPolicy;
 use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity, cng_client_cert_resolver};
 use classmesh_protocol::{Capability, ControlRole, PROTOCOL_VERSION};
 use classmesh_security::{
@@ -238,7 +239,6 @@ pub fn verify_teacher_policy_candidate(bytes: &[u8], epoch: u64) -> StartupResul
 }
 
 pub(crate) struct PreparedTeacher {
-    pub(crate) runtime: tokio::runtime::Runtime,
     pub(crate) endpoint: Endpoint,
     pub(crate) session: ClientControlSession,
     pub(crate) route: TeacherControlRoute,
@@ -248,79 +248,106 @@ pub(crate) struct PreparedTeacher {
     pub(crate) presentation: Option<PreparedPresentation>,
 }
 
-pub(crate) fn prepare_installed_teacher() -> StartupResult<PreparedTeacher> {
-    let policy = InstalledTeacherPolicy::open().map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("installed Teacher policy unavailable: {e}"),
-        )
-    })?;
-    let wall_start = unix_ms()?;
-    let started = Instant::now();
-    let mut validated = validate_policy(policy.bytes(), policy.epoch(), wall_start)?;
-    let presentation = validated
-        .presentation
-        .take()
-        .and_then(PreparedPresentation::prepare_egress);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let (endpoint, session) = runtime.block_on(async {
-        tokio::time::timeout(
-            Duration::from_secs(20),
-            connect_teacher(
-                &validated,
-                presentation.as_ref().map(PreparedPresentation::capability),
-            ),
-        )
-        .await?
-    })?;
-    let chain = session
-        .connection
-        .peer_identity()
-        .and_then(|identity| identity.downcast::<Vec<CertificateDer<'static>>>().ok())
-        .ok_or("Student TLS peer certificate missing")?;
-    let student_leaf = chain.first().ok_or("Student TLS peer chain empty")?;
-    let deadline = validated.deadline_ms.min(certificate_expiry(student_leaf)?);
-    let clock = Arc::new(move || {
-        let time = monotonic_wall_time(wall_start, started.elapsed(), unix_ms().ok());
-        if time >= deadline || !policy.still_current().unwrap_or(false) {
-            return u64::MAX;
-        }
-        time
-    });
-    let now = clock();
-    if now == u64::MAX {
-        return Err("protected Teacher policy changed or expired during connection".into());
+pub(crate) struct InstalledTeacherStartup {
+    policy: Arc<InstalledTeacherPolicy>,
+    wall_start: u64,
+    started: Instant,
+}
+
+impl InstalledTeacherStartup {
+    pub(crate) fn open() -> StartupResult<Self> {
+        let policy = InstalledTeacherPolicy::open().map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("installed Teacher policy unavailable: {e}"),
+            )
+        })?;
+        Ok(Self {
+            policy: Arc::new(policy),
+            wall_start: unix_ms()?,
+            started: Instant::now(),
+        })
     }
-    verify_current_student(
-        validated.student,
-        &session.connection,
-        &validated.authorization,
-        now,
-    )
-    .map_err(|e| io::Error::other(format!("Student identity rejected: {e:?}")))?;
-    let route = TeacherControlRoute::new(
-        validated.student,
-        validated.source,
-        session.established.control_session_id,
-    )
-    .map_err(|e| io::Error::other(format!("Teacher session route rejected: {e:?}")))?;
-    Ok(PreparedTeacher {
-        runtime,
-        endpoint,
-        session,
-        route,
-        authorization: validated.authorization,
-        display_name: validated.target.server_name,
-        clock,
-        presentation,
-    })
+
+    fn current_time(&self) -> StartupResult<u64> {
+        if !self.policy.still_current()? {
+            return Err(
+                "protected Teacher policy changed. Reopen Teacher to verify the new policy.".into(),
+            );
+        }
+        Ok(monotonic_wall_time(
+            self.wall_start,
+            self.started.elapsed(),
+            unix_ms().ok(),
+        ))
+    }
+
+    pub(crate) async fn connect(&self, recovery: RecoveryPolicy) -> StartupResult<PreparedTeacher> {
+        let mut validated = validate_policy(
+            self.policy.bytes(),
+            self.policy.epoch(),
+            self.current_time()?,
+        )?;
+        let presentation = validated
+            .presentation
+            .take()
+            .and_then(PreparedPresentation::prepare_egress);
+        let (endpoint, session) = connect_teacher(
+            &validated,
+            presentation.as_ref().map(PreparedPresentation::capability),
+            recovery,
+        )
+        .await?;
+        let chain = session
+            .connection
+            .peer_identity()
+            .and_then(|identity| identity.downcast::<Vec<CertificateDer<'static>>>().ok())
+            .ok_or("Student TLS peer certificate missing")?;
+        let student_leaf = chain.first().ok_or("Student TLS peer chain empty")?;
+        let deadline = validated.deadline_ms.min(certificate_expiry(student_leaf)?);
+        let wall_start = self.wall_start;
+        let started = self.started;
+        let policy = Arc::clone(&self.policy);
+        let clock = Arc::new(move || {
+            let time = monotonic_wall_time(wall_start, started.elapsed(), unix_ms().ok());
+            if time >= deadline || !policy.still_current().unwrap_or(false) {
+                return u64::MAX;
+            }
+            time
+        });
+        let now = clock();
+        if now == u64::MAX {
+            return Err("protected Teacher policy changed or expired during connection".into());
+        }
+        verify_current_student(
+            validated.student,
+            &session.connection,
+            &validated.authorization,
+            now,
+        )
+        .map_err(|e| io::Error::other(format!("Student identity rejected: {e:?}")))?;
+        let route = TeacherControlRoute::new(
+            validated.student,
+            validated.source,
+            session.established.control_session_id,
+        )
+        .map_err(|e| io::Error::other(format!("Teacher session route rejected: {e:?}")))?;
+        Ok(PreparedTeacher {
+            endpoint,
+            session,
+            route,
+            authorization: validated.authorization,
+            display_name: validated.target.server_name,
+            clock,
+            presentation,
+        })
+    }
 }
 
 async fn connect_teacher(
     policy: &ValidatedPolicy,
     presentation_transport: Option<Capability>,
+    recovery: RecoveryPolicy,
 ) -> StartupResult<(Endpoint, ClientControlSession)> {
     let ip = match policy.target.address.ip() {
         IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -353,7 +380,7 @@ async fn connect_teacher(
         &policy.target.server_name,
         &hello,
         DEFAULT_IO_TIMEOUT,
-        DEFAULT_RECONNECT_POLICY,
+        recovery,
     )
     .await?;
     Ok((endpoint, session))
@@ -554,11 +581,17 @@ mod tests {
                 "address": address, "server_name": "classmesh.local" },
         });
         let validated = validate_policy(&serde_json::to_vec(&snapshot).unwrap(), 3, now).unwrap();
-        let (_endpoint, session) =
-            tokio::time::timeout(Duration::from_secs(10), connect_teacher(&validated, None))
-                .await
-                .unwrap()
-                .unwrap();
+        let (_endpoint, session) = tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_teacher(
+                &validated,
+                None,
+                classmesh_control::quic::DEFAULT_RECONNECT_POLICY,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let _server_session = task.await.unwrap();
         assert_eq!(session.established.control_session_id, 51);
         assert_eq!(validated.source, MonitoringSourceId(9));

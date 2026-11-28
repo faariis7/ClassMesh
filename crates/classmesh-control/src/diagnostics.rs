@@ -17,7 +17,9 @@ pub const fn transport_diagnostic_code(error: &ControlTransportError) -> &'stati
         ControlTransportError::Frame(_) => "control.transport.frame",
         ControlTransportError::Timeout { .. } => "control.transport.timeout",
         ControlTransportError::Configuration(_) => "control.transport.configuration",
-        ControlTransportError::Transport(_) => "control.transport.failure",
+        ControlTransportError::Transport(_) | ControlTransportError::Connection(_) => {
+            "control.transport.failure"
+        }
         ControlTransportError::EndpointClosed => "control.transport.endpoint_closed",
     }
 }

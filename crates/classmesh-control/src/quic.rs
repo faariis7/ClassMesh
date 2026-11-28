@@ -8,8 +8,8 @@ use classmesh_core::recovery::RecoveryPolicy;
 use classmesh_protocol::control_wire::ControlEnvelope;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{
-    ClientConfig, Connection, Endpoint, IdleTimeout, RecvStream, SendStream, ServerConfig,
-    TransportConfig,
+    ClientConfig, Connection, ConnectionError, Endpoint, IdleTimeout, ReadError, ReadExactError,
+    RecvStream, SendStream, ServerConfig, TransportConfig, WriteError,
 };
 use rustls::RootCertStore;
 use rustls::client::ResolvesClientCert;
@@ -26,6 +26,8 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 pub const DEFAULT_QUIC_KEEPALIVE: Duration = Duration::from_secs(4);
+/// Authenticated Service retirement with a fresh Hello required.
+pub const SERVICE_RECONNECT_CODE: u32 = 1;
 pub const MAX_CONTROL_BIDI_STREAMS: u32 = 4;
 pub const DEFAULT_RECONNECT_POLICY: RecoveryPolicy = RecoveryPolicy {
     max_attempts: 8,
@@ -39,7 +41,21 @@ pub enum ControlTransportError {
     Timeout { operation: &'static str },
     Configuration(String),
     Transport(String),
+    Connection(ConnectionError),
     EndpointClosed,
+}
+
+impl ControlTransportError {
+    pub fn can_reconnect(&self) -> bool {
+        match self {
+            Self::Timeout { .. }
+            | Self::Connection(ConnectionError::Reset | ConnectionError::TimedOut) => true,
+            Self::Connection(ConnectionError::ApplicationClosed(close)) => {
+                close.error_code == SERVICE_RECONNECT_CODE.into()
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Display for ControlTransportError {
@@ -51,6 +67,7 @@ impl Display for ControlTransportError {
                 write!(formatter, "control transport configuration: {error}")
             }
             Self::Transport(error) => write!(formatter, "control transport: {error}"),
+            Self::Connection(error) => write!(formatter, "control QUIC connection: {error}"),
             Self::EndpointClosed => write!(formatter, "control QUIC endpoint closed"),
         }
     }
@@ -60,6 +77,7 @@ impl Error for ControlTransportError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Frame(error) => Some(error),
+            Self::Connection(error) => Some(error),
             _ => None,
         }
     }
@@ -215,14 +233,14 @@ pub async fn connect(
 ) -> Result<Connection, ControlTransportError> {
     let connecting = endpoint
         .connect(remote, server_name)
-        .map_err(|error| ControlTransportError::Transport(error.to_string()))?;
+        .map_err(|error| ControlTransportError::Configuration(error.to_string()))?;
 
     timeout(DEFAULT_CONNECT_TIMEOUT, connecting)
         .await
         .map_err(|_| ControlTransportError::Timeout {
             operation: "QUIC connect",
         })?
-        .map_err(|error| ControlTransportError::Transport(error.to_string()))
+        .map_err(ControlTransportError::Connection)
 }
 
 pub(crate) fn validate_reconnect_policy(
@@ -331,7 +349,7 @@ impl ControlChannel {
             .map_err(|_| ControlTransportError::Timeout {
                 operation: "open control stream",
             })?
-            .map_err(|error| ControlTransportError::Transport(error.to_string()))?;
+            .map_err(ControlTransportError::Connection)?;
 
         Ok(Self {
             send,
@@ -350,7 +368,7 @@ impl ControlChannel {
             .map_err(|_| ControlTransportError::Timeout {
                 operation: "accept control stream",
             })?
-            .map_err(|error| ControlTransportError::Transport(error.to_string()))?;
+            .map_err(ControlTransportError::Connection)?;
 
         Ok(Self {
             send,
@@ -415,7 +433,10 @@ async fn send_control_envelope(
         .map_err(|_| ControlTransportError::Timeout {
             operation: "write control frame",
         })?
-        .map_err(|error| ControlTransportError::Transport(error.to_string()))
+        .map_err(|error| match error {
+            WriteError::ConnectionLost(cause) => ControlTransportError::Connection(cause),
+            _ => ControlTransportError::Transport(error.to_string()),
+        })
 }
 
 async fn receive_control_envelope(
@@ -428,7 +449,7 @@ async fn receive_control_envelope(
         .map_err(|_| ControlTransportError::Timeout {
             operation: "read control frame length",
         })?
-        .map_err(|error| ControlTransportError::Transport(error.to_string()))?;
+        .map_err(control_read_error)?;
 
     let length = declared_payload_len(prefix)?;
     // The raw payload/frame may contain a Phase 7E key grant. Zeroize both
@@ -441,7 +462,7 @@ async fn receive_control_envelope(
         .map_err(|_| ControlTransportError::Timeout {
             operation: "read control frame payload",
         })?
-        .map_err(|error| ControlTransportError::Transport(error.to_string()))?;
+        .map_err(control_read_error)?;
 
     let mut frame = Zeroizing::new(Vec::with_capacity(
         CONTROL_LENGTH_PREFIX_BYTES + payload.len(),
@@ -454,6 +475,15 @@ async fn receive_control_envelope(
 fn finish_control_send(send: &mut SendStream) -> Result<(), ControlTransportError> {
     send.finish()
         .map_err(|error| ControlTransportError::Transport(error.to_string()))
+}
+
+fn control_read_error(error: ReadExactError) -> ControlTransportError {
+    match error {
+        ReadExactError::ReadError(ReadError::ConnectionLost(cause)) => {
+            ControlTransportError::Connection(cause)
+        }
+        _ => ControlTransportError::Transport(error.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -943,6 +973,29 @@ mod tests {
             connection.close(0_u32.into(), b"server rejected untrusted client identity");
         }
         Ok(())
+    }
+
+    #[test]
+    fn reconnect_classifies_network_loss_and_explicit_service_retirement_only() {
+        let application_close = |code: u32| {
+            ConnectionError::ApplicationClosed(quinn::ApplicationClose {
+                error_code: code.into(),
+                reason: Default::default(),
+            })
+        };
+        assert!(ControlTransportError::Connection(ConnectionError::Reset).can_reconnect());
+        assert!(ControlTransportError::Connection(ConnectionError::TimedOut).can_reconnect());
+        assert!(
+            ControlTransportError::Connection(application_close(SERVICE_RECONNECT_CODE))
+                .can_reconnect()
+        );
+        assert!(!ControlTransportError::Connection(application_close(0_u32)).can_reconnect());
+        assert!(
+            !ControlTransportError::Connection(ConnectionError::VersionMismatch).can_reconnect()
+        );
+        assert!(
+            !ControlTransportError::Transport("spoofed disconnect reason".into()).can_reconnect()
+        );
     }
 
     #[test]

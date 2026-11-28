@@ -16,6 +16,7 @@ use classmesh_windows_runtime::ipc_sensitive::{
 #[derive(Debug)]
 pub enum WorkerGroupMediaKeyError {
     BindingChangeRequiresClear,
+    PresentationSuspendedOrRetired,
     StaleEpoch { current: u32, received: u32 },
     NoInstalledKey,
     StreamMismatch { expected: u32, received: u32 },
@@ -26,6 +27,9 @@ pub enum WorkerGroupMediaKeyError {
 impl Display for WorkerGroupMediaKeyError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::PresentationSuspendedOrRetired => {
+                formatter.write_str("presentation session suspended or retired")
+            }
             Self::BindingChangeRequiresClear => formatter.write_str(
                 "group-media key binding changed without clearing the current Worker presentation",
             ),
@@ -52,6 +56,7 @@ impl Error for WorkerGroupMediaKeyError {
         match self {
             Self::Security(error) => Some(error),
             Self::BindingChangeRequiresClear
+            | Self::PresentationSuspendedOrRetired
             | Self::StaleEpoch { .. }
             | Self::NoInstalledKey
             | Self::StreamMismatch { .. }
@@ -90,8 +95,30 @@ pub struct WorkerGroupMediaAuthenticationStats {
 }
 
 #[derive(Debug, Default)]
+struct PresentationSuspension {
+    suspended: bool,
+    retired_session: Option<u64>,
+}
+
+impl PresentationSuspension {
+    fn accepts(&self, session: u64) -> bool {
+        !self.suspended && self.retired_session != Some(session)
+    }
+
+    fn suspend(&mut self, session: Option<u64>) {
+        self.suspended = true;
+        self.retired_session = session.or(self.retired_session);
+    }
+
+    fn resume(&mut self) {
+        self.suspended = false;
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct WorkerGroupMediaKeyState {
     installed: Option<InstalledWorkerGroupMediaKey>,
+    suspension: PresentationSuspension,
     authentication_stats: WorkerGroupMediaAuthenticationStats,
     // A successful in-place key epoch rotation invalidates decoder reference
     // frames even when the presentation/stream identity stays unchanged.
@@ -99,6 +126,18 @@ pub struct WorkerGroupMediaKeyState {
 }
 
 impl WorkerGroupMediaKeyState {
+    pub fn suspend_presentation(&mut self) {
+        self.suspension
+            .suspend(self.binding().map(|binding| binding.control_session_id));
+        self.installed = None;
+        self.authentication_stats = WorkerGroupMediaAuthenticationStats::default();
+        self.decoder_resync_pending = false;
+    }
+
+    pub fn resume_presentation(&mut self) {
+        self.suspension.resume();
+    }
+
     #[must_use]
     pub fn binding(&self) -> Option<PresentationKeyInstallBinding> {
         self.installed.as_ref().map(|installed| installed.binding)
@@ -127,6 +166,9 @@ impl WorkerGroupMediaKeyState {
         install: SensitivePresentationKeyInstall,
     ) -> Result<PresentationKeyInstallBinding, WorkerGroupMediaKeyError> {
         let binding = install.binding();
+        if !self.suspension.accepts(binding.control_session_id) {
+            return Err(WorkerGroupMediaKeyError::PresentationSuspendedOrRetired);
+        }
         if let Some(current) = self.binding() {
             let same_presentation = binding.control_session_id == current.control_session_id
                 && binding.presentation_id == current.presentation_id
@@ -301,6 +343,18 @@ impl WorkerGroupMediaKeyState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn suspend_clears_keys_and_requires_a_fresh_control_session() {
+        let mut gate = PresentationSuspension::default();
+        assert!(gate.accepts(77));
+        gate.suspend(Some(77));
+        assert!(!gate.accepts(77));
+        assert!(!gate.accepts(78));
+        gate.resume();
+        assert!(!gate.accepts(77));
+        assert!(gate.accepts(78));
+    }
+
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use classmesh_network::multicast::{MulticastMembership, MulticastProbeOutcome};
