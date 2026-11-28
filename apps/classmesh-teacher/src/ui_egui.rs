@@ -24,8 +24,8 @@ use crate::device_diagnostics::{
     DeviceDiagnosticsView, TeacherDeviceDiagnosticsViewModel,
 };
 use crate::presentation_view::{
-    PresentationBindingView, PresentationRuntimeSnapshot, PresentationViewState,
-    TeacherPresentationViewModel, presentation_change_retires_playback,
+    PresentationBindingView, PresentationRuntimeSnapshot, PresentationUiStatus, PresentationUpdate,
+    PresentationViewState, TeacherPresentationViewModel, presentation_change_retires_playback,
 };
 use crate::receiver_playback_diagnostics::{
     TeacherPlaybackBinding, TeacherPlaybackCounters, TeacherPlaybackDiagnosticError,
@@ -184,7 +184,7 @@ pub enum TeacherUiControlEvent {
     },
     Presentation {
         control_session_id: u64,
-        outcome: Result<PresentationRuntimeSnapshot, String>,
+        update: PresentationUpdate,
     },
     Disconnected,
 }
@@ -294,7 +294,7 @@ pub struct TeacherEguiShell {
     classroom: TeacherClassroomViewModel,
     monitoring: TeacherMonitoringGridViewModel,
     presentation: PresentationViewState,
-    presentation_error: Option<String>,
+    presentation_status: Option<PresentationUiStatus>,
     diagnostics_model: TeacherDeviceDiagnosticsViewModel,
     diagnostics: Option<DeviceDiagnosticsView>,
     playback: Option<TeacherPlaybackUiProjection>,
@@ -320,7 +320,7 @@ impl Default for TeacherEguiShell {
             presentation: TeacherPresentationViewModel::state(
                 PresentationRuntimeSnapshot::default(),
             ),
-            presentation_error: None,
+            presentation_status: None,
             diagnostics_model: TeacherDeviceDiagnosticsViewModel::new(
                 DeviceDiagnosticsConfig::default(),
             )
@@ -353,7 +353,7 @@ impl TeacherEguiShell {
             presentation: TeacherPresentationViewModel::state(
                 PresentationRuntimeSnapshot::default(),
             ),
-            presentation_error: None,
+            presentation_status: None,
             diagnostics_model: TeacherDeviceDiagnosticsViewModel::new(
                 DeviceDiagnosticsConfig::default(),
             )
@@ -494,22 +494,8 @@ impl TeacherEguiShell {
                 }
                 Ok(TeacherUiControlEvent::Presentation {
                     control_session_id,
-                    outcome,
-                }) => {
-                    if self
-                        .teacher_interaction_context
-                        .as_ref()
-                        .is_some_and(|context| context.control_session_id == control_session_id)
-                    {
-                        match outcome {
-                            Ok(snapshot) => {
-                                self.presentation_error = None;
-                                self.set_presentation_snapshot(snapshot);
-                            }
-                            Err(error) => self.presentation_error = Some(error),
-                        }
-                    }
-                }
+                    update,
+                }) => self.apply_presentation_update(control_session_id, update),
                 Ok(TeacherUiControlEvent::Disconnected) => {
                     self.pending_action = None;
                     self.disconnect_preserving_command_history();
@@ -596,6 +582,8 @@ impl TeacherEguiShell {
         {
             reset_teacher_interaction_draft(&mut self.teacher_interaction_draft);
             self.command_status.clear();
+            self.presentation_status = None;
+            self.set_presentation_snapshot(PresentationRuntimeSnapshot::default());
             // Every queued action belongs to the old session, including
             // SelectDevice and presentation intents with no session epoch.
             // Never forward them into a newly authenticated QUIC session.
@@ -624,7 +612,14 @@ impl TeacherEguiShell {
     // the last observed results for diagnosis, while revoking all live authority.
     fn disconnect_preserving_command_history(&mut self) {
         self.set_presentation_snapshot(PresentationRuntimeSnapshot::default());
-        self.presentation_error = None;
+        if self.presentation_status.is_some()
+            && !matches!(
+                self.presentation_status,
+                Some(PresentationUiStatus::Failed(_))
+            )
+        {
+            self.presentation_status = Some(PresentationUiStatus::Disconnected);
+        }
         let history = std::mem::take(&mut self.command_status);
         self.clear_teacher_interaction_context();
         self.command_status = history;
@@ -792,6 +787,20 @@ impl TeacherEguiShell {
 
     pub fn clear_staged_file_candidate(&mut self) {
         self.staged_file_candidate = None;
+    }
+
+    fn apply_presentation_update(&mut self, control_session_id: u64, update: PresentationUpdate) {
+        if self
+            .teacher_interaction_context
+            .as_ref()
+            .is_none_or(|context| context.control_session_id != control_session_id)
+        {
+            return;
+        }
+        if let Some(snapshot) = update.snapshot {
+            self.set_presentation_snapshot(snapshot);
+        }
+        self.presentation_status = Some(update.status);
     }
 
     pub fn set_presentation_snapshot(&mut self, snapshot: PresentationRuntimeSnapshot) {
@@ -1093,12 +1102,15 @@ impl TeacherEguiShell {
                 }
             }
             TeacherUiSection::Presentation => {
-                if let Some(error) = &self.presentation_error {
-                    ui.label(error);
-                }
-                if let Some(message) =
-                    show_presentation(ui, self.presentation, self.pending_action.is_some())
-                    && let Some(action) = self.shell.handle(message)
+                let action_blocked = self.pending_action.is_some()
+                    || (self.installed_message_target.is_some()
+                        && self.teacher_interaction_context.is_none());
+                if let Some(message) = show_presentation(
+                    ui,
+                    self.presentation,
+                    self.presentation_status,
+                    action_blocked,
+                ) && let Some(action) = self.shell.handle(message)
                 {
                     self.queue_action(action);
                 }
@@ -2235,6 +2247,27 @@ mod tests {
                 },
             )),
         }
+    }
+
+    #[test]
+    fn stale_presentation_update_cannot_replace_current_ui_or_restore_it_after_disconnect() {
+        let mut app = TeacherEguiShell::default();
+        let context = interaction_context(BTreeSet::from([Capability::TeacherMessage]));
+        let session = context.control_session_id;
+        app.set_teacher_interaction_context(context);
+        app.apply_presentation_update(session, PresentationUiStatus::PreparingReceiver.into());
+        app.apply_presentation_update(session + 1, PresentationUiStatus::Sending.into());
+        assert_eq!(
+            app.presentation_status,
+            Some(PresentationUiStatus::PreparingReceiver)
+        );
+        app.disconnect_preserving_command_history();
+        app.apply_presentation_update(session, PresentationUiStatus::Sending.into());
+        assert_eq!(
+            app.presentation_status,
+            Some(PresentationUiStatus::Disconnected)
+        );
+        assert!(app.presentation.binding.is_none());
     }
 
     #[test]

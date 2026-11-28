@@ -1,36 +1,52 @@
 # Installed Teacher presentation qualification
 
-The installed Windows Teacher supports one enrolled Student target and an opt-in
-protected multicast presentation. Get separate authorization for M3. The M2
-Message-only fixture leaves the presentation field absent and grants
-`SendTeacherMessage` only.
+The installed Windows Teacher supports one enrolled Student and chooses
+Unicast or Multicast from its protected policy at startup. Use an approved
+two-host M3 lab. The M2 Message-only fixture omits the presentation field
+and grants `SendTeacherMessage` only.
 
 ## Provision a disposable two-host lab
 
-1. Record the exact Draft PR commit, matching Teacher/Service/Worker SHA-256 and
-   signer, Windows x64 builds, GPU/driver and Ethernet NIC on each machine.
-   Use a lab-only display with moving content. Teacher sends its primary display.
-   Verify the [M2 admission procedure](WINDOWS_RUNTIME_PLAN.md) and the exact
-   authenticated Worker on the Student before qualifying M3.
-2. Use a test wired VLAN with administrator-confirmed IGMP forwarding and an
-   approved administratively scoped IPv4 group and UDP port. Run the
-   [two-host multicast diagnostic](../tools/classmesh-lab/docs/MULTICAST_DELIVERY_DIAGNOSTIC.md)
-   for that topology. Record both interfaces and packet/delivery correlation.
-   The sender uses TTL 1. Its host-local multicast probe permits advertising the
-   capability and cannot establish two-host delivery.
-3. On the approved disposable Teacher, extend a fresh, independently reviewed
-   Teacher policy JSON using the optional `presentation` object below. Use
-   the actual Teacher interface address routed to the enrolled Student. The
-   group, port and limits must be assigned for the lab. Reuse the existing
-   protected publication and signed roster. On the Student use an independently
-   issued Teacher `StartPresentation` grant and the existing protected Service
-   multicast interface on the same VLAN. Service still authorizes each privileged
-   request. Run the usual policy validation and package/signature gates before
-   publishing or launching.
+1. Record the exact [Draft PR #778](https://github.com/faariis7/ClassMesh/pull/778)
+   commit, matching Teacher/Service/Worker SHA-256 and signer, Windows x64
+   builds, GPU/driver and Ethernet NIC on each machine. Use a lab-only display
+   with moving content. Teacher sends its primary display. Verify the
+   [M2 admission procedure](WINDOWS_RUNTIME_PLAN.md) and the exact authenticated
+   Worker on the Student before qualifying M3.
+2. Use a test wired VLAN and a dedicated UDP port. For Multicast, verify IGMP
+   forwarding and run the [two-host multicast diagnostic](../tools/classmesh-lab/docs/MULTICAST_DELIVERY_DIAGNOSTIC.md).
+   Record both interfaces, group and delivery counts. The sender uses TTL 1.
+   Its host-local probe gates capability advertisement. For Unicast, confirm
+   the approved Student host can bind the port and that traffic from the
+   enrolled Teacher is permitted on the lab network. The existing Service
+   advertises `UdpUnicast` with its authenticated Worker's DXGI capture and
+   hardware H.264 encode capability report. Record both that advertisement
+   and the Student decoder inventory for the physical target.
+3. Extend the independently approved protected Teacher policy. Choose one of
+   the following presentation objects. Both require the Student to authorize
+   the Teacher's existing `StartPresentation` permission. Use the existing
+   policy Plan and approved Registry publication flow. Multicast needs the
+   configured Teacher IPv4 interface, its scoped group and the corresponding
+   Service interface on the lab VLAN. A legacy object with `interface` and
+   `group` and no `transport` continues to select Multicast.
 
    ```json
    {
      "presentation": {
+       "transport": "unicast",
+       "port": 57000,
+       "width": 1280,
+       "height": 720,
+       "fps": 30,
+       "bitrate_kbps": 3000
+     }
+   }
+   ```
+
+   ```json
+   {
+     "presentation": {
+       "transport": "multicast",
        "interface": "192.0.2.10",
        "group": "239.11.0.5",
        "port": 57000,
@@ -42,18 +58,24 @@ Message-only fixture leaves the presentation field absent and grants
    }
    ```
 
-   These are example values. Use a valid even raster and bounded H.264 profile.
-   For a straightforward first run set the test display to the same raster and
-   measure the actual encoder output profile.
+   Use actual lab assignments. For the first run, set the display to the
+   configured even raster and measure the encoder output profile. In Unicast,
+   the protected port is the only endpoint parameter in the offer. Teacher
+   sends to the authenticated QUIC peer IP, and Service pins the Teacher IP
+   for the Worker receiver. The sender retires the route if the peer IP changes
+   during setup or streaming. Change transports by starting a new session
+   under separately approved configuration.
 
 ## Positive and denial cases
 
-- Run the Teacher normally as an ordinary interactive user and open Presentation.
-  Click **Start presentation**. Record the exact session and request correlation
+- Run this sequence once for each configured transport. Launch Teacher as
+  an ordinary interactive user, open Presentation and confirm its Ready label
+  names the transport. Click **Start presentation**. Record the exact session and request correlation
   for Service ownership status, the matching SFrame epoch acknowledgment, and
   the Student Worker's accepted stream offer before the sender captures.
-  Check capture/encode counts and *changing visible Student output*. Preserve
-  the decode/present result and distinguish sender counters from Student output.
+  Verify the UI advances through reservation, key, receiver and capture phases.
+  Sending indicates a successful protected frame write on Teacher. Capture
+  *changing visible Student output* and the separate decoder/present counts.
 - Click **Stop presentation**. Confirm the sender stops, the exact Worker
   receiver and key lease retire, and no old frames render. Start again and
   verify a new presentation/stream ID and new key material. The scoped epoch
@@ -63,7 +85,10 @@ Message-only fixture leaves the presentation field absent and grants
   Retain the configured transport but remove `StartPresentation` at Service
   and verify denial before ownership or media. Exercise stale Stop binding,
   wrong request/stream/epoch acknowledgment, duplicate/replayed control, and
-  policy/session retirement during streaming. Capture recovery separately.
+  policy/session retirement during streaming. Force an approved UDP bind
+  conflict to verify the configured receiver refuses the offer. Teacher should
+  complete correlated Stop and allow a clean Start on the same control session
+  after the conflict is removed. Record which side supplied each error.
 - Use bounded packet impairment on the lab path. Record decoder-safe recovery
   through the existing rate-limited keyframe request, CPU/GPU use, capture
   pacing, dropped frames, and p50/p95 glass-to-glass latency. Repeat
@@ -77,24 +102,36 @@ Message-only fixture leaves the presentation field absent and grants
 
 ## Transport and codec boundaries
 
-The installed GUI initiates the configured multicast path. Sender-side
-protected unicast fan-out and the Service/Worker unicast receiver already
-exist. They need an installed-Teacher unicast offer/receiver selection path and
-separate physical evidence. Multicast refusal leaves no implicit transport
-downgrade. The installed sender owns a single negotiated route, lets the
-existing Service release the lease when the control session closes, and stops
-emitting frames on cancellation, policy expiry or peer revocation. A separate
-media thread keeps capture and encoder delays out of the QUIC control loop.
+Both installed transports use the same authenticated presentation lifecycle,
+one shared capture/encode fan-out, the existing protected group-media
+coordinator and bounded sinks. A correlated Service Start reserves ownership.
+The Worker must acknowledge the exact key and its receiver must accept the
+exact selected offer before capture begins. The Service authorizes every
+privileged message. The sender rechecks the roster deadline, peer and exact
+connection after native encoding and before sealing or sending the frame.
+Cancellation, disconnect or loss of authority retire the sender. Stop and
+restart wait for both remote confirmation and local sender exit. Missing
+confirmation retires the exact control session to let Service release ownership.
 
-For VM1, the recorded x64-emulated inventory on VirtIO GPU driver
-`100.6.101.58119` enumerated Microsoft’s synchronous H.264 MFT, an empty
+## Separate software decode smoke
+
+The prior VM1 inventory under x64 emulation on VirtIO GPU driver
+`100.6.101.58119` found Microsoft's synchronous H.264 MFT, an empty
 adapter-specific decoder list and `E_NOINTERFACE (0x80004002)` at
-`d3d11_video_interface`. A D3D11 device and a D3D11-aware MFT do not establish
-adapter-backed decode. The installed Student explicitly requires `ID3D11VideoDevice` before it
-activates the synchronous decoder. Microsoft supports system-memory MFT
-decoding without DXVA, which gives a separate decode-only qualification path.
-It would require a separately measured decode and upload/presentation path
-before use in the product. Keep the installed renderer gate, bounded buffers
-and the existing hardware/performance targets.
-Qualify asynchronous/vendor transforms only on the exact physical GPU/driver.
-[Microsoft H.264 decoder](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-decoder) · [D3D11 video interface](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nn-d3d11-id3d11videodevice) · [Media Foundation software decode](https://learn.microsoft.com/en-us/windows/win32/medfound/supporting-direct3d-11-video-decoding-in-media-foundation)
+`d3d11_video_interface`. Run `classmesh-async-h264-qualify.exe --inventory`
+on each candidate lab device. The installed Student requires
+`ID3D11VideoDevice` before activating the synchronous decoder.
+
+Microsoft documents the H.264 software MFT and NV12 output. A bounded
+decode-only smoke can use a Windows Media Foundation Source Reader on a short,
+hashed synthetic H.264 MP4, with no D3D device manager, no hardware transforms
+and no process-local transform registration. Record the selected decoder,
+negotiated NV12 format, frame count and changing luma digests in system memory.
+`MF_SOURCE_READER_DISABLE_DXVA` alone leaves D3D-backed allocation in use
+when a manager is supplied. A standalone smoke run belongs on a separate
+disposable Windows host. Its results cover software decode of that fixture.
+Student rendering still requires the installed synchronous D3D11 path and
+the physical output, FPS, latency and recovery measurements above.
+[Microsoft H.264 decoder](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-decoder) ·
+[Source Reader hardware transforms](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-readwrite-enable-hardware-transforms) ·
+[Source Reader DXVA behavior](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-source-reader-disable-dxva)

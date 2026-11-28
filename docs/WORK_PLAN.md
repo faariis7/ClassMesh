@@ -22,11 +22,12 @@ through the SYSTEM-owned primary pipe. The next guarded VM1 run must verify
 
 ## Installed Teacher M3 qualification
 
-The installed Teacher has an opt-in protected multicast runtime for its single
-enrolled Student. The Message-only policy continues to omit presentation.
-Unicast primitives and the Student receive path are covered separately. Use
-the [two-host procedure](M3_INSTALLED_PRESENTATION_QUALIFICATION.md) to measure
-visible output, exact teardown, recovery and physical performance.
+[Draft PR #778](https://github.com/faariis7/ClassMesh/pull/778) implements
+Unicast and Multicast for the single enrolled Student, selected by protected
+Teacher policy. Use the [two-host procedure](M3_INSTALLED_PRESENTATION_QUALIFICATION.md)
+for each transport. Physical acceptance requires visible Student rendering,
+exact teardown, restart, recovery and the established GPU/network performance
+measurements. Keep the separate protected M2 qualification on Draft #776.
 
 ## Unified RC follow-up — 2026-11-25
 

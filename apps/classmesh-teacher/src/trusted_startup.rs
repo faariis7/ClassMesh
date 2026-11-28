@@ -34,7 +34,6 @@ use sha2::{Digest, Sha256};
 
 use crate::connected_command::{TeacherControlRoute, verify_current_student};
 use crate::installed_presentation::{PreparedPresentation, PresentationPolicy, TeacherClock};
-use classmesh_network::multicast::MulticastProbeOutcome;
 
 type StartupResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -246,7 +245,7 @@ pub(crate) struct PreparedTeacher {
     pub(crate) authorization: LiveAuthorizationStore,
     pub(crate) display_name: String,
     pub(crate) clock: TeacherClock,
-    pub(crate) presentation: Option<(PreparedPresentation, MulticastProbeOutcome)>,
+    pub(crate) presentation: Option<PreparedPresentation>,
 }
 
 pub(crate) fn prepare_installed_teacher() -> StartupResult<PreparedTeacher> {
@@ -262,14 +261,17 @@ pub(crate) fn prepare_installed_teacher() -> StartupResult<PreparedTeacher> {
     let presentation = validated
         .presentation
         .take()
-        .and_then(PreparedPresentation::with_local_probe);
+        .and_then(PreparedPresentation::prepare_egress);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let (endpoint, session) = runtime.block_on(async {
         tokio::time::timeout(
             Duration::from_secs(20),
-            connect_teacher(&validated, presentation.is_some()),
+            connect_teacher(
+                &validated,
+                presentation.as_ref().map(PreparedPresentation::capability),
+            ),
         )
         .await?
     })?;
@@ -318,7 +320,7 @@ pub(crate) fn prepare_installed_teacher() -> StartupResult<PreparedTeacher> {
 
 async fn connect_teacher(
     policy: &ValidatedPolicy,
-    presentation: bool,
+    presentation_transport: Option<Capability>,
 ) -> StartupResult<(Endpoint, ClientControlSession)> {
     let ip = match policy.target.address.ip() {
         IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -330,11 +332,11 @@ async fn connect_teacher(
         policy.resolver.clone(),
     )?);
     let mut capabilities = BTreeSet::from([Capability::TeacherMessage]);
-    if presentation {
+    if let Some(transport) = presentation_transport {
         capabilities.extend([
             Capability::TeacherPresentation,
             Capability::SframeGroupMedia,
-            Capability::UdpMulticast,
+            transport,
         ]);
     }
     let hello = ControlHello {
@@ -553,7 +555,7 @@ mod tests {
         });
         let validated = validate_policy(&serde_json::to_vec(&snapshot).unwrap(), 3, now).unwrap();
         let (_endpoint, session) =
-            tokio::time::timeout(Duration::from_secs(10), connect_teacher(&validated, false))
+            tokio::time::timeout(Duration::from_secs(10), connect_teacher(&validated, None))
                 .await
                 .unwrap()
                 .unwrap();

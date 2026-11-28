@@ -293,14 +293,14 @@ impl TeacherVideoEngineLifecycle {
         coordinator: &mut GroupMediaCoordinator,
         authorization: &AuthorizationStore,
         is_current: impl FnOnce() -> bool,
-    ) -> Result<(), TeacherVideoEngineLifecycleError> {
+    ) -> Result<Option<PresentationMulticastSendStep>, TeacherVideoEngineLifecycleError> {
         self.active
             .as_mut()
             .ok_or(TeacherVideoEngineLifecycleError::NoActiveRuntime)?
             .runtime
             .process_frame_if_current(meta, frame, coordinator, authorization, is_current)
-            .map_err(TeacherVideoEngineApplyError::from)?;
-        Ok(())
+            .map_err(TeacherVideoEngineApplyError::from)
+            .map_err(Into::into)
     }
 
     pub fn stop(

@@ -179,6 +179,12 @@ A presentation-capable encoder should sustain 1080p30 with useful headroom on ta
 
 ## 4. Teacher-presentation topology tests
 
+For the installed Teacher, the [two-host M3 procedure](M3_INSTALLED_PRESENTATION_QUALIFICATION.md)
+covers the protected Unicast and Multicast policies, exact Worker startup,
+visible output and cleanup. Run the physical x64 sequence for each transport.
+Use the separate software-decoder smoke to measure fixture decoding in system
+memory on a disposable Windows host.
+
 ### Wired LAN
 
 Compare:

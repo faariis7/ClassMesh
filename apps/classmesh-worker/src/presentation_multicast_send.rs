@@ -118,11 +118,11 @@ pub struct PresentationMulticastSendStep {
 }
 
 fn presentation_keyframe_request_matches(
-    config: ProtectedMulticastSenderConfig,
+    binding: PresentationMulticastSendBinding,
     request: PresentationKeyframeRequest,
 ) -> bool {
-    request.presentation_id() == config.presentation_id()
-        && request.stream_id() == config.stream_id()
+    request.presentation_id() == binding.presentation_id()
+        && request.stream_id() == binding.stream_id()
 }
 
 fn presentation_sender_unicast_action_matches(
@@ -280,9 +280,12 @@ impl PresentationMulticastSendBinding {
 #[derive(Debug)]
 pub struct PresentationMulticastSendRuntime {
     fanout: PresentationFanoutRuntime,
-    sink: ProtectedMulticastDistributorSink,
-    sender: ProtectedMulticastFrameSender,
-    sender_config: ProtectedMulticastSenderConfig,
+    binding: PresentationMulticastSendBinding,
+    multicast: Option<(
+        ProtectedMulticastDistributorSink,
+        ProtectedMulticastFrameSender,
+        ProtectedMulticastSenderConfig,
+    )>,
     unicast: ProtectedUnicastFanout,
     unicast_bindings: PresentationUnicastActionBindings,
 }
@@ -316,17 +319,39 @@ impl PresentationMulticastSendRuntime {
         let sender = ProtectedMulticastFrameSender::bind_nonblocking(sender_config)?;
         Ok(Self {
             fanout,
-            sink,
-            sender,
-            sender_config,
+            binding: PresentationMulticastSendBinding::from_sender_config(sender_config),
+            multicast: Some((sink, sender, sender_config)),
             unicast: ProtectedUnicastFanout::default(),
+            unicast_bindings: PresentationUnicastActionBindings::default(),
+        })
+    }
+
+    /// Uses the existing fan-out with one protected destination and no multicast socket.
+    pub fn bind_unicast(
+        target: PresentationTarget,
+        config: ProtectedUnicastSenderConfig,
+        sink_id: SinkId,
+        queue_capacity: usize,
+    ) -> Result<Self, PresentationMulticastSendRuntimeError> {
+        let mut fanout = PresentationFanoutRuntime::new(target)?;
+        let mut unicast = ProtectedUnicastFanout::default();
+        unicast.attach(fanout.distributor_mut(), sink_id, config, queue_capacity)?;
+        Ok(Self {
+            fanout,
+            binding: PresentationMulticastSendBinding {
+                presentation_id: config.presentation_id(),
+                stream_id: config.stream_id(),
+                epoch: config.epoch().get(),
+            },
+            multicast: None,
+            unicast,
             unicast_bindings: PresentationUnicastActionBindings::default(),
         })
     }
 
     #[must_use]
     pub fn binding(&self) -> PresentationMulticastSendBinding {
-        PresentationMulticastSendBinding::from_sender_config(self.sender_config)
+        self.binding
     }
 
     #[must_use]
@@ -346,7 +371,8 @@ impl PresentationMulticastSendRuntime {
 
     #[must_use]
     pub fn sink_stats(&self) -> Option<SinkStats> {
-        self.sink.stats(self.fanout.distributor())
+        let (sink, _, _) = self.multicast.as_ref()?;
+        sink.stats(self.fanout.distributor())
     }
 
     pub fn attach_unicast_outlier(
@@ -374,10 +400,15 @@ impl PresentationMulticastSendRuntime {
         action: ServicePresentationSenderUnicastAction,
         queue_capacity: usize,
     ) -> Result<bool, PresentationMulticastSendRuntimeError> {
-        match self.unicast_bindings.classify(self.sender_config, action)? {
+        let (_, _, sender_config) = self
+            .multicast
+            .as_ref()
+            .ok_or(PresentationMulticastSendRuntimeError::UnicastActionBindingMismatch)?;
+        let sender_config = *sender_config;
+        match self.unicast_bindings.classify(sender_config, action)? {
             PresentationUnicastActionDecision::Noop => Ok(false),
             PresentationUnicastActionDecision::Attach(sink_id) => {
-                let config = protected_unicast_config_from_action(self.sender_config, action)?;
+                let config = protected_unicast_config_from_action(sender_config, action)?;
                 self.attach_unicast_outlier(sink_id, config, queue_capacity)?;
                 self.unicast_bindings.record_attach(action);
                 Ok(true)
@@ -409,7 +440,7 @@ impl PresentationMulticastSendRuntime {
         &mut self,
         request: PresentationKeyframeRequest,
     ) -> Result<bool, PresentationMulticastSendRuntimeError> {
-        if !presentation_keyframe_request_matches(self.sender_config, request) {
+        if !presentation_keyframe_request_matches(self.binding, request) {
             return Ok(false);
         }
         self.request_keyframe()
@@ -442,16 +473,25 @@ impl PresentationMulticastSendRuntime {
         is_current: impl FnOnce() -> bool,
     ) -> Result<Option<PresentationMulticastSendStep>, PresentationMulticastSendRuntimeError> {
         let encoded_outputs = self.fanout.process_frame(meta, frame)?;
+        self.drain_encoded_if_current(encoded_outputs, coordinator, authorization, is_current)
+    }
+
+    fn drain_encoded_if_current(
+        &mut self,
+        encoded_outputs: usize,
+        coordinator: &mut GroupMediaCoordinator,
+        authorization: &AuthorizationStore,
+        is_current: impl FnOnce() -> bool,
+    ) -> Result<Option<PresentationMulticastSendStep>, PresentationMulticastSendRuntimeError> {
         if !is_current() {
             return Ok(None);
         }
-        let delivery = match self.sink.take_next_decodable(self.fanout.distributor_mut()) {
-            Some(frame) => Some(self.sender.try_send_shared_h264_frame(
-                coordinator,
-                authorization,
-                &frame,
-            )?),
-            None => None,
+        let delivery = if let Some((sink, sender, _)) = &mut self.multicast
+            && let Some(frame) = sink.take_next_decodable(self.fanout.distributor_mut())
+        {
+            Some(sender.try_send_shared_h264_frame(coordinator, authorization, &frame)?)
+        } else {
+            None
         };
         let (sent, backpressure_drop) = delivery_fields(delivery);
         let unicast_deliveries =
@@ -494,6 +534,56 @@ mod tests {
             MulticastProbeOutcome::Available,
         )
         .expect("valid protected sender config")
+    }
+
+    #[test]
+    fn unicast_sender_keeps_queued_video_off_the_wire_after_authorization_ends() {
+        use std::net::UdpSocket;
+
+        use classmesh_video::distributor::SharedEncodedFrame;
+        use classmesh_video::{Codec, EncodedFrameMeta};
+
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let epoch = GroupMediaEpoch::new(1).unwrap();
+        let config =
+            ProtectedUnicastSenderConfig::new(receiver.local_addr().unwrap(), 7, 8, epoch).unwrap();
+        let mut runtime = PresentationMulticastSendRuntime::bind_unicast(
+            PresentationTarget::default(),
+            config,
+            SinkId(1),
+            2,
+        )
+        .unwrap();
+        assert!(runtime.sink_stats().is_none());
+        assert_eq!(runtime.unicast_outlier_count(), 1);
+        assert_eq!(runtime.binding().presentation_id(), 7);
+        assert_eq!(runtime.binding().stream_id(), 8);
+        runtime
+            .fanout
+            .distributor_mut()
+            .publish(SharedEncodedFrame::new(
+                EncodedFrameMeta {
+                    frame_id: 1,
+                    timestamp_us: 1,
+                    keyframe: true,
+                },
+                Codec::H264,
+                vec![0x42; 128],
+            ));
+        let report = runtime
+            .drain_encoded_if_current(
+                1,
+                &mut GroupMediaCoordinator::default(),
+                &AuthorizationStore::default(),
+                || false,
+            )
+            .unwrap();
+        assert!(report.is_none());
+        assert_eq!(
+            receiver.recv_from(&mut [0; 2048]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]
@@ -562,20 +652,26 @@ mod tests {
         let exact =
             PresentationKeyframeRequest::new(config.presentation_id(), config.stream_id(), 42)
                 .expect("valid exact directive");
-        assert!(presentation_keyframe_request_matches(config, exact));
+        assert!(presentation_keyframe_request_matches(
+            PresentationMulticastSendBinding::from_sender_config(config),
+            exact
+        ));
 
         let wrong_presentation =
             PresentationKeyframeRequest::new(config.presentation_id() + 1, config.stream_id(), 42)
                 .expect("valid drifted directive");
         assert!(!presentation_keyframe_request_matches(
-            config,
+            PresentationMulticastSendBinding::from_sender_config(config),
             wrong_presentation
         ));
 
         let wrong_stream =
             PresentationKeyframeRequest::new(config.presentation_id(), config.stream_id() + 1, 42)
                 .expect("valid drifted directive");
-        assert!(!presentation_keyframe_request_matches(config, wrong_stream));
+        assert!(!presentation_keyframe_request_matches(
+            PresentationMulticastSendBinding::from_sender_config(config),
+            wrong_stream
+        ));
     }
 
     #[test]

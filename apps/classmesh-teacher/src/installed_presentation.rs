@@ -1,6 +1,6 @@
 //! Opt-in presentation on the installed Teacher's enrolled control session.
 use std::io;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -22,13 +22,17 @@ use classmesh_control::{
     peer_identity::authenticated_peer_identity,
     presentation_recovery::PresentationRecoveryCoordinator,
     quic::ControlSendHalf,
-    stream::{stream_profile_from_wire, udp_multicast_transport_parameters},
+    stream::{
+        UDP_UNICAST_PARAMETERS_VERSION, peer_bound_udp_unicast_destination,
+        stream_profile_from_wire, udp_multicast_transport_parameters,
+    },
     teacher_playback_receive::AuthenticatedTeacherControlMessage,
 };
 use classmesh_core::{keyframe::PresentationKeyframeRequest, recovery::RecoveryPolicy};
 use classmesh_network::{
     multicast::{MulticastMembership, MulticastProbeOutcome},
     multicast_sender::ProtectedMulticastSenderConfig,
+    protected_unicast_sender::{ProtectedUnicastFanoutDelivery, ProtectedUnicastSenderConfig},
     runtime_multicast_probe::probe_local_multicast_interface,
 };
 use classmesh_protocol::{
@@ -38,7 +42,9 @@ use classmesh_protocol::{
         VideoProfile, control_envelope::Payload,
     },
 };
-use classmesh_security::{Permission, group_media_coordinator::GroupMediaCoordinator};
+use classmesh_security::{
+    Permission, group_media::GroupMediaEpoch, group_media_coordinator::GroupMediaCoordinator,
+};
 use classmesh_video::distributor::SinkId;
 use classmesh_worker::{
     presentation::PresentationTarget, presentation_multicast_send::PresentationMulticastSendRuntime,
@@ -51,7 +57,10 @@ use crate::{
     TeacherVideoEngineDirective, TeacherVideoEngineLifecycle,
     connected_command::{TeacherCommandSender, TeacherControlRoute, verify_current_student},
     presentation_control::{PresentationControl, PresentationReply},
-    presentation_view::{PresentationBindingView, PresentationRuntimeSnapshot},
+    presentation_view::{
+        PresentationBindingView, PresentationRuntimeSnapshot, PresentationUiStatus,
+        PresentationUpdate,
+    },
     ui_shell::{TeacherPresentationUiAction, apply_presentation_ui_action},
 };
 
@@ -62,8 +71,10 @@ pub(crate) type TeacherClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PresentationPolicy {
-    interface: Ipv4Addr,
-    group: Ipv4Addr,
+    #[serde(default)]
+    transport: ConfiguredTransport,
+    interface: Option<Ipv4Addr>,
+    group: Option<Ipv4Addr>,
     port: u16,
     width: u32,
     height: u32,
@@ -71,16 +82,51 @@ pub(crate) struct PresentationPolicy {
     bitrate_kbps: u32,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ConfiguredTransport {
+    #[default]
+    Multicast,
+    Unicast,
+}
+
+#[derive(Clone, Copy)]
+enum PresentationTransport {
+    Multicast {
+        membership: MulticastMembership,
+        probe: Option<MulticastProbeOutcome>,
+    },
+    Unicast,
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct PreparedPresentation {
-    membership: MulticastMembership,
+    transport: PresentationTransport,
     port: u16,
     profile: VideoProfile,
 }
 
 impl PresentationPolicy {
     pub(crate) fn prepare(self) -> io::Result<PreparedPresentation> {
-        let membership = MulticastMembership::new(self.group, self.interface).map_err(error)?;
-        udp_multicast_transport_parameters(self.group, self.port).map_err(error)?;
+        let invalid_transport = || {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid protected presentation transport",
+            )
+        };
+        if self.port == 0 {
+            return Err(invalid_transport());
+        }
+        let transport = match (self.transport, self.group, self.interface) {
+            (ConfiguredTransport::Multicast, Some(group), Some(interface)) => {
+                PresentationTransport::Multicast {
+                    membership: MulticastMembership::new(group, interface).map_err(error)?,
+                    probe: None,
+                }
+            }
+            (ConfiguredTransport::Unicast, None, None) => PresentationTransport::Unicast,
+            _ => return Err(invalid_transport()),
+        };
         let profile = VideoProfile {
             width: self.width,
             height: self.height,
@@ -90,7 +136,7 @@ impl PresentationPolicy {
         };
         stream_profile_from_wire(&profile).map_err(error)?;
         Ok(PreparedPresentation {
-            membership,
+            transport,
             port: self.port,
             profile,
         })
@@ -98,11 +144,99 @@ impl PresentationPolicy {
 }
 
 impl PreparedPresentation {
-    pub(crate) fn with_local_probe(self) -> Option<(Self, MulticastProbeOutcome)> {
-        let outcome = probe_local_multicast_interface(self.membership.interface()).ok()?;
-        outcome
-            .can_advertise_udp_multicast()
-            .then_some((self, outcome))
+    pub(crate) fn prepare_egress(mut self) -> Option<Self> {
+        if let PresentationTransport::Multicast { membership, probe } = &mut self.transport {
+            let outcome = probe_local_multicast_interface(membership.interface()).ok()?;
+            if !outcome.can_advertise_udp_multicast() {
+                return None;
+            }
+            *probe = Some(outcome);
+        }
+        Some(self)
+    }
+
+    pub(crate) fn capability(&self) -> Capability {
+        match self.transport {
+            PresentationTransport::Multicast { .. } => Capability::UdpMulticast,
+            PresentationTransport::Unicast => Capability::UdpUnicast,
+        }
+    }
+
+    fn wire_transport(&self) -> MediaTransport {
+        match self.transport {
+            PresentationTransport::Multicast { .. } => MediaTransport::UdpMulticast,
+            PresentationTransport::Unicast => MediaTransport::UdpUnicast,
+        }
+    }
+
+    fn offer(&self, stream_id: u32) -> io::Result<StreamOffer> {
+        let parameters = match self.transport {
+            PresentationTransport::Multicast { membership, .. } => {
+                udp_multicast_transport_parameters(membership.group(), self.port)
+                    .map_err(error)?
+                    .to_vec()
+            }
+            PresentationTransport::Unicast => {
+                let [high, low] = self.port.to_be_bytes();
+                vec![UDP_UNICAST_PARAMETERS_VERSION, high, low]
+            }
+        };
+        Ok(StreamOffer {
+            stream_id: stream_id.into(),
+            kind: StreamKind::TeacherPresentation as i32,
+            transport: self.wire_transport() as i32,
+            profile: Some(self.profile),
+            transport_parameters: parameters,
+        })
+    }
+
+    fn bind_sender(
+        &self,
+        peer_ip: IpAddr,
+        binding: PresentationBindingView,
+        epoch: GroupMediaEpoch,
+        target: PresentationTarget,
+    ) -> io::Result<PresentationMulticastSendRuntime> {
+        match self.transport {
+            PresentationTransport::Multicast {
+                membership,
+                probe: Some(probe),
+            } => {
+                let config = ProtectedMulticastSenderConfig::new(
+                    membership,
+                    self.port,
+                    binding.presentation_id,
+                    binding.stream_id,
+                    epoch,
+                    probe,
+                )
+                .map_err(error)?;
+                PresentationMulticastSendRuntime::bind(target, config, SinkId(1)).map_err(error)
+            }
+            PresentationTransport::Unicast => {
+                let offer = self.offer(binding.stream_id)?;
+                let destination =
+                    peer_bound_udp_unicast_destination(peer_ip, &offer.transport_parameters)
+                        .map_err(error)?;
+                let config = ProtectedUnicastSenderConfig::new(
+                    destination,
+                    binding.presentation_id,
+                    binding.stream_id,
+                    epoch,
+                )
+                .map_err(error)?;
+                PresentationMulticastSendRuntime::bind_unicast(
+                    target,
+                    config,
+                    SinkId(1),
+                    QUEUE_CAPACITY,
+                )
+                .map_err(error)
+            }
+            PresentationTransport::Multicast { probe: None, .. } => {
+                Err(io::Error::other("No local multicast probe"))
+            }
+        }
     }
 }
 
@@ -113,10 +247,11 @@ pub(crate) struct PresentationRoute {
 }
 
 pub(crate) struct InstalledPresentation {
-    config: Option<(PreparedPresentation, MulticastProbeOutcome)>,
+    config: Option<PreparedPresentation>,
     pub(crate) binding: PresentationRoute,
     active: Option<ActivePresentation>,
     worker: Option<PresentationWorker>,
+    stopped: Option<PresentationUiStatus>,
 }
 
 struct ActivePresentation {
@@ -124,19 +259,40 @@ struct ActivePresentation {
     coordinator: Option<GroupMediaCoordinator>,
     pending_key: Option<PendingPresentationKeyAck>,
     deadline: Instant,
+    peer_ip: Option<IpAddr>,
+    failure: Option<&'static str>,
 }
 
 impl InstalledPresentation {
-    pub(crate) fn new(
-        config: Option<(PreparedPresentation, MulticastProbeOutcome)>,
-        binding: PresentationRoute,
-    ) -> Self {
+    pub(crate) fn new(config: Option<PreparedPresentation>, binding: PresentationRoute) -> Self {
         Self {
             config,
             binding,
             active: None,
             worker: None,
+            stopped: None,
         }
+    }
+
+    pub(crate) fn availability(&self, session: &EstablishedControlSession) -> PresentationUiStatus {
+        let Some(config) = &self.config else {
+            return PresentationUiStatus::Unavailable(
+                "An administrator must configure an available presentation transport.",
+            );
+        };
+        if ![
+            Capability::TeacherPresentation,
+            Capability::SframeGroupMedia,
+            config.capability(),
+        ]
+        .iter()
+        .all(|capability| session.negotiated.capabilities.contains(capability))
+        {
+            return PresentationUiStatus::Unavailable(
+                "The Student did not negotiate the configured presentation transport.",
+            );
+        }
+        PresentationUiStatus::Ready(config.wire_transport())
     }
 
     pub(crate) async fn action(
@@ -145,7 +301,7 @@ impl InstalledPresentation {
         writer: &mut TeacherCommandSender,
         session: (&Connection, &EstablishedControlSession),
         sender: &mut ControlSendHalf,
-    ) -> io::Result<Option<PresentationRuntimeSnapshot>> {
+    ) -> io::Result<Option<PresentationUpdate>> {
         let mut payload_writer = PresentationWriter {
             binding: &self.binding,
             writer,
@@ -157,20 +313,10 @@ impl InstalledPresentation {
                 if self.active.is_some() || self.worker.is_some() {
                     return Ok(None);
                 }
-                if self.config.is_none()
-                    || ![
-                        Capability::TeacherPresentation,
-                        Capability::SframeGroupMedia,
-                        Capability::UdpMulticast,
-                    ]
-                    .iter()
-                    .all(|capability| session.1.negotiated.capabilities.contains(capability))
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "Protected multicast presentation is unavailable for this session",
-                    ));
-                }
+                let status = self.availability(session.1);
+                let PresentationUiStatus::Ready(transport) = status else {
+                    return Ok(Some(status.into()));
+                };
                 let now = (self.binding.clock)();
                 let snapshot = self.binding.authorization.snapshot().map_err(error)?;
                 BoundGroupMediaReceiverSession::bind_client_parts(
@@ -203,14 +349,24 @@ impl InstalledPresentation {
                     }))
                     .await?;
                 self.active = Some(ActivePresentation {
-                    control: PresentationControl::new(binding, request),
+                    control: PresentationControl::new(
+                        binding,
+                        session.1.control_session_id,
+                        request,
+                        transport,
+                    ),
                     coordinator: Some(coordinator),
                     pending_key: None,
                     deadline: Instant::now() + REPLY_DEADLINE,
+                    peer_ip: None,
+                    failure: None,
                 });
-                Ok(Some(PresentationRuntimeSnapshot {
-                    binding: Some(binding),
-                    ..Default::default()
+                Ok(Some(PresentationUpdate {
+                    status: PresentationUiStatus::Reserving,
+                    snapshot: Some(PresentationRuntimeSnapshot {
+                        binding: Some(binding),
+                        ..Default::default()
+                    }),
                 }))
             }
             TeacherPresentationUiAction::Stop { binding } => {
@@ -224,16 +380,8 @@ impl InstalledPresentation {
                 if let Some(worker) = &self.worker {
                     worker.cancel();
                 }
-                active.coordinator = None;
-                active.pending_key = None;
-                let request = payload_writer
-                    .send(Payload::PresentationStop(PresentationStop {
-                        presentation_id: binding.presentation_id,
-                    }))
-                    .await?;
-                active.control.wait_for_stop(request);
-                active.deadline = Instant::now() + REPLY_DEADLINE;
-                Ok(None)
+                active.stop(&mut payload_writer).await?;
+                Ok(Some(PresentationUiStatus::Stopping.into()))
             }
         }
     }
@@ -244,7 +392,7 @@ impl InstalledPresentation {
         writer: &mut TeacherCommandSender,
         session: (&Connection, &EstablishedControlSession),
         sender: &mut ControlSendHalf,
-    ) -> io::Result<Option<PresentationRuntimeSnapshot>> {
+    ) -> io::Result<Option<PresentationUpdate>> {
         let Some(active) = &mut self.active else {
             return Ok(None);
         };
@@ -252,17 +400,17 @@ impl InstalledPresentation {
         if envelope.request_id == 0
             && let Some(Payload::KeyframeRequest(request)) = &envelope.payload
             && request.stream_id == u64::from(active.control.binding.stream_id)
-            && !active.control.waiting()
+            && active.control.ready()
             && let Some(worker) = &mut self.worker
         {
             worker.request_keyframe(active.control.binding, request.last_decodable_frame_id)?;
             return Ok(None);
         }
-        let Some(reply) = envelope
-            .payload
-            .as_ref()
-            .and_then(|payload| active.control.accept(envelope.request_id, payload))
-        else {
+        let Some(reply) = envelope.payload.as_ref().and_then(|payload| {
+            active
+                .control
+                .accept(envelope.control_session_id, envelope.request_id, payload)
+        }) else {
             return Ok(None);
         };
         let binding = active.control.binding;
@@ -273,7 +421,7 @@ impl InstalledPresentation {
             sender,
         };
         active.deadline = Instant::now() + REPLY_DEADLINE;
-        match reply {
+        let status = match reply {
             PresentationReply::Started => {
                 let now = (self.binding.clock)();
                 let snapshot = self.binding.authorization.snapshot().map_err(error)?;
@@ -317,6 +465,7 @@ impl InstalledPresentation {
                     )
                     .await?;
                 active.control.wait_for_key(request);
+                PresentationUiStatus::InstallingKey
             }
             PresentationReply::KeyInstalled => {
                 let now = (self.binding.clock)();
@@ -347,29 +496,20 @@ impl InstalledPresentation {
                         now,
                     )
                     .map_err(error)?;
-                let config = &self
+                let config = self
                     .config
                     .as_ref()
-                    .expect("presentation requires configuration")
-                    .0;
+                    .expect("presentation requires configuration");
+                let peer_ip = session.0.remote_address().ip();
                 let request = payload_writer
-                    .send(Payload::StreamOffer(StreamOffer {
-                        stream_id: binding.stream_id.into(),
-                        kind: StreamKind::TeacherPresentation as i32,
-                        transport: MediaTransport::UdpMulticast as i32,
-                        profile: Some(config.profile),
-                        transport_parameters: udp_multicast_transport_parameters(
-                            config.membership.group(),
-                            config.port,
-                        )
-                        .map_err(error)?
-                        .to_vec(),
-                    }))
+                    .send(Payload::StreamOffer(config.offer(binding.stream_id)?))
                     .await?;
+                active.peer_ip = Some(peer_ip);
                 active.control.wait_for_offer(request);
+                PresentationUiStatus::PreparingReceiver
             }
             PresentationReply::TransportReady => {
-                let (config, probe) = self
+                let config = self
                     .config
                     .as_ref()
                     .expect("presentation requires configuration");
@@ -377,31 +517,73 @@ impl InstalledPresentation {
                     .coordinator
                     .take()
                     .expect("transport retains coordinator");
-                self.worker = Some(PresentationWorker::start(
+                let peer_ip = active.peer_ip.expect("transport follows an offer");
+                if peer_ip != session.0.remote_address().ip() {
+                    return Err(io::Error::other(
+                        "The Student network address changed during presentation setup.",
+                    ));
+                }
+                match PresentationWorker::start(
                     &self.binding,
                     session.0.clone(),
+                    peer_ip,
                     binding,
                     config,
-                    *probe,
                     coordinator,
-                )?);
+                ) {
+                    Ok(worker) => {
+                        self.worker = Some(worker);
+                        PresentationUiStatus::StartingCapture
+                    }
+                    Err(_) => {
+                        active.failure =
+                            Some("Could not initialize the local presentation sender.");
+                        active.stop(&mut payload_writer).await?;
+                        PresentationUiStatus::Stopping
+                    }
+                }
             }
             PresentationReply::Stopped => {
+                let status = active.failure.map_or_else(
+                    || self.availability(session.1),
+                    PresentationUiStatus::Failed,
+                );
                 self.active = None;
-                return Ok(Some(PresentationRuntimeSnapshot::default()));
+                if self.worker.is_some() {
+                    self.stopped = Some(status);
+                    return Ok(None);
+                }
+                return Ok(Some(PresentationUpdate::idle(status)));
             }
-            PresentationReply::Rejected => {
-                // Retiring the connection releases any remote ownership or
-                // Worker key, including a rejected Stop or transport offer.
+            PresentationReply::StartRejected => {
+                self.active = None;
+                return Ok(Some(PresentationUpdate::idle(
+                    PresentationUiStatus::Failed(
+                        "The Student Service refused to reserve the presentation.",
+                    ),
+                )));
+            }
+            PresentationReply::OfferRejected => {
+                active.failure =
+                    Some("The Student Worker could not start the configured receiver.");
+                active.stop(&mut payload_writer).await?;
+                PresentationUiStatus::Stopping
+            }
+            PresentationReply::StopRejected => {
                 return Err(io::Error::other(
-                    "Student Service rejected the presentation",
+                    "The Student Service rejected presentation Stop.",
                 ));
             }
-        }
-        Ok(None)
+        };
+        Ok(Some(status.into()))
     }
 
-    pub(crate) fn poll(&mut self) -> io::Result<Option<PresentationRuntimeSnapshot>> {
+    pub(crate) async fn poll(
+        &mut self,
+        writer: &mut TeacherCommandSender,
+        session: (&Connection, &EstablishedControlSession),
+        sender: &mut ControlSendHalf,
+    ) -> io::Result<Option<PresentationUpdate>> {
         if self
             .active
             .as_ref()
@@ -418,20 +600,55 @@ impl InstalledPresentation {
         if worker.thread.is_finished() {
             let worker = self.worker.take().expect("worker was present");
             let expected = worker.cancelled.load(Ordering::Acquire);
-            worker
+            let outcome = worker
                 .thread
                 .join()
-                .map_err(|_| io::Error::other("Presentation worker panicked"))??;
-            if !expected {
-                return Err(io::Error::other("Presentation worker retired"));
+                .map_err(|_| io::Error::other("Presentation sender panicked"))?;
+            if expected {
+                return Ok(self.stopped.take().map(PresentationUpdate::idle));
             }
-            return Ok(None);
+            let Err(cause) = outcome else {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "Presentation lost its authenticated route or authorization.",
+                ));
+            };
+            eprintln!("ClassMesh local presentation sender: {cause}");
+            let Some(active) = self.active.as_mut() else {
+                return Err(cause);
+            };
+            active.failure =
+                Some("The Teacher capture, encoder or sender failed. See the local diagnostics.");
+            active
+                .stop(&mut PresentationWriter {
+                    binding: &self.binding,
+                    writer,
+                    session,
+                    sender,
+                })
+                .await?;
+            return Ok(Some(PresentationUiStatus::Stopping.into()));
         }
         // Buffered observations from a retired worker must never restart UI.
         if worker.cancelled.load(Ordering::Acquire) {
             return Ok(None);
         }
         Ok(worker.snapshots.try_recv().ok())
+    }
+}
+
+impl ActivePresentation {
+    async fn stop(&mut self, writer: &mut PresentationWriter<'_>) -> io::Result<()> {
+        self.coordinator = None;
+        self.pending_key = None;
+        let request = writer
+            .send(Payload::PresentationStop(PresentationStop {
+                presentation_id: self.control.binding.presentation_id,
+            }))
+            .await?;
+        self.control.wait_for_stop(request);
+        self.deadline = Instant::now() + REPLY_DEADLINE;
+        Ok(())
     }
 }
 
@@ -468,7 +685,7 @@ impl PresentationWriter<'_> {
 
 struct PresentationWorker {
     cancelled: Arc<AtomicBool>,
-    snapshots: Receiver<PresentationRuntimeSnapshot>,
+    snapshots: Receiver<PresentationUpdate>,
     keyframes: SyncSender<PresentationKeyframeRequest>,
     recovery: PresentationRecoveryCoordinator,
     started: Instant,
@@ -479,9 +696,9 @@ impl PresentationWorker {
     fn start(
         route: &PresentationRoute,
         connection: Connection,
+        peer_ip: IpAddr,
         binding: PresentationBindingView,
         config: &PreparedPresentation,
-        probe: MulticastProbeOutcome,
         mut coordinator: GroupMediaCoordinator,
     ) -> io::Result<Self> {
         let receiver = route.route.expected_student();
@@ -493,20 +710,13 @@ impl PresentationWorker {
         let (keyframes, requests) = sync_channel(1);
         let recovery =
             PresentationRecoveryCoordinator::for_stream(binding.stream_id).map_err(error)?;
-        let sender_config = ProtectedMulticastSenderConfig::new(
-            config.membership,
-            config.port,
-            binding.presentation_id,
-            binding.stream_id,
-            coordinator
-                .active_epoch()
-                .ok_or_else(|| io::Error::other("Missing active presentation epoch"))?,
-            probe,
-        )
-        .map_err(error)?;
+        let epoch = coordinator
+            .active_epoch()
+            .ok_or_else(|| io::Error::other("Missing active presentation epoch"))?;
         let target =
             PresentationTarget::try_from(stream_profile_from_wire(&config.profile).map_err(error)?)
                 .map_err(error)?;
+        let config = *config;
         let period = Duration::from_secs(1) / target.fps;
         let thread = thread::Builder::new()
             .name("classmesh-presentation".into())
@@ -514,6 +724,7 @@ impl PresentationWorker {
                 let is_current = || {
                     !stop.load(Ordering::Acquire)
                         && connection.close_reason().is_none()
+                        && connection.remote_address().ip() == peer_ip
                         && verify_current_student(receiver, &connection, &authorization, clock())
                             .is_ok()
                         && authorization.snapshot().is_ok_and(|snapshot| {
@@ -536,9 +747,7 @@ impl PresentationWorker {
                     RecoveryPolicy::default(),
                 );
                 capture.start().map_err(error)?;
-                let sender =
-                    PresentationMulticastSendRuntime::bind(target, sender_config, SinkId(1))
-                        .map_err(error)?;
+                let sender = config.bind_sender(peer_ip, binding, epoch, target)?;
                 let mut lifecycle = TeacherVideoEngineLifecycle::default();
                 apply_presentation_ui_action(
                     TeacherPresentationUiAction::Start,
@@ -548,6 +757,7 @@ impl PresentationWorker {
                 .map_err(error)?;
                 let mut publish = Instant::now();
                 let mut retry_at = publish;
+                let mut is_sending = false;
                 while is_current() {
                     let next_tick = Instant::now() + period;
                     if let Ok(request) = requests.try_recv() {
@@ -562,7 +772,7 @@ impl PresentationWorker {
                     let snapshot = authorization.snapshot().map_err(error)?;
                     match capture.poll(0) {
                         CaptureStep::Frame { meta, frame } => {
-                            lifecycle
+                            let Some(delivery) = lifecycle
                                 .process_frame_if_current(
                                     meta,
                                     frame,
@@ -570,11 +780,28 @@ impl PresentationWorker {
                                     snapshot.store(),
                                     is_current,
                                 )
-                                .map_err(error)?;
+                                .map_err(error)?
+                            else {
+                                break;
+                            };
+                            is_sending |= delivery.sent.is_some()
+                                || delivery.unicast_deliveries.iter().any(|delivery| {
+                                    matches!(delivery, ProtectedUnicastFanoutDelivery::Sent { .. })
+                                });
+                            if let Some(ProtectedUnicastFanoutDelivery::Failed {
+                                error: cause,
+                                ..
+                            }) = delivery.unicast_deliveries.into_iter().find(|delivery| {
+                                matches!(delivery, ProtectedUnicastFanoutDelivery::Failed { .. })
+                            }) {
+                                return Err(error(cause));
+                            }
                         }
                         CaptureStep::NoFrame => {}
                         CaptureStep::RetryAfter { delay_ms, .. } => {
                             lifecycle.reset_capture_pipeline();
+                            is_sending = false;
+                            let _ = events.try_send(PresentationUiStatus::RecoveringCapture.into());
                             retry_at = Instant::now() + Duration::from_millis(delay_ms);
                         }
                         CaptureStep::Suspended(reason) | CaptureStep::Failed(reason) => {
@@ -582,7 +809,14 @@ impl PresentationWorker {
                         }
                     }
                     if Instant::now() >= publish {
-                        let _ = events.try_send(lifecycle.presentation_snapshot());
+                        let _ = events.try_send(PresentationUpdate {
+                            status: if is_sending {
+                                PresentationUiStatus::Sending
+                            } else {
+                                PresentationUiStatus::StartingCapture
+                            },
+                            snapshot: Some(lifecycle.presentation_snapshot()),
+                        });
                         publish = Instant::now() + Duration::from_millis(500);
                     }
                     thread::sleep(next_tick.saturating_duration_since(Instant::now()));
@@ -658,15 +892,40 @@ mod tests {
     }
 
     #[test]
+    fn unicast_policy_selects_only_unicast_and_uses_a_port_only_offer() {
+        let raw = r#"{
+            "transport":"unicast","port":57000,
+            "width":1280,"height":720,"fps":30,"bitrate_kbps":3000
+        }"#;
+        let policy = serde_json::from_str::<PresentationPolicy>(raw)
+            .unwrap()
+            .prepare()
+            .unwrap();
+        let prepared = policy.prepare_egress().unwrap();
+        assert_eq!(prepared.wire_transport(), MediaTransport::UdpUnicast);
+        assert_eq!(prepared.capability(), Capability::UdpUnicast);
+        let offer = prepared.offer(9).unwrap();
+        assert_eq!(offer.transport_parameters, [1, 0xde, 0xa8]);
+        assert!(
+            serde_json::from_str::<PresentationPolicy>(
+                &raw.replace(r#""port":57000"#, r#""port":57000,"group":"239.11.0.5""#,)
+            )
+            .unwrap()
+            .prepare()
+            .is_err()
+        );
+    }
+
+    #[test]
     fn installed_presentation_requires_bounded_profile_and_explicit_local_multicast() {
         assert!(policy().prepare().is_ok());
         for disabled in [
             PresentationPolicy {
-                interface: Ipv4Addr::UNSPECIFIED,
+                interface: Some(Ipv4Addr::UNSPECIFIED),
                 ..policy()
             },
             PresentationPolicy {
-                group: Ipv4Addr::new(224, 0, 0, 1),
+                group: Some(Ipv4Addr::new(224, 0, 0, 1)),
                 ..policy()
             },
             PresentationPolicy {

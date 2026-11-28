@@ -1,15 +1,22 @@
 use eframe::egui;
 
-use crate::presentation_view::PresentationViewState;
+use classmesh_protocol::control_wire::MediaTransport;
+
+use crate::presentation_view::{PresentationUiStatus, PresentationViewState};
 use crate::ui_shell::{TeacherUiMessage, media_label};
 
 pub fn show_presentation(
     ui: &mut egui::Ui,
     state: PresentationViewState,
+    status: Option<PresentationUiStatus>,
     action_pending: bool,
 ) -> Option<TeacherUiMessage> {
     ui.heading("Presentation");
-    ui.label(format!("Media: {}", media_label(state.media_state)));
+    if let Some(status) = status {
+        ui.label(status_text(status));
+    } else {
+        ui.label(format!("Media: {}", media_label(state.media_state)));
+    }
 
     let action = match state.binding {
         Some(binding) => {
@@ -39,19 +46,54 @@ pub fn show_presentation(
                 TeacherUiMessage::StopPresentation(binding),
             )
         }
-        None => {
-            ui.label("No presentation sender is active.");
-            ("Start presentation", TeacherUiMessage::StartPresentation)
-        }
+        None => ("Start presentation", TeacherUiMessage::StartPresentation),
     };
 
+    let waiting = matches!(
+        status,
+        Some(
+            PresentationUiStatus::Reserving
+                | PresentationUiStatus::Stopping
+                | PresentationUiStatus::Unavailable(_)
+                | PresentationUiStatus::Disconnected
+        )
+    );
     if ui
-        .add_enabled(!action_pending, egui::Button::new(action.0))
+        .add_enabled(!action_pending && !waiting, egui::Button::new(action.0))
         .clicked()
     {
         Some(action.1)
     } else {
         None
+    }
+}
+
+fn status_text(status: PresentationUiStatus) -> &'static str {
+    match status {
+        PresentationUiStatus::Unavailable(message) | PresentationUiStatus::Failed(message) => {
+            message
+        }
+        PresentationUiStatus::Ready(MediaTransport::UdpUnicast) => {
+            "Ready to present over protected Unicast."
+        }
+        PresentationUiStatus::Ready(MediaTransport::UdpMulticast) => {
+            "Ready to present over protected Multicast."
+        }
+        PresentationUiStatus::Ready(_) => "Ready to present.",
+        PresentationUiStatus::Reserving => {
+            "Waiting for the Student Service to reserve the presentation."
+        }
+        PresentationUiStatus::InstallingKey => {
+            "Waiting for the Student Worker to confirm the media key."
+        }
+        PresentationUiStatus::PreparingReceiver => {
+            "Waiting for the Student Worker to start receiving."
+        }
+        PresentationUiStatus::StartingCapture => "Starting Teacher capture and encoding.",
+        PresentationUiStatus::Sending => "Sending protected video to the Student.",
+        PresentationUiStatus::RecoveringCapture => "Recovering Teacher screen capture.",
+        PresentationUiStatus::Stopping => "Stopping the presentation and waiting for cleanup.",
+        PresentationUiStatus::Disconnected => "Student disconnected. Reopen Teacher to reconnect.",
     }
 }
 
