@@ -858,6 +858,7 @@ dependencies = [
  "classmesh-control",
  "classmesh-core",
  "classmesh-identity-win",
+ "classmesh-network",
  "classmesh-protocol",
  "classmesh-security",
  "classmesh-video",

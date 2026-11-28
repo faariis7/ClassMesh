@@ -384,6 +384,8 @@ pub fn run_teacher_ui_with_enrolled_control(
 /// Installed Live Mode and the read-only startup probe share the same
 /// protected producer and preflight. Both preserve the same QUIC runtime.
 pub fn run_installed_teacher(check_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::connected_runtime::drive_installed_teacher_control;
+    use crate::installed_presentation::{InstalledPresentation, PresentationRoute};
     use crate::trusted_startup::{PreparedTeacher, prepare_installed_teacher};
 
     let PreparedTeacher {
@@ -394,6 +396,7 @@ pub fn run_installed_teacher(check_only: bool) -> Result<(), Box<dyn std::error:
         authorization,
         display_name,
         clock,
+        presentation,
     } = prepare_installed_teacher().map_err(|error| -> Box<dyn std::error::Error> { error })?;
     preflight_control_route(route, &session, &authorization)
         .map_err(EnrolledTeacherUiLaunchError::UntrustedStartup)?;
@@ -425,15 +428,20 @@ pub fn run_installed_teacher(check_only: bool) -> Result<(), Box<dyn std::error:
         session: route.control_session_id(),
         display_name,
     };
-    let (bridge, thread) = start_runtime_thread(move |events, actions| {
-        let result = runtime.block_on(drive_authenticated_teacher_control(
+    let presentation = InstalledPresentation::new(
+        presentation,
+        PresentationRoute {
             route,
+            authorization: std::sync::Arc::new(authorization),
+            clock,
+        },
+    );
+    let (bridge, thread) = start_runtime_thread(move |events, actions| {
+        let result = runtime.block_on(drive_installed_teacher_control(
+            presentation,
             session,
-            &authorization,
             events,
             actions,
-            |_| ControlFlow::Continue(()),
-            (clock, Instant::now),
         ));
         drop(endpoint);
         result

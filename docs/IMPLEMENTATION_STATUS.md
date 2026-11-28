@@ -28,6 +28,20 @@ capabilities. A native ordinary Session 1 test reads the pipe descriptor and
 rejects an unauthorized endpoint. The protected positive path and genuine
 Message receipt require the next exact-asset-approved VM1 run.
 
+## Installed Teacher presentation
+
+[Draft PR #778](https://github.com/faariis7/ClassMesh/pull/778) adds explicit
+protected Unicast selection to the installed Multicast presentation owner.
+The installed path uses the same enrolled setup and checks correlated
+reservation, Worker key confirmation and offer acceptance before capture.
+Teacher reports sender progress and attempts a correlated Stop after a
+receiver refusal. Its Windows-only regression uses enrolled QUIC over
+loopback and a Service response fixture to verify key/offer order, refusal,
+Stop, a fresh binding on restart and denial on mid-start receiver revocation.
+Physical use of both transports and rendered output remain open. See the
+[installed presentation procedure](M3_INSTALLED_PRESENTATION_QUALIFICATION.md)
+and the Draft PR's exact-head checks.
+
 ## Unified RC follow-up — 2026-11-25
 
 [Draft PR #776](https://github.com/faariis7/ClassMesh/pull/776) holds the exact

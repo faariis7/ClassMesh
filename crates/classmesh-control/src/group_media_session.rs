@@ -186,14 +186,26 @@ impl BoundGroupMediaReceiverSession {
         authorization: &AuthorizationStore,
         now_unix_ms: u64,
     ) -> Result<Self, GroupMediaSessionError> {
-        let identity = authenticated_peer_identity(&session.connection, authorization, now_unix_ms)
-            .map_err(GroupMediaSessionError::PeerIdentity)?;
-        Self::bind_client_identity(
+        Self::bind_client_parts(
+            &session.connection,
             &session.established,
-            identity,
             expected_receiver,
             authorization,
+            now_unix_ms,
         )
+    }
+
+    /// Bind the existing enrolled QUIC connection after splitting control I/O.
+    pub fn bind_client_parts(
+        connection: &quinn::Connection,
+        established: &EstablishedControlSession,
+        expected_receiver: PrincipalId,
+        authorization: &AuthorizationStore,
+        now_unix_ms: u64,
+    ) -> Result<Self, GroupMediaSessionError> {
+        let identity = authenticated_peer_identity(connection, authorization, now_unix_ms)
+            .map_err(GroupMediaSessionError::PeerIdentity)?;
+        Self::bind_client_identity(established, identity, expected_receiver, authorization)
     }
 
     fn bind_client_identity(
@@ -336,6 +348,16 @@ impl SensitivePresentationKeyEnvelope {
     /// after the correlation record has been created.
     pub async fn send(mut self, channel: &mut ControlChannel) -> Result<(), ControlTransportError> {
         let result = channel.send(&self.envelope).await;
+        self.zeroize_key_material();
+        result
+    }
+
+    /// The split Teacher writer still owns the same enrolled channel and sequence ledger.
+    pub async fn send_on_split(
+        mut self,
+        sender: &mut crate::quic::ControlSendHalf,
+    ) -> Result<(), ControlTransportError> {
+        let result = sender.send(&self.envelope).await;
         self.zeroize_key_material();
         result
     }

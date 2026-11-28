@@ -15,6 +15,19 @@ Service process. Keep Session 0, pipe PID, liveness and LocalSystem checks
 when correcting that path. See the
 [VM1 run record](WINDOWS_RUNTIME_PLAN.md#protected-vm1-run--2026-11-26).
 
+## Installed Teacher presentation handoff
+
+Use [Draft PR #778](https://github.com/faariis7/ClassMesh/pull/778) to qualify
+protected Unicast and Multicast. The existing protected Service, Worker IPC
+and transport wire contracts supply the receiver and acknowledgments.
+The shared sender implementation in `presentation_multicast_send.rs` now
+offers a Unicast-only constructor used by the installed Teacher. Coordinate
+its review with [Draft #776](https://github.com/faariis7/ClassMesh/pull/776)
+when bringing #778 into the unified candidate. Read the
+[two-host procedure](M3_INSTALLED_PRESENTATION_QUALIFICATION.md) for required
+provisioning, native status checks, refusal/restart evidence and separate
+software-decode smoke scope.
+
 ## Unified RC follow-up — 2026-11-25
 
 Resume from [#776](https://github.com/faariis7/ClassMesh/pull/776) and refresh

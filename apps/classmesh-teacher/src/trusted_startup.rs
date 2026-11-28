@@ -17,8 +17,8 @@ use classmesh_control::{
 use classmesh_identity_win::{CngMachineKey, DurableMachineIdentity, cng_client_cert_resolver};
 use classmesh_protocol::{Capability, ControlRole, PROTOCOL_VERSION};
 use classmesh_security::{
-    AuthorizationStore, CredentialFingerprint, CredentialRecord, CredentialState, Principal,
-    PrincipalId, PrincipalKind,
+    AuthorizationStore, CredentialFingerprint, CredentialRecord, CredentialState, Permission,
+    Principal, PrincipalId, PrincipalKind,
     teacher_roster::{MAX_DEVICES, RosterKey, RosterPolicy, verify_teacher_roster},
 };
 use classmesh_video::monitoring_scheduler::MonitoringSourceId;
@@ -33,6 +33,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::connected_command::{TeacherControlRoute, verify_current_student};
+use crate::installed_presentation::{PreparedPresentation, PresentationPolicy, TeacherClock};
 
 type StartupResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -54,6 +55,7 @@ struct PolicyDocument {
     teacher_enrollment_ca_der: Vec<u8>,
     machine_identity: Vec<u8>,
     student: StudentTarget,
+    presentation: Option<PresentationPolicy>,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +84,7 @@ struct ValidatedPolicy {
     resolver: Arc<dyn ResolvesClientCert>,
     roots: RootCertStore,
     deadline_ms: u64,
+    presentation: Option<PreparedPresentation>,
 }
 
 fn validate_policy(bytes: &[u8], epoch: u64, now: u64) -> StartupResult<ValidatedPolicy> {
@@ -186,6 +189,10 @@ fn validate_policy(bytes: &[u8], epoch: u64, now: u64) -> StartupResult<Validate
         .valid_until_ms()
         .min(identity.not_after_unix_ms)
         .min(teacher_expiry);
+    let presentation = config
+        .presentation
+        .map(PresentationPolicy::prepare)
+        .transpose()?;
     let fingerprint = CredentialFingerprint(config.student.leaf_sha256);
     let mut authorization = AuthorizationStore::default();
     authorization
@@ -193,7 +200,11 @@ fn validate_policy(bytes: &[u8], epoch: u64, now: u64) -> StartupResult<Validate
             id: student,
             kind: PrincipalKind::StudentDevice,
             enabled: true,
-            permissions: BTreeSet::new(),
+            permissions: if presentation.is_some() {
+                BTreeSet::from([Permission::ReceivePresentation])
+            } else {
+                BTreeSet::new()
+            },
             credentials: BTreeMap::from([(
                 fingerprint,
                 CredentialRecord {
@@ -216,6 +227,7 @@ fn validate_policy(bytes: &[u8], epoch: u64, now: u64) -> StartupResult<Validate
         resolver,
         roots,
         deadline_ms,
+        presentation,
     })
 }
 
@@ -232,7 +244,8 @@ pub(crate) struct PreparedTeacher {
     pub(crate) route: TeacherControlRoute,
     pub(crate) authorization: LiveAuthorizationStore,
     pub(crate) display_name: String,
-    pub(crate) clock: Box<dyn Fn() -> u64 + Send>,
+    pub(crate) clock: TeacherClock,
+    pub(crate) presentation: Option<PreparedPresentation>,
 }
 
 pub(crate) fn prepare_installed_teacher() -> StartupResult<PreparedTeacher> {
@@ -244,12 +257,23 @@ pub(crate) fn prepare_installed_teacher() -> StartupResult<PreparedTeacher> {
     })?;
     let wall_start = unix_ms()?;
     let started = Instant::now();
-    let validated = validate_policy(policy.bytes(), policy.epoch(), wall_start)?;
+    let mut validated = validate_policy(policy.bytes(), policy.epoch(), wall_start)?;
+    let presentation = validated
+        .presentation
+        .take()
+        .and_then(PreparedPresentation::prepare_egress);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let (endpoint, session) = runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(20), connect_teacher(&validated)).await?
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            connect_teacher(
+                &validated,
+                presentation.as_ref().map(PreparedPresentation::capability),
+            ),
+        )
+        .await?
     })?;
     let chain = session
         .connection
@@ -258,7 +282,7 @@ pub(crate) fn prepare_installed_teacher() -> StartupResult<PreparedTeacher> {
         .ok_or("Student TLS peer certificate missing")?;
     let student_leaf = chain.first().ok_or("Student TLS peer chain empty")?;
     let deadline = validated.deadline_ms.min(certificate_expiry(student_leaf)?);
-    let clock = Box::new(move || {
+    let clock = Arc::new(move || {
         let time = monotonic_wall_time(wall_start, started.elapsed(), unix_ms().ok());
         if time >= deadline || !policy.still_current().unwrap_or(false) {
             return u64::MAX;
@@ -290,11 +314,13 @@ pub(crate) fn prepare_installed_teacher() -> StartupResult<PreparedTeacher> {
         authorization: validated.authorization,
         display_name: validated.target.server_name,
         clock,
+        presentation,
     })
 }
 
 async fn connect_teacher(
     policy: &ValidatedPolicy,
+    presentation_transport: Option<Capability>,
 ) -> StartupResult<(Endpoint, ClientControlSession)> {
     let ip = match policy.target.address.ip() {
         IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -305,11 +331,19 @@ async fn connect_teacher(
         policy.roots.clone(),
         policy.resolver.clone(),
     )?);
+    let mut capabilities = BTreeSet::from([Capability::TeacherMessage]);
+    if let Some(transport) = presentation_transport {
+        capabilities.extend([
+            Capability::TeacherPresentation,
+            Capability::SframeGroupMedia,
+            transport,
+        ]);
+    }
     let hello = ControlHello {
         principal_id: policy.teacher,
         role: ControlRole::Teacher,
         version: PROTOCOL_VERSION,
-        capabilities: BTreeSet::from([Capability::TeacherMessage]),
+        capabilities,
         hostname: "ClassMesh Teacher".into(),
         app_version: env!("CARGO_PKG_VERSION").into(),
     };
@@ -521,7 +555,7 @@ mod tests {
         });
         let validated = validate_policy(&serde_json::to_vec(&snapshot).unwrap(), 3, now).unwrap();
         let (_endpoint, session) =
-            tokio::time::timeout(Duration::from_secs(10), connect_teacher(&validated))
+            tokio::time::timeout(Duration::from_secs(10), connect_teacher(&validated, None))
                 .await
                 .unwrap()
                 .unwrap();

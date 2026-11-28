@@ -20,6 +20,15 @@ limited, query-only Service identity handles to the exact launched Worker
 through the SYSTEM-owned primary pipe. The next guarded VM1 run must verify
 `TeacherMessage negotiated: true` on the matching signed candidate.
 
+## Installed Teacher M3 qualification
+
+[Draft PR #778](https://github.com/faariis7/ClassMesh/pull/778) implements
+Unicast and Multicast for the single enrolled Student, selected by protected
+Teacher policy. Use the [two-host procedure](M3_INSTALLED_PRESENTATION_QUALIFICATION.md)
+for each transport. Physical acceptance requires visible Student rendering,
+exact teardown, restart, recovery and the established GPU/network performance
+measurements. Keep the separate protected M2 qualification on Draft #776.
+
 ## Unified RC follow-up — 2026-11-25
 
 The single release-integration branch remains [Draft PR #776](https://github.com/faariis7/ClassMesh/pull/776),

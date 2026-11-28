@@ -28,6 +28,8 @@ use crate::connected_command::{
     QueuedTeacherUiAction, TeacherCommandSendError, TeacherCommandSender, TeacherControlRoute,
     next_queued_teacher_ui_action, verify_current_student,
 };
+use crate::installed_presentation::InstalledPresentation;
+use crate::presentation_view::{PresentationUiStatus, PresentationUpdate};
 use crate::receiver_playback_session::{
     TeacherPlaybackSessionError, TeacherPlaybackSessionEvent, TeacherPlaybackSessionOwner,
 };
@@ -56,6 +58,7 @@ pub enum TeacherConnectedPlaybackError {
     /// verified playback observation established its exact source/session.
     NotBootstrapped,
     Command(TeacherCommandSendError),
+    Presentation(std::io::Error),
 }
 
 fn send_window_event(
@@ -69,6 +72,46 @@ fn send_window_event(
             Err(TeacherConnectedPlaybackError::WindowDisconnected)
         }
     }
+}
+
+fn publish_presentation(
+    events: &SyncSender<TeacherUiControlEvent>,
+    control_session_id: u64,
+    result: std::io::Result<Option<PresentationUpdate>>,
+) -> Result<(), TeacherConnectedPlaybackError> {
+    let update = match result {
+        Ok(None) => return Ok(()),
+        Ok(Some(update)) => update,
+        Err(error) => {
+            let text = match error.kind() {
+                std::io::ErrorKind::TimedOut => {
+                    "The Student did not confirm the presentation operation in time."
+                }
+                std::io::ErrorKind::PermissionDenied => {
+                    "Presentation authorization or its authenticated route ended."
+                }
+                std::io::ErrorKind::Interrupted => {
+                    "The Teacher sender did not stop in time. The control session was retired."
+                }
+                _ => "The presentation session ended. See the local diagnostics.",
+            };
+            send_window_event(
+                events,
+                TeacherUiControlEvent::Presentation {
+                    control_session_id,
+                    update: PresentationUpdate::idle(PresentationUiStatus::Failed(text)),
+                },
+            )?;
+            return Err(TeacherConnectedPlaybackError::Presentation(error));
+        }
+    };
+    send_window_event(
+        events,
+        TeacherUiControlEvent::Presentation {
+            control_session_id,
+            update,
+        },
+    )
 }
 
 /// Drive the *existing* enrolled QUIC session, forwarding genuine verified
@@ -244,7 +287,7 @@ pub async fn drive_authenticated_teacher_duplex(
         authorization,
         events,
         actions,
-        dispatch,
+        (dispatch, None),
         clocks,
     )
     .await
@@ -267,8 +310,29 @@ pub async fn drive_authenticated_teacher_control(
         authorization,
         events,
         actions,
-        dispatch,
+        (dispatch, None),
         clocks,
+    )
+    .await
+}
+
+pub(crate) async fn drive_installed_teacher_control(
+    presentation: InstalledPresentation,
+    session: ClientControlSession,
+    events: SyncSender<TeacherUiControlEvent>,
+    actions: Receiver<TeacherUiAction>,
+) -> Result<(), TeacherConnectedPlaybackError> {
+    let route = presentation.binding.route;
+    let authorization = std::sync::Arc::clone(&presentation.binding.authorization);
+    let clock = std::sync::Arc::clone(&presentation.binding.clock);
+    run_teacher_session(
+        (route, None),
+        session,
+        &authorization,
+        events,
+        actions,
+        (|_| ControlFlow::Continue(()), Some(presentation)),
+        (|| clock(), Instant::now),
     )
     .await
 }
@@ -282,7 +346,10 @@ async fn run_teacher_session(
     authorization: &LiveAuthorizationStore,
     events: SyncSender<TeacherUiControlEvent>,
     actions: Receiver<TeacherUiAction>,
-    dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()>,
+    dispatch: (
+        impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()>,
+        Option<InstalledPresentation>,
+    ),
     clocks: (impl Fn() -> u64, impl Fn() -> Instant),
 ) -> Result<(), TeacherConnectedPlaybackError> {
     let connection = session.connection.clone();
@@ -312,7 +379,10 @@ async fn run_teacher_session_inner(
     authorization: &LiveAuthorizationStore,
     events: SyncSender<TeacherUiControlEvent>,
     actions: Receiver<TeacherUiAction>,
-    mut dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()>,
+    (mut dispatch, mut presentation): (
+        impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()>,
+        Option<InstalledPresentation>,
+    ),
     clocks: (impl Fn() -> u64, impl Fn() -> Instant),
 ) -> Result<(), TeacherConnectedPlaybackError> {
     let control_session_id = route.control_session_id();
@@ -367,6 +437,13 @@ async fn run_teacher_session_inner(
             TeacherUiControlEvent::Authenticated(context.clone()),
         )?;
     }
+    if let Some(presentation) = &presentation {
+        publish_presentation(
+            &events,
+            control_session_id,
+            Ok(Some(presentation.availability(&session.established).into())),
+        )?;
+    }
     let mut split = session.into_split();
     let mut reader_guard = TeacherControlSequenceGuard::default();
     let mut command_sender = TeacherCommandSender::default();
@@ -407,11 +484,22 @@ async fn run_teacher_session_inner(
                     ).await.map_err(TeacherConnectedPlaybackError::Command)?;
                 }
                 _ = tick.tick() => {
+                    if let Some(presentation) = &mut presentation {
+                        let observation = presentation.poll(&mut command_sender, (&split.connection, &split.established), &mut split.sender).await;
+                        publish_presentation(&events, control_session_id, observation)?;
+                    }
                     match next_queued_teacher_ui_action(&actions) {
                         QueuedTeacherUiAction::Empty => {}
                         QueuedTeacherUiAction::Closed => {
 
                             return Err(TeacherConnectedPlaybackError::ActionChannelClosed);
+                        }
+                        QueuedTeacherUiAction::Local(TeacherUiAction::Presentation(action)) if presentation.is_some() => {
+                            let controller = presentation.as_mut().expect("installed presentation");
+                            let observation = controller.action(
+                                action, &mut command_sender, (&split.connection, &split.established), &mut split.sender,
+                            ).await;
+                            publish_presentation(&events, control_session_id, observation)?;
                         }
                         QueuedTeacherUiAction::Local(local) => {
                             if dispatch(TeacherDuplexDispatch::LocalAction(local)).is_break() {
@@ -476,6 +564,17 @@ async fn run_teacher_session_inner(
                 )));
             }
         };
+        if let Some(presentation) = &mut presentation {
+            let observation = presentation
+                .reply(
+                    &verified,
+                    &mut command_sender,
+                    (&split.connection, &split.established),
+                    &mut split.sender,
+                )
+                .await;
+            publish_presentation(&events, control_session_id, observation)?;
+        }
         let event = match playback.as_deref_mut() {
             Some(owner) => owner
                 .accept_guarded_verified(verified, (clocks.1)())

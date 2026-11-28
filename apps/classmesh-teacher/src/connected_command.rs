@@ -371,6 +371,93 @@ impl TeacherCommandSender {
         Ok(frame.request_id)
     }
 
+    #[cfg(windows)]
+    pub(crate) async fn send_presentation(
+        &mut self,
+        route: TeacherControlRoute,
+        session: (&Connection, &EstablishedControlSession),
+        sender: &mut ControlSendHalf,
+        authorization: &LiveAuthorizationStore,
+        payload: control_envelope::Payload,
+        now: impl Fn() -> u64,
+    ) -> Result<u64, TeacherCommandSendError> {
+        if !matches!(
+            payload,
+            control_envelope::Payload::PresentationStart(_)
+                | control_envelope::Payload::PresentationStop(_)
+                | control_envelope::Payload::StreamOffer(_)
+        ) || !session
+            .1
+            .negotiated
+            .capabilities
+            .contains(&classmesh_protocol::Capability::TeacherPresentation)
+        {
+            return Err(TeacherCommandSendError::CapabilityUnavailable);
+        }
+        let request = self.presentation_request(session.0)?;
+        let version = session.1.negotiated.version;
+        let frame = ControlEnvelope {
+            control_session_id: route.control_session_id(),
+            sequence: self.next_sequence,
+            request_id: request,
+            protocol_version: Some(WireVersion {
+                major: version.major.into(),
+                minor: version.minor.into(),
+            }),
+            payload: Some(payload),
+        };
+        self.write_reserved(
+            route,
+            session,
+            TeacherWriter::Half(sender),
+            authorization,
+            &frame,
+            now,
+        )
+        .await?;
+        Ok(request)
+    }
+
+    #[cfg(windows)]
+    pub(crate) async fn send_presentation_key(
+        &mut self,
+        route: TeacherControlRoute,
+        session: (&Connection, &EstablishedControlSession),
+        sender: &mut ControlSendHalf,
+        authorization: &LiveAuthorizationStore,
+        build: impl FnOnce(
+            u64,
+            u64,
+        ) -> std::io::Result<
+            classmesh_control::group_media_session::SensitivePresentationKeyEnvelope,
+        >,
+        now: impl Fn() -> u64,
+    ) -> std::io::Result<u64> {
+        let map_error = |error| std::io::Error::other(format!("presentation control: {error:?}"));
+        let request = self.presentation_request(session.0).map_err(map_error)?;
+        let sequence = self.next_sequence;
+        self.reserve_sequence(route, session, authorization, &now)
+            .map_err(map_error)?;
+        let write = build(request, sequence)?.send_on_split(sender).await;
+        self.finish_write(route, session.0, authorization, write, &now)
+            .map_err(map_error)?;
+        Ok(request)
+    }
+
+    #[cfg(windows)]
+    fn presentation_request(
+        &mut self,
+        connection: &Connection,
+    ) -> Result<u64, TeacherCommandSendError> {
+        let request = self.next_request_id;
+        let Some(next) = request.checked_add(1) else {
+            self.retire(connection);
+            return Err(TeacherCommandSendError::InvalidCounters);
+        };
+        self.next_request_id = next;
+        Ok(request)
+    }
+
     async fn write_reserved(
         &mut self,
         route: TeacherControlRoute,
@@ -379,6 +466,18 @@ impl TeacherCommandSender {
         authorization: &LiveAuthorizationStore,
         frame: &ControlEnvelope,
         now_ms: impl Fn() -> u64,
+    ) -> Result<(), TeacherCommandSendError> {
+        self.reserve_sequence(route, session, authorization, &now_ms)?;
+        let write = writer.send(frame).await;
+        self.finish_write(route, session.0, authorization, write, &now_ms)
+    }
+
+    fn reserve_sequence(
+        &mut self,
+        route: TeacherControlRoute,
+        session: (&Connection, &EstablishedControlSession),
+        authorization: &LiveAuthorizationStore,
+        now_ms: &impl Fn() -> u64,
     ) -> Result<(), TeacherCommandSendError> {
         let (connection, established) = session;
         if self.retired || !route.active {
@@ -415,7 +514,18 @@ impl TeacherCommandSender {
         };
         // Reserve before I/O: a failed or ambiguous write permanently retires the sender.
         self.next_sequence = next_sequence;
-        if let Err(error) = writer.send(frame).await {
+        Ok(())
+    }
+
+    fn finish_write(
+        &mut self,
+        route: TeacherControlRoute,
+        connection: &Connection,
+        authorization: &LiveAuthorizationStore,
+        write: Result<(), ControlTransportError>,
+        now_ms: &impl Fn() -> u64,
+    ) -> Result<(), TeacherCommandSendError> {
+        if let Err(error) = write {
             self.retire(connection);
             return Err(TeacherCommandSendError::Transport(error));
         }
@@ -748,6 +858,10 @@ mod authenticated_quic_tests {
     const SOURCE: MonitoringSourceId = MonitoringSourceId(7);
     const VERSION: ProtocolVersion = ProtocolVersion { major: 0, minor: 8 };
 
+    fn test_capabilities() -> BTreeSet<Capability> {
+        BTreeSet::from([Capability::TeacherMessage, Capability::TeacherPresentation])
+    }
+
     fn action(source: MonitoringSourceId) -> TeacherInteractionUiAction {
         TeacherInteractionUiAction {
             source_id: source,
@@ -762,8 +876,16 @@ mod authenticated_quic_tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn live_enrolled_quic_sender_preserves_source_sequence_and_revocation() -> TestResult {
+    struct EnrolledPair {
+        server: Endpoint,
+        client: Endpoint,
+        enrolled_teachers: AuthorizationStore,
+        live_auth: LiveAuthorizationStore,
+    }
+
+    fn enrolled_pair(
+        student_permissions: BTreeSet<Permission>,
+    ) -> Result<EnrolledPair, Box<dyn Error + Send + Sync>> {
         let server_identity = generate_simple_self_signed(vec!["classmesh.local".to_owned()])?;
         let server_cert = CertificateDer::from(server_identity.cert);
         let server_key = PrivatePkcs8KeyDer::from(server_identity.signing_key.serialize_der());
@@ -779,7 +901,10 @@ mod authenticated_quic_tests {
                 id: TEACHER,
                 kind: PrincipalKind::Teacher,
                 enabled: true,
-                permissions: BTreeSet::from([Permission::SendTeacherMessage]),
+                permissions: BTreeSet::from([
+                    Permission::SendTeacherMessage,
+                    Permission::StartPresentation,
+                ]),
                 credentials: BTreeMap::from([(
                     teacher_fingerprint,
                     CredentialRecord::active(teacher_fingerprint, 100),
@@ -797,7 +922,6 @@ mod authenticated_quic_tests {
             enrolled_server_config(vec![server_cert.clone()], server_key.into(), verifier)?,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         )?;
-        let address = server.local_addr()?;
 
         let mut roots = RootCertStore::empty();
         roots.add(server_cert.clone())?;
@@ -821,12 +945,29 @@ mod authenticated_quic_tests {
                 id: STUDENT,
                 kind: PrincipalKind::StudentDevice,
                 enabled: true,
-                permissions: BTreeSet::new(),
+                permissions: student_permissions,
                 credentials,
             })
             .map_err(|error| format!("{error:?}"))?;
         let live_auth = LiveAuthorizationStore::new(store);
-        let negotiated = BTreeSet::from([Capability::TeacherMessage]);
+        Ok(EnrolledPair {
+            server,
+            client,
+            enrolled_teachers,
+            live_auth,
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn live_enrolled_quic_sender_preserves_source_sequence_and_revocation() -> TestResult {
+        let EnrolledPair {
+            server,
+            client,
+            enrolled_teachers,
+            live_auth,
+        } = enrolled_pair(BTreeSet::new())?;
+        let address = server.local_addr()?;
+        let negotiated = test_capabilities();
         let server_task = tokio::spawn(async move {
             let conn = accept(&server).await.map_err(|e| e.to_string())?;
             let mut channel = ControlChannel::accept(&conn, DEFAULT_IO_TIMEOUT)
@@ -871,6 +1012,29 @@ mod authenticated_quic_tests {
                 dispatch_privileged_command(&mut guard, &enrolled_teachers, &second, 150),
                 Ok(PrivilegedControlCommand::TeacherInteraction(_))
             ));
+            #[cfg(windows)]
+            {
+                for (offset, present_start) in [(0, true), (1, false)] {
+                    let frame = channel.receive().await.map_err(|e| e.to_string())?;
+                    assert_eq!(
+                        (frame.sequence, frame.request_id, frame.control_session_id),
+                        (4 + offset, 3 + offset, SESSION)
+                    );
+                    let admitted =
+                        dispatch_privileged_command(&mut guard, &enrolled_teachers, &frame, 150);
+                    if present_start {
+                        assert!(matches!(
+                            admitted,
+                            Ok(PrivilegedControlCommand::PresentationStart(_))
+                        ));
+                    } else {
+                        assert!(matches!(
+                            admitted,
+                            Ok(PrivilegedControlCommand::PresentationStop(_))
+                        ));
+                    }
+                }
+            }
             let mut unpermitted =
                 AuthenticatedControlGuard::new(peer.identity, SESSION, VERSION, 1);
             assert!(matches!(
@@ -927,7 +1091,7 @@ mod authenticated_quic_tests {
                 principal_id: PrincipalId([8; 32]),
                 role: ControlRole::Teacher,
                 version: VERSION,
-                capabilities: BTreeSet::from([Capability::TeacherMessage]),
+                capabilities: test_capabilities(),
                 hostname: "teacher-native-connection".to_owned(),
                 app_version: "0.0.1".to_owned(),
             },
@@ -1010,14 +1174,51 @@ mod authenticated_quic_tests {
         let mut receive_guard = TeacherControlSequenceGuard::default();
         let bound_action = action(SOURCE);
         let (write, read) = tokio::join!(
-            sender.send_on_split(
-                &owner,
-                (&split.connection, &split.established),
-                &mut split.sender,
-                &live_auth,
-                &bound_action,
-                || 150
-            ),
+            async {
+                let written = sender
+                    .send_on_split(
+                        &owner,
+                        (&split.connection, &split.established),
+                        &mut split.sender,
+                        &live_auth,
+                        &bound_action,
+                        || 150,
+                    )
+                    .await?;
+                #[cfg(windows)]
+                {
+                    use classmesh_protocol::control_wire::{PresentationStart, PresentationStop};
+                    let route = TeacherControlRoute::from(&owner);
+                    let session = (&split.connection, &split.established);
+                    let start = sender
+                        .send_presentation(
+                            route,
+                            session,
+                            &mut split.sender,
+                            &live_auth,
+                            control_envelope::Payload::PresentationStart(PresentationStart {
+                                presentation_id: 10,
+                                stream_id: 11,
+                            }),
+                            || 150,
+                        )
+                        .await?;
+                    let stop = sender
+                        .send_presentation(
+                            route,
+                            session,
+                            &mut split.sender,
+                            &live_auth,
+                            control_envelope::Payload::PresentationStop(PresentationStop {
+                                presentation_id: 10,
+                            }),
+                            || 150,
+                        )
+                        .await?;
+                    assert_eq!((start, stop), (3, 4));
+                }
+                Ok::<_, TeacherCommandSendError>(written)
+            },
             receive_guarded_authenticated_teacher_control_on_split(
                 &split.connection,
                 &split.established,
@@ -1108,6 +1309,342 @@ mod authenticated_quic_tests {
         split.connection.close(0u32.into(), b"test end");
         client.close(0u32.into(), b"test end");
         client.wait_idle().await;
+        Ok(())
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn installed_unicast_routes_offer_cleans_up_and_rechecks_authority_on_restart()
+    -> TestResult {
+        use classmesh_control::stream::validate_presentation_unicast_fallback_offer;
+        use classmesh_protocol::control_wire::{
+            MediaTransport, PresentationKeyAck, PresentationState, PresentationStatus,
+            StreamAnswer, control_envelope::Payload,
+        };
+        use classmesh_windows_runtime::ipc_sensitive::SensitivePresentationKeyInstall;
+
+        use crate::installed_presentation::{
+            InstalledPresentation, PresentationPolicy, PresentationRoute,
+        };
+        use crate::presentation_view::PresentationUiStatus;
+        use crate::ui_shell::TeacherPresentationUiAction;
+
+        async fn respond(
+            channel: &mut ControlChannel,
+            request: u64,
+            sequence: u64,
+            payload: Payload,
+        ) -> Result<(), classmesh_control::quic::ControlTransportError> {
+            channel
+                .send(&ControlEnvelope {
+                    control_session_id: SESSION,
+                    sequence,
+                    request_id: request,
+                    protocol_version: Some(WireVersion { major: 0, minor: 8 }),
+                    payload: Some(payload),
+                })
+                .await
+        }
+
+        let EnrolledPair {
+            server,
+            client,
+            enrolled_teachers,
+            live_auth,
+        } = enrolled_pair(BTreeSet::from([Permission::ReceivePresentation]))?;
+        let live_auth = Arc::new(live_auth);
+        let address = server.local_addr()?;
+        let caps = BTreeSet::from([
+            Capability::TeacherMessage,
+            Capability::TeacherPresentation,
+            Capability::SframeGroupMedia,
+            Capability::UdpUnicast,
+        ]);
+        let server_caps = caps.clone();
+        // This peer models Service responses to exercise the installed Teacher.
+        // The protected Worker and renderer are qualified separately.
+        let service = tokio::spawn(async move {
+            let conn = accept(&server).await?;
+            let mut channel = ControlChannel::accept(&conn, DEFAULT_IO_TIMEOUT).await?;
+            let (_, peer) = server_hello_enrolled(
+                &conn,
+                &mut channel,
+                &ServerHelloConfig {
+                    local_version: VERSION,
+                    local_capabilities: server_caps.clone(),
+                    control_session_id: SESSION,
+                },
+                &enrolled_teachers,
+                150,
+            )
+            .await?;
+            let mut guard = AuthenticatedControlGuard::new(peer.identity, SESSION, VERSION, 1);
+            let start = channel.receive().await?;
+            let Ok(PrivilegedControlCommand::PresentationStart(started)) =
+                dispatch_privileged_command(&mut guard, &enrolled_teachers, &start, 150)
+            else {
+                panic!("presenter must be authorized before reserving a stream")
+            };
+            assert_eq!((start.sequence, start.request_id), (2, 1));
+            let mut status = PresentationStatus {
+                presentation_id: started.presentation_id,
+                stream_id: started.stream_id,
+                state: PresentationState::Starting as i32,
+                diagnostic: String::new(),
+            };
+            respond(
+                &mut channel,
+                start.request_id,
+                2,
+                Payload::PresentationStatus(status.clone()),
+            )
+            .await?;
+
+            let mut grant = channel.receive().await?;
+            guard
+                .authorize(
+                    &enrolled_teachers,
+                    &grant,
+                    Permission::StartPresentation,
+                    150,
+                )
+                .map_err(|error| format!("{error:?}"))?;
+            assert_eq!((grant.sequence, grant.request_id), (3, 2));
+            let Some(Payload::PresentationKeyGrant(key)) = grant.payload.as_mut() else {
+                panic!("the reserved stream must receive a key before its offer");
+            };
+            let ack = PresentationKeyAck {
+                presentation_id: key.presentation_id,
+                stream_id: key.stream_id,
+                epoch: key.epoch,
+            };
+            let _test_install = SensitivePresentationKeyInstall::take_from_control_grant(
+                SESSION,
+                grant.request_id,
+                key,
+            )
+            .map_err(|error| format!("{error:?}"))?;
+            assert_eq!(
+                (ack.presentation_id, ack.stream_id),
+                (started.presentation_id, started.stream_id)
+            );
+            respond(
+                &mut channel,
+                grant.request_id,
+                3,
+                Payload::PresentationKeyAck(ack),
+            )
+            .await?;
+
+            let offer_frame = channel.receive().await?;
+            guard
+                .authorize(
+                    &enrolled_teachers,
+                    &offer_frame,
+                    Permission::StartPresentation,
+                    150,
+                )
+                .map_err(|error| format!("{error:?}"))?;
+            assert_eq!((offer_frame.sequence, offer_frame.request_id), (4, 3));
+            let Some(Payload::StreamOffer(offer)) = &offer_frame.payload else {
+                panic!("expected an authenticated stream offer");
+            };
+            let validated = validate_presentation_unicast_fallback_offer(offer, &server_caps)
+                .map_err(|error| format!("{error:?}"))?;
+            assert_eq!(
+                (validated.stream_id, validated.port),
+                (started.stream_id, 57000)
+            );
+            respond(
+                &mut channel,
+                offer_frame.request_id,
+                4,
+                Payload::StreamAnswer(StreamAnswer {
+                    stream_id: offer.stream_id,
+                    accepted: false,
+                    supported_transports: vec![MediaTransport::UdpUnicast as i32],
+                    rejection_reason: "controlled fixture rejection".into(),
+                }),
+            )
+            .await?;
+
+            let stop = channel.receive().await?;
+            let Ok(PrivilegedControlCommand::PresentationStop(stopped)) =
+                dispatch_privileged_command(&mut guard, &enrolled_teachers, &stop, 150)
+            else {
+                panic!("receiver refusal must release the exact presentation")
+            };
+            assert_eq!(stopped.presentation_id, started.presentation_id);
+            assert_eq!((stop.sequence, stop.request_id), (5, 4));
+            status.state = PresentationState::Stopped as i32;
+            respond(
+                &mut channel,
+                stop.request_id,
+                5,
+                Payload::PresentationStatus(status),
+            )
+            .await?;
+
+            let restart = channel.receive().await?;
+            let Ok(PrivilegedControlCommand::PresentationStart(restarted)) =
+                dispatch_privileged_command(&mut guard, &enrolled_teachers, &restart, 150)
+            else {
+                panic!("a clean Stop must permit a fresh Start")
+            };
+            assert_ne!(restarted.presentation_id, started.presentation_id);
+            assert_ne!(restarted.stream_id, started.stream_id);
+            respond(
+                &mut channel,
+                restart.request_id,
+                6,
+                Payload::PresentationStatus(PresentationStatus {
+                    presentation_id: restarted.presentation_id,
+                    stream_id: restarted.stream_id,
+                    state: PresentationState::Starting as i32,
+                    diagnostic: String::new(),
+                }),
+            )
+            .await?;
+            assert!(
+                channel.receive().await.is_err(),
+                "revoked receiver must get no key on restart"
+            );
+            Ok::<_, Box<dyn Error + Send + Sync>>(())
+        });
+
+        let mut split = connect_client_session_with_retries(
+            &client,
+            address,
+            "classmesh.local",
+            &ControlHello {
+                principal_id: TEACHER,
+                role: ControlRole::Teacher,
+                version: VERSION,
+                capabilities: caps,
+                hostname: "teacher-unicast-test".into(),
+                app_version: "0.0.1".into(),
+            },
+            DEFAULT_IO_TIMEOUT,
+            RecoveryPolicy {
+                max_attempts: 1,
+                base_backoff_ms: 1,
+                max_backoff_ms: 1,
+            },
+        )
+        .await?
+        .into_split();
+        let config = serde_json::from_str::<PresentationPolicy>(
+            r#"{
+            "transport":"unicast","port":57000,"width":1280,"height":720,
+            "fps":30,"bitrate_kbps":3000
+        }"#,
+        )?
+        .prepare()?
+        .prepare_egress();
+        let route = TeacherControlRoute::new(STUDENT, SOURCE, SESSION)
+            .map_err(|error| format!("{error:?}"))?;
+        let mut presentation = InstalledPresentation::new(
+            config,
+            PresentationRoute {
+                route,
+                authorization: Arc::clone(&live_auth),
+                clock: Arc::new(|| 150),
+            },
+        );
+        let mut writer = TeacherCommandSender::default();
+        let mut guard = TeacherControlSequenceGuard::default();
+        let session = (&split.connection, &split.established);
+        assert_eq!(
+            presentation.availability(session.1),
+            PresentationUiStatus::Ready(MediaTransport::UdpUnicast)
+        );
+        let started = presentation
+            .action(
+                TeacherPresentationUiAction::Start,
+                &mut writer,
+                session,
+                &mut split.sender,
+            )
+            .await?
+            .expect("presentation reserves the remote slot");
+        assert_eq!(started.status, PresentationUiStatus::Reserving);
+        let first_binding = started.snapshot.unwrap().binding.unwrap();
+        for expected in [
+            PresentationUiStatus::InstallingKey,
+            PresentationUiStatus::PreparingReceiver,
+            PresentationUiStatus::Stopping,
+            PresentationUiStatus::Failed(
+                "The Student Worker could not start the configured receiver.",
+            ),
+        ] {
+            let response = receive_guarded_authenticated_teacher_control_on_split(
+                session.0,
+                session.1,
+                &mut split.receiver,
+                &live_auth,
+                STUDENT,
+                || 150,
+                &mut guard,
+            )
+            .await?;
+            let update = presentation
+                .reply(&response, &mut writer, session, &mut split.sender)
+                .await?
+                .expect("exact Worker response");
+            assert_eq!(update.status, expected);
+        }
+
+        let restart = presentation
+            .action(
+                TeacherPresentationUiAction::Start,
+                &mut writer,
+                session,
+                &mut split.sender,
+            )
+            .await?
+            .expect("new presentation after retirement");
+        assert_ne!(restart.snapshot.unwrap().binding.unwrap(), first_binding);
+        assert!(
+            presentation
+                .action(
+                    TeacherPresentationUiAction::Stop {
+                        binding: first_binding
+                    },
+                    &mut writer,
+                    session,
+                    &mut split.sender
+                )
+                .await?
+                .is_none()
+        );
+        let snapshot = live_auth.snapshot().map_err(|error| format!("{error:?}"))?;
+        let mut revoked = snapshot.store().clone();
+        let mut student = revoked.principal(STUDENT).unwrap().clone();
+        student.permissions.clear();
+        revoked
+            .upsert(student)
+            .map_err(|error| format!("{error:?}"))?;
+        live_auth
+            .publish_if_version(snapshot.version(), revoked)
+            .map_err(|error| format!("{error:?}"))?;
+        let response = receive_guarded_authenticated_teacher_control_on_split(
+            session.0,
+            session.1,
+            &mut split.receiver,
+            &live_auth,
+            STUDENT,
+            || 150,
+            &mut guard,
+        )
+        .await?;
+        assert!(
+            presentation
+                .reply(&response, &mut writer, session, &mut split.sender)
+                .await
+                .is_err()
+        );
+        session.0.close(0u32.into(), b"test authority retired");
+        let _ = session.0.closed().await;
+        service.await??;
         Ok(())
     }
 }

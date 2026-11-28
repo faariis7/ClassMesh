@@ -45,6 +45,49 @@ pub struct PresentationViewState {
     pub metrics: PresentationMetricsView,
 }
 
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationUiStatus {
+    Unavailable(&'static str),
+    Ready(classmesh_protocol::control_wire::MediaTransport),
+    Reserving,
+    InstallingKey,
+    PreparingReceiver,
+    StartingCapture,
+    Sending,
+    RecoveringCapture,
+    Stopping,
+    Failed(&'static str),
+    Disconnected,
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct PresentationUpdate {
+    pub status: PresentationUiStatus,
+    pub snapshot: Option<PresentationRuntimeSnapshot>,
+}
+
+#[cfg(windows)]
+impl PresentationUpdate {
+    pub(crate) fn idle(status: PresentationUiStatus) -> Self {
+        Self {
+            status,
+            snapshot: Some(PresentationRuntimeSnapshot::default()),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl From<PresentationUiStatus> for PresentationUpdate {
+    fn from(status: PresentationUiStatus) -> Self {
+        Self {
+            status,
+            snapshot: None,
+        }
+    }
+}
+
 /// A local presentation replacement retires diagnostics bound to the former
 /// stream/epoch. Preserve reports already bound to the incoming presentation
 /// when authenticated events arrive before the snapshot update.
