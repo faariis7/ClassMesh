@@ -90,6 +90,9 @@ fn publish_presentation(
                 std::io::ErrorKind::PermissionDenied => {
                     "Presentation authorization or its authenticated route ended."
                 }
+                std::io::ErrorKind::Interrupted => {
+                    "The Teacher sender did not stop in time. The control session was retired."
+                }
                 _ => "The presentation session ended. See the local diagnostics.",
             };
             send_window_event(

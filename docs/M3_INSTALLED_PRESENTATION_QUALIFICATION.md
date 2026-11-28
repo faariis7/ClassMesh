@@ -110,8 +110,9 @@ exact selected offer before capture begins. The Service authorizes every
 privileged message. The sender rechecks the roster deadline, peer and exact
 connection after native encoding and before sealing or sending the frame.
 Cancellation, disconnect or loss of authority retire the sender. Stop and
-restart wait for both remote confirmation and local sender exit. Missing
-confirmation retires the exact control session to let Service release ownership.
+restart wait for both remote confirmation and local sender exit. Each wait
+has a deadline. On a missed deadline Teacher retires the exact control session,
+and Service can release its ownership without admitting a second local sender.
 
 ## Separate software decode smoke
 

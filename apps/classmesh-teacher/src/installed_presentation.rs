@@ -251,7 +251,24 @@ pub(crate) struct InstalledPresentation {
     pub(crate) binding: PresentationRoute,
     active: Option<ActivePresentation>,
     worker: Option<PresentationWorker>,
-    stopped: Option<PresentationUiStatus>,
+    stopped: Option<SenderRetirement>,
+}
+
+struct SenderRetirement {
+    status: PresentationUiStatus,
+    deadline: Instant,
+}
+
+impl SenderRetirement {
+    fn check_deadline(&self, now: Instant) -> io::Result<()> {
+        if now >= self.deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Local presentation sender did not retire in time",
+            ));
+        }
+        Ok(())
+    }
 }
 
 struct ActivePresentation {
@@ -544,13 +561,14 @@ impl InstalledPresentation {
                 }
             }
             PresentationReply::Stopped => {
+                let deadline = active.deadline;
                 let status = active.failure.map_or_else(
                     || self.availability(session.1),
                     PresentationUiStatus::Failed,
                 );
                 self.active = None;
                 if self.worker.is_some() {
-                    self.stopped = Some(status);
+                    self.stopped = Some(SenderRetirement { status, deadline });
                     return Ok(None);
                 }
                 return Ok(Some(PresentationUpdate::idle(status)));
@@ -605,7 +623,10 @@ impl InstalledPresentation {
                 .join()
                 .map_err(|_| io::Error::other("Presentation sender panicked"))?;
             if expected {
-                return Ok(self.stopped.take().map(PresentationUpdate::idle));
+                return Ok(self
+                    .stopped
+                    .take()
+                    .map(|stop| PresentationUpdate::idle(stop.status)));
             }
             let Err(cause) = outcome else {
                 return Err(io::Error::new(
@@ -628,6 +649,9 @@ impl InstalledPresentation {
                 })
                 .await?;
             return Ok(Some(PresentationUiStatus::Stopping.into()));
+        }
+        if let Some(stop) = &self.stopped {
+            stop.check_deadline(Instant::now())?;
         }
         // Buffered observations from a retired worker must never restart UI.
         if worker.cancelled.load(Ordering::Acquire) {
@@ -889,6 +913,22 @@ mod tests {
         }"#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn local_sender_retirement_is_bounded_even_after_remote_stop() {
+        let since = Instant::now();
+        let stop = SenderRetirement {
+            deadline: since + REPLY_DEADLINE,
+            status: PresentationUiStatus::Ready(MediaTransport::UdpUnicast),
+        };
+        assert!(stop.check_deadline(since).is_ok());
+        assert_eq!(
+            stop.check_deadline(since + REPLY_DEADLINE)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Interrupted
+        );
     }
 
     #[test]
