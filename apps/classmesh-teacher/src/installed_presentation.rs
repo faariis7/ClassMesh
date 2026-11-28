@@ -291,6 +291,33 @@ impl InstalledPresentation {
         }
     }
 
+    /// Disconnect retires the key and local sender before another connection can run.
+    pub(crate) async fn retire(&mut self) -> io::Result<()> {
+        self.active = None;
+        let Some(worker) = self.worker.take() else {
+            return Ok(());
+        };
+        worker.cancel();
+        let wait = async {
+            while !worker.thread.is_finished() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(REPLY_DEADLINE, wait)
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "Local presentation sender did not retire in time",
+                )
+            })?;
+        let _ = worker
+            .thread
+            .join()
+            .map_err(|_| io::Error::other("Presentation sender panicked"))?;
+        Ok(())
+    }
+
     pub(crate) fn availability(&self, session: &EstablishedControlSession) -> PresentationUiStatus {
         let Some(config) = &self.config else {
             return PresentationUiStatus::Unavailable(

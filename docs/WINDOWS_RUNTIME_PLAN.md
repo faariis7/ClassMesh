@@ -132,6 +132,14 @@ a separate approved, exclusive lab operation. No VM2 or persistent policy change
 
 This plan converts architectural assumptions into executable tests before ClassMesh grows a large UI or feature surface.
 
+## Installed recovery acceptance
+
+For the M4 candidate, execute the
+[recovery matrix](M4_RUNTIME_RECOVERY_QUALIFICATION.md) with matching approved
+Windows x64 images and independent physical and VM evidence. Collect native
+process continuity, key and socket retirement, operator-correlated Message
+results, and changing displayed frames for both installed transports.
+
 ## 1. Session/runtime matrix
 
 Validate the Agent/Worker model in these states:

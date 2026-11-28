@@ -1,3 +1,13 @@
+## Installed M4 handoff
+
+Use the separate M4 candidate stacked on Draft #778. Confirm the exact Windows
+artifacts and protected M2 prerequisites before testing. The installed Teacher
+uses a fresh authenticated session and explicit new Start after an interrupted
+presentation. Verify both transports and record the native restart, sleep,
+lock, expiration and leak evidence. The earlier VM1 baseline remains evidence
+about its own signed revision. Follow the
+[M4 runtime qualification](M4_RUNTIME_RECOVERY_QUALIFICATION.md).
+
 ## Trusted Teacher startup handoff
 
 Resume from the unified Draft PR #776. The Windows executable and read-only

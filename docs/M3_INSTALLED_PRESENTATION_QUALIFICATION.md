@@ -100,6 +100,9 @@ and grants `SendTeacherMessage` only.
   qualification-only async decode measurement. Keep the stable Student's
   synchronous H.264 decoder and preserve stage-specific logs.
 
+Use the [M4 recovery matrix](M4_RUNTIME_RECOVERY_QUALIFICATION.md) for interrupted
+starts, transport outages and exact Worker replacement.
+
 ## Transport and codec boundaries
 
 Both installed transports use the same authenticated presentation lifecycle,

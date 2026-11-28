@@ -26,7 +26,7 @@ use classmesh_protocol::{
 
 use crate::connected_command::{
     QueuedTeacherUiAction, TeacherCommandSendError, TeacherCommandSender, TeacherControlRoute,
-    next_queued_teacher_ui_action, verify_current_student,
+    next_installed_action, next_queued_teacher_ui_action, verify_current_student,
 };
 use crate::installed_presentation::InstalledPresentation;
 use crate::presentation_view::{PresentationUiStatus, PresentationUpdate};
@@ -59,9 +59,11 @@ pub enum TeacherConnectedPlaybackError {
     NotBootstrapped,
     Command(TeacherCommandSendError),
     Presentation(std::io::Error),
+    Reconnect,
+    Recovery(String),
 }
 
-fn send_window_event(
+pub(crate) fn send_window_event(
     sender: &SyncSender<TeacherUiControlEvent>,
     event: TeacherUiControlEvent,
 ) -> Result<(), TeacherConnectedPlaybackError> {
@@ -277,7 +279,7 @@ pub async fn drive_authenticated_teacher_duplex(
     session: ClientControlSession,
     authorization: &LiveAuthorizationStore,
     events: SyncSender<TeacherUiControlEvent>,
-    actions: Receiver<TeacherUiAction>,
+    mut actions: Receiver<TeacherUiAction>,
     dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()>,
     clocks: (impl Fn() -> u64, impl Fn() -> Instant),
 ) -> Result<(), TeacherConnectedPlaybackError> {
@@ -286,7 +288,7 @@ pub async fn drive_authenticated_teacher_duplex(
         session,
         authorization,
         events,
-        actions,
+        &mut actions,
         (dispatch, None),
         clocks,
     )
@@ -300,7 +302,7 @@ pub async fn drive_authenticated_teacher_control(
     session: ClientControlSession,
     authorization: &LiveAuthorizationStore,
     events: SyncSender<TeacherUiControlEvent>,
-    actions: Receiver<TeacherUiAction>,
+    mut actions: Receiver<TeacherUiAction>,
     dispatch: impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()>,
     clocks: (impl Fn() -> u64, impl Fn() -> Instant),
 ) -> Result<(), TeacherConnectedPlaybackError> {
@@ -309,7 +311,7 @@ pub async fn drive_authenticated_teacher_control(
         session,
         authorization,
         events,
-        actions,
+        &mut actions,
         (dispatch, None),
         clocks,
     )
@@ -320,7 +322,8 @@ pub(crate) async fn drive_installed_teacher_control(
     presentation: InstalledPresentation,
     session: ClientControlSession,
     events: SyncSender<TeacherUiControlEvent>,
-    actions: Receiver<TeacherUiAction>,
+    actions: &mut Receiver<TeacherUiAction>,
+    generation: u64,
 ) -> Result<(), TeacherConnectedPlaybackError> {
     let route = presentation.binding.route;
     let authorization = std::sync::Arc::clone(&presentation.binding.authorization);
@@ -331,7 +334,10 @@ pub(crate) async fn drive_installed_teacher_control(
         &authorization,
         events,
         actions,
-        (|_| ControlFlow::Continue(()), Some(presentation)),
+        (
+            |_| ControlFlow::Continue(()),
+            Some((generation, presentation)),
+        ),
         (|| clock(), Instant::now),
     )
     .await
@@ -345,25 +351,42 @@ async fn run_teacher_session(
     session: ClientControlSession,
     authorization: &LiveAuthorizationStore,
     events: SyncSender<TeacherUiControlEvent>,
-    actions: Receiver<TeacherUiAction>,
+    actions: &mut Receiver<TeacherUiAction>,
     dispatch: (
         impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()>,
-        Option<InstalledPresentation>,
+        Option<(u64, InstalledPresentation)>,
     ),
     clocks: (impl Fn() -> u64, impl Fn() -> Instant),
 ) -> Result<(), TeacherConnectedPlaybackError> {
     let connection = session.connection.clone();
+    let (dispatch, mut presentation) = dispatch;
     let result = run_teacher_session_inner(
         (route, playback.as_deref_mut()),
         session,
         authorization,
-        events,
+        events.clone(),
         actions,
-        dispatch,
+        (dispatch, presentation.as_mut()),
         clocks,
     )
     .await;
+    let reconnect_on_close = connection.close_reason().is_some_and(|cause| {
+        classmesh_control::quic::ControlTransportError::Connection(cause).can_reconnect()
+    });
     connection.close(0u32.into(), b"Teacher control session retired");
+    if let Some((_, presentation)) = &mut presentation {
+        // Retire UI authority immediately, even if native capture is still exiting.
+        let _ = send_window_event(&events, TeacherUiControlEvent::Disconnected);
+        presentation
+            .retire()
+            .await
+            .map_err(TeacherConnectedPlaybackError::Presentation)?;
+        if let Err(TeacherConnectedPlaybackError::Presentation(error)) = &result
+            && (reconnect_on_close || error.kind() == std::io::ErrorKind::TimedOut)
+        {
+            return Err(TeacherConnectedPlaybackError::Reconnect);
+        }
+    }
     if let Some(owner) = playback {
         owner.retire_exact(owner.source_id(), owner.binding());
     }
@@ -378,10 +401,10 @@ async fn run_teacher_session_inner(
     session: ClientControlSession,
     authorization: &LiveAuthorizationStore,
     events: SyncSender<TeacherUiControlEvent>,
-    actions: Receiver<TeacherUiAction>,
+    actions: &mut Receiver<TeacherUiAction>,
     (mut dispatch, mut presentation): (
         impl FnMut(TeacherDuplexDispatch) -> ControlFlow<()>,
-        Option<InstalledPresentation>,
+        Option<&mut (u64, InstalledPresentation)>,
     ),
     clocks: (impl Fn() -> u64, impl Fn() -> Instant),
 ) -> Result<(), TeacherConnectedPlaybackError> {
@@ -432,12 +455,15 @@ async fn run_teacher_session_inner(
             (clocks.0)(),
         )
         .map_err(TeacherConnectedPlaybackError::Command)?;
-        send_window_event(
-            &events,
-            TeacherUiControlEvent::Authenticated(context.clone()),
-        )?;
+        let event = match &presentation {
+            Some((generation, _)) => {
+                TeacherUiControlEvent::InstalledConnected(*generation, context.clone())
+            }
+            None => TeacherUiControlEvent::Authenticated(context.clone()),
+        };
+        send_window_event(&events, event)?;
     }
-    if let Some(presentation) = &presentation {
+    if let Some((_, presentation)) = &presentation {
         publish_presentation(
             &events,
             control_session_id,
@@ -484,18 +510,22 @@ async fn run_teacher_session_inner(
                     ).await.map_err(TeacherConnectedPlaybackError::Command)?;
                 }
                 _ = tick.tick() => {
-                    if let Some(presentation) = &mut presentation {
+                    if let Some((_, presentation)) = &mut presentation {
                         let observation = presentation.poll(&mut command_sender, (&split.connection, &split.established), &mut split.sender).await;
                         publish_presentation(&events, control_session_id, observation)?;
                     }
-                    match next_queued_teacher_ui_action(&actions) {
+                    let action = match &presentation {
+                        Some((generation, _)) => next_installed_action(actions, *generation),
+                        None => next_queued_teacher_ui_action(actions),
+                    };
+                    match action {
                         QueuedTeacherUiAction::Empty => {}
                         QueuedTeacherUiAction::Closed => {
 
                             return Err(TeacherConnectedPlaybackError::ActionChannelClosed);
                         }
                         QueuedTeacherUiAction::Local(TeacherUiAction::Presentation(action)) if presentation.is_some() => {
-                            let controller = presentation.as_mut().expect("installed presentation");
+                            let (_, controller) = presentation.as_mut().expect("installed presentation");
                             let observation = controller.action(
                                 action, &mut command_sender, (&split.connection, &split.established), &mut split.sender,
                             ).await;
@@ -564,7 +594,7 @@ async fn run_teacher_session_inner(
                 )));
             }
         };
-        if let Some(presentation) = &mut presentation {
+        if let Some((_, presentation)) = &mut presentation {
             let observation = presentation
                 .reply(
                     &verified,

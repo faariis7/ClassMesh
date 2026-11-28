@@ -49,6 +49,9 @@ pub enum SupervisorAction {
 pub struct SessionSupervisor {
     worker: WorkerState,
     active_session: Option<SessionId>,
+    desktop_suspended: Option<SessionId>,
+    disconnected_session: Option<SessionId>,
+    asleep: bool,
 }
 
 impl Default for SessionSupervisor {
@@ -56,6 +59,9 @@ impl Default for SessionSupervisor {
         Self {
             worker: WorkerState::Stopped,
             active_session: None,
+            desktop_suspended: None,
+            disconnected_session: None,
+            asleep: false,
         }
     }
 }
@@ -73,9 +79,10 @@ impl SessionSupervisor {
 
     pub fn on_event(&mut self, event: SessionEvent) -> SupervisorAction {
         match event {
-            SessionEvent::Logon(session)
-            | SessionEvent::ConsoleConnect(session)
-            | SessionEvent::RemoteConnect(session) => self.activate(session),
+            SessionEvent::Logon(session) => self.activate(session),
+            SessionEvent::ConsoleConnect(session) | SessionEvent::RemoteConnect(session) => {
+                self.connect(session)
+            }
             SessionEvent::Logoff(session) => self.logoff(session),
             SessionEvent::Lock(session) => self.lock(session),
             SessionEvent::Unlock(session) => self.unlock(session),
@@ -85,10 +92,33 @@ impl SessionSupervisor {
         }
     }
 
-    pub fn mark_worker_running(&mut self, session: SessionId) {
-        if self.worker == WorkerState::Starting(session) {
-            self.worker = WorkerState::Running(session);
+    pub fn mark_worker_running(&mut self, session: SessionId) -> SupervisorAction {
+        if self.worker != WorkerState::Starting(session) {
+            return SupervisorAction::None;
         }
+        self.worker = WorkerState::Running(session);
+        if self.media_blocked(session) {
+            return self.suspend_running(session);
+        }
+        SupervisorAction::None
+    }
+
+    pub fn suspend_for_sleep(&mut self) -> SupervisorAction {
+        self.asleep = true;
+        self.active_session
+            .map_or(SupervisorAction::None, |session| {
+                self.suspend_running(session)
+            })
+    }
+
+    pub fn resume_after_sleep(&mut self) -> SupervisorAction {
+        if !std::mem::take(&mut self.asleep) {
+            return SupervisorAction::None;
+        }
+        self.active_session
+            .map_or(SupervisorAction::None, |session| {
+                self.resume_desktop(session)
+            })
     }
 
     pub fn mark_worker_stopped(&mut self, session: SessionId) {
@@ -111,12 +141,15 @@ impl SessionSupervisor {
             self.worker = WorkerState::Starting(session);
             SupervisorAction::LaunchWorker(session)
         } else {
-            self.worker = WorkerState::Stopped;
             SupervisorAction::None
         }
     }
 
     fn activate(&mut self, session: SessionId) -> SupervisorAction {
+        if self.active_session != Some(session) {
+            self.desktop_suspended = None;
+            self.disconnected_session = None;
+        }
         self.active_session = Some(session);
         match self.worker {
             WorkerState::Stopped => {
@@ -147,6 +180,8 @@ impl SessionSupervisor {
     fn logoff(&mut self, session: SessionId) -> SupervisorAction {
         if self.active_session == Some(session) {
             self.active_session = None;
+            self.desktop_suspended = None;
+            self.disconnected_session = None;
         }
         match self.worker {
             WorkerState::Starting(current)
@@ -163,6 +198,14 @@ impl SessionSupervisor {
     }
 
     fn lock(&mut self, session: SessionId) -> SupervisorAction {
+        if self.active_session == Some(session) {
+            self.desktop_suspended = Some(session);
+            return self.suspend_running(session);
+        }
+        SupervisorAction::None
+    }
+
+    fn suspend_running(&mut self, session: SessionId) -> SupervisorAction {
         if self.worker == WorkerState::Running(session) {
             self.worker = WorkerState::Suspended(session);
             return SupervisorAction::SuspendMedia(session);
@@ -170,18 +213,49 @@ impl SessionSupervisor {
         SupervisorAction::None
     }
 
-    fn unlock(&mut self, session: SessionId) -> SupervisorAction {
-        if self.worker == WorkerState::Suspended(session) {
+    fn media_blocked(&self, session: SessionId) -> bool {
+        self.asleep
+            || self.desktop_suspended == Some(session)
+            || self.disconnected_session == Some(session)
+    }
+
+    fn resume_desktop(&mut self, session: SessionId) -> SupervisorAction {
+        if self.worker == WorkerState::Suspended(session) && !self.media_blocked(session) {
             self.worker = WorkerState::Running(session);
             return SupervisorAction::ResumeMedia(session);
+        }
+        SupervisorAction::None
+    }
+
+    fn connect(&mut self, session: SessionId) -> SupervisorAction {
+        let action = self.activate(session);
+        if self.disconnected_session == Some(session) {
+            self.disconnected_session = None;
+        }
+        if action == SupervisorAction::None {
+            return self.resume_desktop(session);
+        }
+        action
+    }
+
+    fn unlock(&mut self, session: SessionId) -> SupervisorAction {
+        if self.active_session.is_some_and(|active| active != session) {
+            return SupervisorAction::None;
+        }
+        self.desktop_suspended = None;
+        if self.media_blocked(session) {
+            return SupervisorAction::None;
+        }
+        if self.worker == WorkerState::Suspended(session) {
+            return self.resume_desktop(session);
         }
         self.activate(session)
     }
 
     fn disconnect(&mut self, session: SessionId) -> SupervisorAction {
-        if self.worker == WorkerState::Running(session) {
-            self.worker = WorkerState::Suspended(session);
-            return SupervisorAction::SuspendMedia(session);
+        if self.active_session == Some(session) {
+            self.disconnected_session = Some(session);
+            return self.suspend_running(session);
         }
         SupervisorAction::None
     }
@@ -190,6 +264,80 @@ impl SessionSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconnecting_the_same_desktop_resumes_only_when_unlocked() {
+        let session = SessionId(11);
+        let mut supervisor = SessionSupervisor::default();
+        supervisor.on_event(SessionEvent::RemoteConnect(session));
+        supervisor.mark_worker_running(session);
+        assert_eq!(
+            supervisor.on_event(SessionEvent::RemoteDisconnect(session)),
+            SupervisorAction::SuspendMedia(session)
+        );
+        assert_eq!(
+            supervisor.on_event(SessionEvent::RemoteConnect(session)),
+            SupervisorAction::ResumeMedia(session)
+        );
+        supervisor.on_event(SessionEvent::Lock(session));
+        supervisor.on_event(SessionEvent::RemoteDisconnect(session));
+        assert_eq!(
+            supervisor.on_event(SessionEvent::RemoteConnect(session)),
+            SupervisorAction::None
+        );
+        assert_eq!(
+            supervisor.on_event(SessionEvent::Unlock(session)),
+            SupervisorAction::ResumeMedia(session)
+        );
+    }
+
+    #[test]
+    fn sleeping_and_locked_desktop_suspend_independently() {
+        let session = SessionId(11);
+        let mut supervisor = SessionSupervisor::default();
+        supervisor.on_event(SessionEvent::Logon(session));
+        assert_eq!(
+            supervisor.mark_worker_running(session),
+            SupervisorAction::None
+        );
+        assert_eq!(
+            supervisor.suspend_for_sleep(),
+            SupervisorAction::SuspendMedia(session)
+        );
+        assert_eq!(
+            supervisor.on_event(SessionEvent::Lock(session)),
+            SupervisorAction::None
+        );
+        assert_eq!(supervisor.resume_after_sleep(), SupervisorAction::None);
+        assert_eq!(supervisor.worker_state(), WorkerState::Suspended(session));
+        assert_eq!(
+            supervisor.on_event(SessionEvent::Unlock(session)),
+            SupervisorAction::ResumeMedia(session)
+        );
+        assert_eq!(supervisor.resume_after_sleep(), SupervisorAction::None);
+    }
+
+    #[test]
+    fn lock_during_startup_and_stale_unlock_preserve_the_current_worker() {
+        let old = SessionId(10);
+        let current = SessionId(11);
+        let mut supervisor = SessionSupervisor::default();
+        supervisor.on_event(SessionEvent::Logon(old));
+        supervisor.mark_worker_running(old);
+        supervisor.on_event(SessionEvent::Logon(current));
+        assert_eq!(
+            supervisor.on_event(SessionEvent::Unlock(old)),
+            SupervisorAction::None
+        );
+        assert_eq!(supervisor.worker_crashed(old), SupervisorAction::None);
+        assert_eq!(supervisor.worker_state(), WorkerState::Starting(current));
+        supervisor.on_event(SessionEvent::Lock(current));
+        assert_eq!(
+            supervisor.mark_worker_running(current),
+            SupervisorAction::SuspendMedia(current)
+        );
+        assert_eq!(supervisor.worker_state(), WorkerState::Suspended(current));
+    }
 
     #[test]
     fn logon_launches_worker_in_user_session() {

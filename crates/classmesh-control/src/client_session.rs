@@ -69,8 +69,8 @@ pub async fn connect_client_session_with_retries(
     for attempt in 1..=policy.max_attempts {
         match establish_once(endpoint, remote, server_name, hello, io_timeout).await {
             Ok(session) => return Ok(session),
-            Err(error @ HandshakeError::Transport(_)) => {
-                last_transport_error = Some(error);
+            Err(HandshakeError::Transport(error)) if error.can_reconnect() => {
+                last_transport_error = Some(HandshakeError::Transport(error));
             }
             Err(error) => return Err(error),
         }
@@ -171,53 +171,49 @@ mod tests {
             let _first_channel = ControlChannel::accept(&first, DEFAULT_IO_TIMEOUT)
                 .await
                 .map_err(|error| error.to_string())?;
-            first.close(0_u32.into(), b"simulate dropped control session");
-
-            let second = accept(&server).await.map_err(|error| error.to_string())?;
-            let mut second_channel = ControlChannel::accept(&second, DEFAULT_IO_TIMEOUT)
-                .await
-                .map_err(|error| error.to_string())?;
-            let established = server_hello(
-                &mut second_channel,
-                &ServerHelloConfig {
-                    local_version: ProtocolVersion { major: 0, minor: 2 },
-                    local_capabilities: BTreeSet::from([Capability::UdpUnicast]),
-                    control_session_id: 88,
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-
-            Ok::<(Endpoint, Connection, EstablishedControlSession), String>((
-                server,
-                second,
-                established,
-            ))
+            first.close(
+                crate::quic::SERVICE_RECONNECT_CODE.into(),
+                b"simulate dropped control session",
+            );
+            for id in 88..=90 {
+                let connection = accept(&server).await?;
+                let mut channel = ControlChannel::accept(&connection, DEFAULT_IO_TIMEOUT).await?;
+                let established = server_hello(
+                    &mut channel,
+                    &ServerHelloConfig {
+                        local_version: ProtocolVersion { major: 0, minor: 2 },
+                        local_capabilities: BTreeSet::from([Capability::UdpUnicast]),
+                        control_session_id: id,
+                    },
+                )
+                .await?;
+                assert_eq!(established.control_session_id, id);
+                // Hold this server-side session until the client retires it.
+                connection.closed().await;
+            }
+            Ok::<_, Box<dyn Error + Send + Sync>>(server)
         });
 
-        let session = connect_client_session_with_retries(
-            &client,
-            server_address,
-            "classmesh.local",
-            &hello(),
-            DEFAULT_IO_TIMEOUT,
-            RecoveryPolicy {
-                max_attempts: 2,
-                base_backoff_ms: 1,
-                max_backoff_ms: 2,
-            },
-        )
-        .await?;
-
-        assert_eq!(session.established.control_session_id, 88);
-
-        session
-            .connection
-            .close(0_u32.into(), b"reconnect test complete");
-        let (server, server_connection, server_session) =
-            server_task.await.map_err(|error| error.to_string())??;
-        assert_eq!(server_session.control_session_id, 88);
-        server_connection.close(0_u32.into(), b"reconnect test complete");
+        for id in 88..=90 {
+            let session = connect_client_session_with_retries(
+                &client,
+                server_address,
+                "classmesh.local",
+                &hello(),
+                DEFAULT_IO_TIMEOUT,
+                RecoveryPolicy {
+                    max_attempts: 2,
+                    base_backoff_ms: 1,
+                    max_backoff_ms: 2,
+                },
+            )
+            .await?;
+            assert_eq!(session.established.control_session_id, id);
+            session
+                .connection
+                .close(0_u32.into(), b"reconnect test complete");
+        }
+        let server = server_task.await??;
         server.close(0_u32.into(), b"reconnect test complete");
         client.wait_idle().await;
         Ok(())

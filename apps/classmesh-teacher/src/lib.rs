@@ -9,6 +9,8 @@ pub mod device_diagnostics;
 pub mod focus_view;
 #[cfg(windows)]
 mod installed_presentation;
+#[cfg(any(windows, test))]
+mod installed_recovery;
 pub mod monitoring;
 pub mod monitoring_promotion;
 #[cfg(any(windows, test))]
